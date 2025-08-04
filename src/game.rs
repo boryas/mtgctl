@@ -1,0 +1,453 @@
+use clap::{Args, Subcommand};
+use dialoguer::{Input, Select, Confirm};
+use chrono::{Local, NaiveDate};
+use diesel::prelude::*;
+
+use crate::db::{establish_connection, models::*};
+use crate::db::schema::{matches, games};
+
+// Predefined opponent deck types for Legacy format
+const OPPONENT_DECKS: &[&str] = &[
+    "Delver", "Reanimator", "Death and Taxes", "Burn", "Elves", "Goblins", 
+    "Show and Tell", "Storm", "Dredge", "Maverick", "Stoneblade", "Miracles",
+    "Lands", "Painter", "Infect", "Merfolk", "Cloudpost", "Prison", "Other"
+];
+
+const EVENT_TYPES: &[&str] = &[
+    "League", "Tournament", "Casual", "Challenge", "Prelim", "Other"
+];
+
+#[derive(Args)]
+pub struct GameArgs {
+    #[command(subcommand)]
+    command: GameCommands,
+}
+
+#[derive(Subcommand)]
+enum GameCommands {
+    AddMatch {
+        #[arg(long, help = "Date in YYYY-MM-DD format (default: today)")]
+        date: Option<String>,
+    },
+    ListMatches {
+        #[arg(long, default_value = "10", help = "Number of recent matches to show")]
+        limit: i64,
+    },
+    MatchDetails {
+        #[arg(help = "Match ID to show details for")]
+        match_id: i32,
+    },
+    Stats {
+        #[arg(long, help = "Filter by deck name")]
+        deck: Option<String>,
+        #[arg(long, help = "Filter by event type")]
+        event: Option<String>,
+    },
+}
+
+pub fn run(args: GameArgs) {
+    match args.command {
+        GameCommands::AddMatch { date } => add_match_interactive(date),
+        GameCommands::ListMatches { limit } => list_matches(limit),
+        GameCommands::MatchDetails { match_id } => show_match_details(match_id),
+        GameCommands::Stats { deck, event } => show_stats(deck, event),
+    }
+}
+
+fn add_match_interactive(date_arg: Option<String>) {
+    println!("=== Adding New Match ===");
+    
+    // Get date
+    let date = if let Some(d) = date_arg {
+        match NaiveDate::parse_from_str(&d, "%Y-%m-%d") {
+            Ok(parsed_date) => parsed_date.format("%Y-%m-%d").to_string(),
+            Err(_) => {
+                eprintln!("Invalid date format. Use YYYY-MM-DD");
+                return;
+            }
+        }
+    } else {
+        Local::now().format("%Y-%m-%d").to_string()
+    };
+    
+    println!("Date: {}", date);
+    
+    // Get deck name
+    let deck_name: String = Input::new()
+        .with_prompt("Your deck name")
+        .interact_text()
+        .unwrap();
+    
+    // Get opponent name
+    let opponent_name: String = Input::new()
+        .with_prompt("Opponent name")
+        .interact_text()
+        .unwrap();
+    
+    // Get opponent deck
+    let opponent_deck_idx = Select::new()
+        .with_prompt("Opponent's deck")
+        .items(OPPONENT_DECKS)
+        .default(0)
+        .interact()
+        .unwrap();
+    let opponent_deck = OPPONENT_DECKS[opponent_deck_idx].to_string();
+    
+    // Get event type
+    let event_type_idx = Select::new()
+        .with_prompt("Event type")
+        .items(EVENT_TYPES)
+        .default(0)
+        .interact()
+        .unwrap();
+    let event_type = EVENT_TYPES[event_type_idx].to_string();
+    
+    // Get die roll winner
+    let die_roll_winner = if Confirm::new()
+        .with_prompt("Did you win the die roll?")
+        .interact()
+        .unwrap()
+    {
+        Winner::Me
+    } else {
+        Winner::Opponent
+    };
+    
+    // Create the match without winner (will be determined by games)
+    let new_match = NewMatch {
+        date,
+        deck_name,
+        opponent_name,
+        opponent_deck,
+        event_type,
+        die_roll_winner: die_roll_winner.to_string(),
+        match_winner: "unknown".to_string(), // Will be updated after games
+    };
+    
+    let connection = &mut establish_connection();
+    
+    diesel::insert_into(matches::table)
+        .values(&new_match)
+        .execute(connection)
+        .expect("Error saving new match");
+    
+    // Get the most recent match for this combination (should be the one we just inserted)
+    let match_id: i32 = matches::table
+        .select(matches::match_id)
+        .order(matches::match_id.desc())
+        .first(connection)
+        .expect("Error getting match ID");
+    
+    println!("\nMatch created with ID: {}", match_id);
+    
+    // Now add games and determine match winner
+    let match_winner = add_games_interactive(connection, match_id);
+    
+    // Update the match with the winner
+    diesel::update(matches::table.find(match_id))
+        .set(matches::match_winner.eq(match_winner.to_string()))
+        .execute(connection)
+        .expect("Error updating match winner");
+}
+
+fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Winner {
+    println!("\n=== Adding Games (Best of 3) ===");
+    
+    let mut my_wins = 0;
+    let mut opponent_wins = 0;
+    
+    for game_num in 1..=3 {
+        println!("\n--- Game {} ---", game_num);
+        
+        // Play or draw
+        let play_draw = if Confirm::new()
+            .with_prompt("Did you play first? (no = draw)")
+            .interact()
+            .unwrap()
+        {
+            PlayDraw::Play
+        } else {
+            PlayDraw::Draw
+        };
+        
+        // Mulligans
+        let mulligans: i32 = Input::new()
+            .with_prompt("Number of mulligans (0-7)")
+            .validate_with(|input: &i32| -> Result<(), &str> {
+                if *input >= 0 && *input <= 7 {
+                    Ok(())
+                } else {
+                    Err("Mulligans must be between 0 and 7")
+                }
+            })
+            .interact_text()
+            .unwrap();
+        
+        // Opening hand plan
+        let opening_hand_plan: String = Input::new()
+            .with_prompt("Opening hand plan")
+            .allow_empty(true)
+            .interact_text()
+            .unwrap();
+        
+        let opening_hand_plan = if opening_hand_plan.is_empty() {
+            None
+        } else {
+            Some(opening_hand_plan)
+        };
+        
+        // Game winner
+        let game_winner = if Confirm::new()
+            .with_prompt("Did you win this game?")
+            .interact()
+            .unwrap()
+        {
+            my_wins += 1;
+            Winner::Me
+        } else {
+            opponent_wins += 1;
+            Winner::Opponent
+        };
+        
+        // Win condition (only if you won)
+        let win_condition = if matches!(game_winner, Winner::Me) {
+            let condition: String = Input::new()
+                .with_prompt("What did you win with?")
+                .allow_empty(true)
+                .interact_text()
+                .unwrap();
+            
+            if condition.is_empty() { None } else { Some(condition) }
+        } else {
+            None
+        };
+        
+        // Save the game
+        let new_game = NewGame {
+            match_id,
+            game_number: game_num,
+            play_draw: play_draw.to_string(),
+            mulligans,
+            opening_hand_plan,
+            game_winner: game_winner.to_string(),
+            win_condition,
+        };
+        
+        diesel::insert_into(games::table)
+            .values(&new_game)
+            .execute(connection)
+            .expect("Error saving new game");
+        
+        println!("Game {} saved", game_num);
+        println!("Current score: You {}-{} Opponent", my_wins, opponent_wins);
+        
+        // Check if match is decided (first to 2 wins)
+        if my_wins == 2 {
+            println!("\n🎉 You won the match 2-{}!", opponent_wins);
+            return Winner::Me;
+        } else if opponent_wins == 2 {
+            println!("\n😞 You lost the match {}-2", my_wins);
+            return Winner::Opponent;
+        }
+    }
+    
+    // This shouldn't happen in best of 3, but just in case
+    if my_wins > opponent_wins {
+        Winner::Me
+    } else {
+        Winner::Opponent
+    }
+}
+
+fn list_matches(limit: i64) {
+    let connection = &mut establish_connection();
+    
+    let results = matches::table
+        .order(matches::match_id.desc())
+        .limit(limit)
+        .load::<Match>(connection)
+        .expect("Error loading matches");
+    
+    if results.is_empty() {
+        println!("No matches found");
+        return;
+    }
+    
+    println!("=== Recent Matches ===");
+    println!("{:<4} {:<12} {:<15} {:<15} {:<12} {:<8} {:<8}", 
+             "ID", "Date", "Deck", "Opponent", "Opp Deck", "Event", "Result");
+    println!("{}", "-".repeat(80));
+    
+    for m in results {
+        let result = if m.match_winner == "me" { "W" } else { "L" };
+        println!("{:<4} {:<12} {:<15} {:<15} {:<12} {:<8} {:<8}", 
+                 m.match_id, m.date, 
+                 truncate(&m.deck_name, 15),
+                 truncate(&m.opponent_name, 15),
+                 truncate(&m.opponent_deck, 12),
+                 truncate(&m.event_type, 8),
+                 result);
+    }
+}
+
+fn show_match_details(match_id: i32) {
+    let connection = &mut establish_connection();
+    
+    let match_result = matches::table
+        .find(match_id)
+        .first::<Match>(connection);
+    
+    let match_data = match match_result {
+        Ok(m) => m,
+        Err(_) => {
+            println!("Match {} not found", match_id);
+            return;
+        }
+    };
+    
+    let games_result = games::table
+        .filter(games::match_id.eq(match_id))
+        .order(games::game_number.asc())
+        .load::<Game>(connection)
+        .expect("Error loading games");
+    
+    println!("=== Match {} Details ===", match_id);
+    println!("Date: {}", match_data.date);
+    println!("Your deck: {}", match_data.deck_name);
+    println!("Opponent: {} ({})", match_data.opponent_name, match_data.opponent_deck);
+    println!("Event: {}", match_data.event_type);
+    println!("Die roll winner: {}", match_data.die_roll_winner);
+    println!("Match winner: {}", match_data.match_winner);
+    
+    println!("\n=== Games ===");
+    for game in games_result {
+        println!("\nGame {}:", game.game_number);
+        println!("  Play/Draw: {}", game.play_draw);
+        println!("  Mulligans: {}", game.mulligans);
+        if let Some(plan) = &game.opening_hand_plan {
+            println!("  Opening plan: {}", plan);
+        }
+        println!("  Winner: {}", game.game_winner);
+        if let Some(condition) = &game.win_condition {
+            println!("  Win condition: {}", condition);
+        }
+    }
+}
+
+fn show_stats(deck_filter: Option<String>, event_filter: Option<String>) {
+    let connection = &mut establish_connection();
+    
+    // Build the base query
+    let mut query = matches::table.into_boxed();
+    
+    if let Some(deck) = &deck_filter {
+        query = query.filter(matches::deck_name.like(format!("%{}%", deck)));
+    }
+    
+    if let Some(event) = &event_filter {
+        query = query.filter(matches::event_type.like(format!("%{}%", event)));
+    }
+    
+    let all_matches = query.load::<Match>(connection)
+        .expect("Error loading matches");
+    
+    if all_matches.is_empty() {
+        println!("No matches found");
+        return;
+    }
+    
+    println!("=== Match Statistics ===");
+    if let Some(deck) = &deck_filter {
+        println!("Filtered by deck: {}", deck);
+    }
+    if let Some(event) = &event_filter {
+        println!("Filtered by event: {}", event);
+    }
+    println!();
+    
+    // Calculate overall match statistics
+    let total_matches = all_matches.len();
+    let wins = all_matches.iter().filter(|m| m.match_winner == "me").count();
+    let losses = total_matches - wins;
+    let win_rate = if total_matches > 0 { (wins as f64 / total_matches as f64) * 100.0 } else { 0.0 };
+    
+    println!("Overall Record:");
+    println!("  Matches: {} ({}-{})", total_matches, wins, losses);
+    println!("  Win Rate: {:.1}%", win_rate);
+    
+    // Die roll statistics
+    let die_roll_wins = all_matches.iter().filter(|m| m.die_roll_winner == "me").count();
+    let die_roll_rate = if total_matches > 0 { (die_roll_wins as f64 / total_matches as f64) * 100.0 } else { 0.0 };
+    println!("  Die Roll Win Rate: {:.1}%", die_roll_rate);
+    println!();
+    
+    // Get all games for these matches
+    let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
+    let all_games = games::table
+        .filter(games::match_id.eq_any(&match_ids))
+        .load::<Game>(connection)
+        .expect("Error loading games");
+    
+    // Game statistics
+    let total_games = all_games.len();
+    let game_wins = all_games.iter().filter(|g| g.game_winner == "me").count();
+    let game_losses = total_games - game_wins;
+    let game_win_rate = if total_games > 0 { (game_wins as f64 / total_games as f64) * 100.0 } else { 0.0 };
+    
+    println!("Game Record:");
+    println!("  Games: {} ({}-{})", total_games, game_wins, game_losses);
+    println!("  Game Win Rate: {:.1}%", game_win_rate);
+    
+    // Play/Draw statistics
+    let play_games = all_games.iter().filter(|g| g.play_draw == "play").collect::<Vec<_>>();
+    let draw_games = all_games.iter().filter(|g| g.play_draw == "draw").collect::<Vec<_>>();
+    
+    if !play_games.is_empty() {
+        let play_wins = play_games.iter().filter(|g| g.game_winner == "me").count();
+        let play_win_rate = (play_wins as f64 / play_games.len() as f64) * 100.0;
+        println!("  On the Play: {}-{} ({:.1}%)", play_wins, play_games.len() - play_wins, play_win_rate);
+    }
+    
+    if !draw_games.is_empty() {
+        let draw_wins = draw_games.iter().filter(|g| g.game_winner == "me").count();
+        let draw_win_rate = (draw_wins as f64 / draw_games.len() as f64) * 100.0;
+        println!("  On the Draw: {}-{} ({:.1}%)", draw_wins, draw_games.len() - draw_wins, draw_win_rate);
+    }
+    
+    // Mulligan statistics
+    let total_mulligans: i32 = all_games.iter().map(|g| g.mulligans).sum();
+    let avg_mulligans = if total_games > 0 { total_mulligans as f64 / total_games as f64 } else { 0.0 };
+    println!("  Average Mulligans: {:.2}", avg_mulligans);
+    println!();
+    
+    // Opponent statistics
+    let mut opponent_stats: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    for m in &all_matches {
+        let entry = opponent_stats.entry(m.opponent_deck.clone()).or_insert((0, 0));
+        if m.match_winner == "me" {
+            entry.0 += 1;
+        } else {
+            entry.1 += 1;
+        }
+    }
+    
+    if opponent_stats.len() > 1 {
+        println!("Matchup Statistics:");
+        let mut opponent_vec: Vec<_> = opponent_stats.into_iter().collect();
+        opponent_vec.sort_by(|a, b| (a.1.0 + a.1.1).cmp(&(b.1.0 + b.1.1)).reverse());
+        
+        for (deck, (wins, losses)) in opponent_vec {
+            let total = wins + losses;
+            let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+            println!("  vs {}: {}-{} ({:.1}%)", deck, wins, losses, win_rate);
+        }
+    }
+}
+
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len-3])
+    }
+}
