@@ -15,7 +15,7 @@ Cephalid Breakfast
 Doomsday
 Nadu: Midrange
 Nadu: Elves
-Beanstalk: BUG
+Beanstalk: Sultai
 Beanstalk: Domain
 Beanstalk: Yorion
 Storm: TES
@@ -33,4 +33,10 @@ Miracles
 Infect
 Merfolk
 Cloudpost
+Control: Grixis
+Control: Jeskai
+Control: Bant
+Control: Sultai
+Applejacks
+Scythecat Cub Aggro
 Other
