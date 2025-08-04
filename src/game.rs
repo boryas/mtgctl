@@ -85,11 +85,11 @@ pub fn categorize_deck(deck_name: &str) -> DeckCategory {
         "Painter: U" => DeckCategory::Blue,
         "Nadu: Midrange" | "Nadu: Elves" => DeckCategory::Blue,
         "Beanstalk: BUG" | "Beanstalk: Domain" | "Beanstalk: Yorion" => DeckCategory::Blue,
-        "Cradle Control" => DeckCategory::Blue,
+        "Cradle Control" => DeckCategory::NonBlue,
         "Stoneblade" => DeckCategory::Blue,
         "Miracles" => DeckCategory::Blue,
         "Merfolk" => DeckCategory::Blue,
-        "Cloudpost" => DeckCategory::Blue,
+        "Cloudpost" => DeckCategory::NonBlue,
         
         // Non-blue decks
         "Stompy: Moon" | "Stompy: Eldrazi" => DeckCategory::NonBlue,
@@ -130,7 +130,7 @@ enum GameCommands {
         #[arg(long, help = "Filter by event type")]
         event: Option<String>,
         #[arg(long, help = "Slice data by: opponent, opponent-deck, deck-category, game-number, mulligans")]
-        slice_by: Option<String>,
+        slice: Option<String>,
     },
 }
 
@@ -139,7 +139,7 @@ pub fn run(args: GameArgs) {
         GameCommands::AddMatch { date } => add_match_interactive(date),
         GameCommands::ListMatches { limit } => list_matches(limit),
         GameCommands::MatchDetails { match_id } => show_match_details(match_id),
-        GameCommands::Stats { deck, event, slice_by } => show_stats(deck, event, slice_by),
+        GameCommands::Stats { deck, event, slice } => show_stats(deck, event, slice),
     }
 }
 
@@ -423,7 +423,7 @@ fn show_match_details(match_id: i32) {
     }
 }
 
-fn show_stats(deck_filter: Option<String>, event_filter: Option<String>, slice_by: Option<String>) {
+fn show_stats(deck_filter: Option<String>, event_filter: Option<String>, slice: Option<String>) {
     let connection = &mut establish_connection();
     
     // Build the base query
@@ -452,11 +452,7 @@ fn show_stats(deck_filter: Option<String>, event_filter: Option<String>, slice_b
     if let Some(event) = &event_filter {
         println!("Filtered by event: {}", event);
     }
-    if let Some(slice) = &slice_by {
-        println!("Sliced by: {}", slice);
-    }
     println!();
-    
     // Get all games for these matches
     let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
     let all_games = games::table
@@ -467,8 +463,47 @@ fn show_stats(deck_filter: Option<String>, event_filter: Option<String>, slice_b
     // Show overall statistics first
     show_overall_stats(&all_matches, &all_games);
     
-    // Then show sliced statistics if requested
-    if let Some(slice_type) = slice_by {
+    // Handle slice selection - interactive dropdown if not provided
+    let slice_type = if let Some(provided_slice) = slice {
+        println!("Sliced by: {}", provided_slice);
+        println!();
+        Some(provided_slice)
+    } else {
+        // Interactive slice selection
+        let slice_options = vec![
+            "None (no slicing)",
+            "opponent",
+            "opponent-deck", 
+            "deck-category",
+            "game-number",
+            "mulligans"
+        ];
+        
+        let selection = Select::new()
+            .with_prompt("Select how to slice the data")
+            .items(&slice_options)
+            .default(0)
+            .interact();
+        
+        let selection = match selection {
+            Ok(s) => s,
+            Err(_) => {
+                // Fallback to no slicing if not interactive
+                return;
+            }
+        };
+        
+        if selection == 0 {
+            None
+        } else {
+            println!("Sliced by: {}", slice_options[selection]);
+            println!();
+            Some(slice_options[selection].to_string())
+        }
+    };
+    
+    // Show sliced statistics if requested
+    if let Some(slice_type) = slice_type {
         show_sliced_stats(&all_matches, &all_games, &slice_type);
     }
 }
