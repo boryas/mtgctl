@@ -8,14 +8,101 @@ use crate::db::schema::{matches, games};
 
 // Predefined opponent deck types for Legacy format
 const OPPONENT_DECKS: &[&str] = &[
-    "Delver", "Reanimator", "Death and Taxes", "Burn", "Elves", "Goblins", 
-    "Show and Tell", "Storm", "Dredge", "Maverick", "Stoneblade", "Miracles",
-    "Lands", "Painter", "Infect", "Merfolk", "Cloudpost", "Prison", "Other"
+    "Reanimator: UB",
+    "Reanimator: BR",
+    "Stompy: Moon",
+    "Stompy: Eldrazi",
+    "Tempo: UB",
+    "Tempo: UR",
+    "Lands",
+    "Omni-tell",
+    "Sneak and Show",
+    "Painter: R",
+    "Painter: U",
+    "Mystic Forge",
+    "Oops! All Spells",
+    "Cephalid Breakfast",
+    "Doomsday",
+    "Nadu: Midrange",
+    "Nadu: Elves",
+    "Beanstalk: BUG",
+    "Beanstalk: Domain",
+    "Beanstalk: Yorion",
+    "Storm: TES",
+    "Storm: ANT",
+    "Storm: Ruby",
+    "Storm: Black Saga",
+    "Goblins",
+    "Combo Elves",
+    "Cradle Control",
+    "Dredge",
+    "Maverick: GW",
+    "Stiflenaught",
+    "Stoneblade",
+    "Miracles",
+    "Infect",
+    "Merfolk",
+    "Cloudpost",
+    "Other"
 ];
 
 const EVENT_TYPES: &[&str] = &[
-    "League", "Tournament", "Casual", "Challenge", "Prelim", "Other"
+    "League", "Paper", "Casual", "Challenge", "Prelim", "Other"
 ];
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DeckCategory {
+    Blue,
+    Combo,
+    NonBlue,
+}
+
+impl DeckCategory {
+    pub fn to_string(&self) -> &'static str {
+        match self {
+            DeckCategory::Blue => "Blue",
+            DeckCategory::Combo => "Combo", 
+            DeckCategory::NonBlue => "Non-Blue",
+        }
+    }
+}
+
+pub fn categorize_deck(deck_name: &str) -> DeckCategory {
+    // You can fill in the categories for each deck
+    match deck_name {
+        // Combo decks
+        "Reanimator: UB" | "Reanimator: BR" => DeckCategory::Combo,
+        "Omni-tell" | "Sneak and Show" => DeckCategory::Combo,
+        "Oops! All Spells" | "Cephalid Breakfast" | "Doomsday" => DeckCategory::Combo,
+        "Storm: TES" | "Storm: ANT" | "Storm: Ruby" | "Storm: Black Saga" => DeckCategory::Combo,
+        "Combo Elves" => DeckCategory::Combo,
+        "Dredge" => DeckCategory::Combo,
+        "Stiflenaught" => DeckCategory::Combo,
+        "Infect" => DeckCategory::Combo,
+        
+        // Blue decks (non-combo)
+        "Tempo: UB" | "Tempo: UR" => DeckCategory::Blue,
+        "Painter: U" => DeckCategory::Blue,
+        "Nadu: Midrange" | "Nadu: Elves" => DeckCategory::Blue,
+        "Beanstalk: BUG" | "Beanstalk: Domain" | "Beanstalk: Yorion" => DeckCategory::Blue,
+        "Cradle Control" => DeckCategory::Blue,
+        "Stoneblade" => DeckCategory::Blue,
+        "Miracles" => DeckCategory::Blue,
+        "Merfolk" => DeckCategory::Blue,
+        "Cloudpost" => DeckCategory::Blue,
+        
+        // Non-blue decks
+        "Stompy: Moon" | "Stompy: Eldrazi" => DeckCategory::NonBlue,
+        "Lands" => DeckCategory::NonBlue,
+        "Painter: R" => DeckCategory::NonBlue,
+        "Mystic Forge" => DeckCategory::NonBlue,
+        "Goblins" => DeckCategory::NonBlue,
+        "Maverick: GW" => DeckCategory::NonBlue,
+        
+        // Default to Non-Blue for Other and unknown decks
+        _ => DeckCategory::NonBlue,
+    }
+}
 
 #[derive(Args)]
 pub struct GameArgs {
@@ -42,6 +129,8 @@ enum GameCommands {
         deck: Option<String>,
         #[arg(long, help = "Filter by event type")]
         event: Option<String>,
+        #[arg(long, help = "Slice data by: opponent, opponent-deck, deck-category, game-number, mulligans")]
+        slice_by: Option<String>,
     },
 }
 
@@ -50,7 +139,7 @@ pub fn run(args: GameArgs) {
         GameCommands::AddMatch { date } => add_match_interactive(date),
         GameCommands::ListMatches { limit } => list_matches(limit),
         GameCommands::MatchDetails { match_id } => show_match_details(match_id),
-        GameCommands::Stats { deck, event } => show_stats(deck, event),
+        GameCommands::Stats { deck, event, slice_by } => show_stats(deck, event, slice_by),
     }
 }
 
@@ -334,7 +423,7 @@ fn show_match_details(match_id: i32) {
     }
 }
 
-fn show_stats(deck_filter: Option<String>, event_filter: Option<String>) {
+fn show_stats(deck_filter: Option<String>, event_filter: Option<String>, slice_by: Option<String>) {
     let connection = &mut establish_connection();
     
     // Build the base query
@@ -363,8 +452,28 @@ fn show_stats(deck_filter: Option<String>, event_filter: Option<String>) {
     if let Some(event) = &event_filter {
         println!("Filtered by event: {}", event);
     }
+    if let Some(slice) = &slice_by {
+        println!("Sliced by: {}", slice);
+    }
     println!();
     
+    // Get all games for these matches
+    let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
+    let all_games = games::table
+        .filter(games::match_id.eq_any(&match_ids))
+        .load::<Game>(connection)
+        .expect("Error loading games");
+    
+    // Show overall statistics first
+    show_overall_stats(&all_matches, &all_games);
+    
+    // Then show sliced statistics if requested
+    if let Some(slice_type) = slice_by {
+        show_sliced_stats(&all_matches, &all_games, &slice_type);
+    }
+}
+
+fn show_overall_stats(all_matches: &[Match], all_games: &[Game]) {
     // Calculate overall match statistics
     let total_matches = all_matches.len();
     let wins = all_matches.iter().filter(|m| m.match_winner == "me").count();
@@ -380,13 +489,6 @@ fn show_stats(deck_filter: Option<String>, event_filter: Option<String>) {
     let die_roll_rate = if total_matches > 0 { (die_roll_wins as f64 / total_matches as f64) * 100.0 } else { 0.0 };
     println!("  Die Roll Win Rate: {:.1}%", die_roll_rate);
     println!();
-    
-    // Get all games for these matches
-    let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
-    let all_games = games::table
-        .filter(games::match_id.eq_any(&match_ids))
-        .load::<Game>(connection)
-        .expect("Error loading games");
     
     // Game statistics
     let total_games = all_games.len();
@@ -419,29 +521,102 @@ fn show_stats(deck_filter: Option<String>, event_filter: Option<String>) {
     let avg_mulligans = if total_games > 0 { total_mulligans as f64 / total_games as f64 } else { 0.0 };
     println!("  Average Mulligans: {:.2}", avg_mulligans);
     println!();
-    
-    // Opponent statistics
-    let mut opponent_stats: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
-    for m in &all_matches {
-        let entry = opponent_stats.entry(m.opponent_deck.clone()).or_insert((0, 0));
-        if m.match_winner == "me" {
-            entry.0 += 1;
-        } else {
-            entry.1 += 1;
-        }
-    }
-    
-    if opponent_stats.len() > 1 {
-        println!("Matchup Statistics:");
-        let mut opponent_vec: Vec<_> = opponent_stats.into_iter().collect();
-        opponent_vec.sort_by(|a, b| (a.1.0 + a.1.1).cmp(&(b.1.0 + b.1.1)).reverse());
+}
+
+fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str) {
+    match slice_type {
+        "opponent" => {
+            println!("=== Statistics by Opponent ===");
+            let mut opponent_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
+            for m in all_matches {
+                opponent_stats.entry(m.opponent_name.clone()).or_default().push(m);
+            }
+            
+            let mut opponent_vec: Vec<_> = opponent_stats.into_iter().collect();
+            opponent_vec.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            
+            for (opponent, matches) in opponent_vec {
+                let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                let total = matches.len();
+                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                println!("  vs {}: {}-{} ({:.1}%)", opponent, wins, total - wins, win_rate);
+            }
+        },
         
-        for (deck, (wins, losses)) in opponent_vec {
-            let total = wins + losses;
-            let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-            println!("  vs {}: {}-{} ({:.1}%)", deck, wins, losses, win_rate);
+        "opponent-deck" => {
+            println!("=== Statistics by Opponent Deck ===");
+            let mut deck_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
+            for m in all_matches {
+                deck_stats.entry(m.opponent_deck.clone()).or_default().push(m);
+            }
+            
+            let mut deck_vec: Vec<_> = deck_stats.into_iter().collect();
+            deck_vec.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            
+            for (deck, matches) in deck_vec {
+                let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                let total = matches.len();
+                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                println!("  vs {}: {}-{} ({:.1}%)", deck, wins, total - wins, win_rate);
+            }
+        },
+        
+        "deck-category" => {
+            println!("=== Statistics by Deck Category ===");
+            let mut category_stats: std::collections::HashMap<DeckCategory, Vec<&Match>> = std::collections::HashMap::new();
+            for m in all_matches {
+                let category = categorize_deck(&m.opponent_deck);
+                category_stats.entry(category).or_default().push(m);
+            }
+            
+            for (category, matches) in category_stats {
+                let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                let total = matches.len();
+                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                println!("  vs {} decks: {}-{} ({:.1}%)", category.to_string(), wins, total - wins, win_rate);
+            }
+        },
+        
+        "game-number" => {
+            println!("=== Statistics by Game Number ===");
+            let mut game_stats: std::collections::HashMap<i32, Vec<&Game>> = std::collections::HashMap::new();
+            for g in all_games {
+                game_stats.entry(g.game_number).or_default().push(g);
+            }
+            
+            for game_num in 1..=3 {
+                if let Some(games) = game_stats.get(&game_num) {
+                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
+                    let total = games.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    println!("  Game {}: {}-{} ({:.1}%)", game_num, wins, total - wins, win_rate);
+                }
+            }
+        },
+        
+        "mulligans" => {
+            println!("=== Statistics by Mulligan Count ===");
+            let mut mulligan_stats: std::collections::HashMap<i32, Vec<&Game>> = std::collections::HashMap::new();
+            for g in all_games {
+                mulligan_stats.entry(g.mulligans).or_default().push(g);
+            }
+            
+            let mut mulligan_vec: Vec<_> = mulligan_stats.into_iter().collect();
+            mulligan_vec.sort_by_key(|&(mulligans, _)| mulligans);
+            
+            for (mulligans, games) in mulligan_vec {
+                let wins = games.iter().filter(|g| g.game_winner == "me").count();
+                let total = games.len();
+                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                println!("  {} mulligans: {}-{} ({:.1}%)", mulligans, wins, total - wins, win_rate);
+            }
+        },
+        
+        _ => {
+            println!("Unknown slice type: {}. Available options: opponent, opponent-deck, deck-category, game-number, mulligans", slice_type);
         }
     }
+    println!();
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
