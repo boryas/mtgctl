@@ -12,7 +12,17 @@ fn load_deck_names() -> Vec<String> {
     match fs::read_to_string("deck_names.txt") {
         Ok(content) => {
             content.lines()
-                .map(|line| line.trim().to_string())
+                .map(|line| {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        return String::new();
+                    }
+                    if let Some((deck_name, _category)) = line.split_once(';') {
+                        deck_name.trim().to_string()
+                    } else {
+                        line.to_string()
+                    }
+                })
                 .filter(|line| !line.is_empty())
                 .collect()
         },
@@ -60,6 +70,42 @@ fn load_deck_names() -> Vec<String> {
     }
 }
 
+fn load_deck_categories() -> HashMap<String, DeckCategory> {
+    let mut categories = HashMap::new();
+    
+    match fs::read_to_string("deck_names.txt") {
+        Ok(content) => {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                
+                if let Some((deck_name, category_str)) = line.split_once(';') {
+                    let deck_name = deck_name.trim().to_string();
+                    let category_str = category_str.trim();
+                    
+                    let category = match category_str {
+                        "Blue" => DeckCategory::Blue,
+                        "Combo" => DeckCategory::Combo,
+                        "Non-Blue" => DeckCategory::NonBlue,
+                        "Stompy" => DeckCategory::NonBlue, // Map Stompy to Non-Blue
+                        "No Category" => DeckCategory::NonBlue, // Default for "Other"
+                        _ => DeckCategory::NonBlue, // Default fallback
+                    };
+                    
+                    categories.insert(deck_name, category);
+                }
+            }
+        },
+        Err(_) => {
+            // Fallback categories if file doesn't exist - empty map will use the hardcoded categorize_deck function
+        }
+    }
+    
+    categories
+}
+
 const EVENT_TYPES: &[&str] = &[
     "League", "Paper", "Casual", "Challenge", "Prelim", "Other"
 ];
@@ -82,7 +128,14 @@ impl DeckCategory {
 }
 
 pub fn categorize_deck(deck_name: &str) -> DeckCategory {
-    // You can fill in the categories for each deck
+    let categories = load_deck_categories();
+    
+    // First try to get from file
+    if let Some(category) = categories.get(deck_name) {
+        return category.clone();
+    }
+    
+    // Fallback to hardcoded categorization if not found in file
     match deck_name {
         // Combo decks
         "Reanimator: UB" | "Reanimator: BR" => DeckCategory::Combo,
@@ -91,27 +144,28 @@ pub fn categorize_deck(deck_name: &str) -> DeckCategory {
         "Storm: TES" | "Storm: ANT" | "Storm: Ruby" | "Storm: Black Saga" => DeckCategory::Combo,
         "Combo Elves" => DeckCategory::Combo,
         "Dredge" => DeckCategory::Combo,
-        "Stiflenaught" => DeckCategory::Combo,
+        "Stiflenaught" => DeckCategory::Blue,
         "Infect" => DeckCategory::Combo,
+        "Mystic Forge" => DeckCategory::Combo,
+        "Nadu: Elves" => DeckCategory::Combo,
         
         // Blue decks (non-combo)
         "Tempo: UB" | "Tempo: UR" => DeckCategory::Blue,
         "Painter: U" => DeckCategory::Blue,
-        "Nadu: Midrange" | "Nadu: Elves" => DeckCategory::Blue,
-        "Beanstalk: BUG" | "Beanstalk: Domain" | "Beanstalk: Yorion" => DeckCategory::Blue,
-        "Cradle Control" => DeckCategory::NonBlue,
+        "Nadu: Midrange" => DeckCategory::Blue,
+        "Beanstalk: BUG" | "Beanstalk: Domain" | "Beanstalk: Yorion" | "Beanstalk: Sultai" => DeckCategory::Blue,
         "Stoneblade" => DeckCategory::Blue,
         "Miracles" => DeckCategory::Blue,
         "Merfolk" => DeckCategory::Blue,
-        "Cloudpost" => DeckCategory::NonBlue,
         
         // Non-blue decks
         "Stompy: Moon" | "Stompy: Eldrazi" => DeckCategory::NonBlue,
         "Lands" => DeckCategory::NonBlue,
         "Painter: R" => DeckCategory::NonBlue,
-        "Mystic Forge" => DeckCategory::NonBlue,
         "Goblins" => DeckCategory::NonBlue,
         "Maverick: GW" => DeckCategory::NonBlue,
+        "Cradle Control" => DeckCategory::NonBlue,
+        "Cloudpost" => DeckCategory::NonBlue,
         
         // Default to Non-Blue for Other and unknown decks
         _ => DeckCategory::NonBlue,
@@ -1094,31 +1148,53 @@ fn add_deck_to_list(deck_name: Option<String>) {
     }
     
     // Load existing deck names
-    let mut deck_names = load_deck_names();
+    let existing_deck_names = load_deck_names();
     
     // Check if deck already exists
-    if deck_names.contains(&deck_name) {
+    if existing_deck_names.contains(&deck_name) {
         println!("Deck '{}' already exists in the list", deck_name);
         return;
     }
     
-    // Add the new deck name
-    deck_names.push(deck_name.clone());
+    // Ask for category
+    let category_options = vec!["Blue", "Combo", "Non-Blue", "Stompy"];
+    let category_idx = Select::new()
+        .with_prompt("Select deck category")
+        .items(&category_options)
+        .default(0)
+        .interact()
+        .unwrap();
+    let category = category_options[category_idx];
+    
+    // Read the existing file content to preserve format
+    let mut lines = Vec::new();
+    if let Ok(content) = fs::read_to_string("deck_names.txt") {
+        for line in content.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+        }
+    }
+    
+    // Add the new deck with category
+    let new_entry = format!("{}; {}", deck_name, category);
+    lines.push(new_entry);
     
     // Sort the list (keep "Other" at the end if it exists)
-    let other_pos = deck_names.iter().position(|name| name == "Other");
+    let other_pos = lines.iter().position(|line| line.starts_with("Other;"));
     if let Some(pos) = other_pos {
-        let other = deck_names.remove(pos);
-        deck_names.sort();
-        deck_names.push(other);
+        let other = lines.remove(pos);
+        lines.sort();
+        lines.push(other);
     } else {
-        deck_names.sort();
+        lines.sort();
     }
     
     // Write back to file
-    let content = deck_names.join("\n");
+    let content = lines.join("\n");
     match fs::write("deck_names.txt", content) {
-        Ok(_) => println!("Added '{}' to deck list", deck_name),
+        Ok(_) => println!("Added '{}' with category '{}' to deck list", deck_name, category),
         Err(e) => println!("Error writing to deck_names.txt: {}", e),
     }
 }
