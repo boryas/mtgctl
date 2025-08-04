@@ -1,0 +1,27 @@
+# Board Plans by Opponent Deck
+# Format: Deck Name | Board Plan
+
+Reanimator: UB | Force backup, counter reanimation spells, pressure with creatures
+Reanimator: BR | Force backup, counter reanimation spells, surgical Griselbrand
+Stompy: Moon | Counter chalice/moon, remove artifacts, win quickly
+Stompy: Eldrazi | Counter early threats, save removal for Reality Smasher
+Tempo: UB | Counter key threats, protect your gameplan, grind value
+Tempo: UR | Counter Delver/Murktide, answer Ragavan quickly
+Lands | Counter Life from the Loam, pressure life total
+Omni-tell | Force backup, counter Show and Tell, clock pressure
+Sneak and Show | Force backup, counter combo pieces, maintain clock
+Painter: R | Counter combo pieces, remove artifacts, pressure
+Painter: U | Force backup, counter Painter, surgical key pieces
+Mystic Forge | Remove artifacts, counter key pieces, maintain pressure
+Oops! All Spells | Force backup, surgical key pieces, mulligan aggressively for Force
+Cephalid Breakfast | Force backup, counter combo pieces, graveyard hate
+Doomsday | Force backup, counter Doomsday, maintain clock pressure
+Nadu: Midrange | Remove Nadu, counter key spells, outvalue
+Nadu: Elves | Wipe the board, counter Nadu, pressure life total
+Storm: TES | Force backup, counter ritual effects, surgical key pieces
+Storm: ANT | Force backup, counter tutors, pressure life total
+Goblins | Board wipes, remove key threats, stabilize
+Combo Elves | Board wipes, counter key elves, pressure quickly
+Dredge | Graveyard hate, counter Bridge, pressure life total
+Miracles | Counter key spells, protect threats, grind value
+Other | Assess gameplan, adapt sideboard accordingly

@@ -2,49 +2,63 @@ use clap::{Args, Subcommand};
 use dialoguer::{Input, Select, Confirm};
 use chrono::{Local, NaiveDate};
 use diesel::prelude::*;
+use std::fs;
+use std::collections::HashMap;
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games};
 
-// Predefined opponent deck types for Legacy format
-const OPPONENT_DECKS: &[&str] = &[
-    "Reanimator: UB",
-    "Reanimator: BR",
-    "Stompy: Moon",
-    "Stompy: Eldrazi",
-    "Tempo: UB",
-    "Tempo: UR",
-    "Lands",
-    "Omni-tell",
-    "Sneak and Show",
-    "Painter: R",
-    "Painter: U",
-    "Mystic Forge",
-    "Oops! All Spells",
-    "Cephalid Breakfast",
-    "Doomsday",
-    "Nadu: Midrange",
-    "Nadu: Elves",
-    "Beanstalk: BUG",
-    "Beanstalk: Domain",
-    "Beanstalk: Yorion",
-    "Storm: TES",
-    "Storm: ANT",
-    "Storm: Ruby",
-    "Storm: Black Saga",
-    "Goblins",
-    "Combo Elves",
-    "Cradle Control",
-    "Dredge",
-    "Maverick: GW",
-    "Stiflenaught",
-    "Stoneblade",
-    "Miracles",
-    "Infect",
-    "Merfolk",
-    "Cloudpost",
-    "Other"
-];
+fn load_deck_names() -> Vec<String> {
+    match fs::read_to_string("deck_names.txt") {
+        Ok(content) => {
+            content.lines()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect()
+        },
+        Err(_) => {
+            // Fallback to hardcoded list if file doesn't exist
+            vec![
+                "Reanimator: UB".to_string(),
+                "Reanimator: BR".to_string(),
+                "Stompy: Moon".to_string(),
+                "Stompy: Eldrazi".to_string(),
+                "Tempo: UB".to_string(),
+                "Tempo: UR".to_string(),
+                "Lands".to_string(),
+                "Omni-tell".to_string(),
+                "Sneak and Show".to_string(),
+                "Painter: R".to_string(),
+                "Painter: U".to_string(),
+                "Mystic Forge".to_string(),
+                "Oops! All Spells".to_string(),
+                "Cephalid Breakfast".to_string(),
+                "Doomsday".to_string(),
+                "Nadu: Midrange".to_string(),
+                "Nadu: Elves".to_string(),
+                "Beanstalk: BUG".to_string(),
+                "Beanstalk: Domain".to_string(),
+                "Beanstalk: Yorion".to_string(),
+                "Storm: TES".to_string(),
+                "Storm: ANT".to_string(),
+                "Storm: Ruby".to_string(),
+                "Storm: Black Saga".to_string(),
+                "Goblins".to_string(),
+                "Combo Elves".to_string(),
+                "Cradle Control".to_string(),
+                "Dredge".to_string(),
+                "Maverick: GW".to_string(),
+                "Stiflenaught".to_string(),
+                "Stoneblade".to_string(),
+                "Miracles".to_string(),
+                "Infect".to_string(),
+                "Merfolk".to_string(),
+                "Cloudpost".to_string(),
+                "Other".to_string(),
+            ]
+        }
+    }
+}
 
 const EVENT_TYPES: &[&str] = &[
     "League", "Paper", "Casual", "Challenge", "Prelim", "Other"
@@ -124,6 +138,24 @@ enum GameCommands {
         #[arg(help = "Match ID to show details for")]
         match_id: i32,
     },
+    EditMatch {
+        #[arg(help = "Match ID to edit")]
+        match_id: i32,
+    },
+    EditGame {
+        #[arg(help = "Match ID containing the game")]
+        match_id: i32,
+        #[arg(help = "Game number (1, 2, or 3)")]
+        game_number: i32,
+    },
+    AddDeck {
+        #[arg(help = "Deck name to add to the deck list")]
+        deck_name: Option<String>,
+    },
+    BoardPlan {
+        #[arg(help = "Opponent deck to show board plan for")]
+        deck_name: Option<String>,
+    },
     Stats {
         #[arg(long, help = "Filter by deck name")]
         deck: Option<String>,
@@ -149,6 +181,10 @@ pub fn run(args: GameArgs) {
         GameCommands::AddMatch { date } => add_match_interactive(date),
         GameCommands::ListMatches { limit } => list_matches(limit),
         GameCommands::MatchDetails { match_id } => show_match_details(match_id),
+        GameCommands::EditMatch { match_id } => edit_match_interactive(match_id),
+        GameCommands::EditGame { match_id, game_number } => edit_game_interactive(match_id, game_number),
+        GameCommands::AddDeck { deck_name } => add_deck_to_list(deck_name),
+        GameCommands::BoardPlan { deck_name } => show_board_plan(deck_name),
         GameCommands::Stats { 
             deck, 
             event, 
@@ -192,14 +228,7 @@ fn add_match_interactive(date_arg: Option<String>) {
         .interact_text()
         .unwrap();
     
-    // Get opponent deck
-    let opponent_deck_idx = Select::new()
-        .with_prompt("Opponent's deck")
-        .items(OPPONENT_DECKS)
-        .default(0)
-        .interact()
-        .unwrap();
-    let opponent_deck = OPPONENT_DECKS[opponent_deck_idx].to_string();
+    // Opponent deck will be set after the match
     
     // Get event type
     let event_type_idx = Select::new()
@@ -221,12 +250,12 @@ fn add_match_interactive(date_arg: Option<String>) {
         Winner::Opponent
     };
     
-    // Create the match without winner (will be determined by games)
+    // Create the match without winner and opponent deck (will be determined after games)
     let new_match = NewMatch {
         date,
         deck_name,
         opponent_name,
-        opponent_deck,
+        opponent_deck: "unknown".to_string(), // Will be updated after match
         event_type,
         die_roll_winner: die_roll_winner.to_string(),
         match_winner: "unknown".to_string(), // Will be updated after games
@@ -251,11 +280,26 @@ fn add_match_interactive(date_arg: Option<String>) {
     // Now add games and determine match winner
     let match_winner = add_games_interactive(connection, match_id);
     
-    // Update the match with the winner
+    // Ask for opponent deck now that match is complete
+    println!("\n=== Match Complete ===");
+    let deck_names = load_deck_names();
+    let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
+    let opponent_deck_idx = Select::new()
+        .with_prompt("What deck was your opponent playing?")
+        .items(&deck_names_refs)
+        .default(0)
+        .interact()
+        .unwrap();
+    let opponent_deck = deck_names[opponent_deck_idx].clone();
+    
+    // Update the match with the winner and opponent deck
     diesel::update(matches::table.find(match_id))
-        .set(matches::match_winner.eq(match_winner.to_string()))
+        .set((
+            matches::match_winner.eq(match_winner.to_string()),
+            matches::opponent_deck.eq(opponent_deck)
+        ))
         .execute(connection)
-        .expect("Error updating match winner");
+        .expect("Error updating match");
 }
 
 fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Winner {
@@ -702,5 +746,387 @@ fn truncate(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max_len-3])
+    }
+}
+
+fn edit_match_interactive(match_id: i32) {
+    let connection = &mut establish_connection();
+    
+    // Load the existing match
+    let match_result = matches::table
+        .find(match_id)
+        .first::<Match>(connection);
+        
+    let mut match_data = match match_result {
+        Ok(m) => m,
+        Err(_) => {
+            println!("Match {} not found", match_id);
+            return;
+        }
+    };
+    
+    println!("=== Editing Match {} ===", match_id);
+    println!("Current values shown in [brackets]. Press Enter to keep current value.");
+    println!();
+    
+    // Edit date
+    let new_date: String = Input::new()
+        .with_prompt(&format!("Date [{}]", match_data.date))
+        .allow_empty(true)
+        .interact_text()
+        .unwrap();
+    if !new_date.is_empty() {
+        match NaiveDate::parse_from_str(&new_date, "%Y-%m-%d") {
+            Ok(_) => match_data.date = new_date,
+            Err(_) => println!("Invalid date format, keeping current value"),
+        }
+    }
+    
+    // Edit deck name
+    let new_deck_name: String = Input::new()
+        .with_prompt(&format!("Your deck name [{}]", match_data.deck_name))
+        .allow_empty(true)
+        .interact_text()
+        .unwrap();
+    if !new_deck_name.is_empty() {
+        match_data.deck_name = new_deck_name;
+    }
+    
+    // Edit opponent name
+    let new_opponent_name: String = Input::new()
+        .with_prompt(&format!("Opponent name [{}]", match_data.opponent_name))
+        .allow_empty(true)
+        .interact_text()
+        .unwrap();
+    if !new_opponent_name.is_empty() {
+        match_data.opponent_name = new_opponent_name;
+    }
+    
+    // Edit opponent deck
+    let deck_names = load_deck_names();
+    let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
+    let current_deck_idx = deck_names.iter()
+        .position(|deck| deck == &match_data.opponent_deck)
+        .unwrap_or(0);
+        
+    let change_deck = Confirm::new()
+        .with_prompt(&format!("Change opponent deck from '{}'?", match_data.opponent_deck))
+        .interact()
+        .unwrap();
+        
+    if change_deck {
+        let opponent_deck_idx = Select::new()
+            .with_prompt("Opponent's deck")
+            .items(&deck_names_refs)
+            .default(current_deck_idx)
+            .interact()
+            .unwrap();
+        match_data.opponent_deck = deck_names[opponent_deck_idx].clone();
+    }
+    
+    // Edit event type
+    let current_event_idx = EVENT_TYPES.iter()
+        .position(|&event| event == match_data.event_type)
+        .unwrap_or(0);
+        
+    let change_event = Confirm::new()
+        .with_prompt(&format!("Change event type from '{}'?", match_data.event_type))
+        .interact()
+        .unwrap();
+        
+    if change_event {
+        let event_type_idx = Select::new()
+            .with_prompt("Event type")
+            .items(EVENT_TYPES)
+            .default(current_event_idx)
+            .interact()
+            .unwrap();
+        match_data.event_type = EVENT_TYPES[event_type_idx].to_string();
+    }
+    
+    // Edit die roll winner
+    let change_die_roll = Confirm::new()
+        .with_prompt(&format!("Change die roll winner from '{}'?", match_data.die_roll_winner))
+        .interact()
+        .unwrap();
+        
+    if change_die_roll {
+        let die_roll_winner = if Confirm::new()
+            .with_prompt("Did you win the die roll?")
+            .interact()
+            .unwrap()
+        {
+            "me"
+        } else {
+            "opponent"
+        };
+        match_data.die_roll_winner = die_roll_winner.to_string();
+    }
+    
+    // Edit match winner
+    let change_match_winner = Confirm::new()
+        .with_prompt(&format!("Change match winner from '{}'?", match_data.match_winner))
+        .interact()
+        .unwrap();
+        
+    if change_match_winner {
+        let match_winner = if Confirm::new()
+            .with_prompt("Did you win the match?")
+            .interact()
+            .unwrap()
+        {
+            "me"
+        } else {
+            "opponent"
+        };
+        match_data.match_winner = match_winner.to_string();
+    }
+    
+    // Save changes
+    diesel::update(matches::table.find(match_id))
+        .set((
+            matches::date.eq(&match_data.date),
+            matches::deck_name.eq(&match_data.deck_name),
+            matches::opponent_name.eq(&match_data.opponent_name),
+            matches::opponent_deck.eq(&match_data.opponent_deck),
+            matches::event_type.eq(&match_data.event_type),
+            matches::die_roll_winner.eq(&match_data.die_roll_winner),
+            matches::match_winner.eq(&match_data.match_winner),
+        ))
+        .execute(connection)
+        .expect("Error updating match");
+        
+    println!("Match {} updated successfully!", match_id);
+}
+
+fn edit_game_interactive(match_id: i32, game_number: i32) {
+    let connection = &mut establish_connection();
+    
+    // Verify match exists
+    let match_exists = matches::table
+        .find(match_id)
+        .first::<Match>(connection)
+        .is_ok();
+        
+    if !match_exists {
+        println!("Match {} not found", match_id);
+        return;
+    }
+    
+    // Load the existing game
+    let game_result = games::table
+        .filter(games::match_id.eq(match_id))
+        .filter(games::game_number.eq(game_number))
+        .first::<Game>(connection);
+        
+    let mut game_data = match game_result {
+        Ok(g) => g,
+        Err(_) => {
+            println!("Game {} in match {} not found", game_number, match_id);
+            return;
+        }
+    };
+    
+    println!("=== Editing Game {} in Match {} ===", game_number, match_id);
+    println!("Current values shown in [brackets]. Press Enter to keep current value.");
+    println!();
+    
+    // Edit play/draw
+    let change_play_draw = Confirm::new()
+        .with_prompt(&format!("Change play/draw from '{}'?", game_data.play_draw))
+        .interact()
+        .unwrap();
+        
+    if change_play_draw {
+        let play_draw = if Confirm::new()
+            .with_prompt("Did you play first? (no = draw)")
+            .interact()
+            .unwrap()
+        {
+            "play"
+        } else {
+            "draw"
+        };
+        game_data.play_draw = play_draw.to_string();
+    }
+    
+    // Edit mulligans
+    let new_mulligans: String = Input::new()
+        .with_prompt(&format!("Number of mulligans [{}]", game_data.mulligans))
+        .allow_empty(true)
+        .interact_text()
+        .unwrap();
+    if !new_mulligans.is_empty() {
+        if let Ok(mulligans) = new_mulligans.parse::<i32>() {
+            if mulligans >= 0 && mulligans <= 7 {
+                game_data.mulligans = mulligans;
+            } else {
+                println!("Mulligans must be between 0 and 7, keeping current value");
+            }
+        } else {
+            println!("Invalid number, keeping current value");
+        }
+    }
+    
+    // Edit opening hand plan
+    let current_plan = game_data.opening_hand_plan.as_deref().unwrap_or("");
+    let new_plan: String = Input::new()
+        .with_prompt(&format!("Opening hand plan [{}]", current_plan))
+        .allow_empty(true)
+        .interact_text()
+        .unwrap();
+    if !new_plan.is_empty() {
+        game_data.opening_hand_plan = Some(new_plan);
+    }
+    
+    // Edit game winner
+    let change_winner = Confirm::new()
+        .with_prompt(&format!("Change game winner from '{}'?", game_data.game_winner))
+        .interact()
+        .unwrap();
+        
+    if change_winner {
+        let game_winner = if Confirm::new()
+            .with_prompt("Did you win this game?")
+            .interact()
+            .unwrap()
+        {
+            "me"
+        } else {
+            "opponent"
+        };
+        game_data.game_winner = game_winner.to_string();
+    }
+    
+    // Edit win condition (only if you won)
+    if game_data.game_winner == "me" {
+        let current_condition = game_data.win_condition.as_deref().unwrap_or("");
+        let new_condition: String = Input::new()
+            .with_prompt(&format!("What did you win with? [{}]", current_condition))
+            .allow_empty(true)
+            .interact_text()
+            .unwrap();
+        if !new_condition.is_empty() {
+            game_data.win_condition = Some(new_condition);
+        }
+    } else {
+        game_data.win_condition = None;
+    }
+    
+    // Save changes
+    diesel::update(games::table
+        .filter(games::match_id.eq(match_id))
+        .filter(games::game_number.eq(game_number)))
+        .set((
+            games::play_draw.eq(&game_data.play_draw),
+            games::mulligans.eq(game_data.mulligans),
+            games::opening_hand_plan.eq(&game_data.opening_hand_plan),
+            games::game_winner.eq(&game_data.game_winner),
+            games::win_condition.eq(&game_data.win_condition),
+        ))
+        .execute(connection)
+        .expect("Error updating game");
+        
+    println!("Game {} in match {} updated successfully!", game_number, match_id);
+}
+
+fn add_deck_to_list(deck_name: Option<String>) {
+    let deck_name = match deck_name {
+        Some(name) => name,
+        None => {
+            // Interactive mode
+            Input::new()
+                .with_prompt("Enter deck name to add")
+                .interact_text()
+                .unwrap()
+        }
+    };
+    
+    if deck_name.trim().is_empty() {
+        println!("Deck name cannot be empty");
+        return;
+    }
+    
+    // Load existing deck names
+    let mut deck_names = load_deck_names();
+    
+    // Check if deck already exists
+    if deck_names.contains(&deck_name) {
+        println!("Deck '{}' already exists in the list", deck_name);
+        return;
+    }
+    
+    // Add the new deck name
+    deck_names.push(deck_name.clone());
+    
+    // Sort the list (keep "Other" at the end if it exists)
+    let other_pos = deck_names.iter().position(|name| name == "Other");
+    if let Some(pos) = other_pos {
+        let other = deck_names.remove(pos);
+        deck_names.sort();
+        deck_names.push(other);
+    } else {
+        deck_names.sort();
+    }
+    
+    // Write back to file
+    let content = deck_names.join("\n");
+    match fs::write("deck_names.txt", content) {
+        Ok(_) => println!("Added '{}' to deck list", deck_name),
+        Err(e) => println!("Error writing to deck_names.txt: {}", e),
+    }
+}
+
+fn load_board_plans() -> HashMap<String, String> {
+    let mut plans = HashMap::new();
+    
+    if let Ok(content) = fs::read_to_string("board_plans.txt") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            
+            if let Some((deck, plan)) = line.split_once(" | ") {
+                plans.insert(deck.trim().to_string(), plan.trim().to_string());
+            }
+        }
+    }
+    
+    plans
+}
+
+fn show_board_plan(deck_name: Option<String>) {
+    let deck_name = match deck_name {
+        Some(name) => name,
+        None => {
+            // Interactive mode - select from available decks
+            let deck_names = load_deck_names();
+            let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
+            
+            let selection = Select::new()
+                .with_prompt("Select opponent deck to see board plan")
+                .items(&deck_names_refs)
+                .default(0)
+                .interact()
+                .unwrap();
+                
+            deck_names[selection].clone()
+        }
+    };
+    
+    let board_plans = load_board_plans();
+    
+    println!("=== Board Plan vs {} ===", deck_name);
+    
+    match board_plans.get(&deck_name) {
+        Some(plan) => {
+            println!("{}", plan);
+        },
+        None => {
+            println!("No board plan found for '{}'", deck_name);
+            println!("You can add one by editing board_plans.txt");
+            println!("Format: Deck Name | Board Plan");
+        }
     }
 }
