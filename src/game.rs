@@ -280,26 +280,39 @@ fn add_match_interactive(date_arg: Option<String>) {
     // Now add games and determine match winner
     let match_winner = add_games_interactive(connection, match_id);
     
-    // Ask for opponent deck now that match is complete
-    println!("\n=== Match Complete ===");
-    let deck_names = load_deck_names();
-    let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-    let opponent_deck_idx = Select::new()
-        .with_prompt("What deck was your opponent playing?")
-        .items(&deck_names_refs)
-        .default(0)
-        .interact()
-        .unwrap();
-    let opponent_deck = deck_names[opponent_deck_idx].clone();
-    
-    // Update the match with the winner and opponent deck
-    diesel::update(matches::table.find(match_id))
-        .set((
-            matches::match_winner.eq(match_winner.to_string()),
-            matches::opponent_deck.eq(opponent_deck)
-        ))
-        .execute(connection)
-        .expect("Error updating match");
+    // Check if opponent deck is still unknown after all games
+    let current_match = matches::table
+        .find(match_id)
+        .first::<Match>(connection)
+        .expect("Error loading current match");
+        
+    if current_match.opponent_deck == "unknown" {
+        println!("\n=== Match Complete ===");
+        let deck_names = load_deck_names();
+        let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
+        let opponent_deck_idx = Select::new()
+            .with_prompt("What deck was your opponent playing?")
+            .items(&deck_names_refs)
+            .default(0)
+            .interact()
+            .unwrap();
+        let opponent_deck = deck_names[opponent_deck_idx].clone();
+        
+        // Update the match with the winner and opponent deck
+        diesel::update(matches::table.find(match_id))
+            .set((
+                matches::match_winner.eq(match_winner.to_string()),
+                matches::opponent_deck.eq(opponent_deck)
+            ))
+            .execute(connection)
+            .expect("Error updating match");
+    } else {
+        // Just update the match winner
+        diesel::update(matches::table.find(match_id))
+            .set(matches::match_winner.eq(match_winner.to_string()))
+            .execute(connection)
+            .expect("Error updating match winner");
+    }
 }
 
 fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Winner {
@@ -392,6 +405,39 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
         
         println!("Game {} saved", game_num);
         println!("Current score: You {}-{} Opponent", my_wins, opponent_wins);
+        
+        // Check if we know the opponent's deck yet
+        let current_match = matches::table
+            .find(match_id)
+            .first::<Match>(connection)
+            .expect("Error loading current match");
+            
+        if current_match.opponent_deck == "unknown" {
+            let knows_deck = Confirm::new()
+                .with_prompt("Do you know what deck your opponent is playing yet?")
+                .interact()
+                .unwrap();
+                
+            if knows_deck {
+                let deck_names = load_deck_names();
+                let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
+                let opponent_deck_idx = Select::new()
+                    .with_prompt("What deck is your opponent playing?")
+                    .items(&deck_names_refs)
+                    .default(0)
+                    .interact()
+                    .unwrap();
+                let opponent_deck = deck_names[opponent_deck_idx].clone();
+                
+                // Update the match with the opponent deck
+                diesel::update(matches::table.find(match_id))
+                    .set(matches::opponent_deck.eq(&opponent_deck))
+                    .execute(connection)
+                    .expect("Error updating opponent deck");
+                    
+                println!("Updated opponent deck to: {}", opponent_deck);
+            }
+        }
         
         // Check if match is decided (first to 2 wins)
         if my_wins == 2 {
