@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use dialoguer::{Input, Select, Confirm};
+use dialoguer::{Input, FuzzySelect, Confirm};
 use chrono::{Local, NaiveDate};
 use diesel::prelude::*;
 use std::fs;
@@ -360,7 +360,7 @@ fn add_match_interactive(date_arg: Option<String>) {
     // Opponent deck will be set after the match
     
     // Get event type
-    let event_type_idx = Select::new()
+    let event_type_idx = FuzzySelect::new()
         .with_prompt("Event type")
         .items(EVENT_TYPES)
         .default(0)
@@ -419,7 +419,7 @@ fn add_match_interactive(date_arg: Option<String>) {
         println!("\n=== Match Complete ===");
         let deck_names = load_deck_names();
         let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-        let opponent_deck_idx = Select::new()
+        let opponent_deck_idx = FuzzySelect::new()
             .with_prompt("What deck was your opponent playing?")
             .items(&deck_names_refs)
             .default(0)
@@ -483,7 +483,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
         let mut game_plans_with_custom = game_plans_refs.clone();
         game_plans_with_custom.push("Custom (type your own)");
         
-        let plan_idx = Select::new()
+        let plan_idx = FuzzySelect::new()
             .with_prompt("Opening hand plan")
             .items(&game_plans_with_custom)
             .default(0)
@@ -523,7 +523,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
             let mut win_cons_with_custom = win_cons_refs.clone();
             win_cons_with_custom.push("Custom (type your own)");
             
-            let win_idx = Select::new()
+            let win_idx = FuzzySelect::new()
                 .with_prompt("What did you win with?")
                 .items(&win_cons_with_custom)
                 .default(0)
@@ -579,7 +579,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
             if knows_deck {
                 let deck_names = load_deck_names();
                 let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-                let opponent_deck_idx = Select::new()
+                let opponent_deck_idx = FuzzySelect::new()
                     .with_prompt("What deck is your opponent playing?")
                     .items(&deck_names_refs)
                     .default(0)
@@ -779,7 +779,7 @@ fn show_stats(
             "win-condition"
         ];
         
-        let selection = Select::new()
+        let selection = FuzzySelect::new()
             .with_prompt("Select how to slice the data")
             .items(&slice_options)
             .default(0)
@@ -1134,7 +1134,7 @@ fn edit_match_interactive(match_id: i32) {
         .unwrap();
         
     if change_deck {
-        let opponent_deck_idx = Select::new()
+        let opponent_deck_idx = FuzzySelect::new()
             .with_prompt("Opponent's deck")
             .items(&deck_names_refs)
             .default(current_deck_idx)
@@ -1154,7 +1154,7 @@ fn edit_match_interactive(match_id: i32) {
         .unwrap();
         
     if change_event {
-        let event_type_idx = Select::new()
+        let event_type_idx = FuzzySelect::new()
             .with_prompt("Event type")
             .items(EVENT_TYPES)
             .default(current_event_idx)
@@ -1377,7 +1377,7 @@ fn add_deck_to_list(deck_name: Option<String>) {
     
     // Ask for category
     let category_options = vec!["Blue", "Combo", "Non-Blue", "Stompy"];
-    let category_idx = Select::new()
+    let category_idx = FuzzySelect::new()
         .with_prompt("Select deck category")
         .items(&category_options)
         .default(0)
@@ -1482,7 +1482,7 @@ fn show_board_plan(deck_name: Option<String>) {
             let deck_names = load_deck_names();
             let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
             
-            let selection = Select::new()
+            let selection = FuzzySelect::new()
                 .with_prompt("Select opponent deck to see board plan")
                 .items(&deck_names_refs)
                 .default(0)
