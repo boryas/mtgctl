@@ -725,13 +725,22 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 opponent_stats.entry(m.opponent_name.clone()).or_default().push(m);
             }
             
-            let mut opponent_vec: Vec<_> = opponent_stats.into_iter().collect();
-            opponent_vec.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            let mut opponent_vec: Vec<_> = opponent_stats.into_iter()
+                .map(|(opponent, matches)| {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    let total = matches.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    (opponent, matches, wins, total, win_rate)
+                })
+                .collect();
             
-            for (opponent, matches) in opponent_vec {
-                let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                let total = matches.len();
-                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+            // Sort by win rate descending, then by total games descending
+            opponent_vec.sort_by(|a, b| {
+                b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.3.cmp(&a.3))
+            });
+            
+            for (opponent, _matches, wins, total, win_rate) in opponent_vec {
                 println!("  vs {}: {}-{} ({:.1}%)", opponent, wins, total - wins, win_rate);
             }
         },
@@ -743,13 +752,22 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 deck_stats.entry(m.opponent_deck.clone()).or_default().push(m);
             }
             
-            let mut deck_vec: Vec<_> = deck_stats.into_iter().collect();
-            deck_vec.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+            let mut deck_vec: Vec<_> = deck_stats.into_iter()
+                .map(|(deck, matches)| {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    let total = matches.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    (deck, matches, wins, total, win_rate)
+                })
+                .collect();
             
-            for (deck, matches) in deck_vec {
-                let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                let total = matches.len();
-                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+            // Sort by win rate descending, then by total games descending
+            deck_vec.sort_by(|a, b| {
+                b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.3.cmp(&a.3))
+            });
+            
+            for (deck, _matches, wins, total, win_rate) in deck_vec {
                 println!("  vs {}: {}-{} ({:.1}%)", deck, wins, total - wins, win_rate);
             }
         },
@@ -762,10 +780,22 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 category_stats.entry(category).or_default().push(m);
             }
             
-            for (category, matches) in category_stats {
-                let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                let total = matches.len();
-                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+            let mut category_vec: Vec<_> = category_stats.into_iter()
+                .map(|(category, matches)| {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    let total = matches.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    (category, wins, total, win_rate)
+                })
+                .collect();
+            
+            // Sort by win rate descending, then by total games descending
+            category_vec.sort_by(|a, b| {
+                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.2.cmp(&a.2))
+            });
+            
+            for (category, wins, total, win_rate) in category_vec {
                 println!("  vs {} decks: {}-{} ({:.1}%)", category.to_string(), wins, total - wins, win_rate);
             }
         },
@@ -777,13 +807,25 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 game_stats.entry(g.game_number).or_default().push(g);
             }
             
-            for game_num in 1..=3 {
-                if let Some(games) = game_stats.get(&game_num) {
-                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
-                    let total = games.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    println!("  Game {}: {}-{} ({:.1}%)", game_num, wins, total - wins, win_rate);
-                }
+            let mut game_vec: Vec<_> = (1..=3)
+                .filter_map(|game_num| {
+                    game_stats.get(&game_num).map(|games| {
+                        let wins = games.iter().filter(|g| g.game_winner == "me").count();
+                        let total = games.len();
+                        let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                        (game_num, wins, total, win_rate)
+                    })
+                })
+                .collect();
+            
+            // Sort by win rate descending, then by total games descending
+            game_vec.sort_by(|a, b| {
+                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.2.cmp(&a.2))
+            });
+            
+            for (game_num, wins, total, win_rate) in game_vec {
+                println!("  Game {}: {}-{} ({:.1}%)", game_num, wins, total - wins, win_rate);
             }
         },
         
@@ -794,13 +836,22 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 mulligan_stats.entry(g.mulligans).or_default().push(g);
             }
             
-            let mut mulligan_vec: Vec<_> = mulligan_stats.into_iter().collect();
-            mulligan_vec.sort_by_key(|&(mulligans, _)| mulligans);
+            let mut mulligan_vec: Vec<_> = mulligan_stats.into_iter()
+                .map(|(mulligans, games)| {
+                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
+                    let total = games.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    (mulligans, wins, total, win_rate)
+                })
+                .collect();
             
-            for (mulligans, games) in mulligan_vec {
-                let wins = games.iter().filter(|g| g.game_winner == "me").count();
-                let total = games.len();
-                let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+            // Sort by win rate descending, then by total games descending
+            mulligan_vec.sort_by(|a, b| {
+                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.2.cmp(&a.2))
+            });
+            
+            for (mulligans, wins, total, win_rate) in mulligan_vec {
                 println!("  {} mulligans: {}-{} ({:.1}%)", mulligans, wins, total - wins, win_rate);
             }
         },
