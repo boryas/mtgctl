@@ -217,29 +217,19 @@ fn load_your_deck_names() -> Vec<String> {
     }
 }
 
-fn load_opponent_names() -> Option<Vec<String>> {
+fn load_opponent_names() -> Vec<String> {
     let connection = &mut establish_connection();
     
-    // First check how many unique opponents we have
-    let count: Result<i64, _> = matches::table
-        .select(diesel::dsl::count_distinct(matches::opponent_name))
-        .first(connection);
+    // Load all unique opponent names ordered by most recent match
+    let opponent_names: Result<Vec<String>, _> = matches::table
+        .select(matches::opponent_name)
+        .distinct()
+        .order(matches::created_at.desc())
+        .load(connection);
     
-    match count {
-        Ok(total) if total <= 15 => {
-            // If 15 or fewer unique opponents, return them ordered by most recent match
-            let opponent_names: Result<Vec<String>, _> = matches::table
-                .select(matches::opponent_name)
-                .distinct()
-                .order(matches::created_at.desc())
-                .load(connection);
-            
-            match opponent_names {
-                Ok(names) => Some(names),
-                Err(_) => None,
-            }
-        },
-        _ => None, // Too many opponents or query failed, use text input instead
+    match opponent_names {
+        Ok(names) => names,
+        Err(_) => vec![], // Return empty vec if query fails
     }
 }
 
@@ -417,36 +407,34 @@ fn add_match_interactive(date_arg: Option<String>) {
         }
     };
     
-    // Get opponent name with fuzzy select if not too many
-    let opponent_name = match load_opponent_names() {
-        Some(opponents) => {
-            // Add option for custom opponent entry
-            let mut opponent_options = opponents.clone();
-            opponent_options.push("Custom (type new opponent)".to_string());
+    // Get opponent name with fuzzy select from all opponents
+    let opponents = load_opponent_names();
+    let opponent_name = if opponents.is_empty() {
+        // No opponent history, use text input
+        Input::new()
+            .with_prompt("Opponent name")
+            .interact_text()
+            .unwrap()
+    } else {
+        // Add option for custom opponent entry
+        let mut opponent_options = opponents.clone();
+        opponent_options.push("Custom (type new opponent)".to_string());
+        
+        let opponent_idx = FuzzySelect::new()
+            .with_prompt("Opponent name (type to search)")
+            .items(&opponent_options)
+            .default(0)
+            .interact()
+            .unwrap();
             
-            let opponent_idx = FuzzySelect::new()
-                .with_prompt("Opponent name")
-                .items(&opponent_options)
-                .default(0)
-                .interact()
-                .unwrap();
-                
-            if opponent_idx == opponent_options.len() - 1 {
-                // Custom option selected
-                Input::new()
-                    .with_prompt("Enter opponent name")
-                    .interact_text()
-                    .unwrap()
-            } else {
-                opponents[opponent_idx].clone()
-            }
-        },
-        None => {
-            // Too many opponents or no history, use text input
+        if opponent_idx == opponent_options.len() - 1 {
+            // Custom option selected
             Input::new()
-                .with_prompt("Opponent name")
+                .with_prompt("Enter opponent name")
                 .interact_text()
                 .unwrap()
+        } else {
+            opponents[opponent_idx].clone()
         }
     };
     
@@ -1237,45 +1225,43 @@ fn edit_match_interactive(match_id: i32) {
         .unwrap();
         
     if change_opponent {
-        match load_opponent_names() {
-            Some(opponents) => {
-                let mut opponent_options = opponents.clone();
-                opponent_options.push("Custom (type new opponent)".to_string());
+        let opponents = load_opponent_names();
+        if opponents.is_empty() {
+            // No opponent history, use text input
+            let new_opponent_name: String = Input::new()
+                .with_prompt(&format!("Opponent name [{}]", match_data.opponent_name))
+                .allow_empty(true)
+                .interact_text()
+                .unwrap();
+            if !new_opponent_name.is_empty() {
+                match_data.opponent_name = new_opponent_name;
+            }
+        } else {
+            let mut opponent_options = opponents.clone();
+            opponent_options.push("Custom (type new opponent)".to_string());
+            
+            let current_opponent_idx = opponents.iter()
+                .position(|opp| opp == &match_data.opponent_name)
+                .unwrap_or(0);
+            
+            let opponent_idx = FuzzySelect::new()
+                .with_prompt("Opponent name (type to search)")
+                .items(&opponent_options)
+                .default(current_opponent_idx)
+                .interact()
+                .unwrap();
                 
-                let current_opponent_idx = opponents.iter()
-                    .position(|opp| opp == &match_data.opponent_name)
-                    .unwrap_or(0);
-                
-                let opponent_idx = FuzzySelect::new()
-                    .with_prompt("Opponent name")
-                    .items(&opponent_options)
-                    .default(current_opponent_idx)
-                    .interact()
-                    .unwrap();
-                    
-                if opponent_idx == opponent_options.len() - 1 {
-                    // Custom option selected
-                    let new_opponent_name: String = Input::new()
-                        .with_prompt("Enter opponent name")
-                        .interact_text()
-                        .unwrap();
-                    if !new_opponent_name.is_empty() {
-                        match_data.opponent_name = new_opponent_name;
-                    }
-                } else {
-                    match_data.opponent_name = opponents[opponent_idx].clone();
-                }
-            },
-            None => {
-                // Too many opponents, use text input
+            if opponent_idx == opponent_options.len() - 1 {
+                // Custom option selected
                 let new_opponent_name: String = Input::new()
-                    .with_prompt(&format!("Opponent name [{}]", match_data.opponent_name))
-                    .allow_empty(true)
+                    .with_prompt("Enter opponent name")
                     .interact_text()
                     .unwrap();
                 if !new_opponent_name.is_empty() {
                     match_data.opponent_name = new_opponent_name;
                 }
+            } else {
+                match_data.opponent_name = opponents[opponent_idx].clone();
             }
         }
     }
