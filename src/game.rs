@@ -89,9 +89,7 @@ fn load_deck_categories() -> HashMap<String, DeckCategory> {
                         "Blue" => DeckCategory::Blue,
                         "Combo" => DeckCategory::Combo,
                         "Non-Blue" => DeckCategory::NonBlue,
-                        "Stompy" => DeckCategory::NonBlue, // Map Stompy to Non-Blue
-                        "No Category" => DeckCategory::NonBlue, // Default for "Other"
-                        _ => DeckCategory::NonBlue, // Default fallback
+                        _ => DeckCategory::Other, // Default for "Other"
                     };
                     
                     categories.insert(deck_name, category);
@@ -115,6 +113,7 @@ pub enum DeckCategory {
     Blue,
     Combo,
     NonBlue,
+    Other,
 }
 
 impl DeckCategory {
@@ -123,6 +122,7 @@ impl DeckCategory {
             DeckCategory::Blue => "Blue",
             DeckCategory::Combo => "Combo", 
             DeckCategory::NonBlue => "Non-Blue",
+            DeckCategory::Other => "Other",
         }
     }
 }
@@ -134,42 +134,8 @@ pub fn categorize_deck(deck_name: &str) -> DeckCategory {
     if let Some(category) = categories.get(deck_name) {
         return category.clone();
     }
-    
-    // Fallback to hardcoded categorization if not found in file
-    match deck_name {
-        // Combo decks
-        "Reanimator: UB" | "Reanimator: BR" => DeckCategory::Combo,
-        "Omni-tell" | "Sneak and Show" => DeckCategory::Combo,
-        "Oops! All Spells" | "Cephalid Breakfast" | "Doomsday" => DeckCategory::Combo,
-        "Storm: TES" | "Storm: ANT" | "Storm: Ruby" | "Storm: Black Saga" => DeckCategory::Combo,
-        "Combo Elves" => DeckCategory::Combo,
-        "Dredge" => DeckCategory::Combo,
-        "Stiflenaught" => DeckCategory::Blue,
-        "Infect" => DeckCategory::Combo,
-        "Mystic Forge" => DeckCategory::Combo,
-        "Nadu: Elves" => DeckCategory::Combo,
-        
-        // Blue decks (non-combo)
-        "Tempo: UB" | "Tempo: UR" => DeckCategory::Blue,
-        "Painter: U" => DeckCategory::Blue,
-        "Nadu: Midrange" => DeckCategory::Blue,
-        "Beanstalk: BUG" | "Beanstalk: Domain" | "Beanstalk: Yorion" | "Beanstalk: Sultai" => DeckCategory::Blue,
-        "Stoneblade" => DeckCategory::Blue,
-        "Miracles" => DeckCategory::Blue,
-        "Merfolk" => DeckCategory::Blue,
-        
-        // Non-blue decks
-        "Stompy: Moon" | "Stompy: Eldrazi" => DeckCategory::NonBlue,
-        "Lands" => DeckCategory::NonBlue,
-        "Painter: R" => DeckCategory::NonBlue,
-        "Goblins" => DeckCategory::NonBlue,
-        "Maverick: GW" => DeckCategory::NonBlue,
-        "Cradle Control" => DeckCategory::NonBlue,
-        "Cloudpost" => DeckCategory::NonBlue,
-        
-        // Default to Non-Blue for Other and unknown decks
-        _ => DeckCategory::NonBlue,
-    }
+
+    return DeckCategory::Other
 }
 
 #[derive(Args)]
@@ -210,6 +176,10 @@ enum GameCommands {
         #[arg(help = "Opponent deck to show board plan for")]
         deck_name: Option<String>,
     },
+    RemoveMatch {
+        #[arg(help = "Match ID to remove")]
+        match_id: i32,
+    },
     Stats {
         #[arg(long, help = "Filter by deck name")]
         deck: Option<String>,
@@ -239,6 +209,7 @@ pub fn run(args: GameArgs) {
         GameCommands::EditGame { match_id, game_number } => edit_game_interactive(match_id, game_number),
         GameCommands::AddDeck { deck_name } => add_deck_to_list(deck_name),
         GameCommands::BoardPlan { deck_name } => show_board_plan(deck_name),
+        GameCommands::RemoveMatch { match_id } => remove_match_interactive(match_id),
         GameCommands::Stats { 
             deck, 
             event, 
@@ -1250,5 +1221,73 @@ fn show_board_plan(deck_name: Option<String>) {
             println!("You can add one by editing board_plans.txt");
             println!("Format: Deck Name | Board Plan");
         }
+    }
+}
+
+fn remove_match_interactive(match_id: i32) {
+    let connection = &mut establish_connection();
+    
+    // First, check if the match exists and show details
+    let match_result = matches::table
+        .find(match_id)
+        .first::<Match>(connection);
+        
+    let match_data = match match_result {
+        Ok(m) => m,
+        Err(_) => {
+            println!("Match {} not found", match_id);
+            return;
+        }
+    };
+    
+    // Show match details for confirmation
+    println!("=== Match {} Details ===", match_id);
+    println!("Date: {}", match_data.date);
+    println!("Your deck: {}", match_data.deck_name);
+    println!("Opponent: {} ({})", match_data.opponent_name, match_data.opponent_deck);
+    println!("Event: {}", match_data.event_type);
+    println!("Result: {}", if match_data.match_winner == "me" { "Win" } else { "Loss" });
+    
+    // Load and show games for this match
+    let games = games::table
+        .filter(games::match_id.eq(match_id))
+        .order(games::game_number.asc())
+        .load::<Game>(connection)
+        .expect("Error loading games");
+    
+    if !games.is_empty() {
+        println!("\nGames:");
+        for game in &games {
+            let result = if game.game_winner == "me" { "W" } else { "L" };
+            println!("  Game {}: {} ({})", game.game_number, result, game.play_draw);
+        }
+    }
+    
+    // Confirm deletion
+    println!();
+    let confirm = Confirm::new()
+        .with_prompt(&format!("Are you sure you want to delete match {} and all its games? This cannot be undone.", match_id))
+        .interact()
+        .unwrap();
+        
+    if !confirm {
+        println!("Match deletion cancelled");
+        return;
+    }
+    
+    // Delete games first (due to foreign key constraint)
+    let games_deleted = diesel::delete(games::table.filter(games::match_id.eq(match_id)))
+        .execute(connection)
+        .expect("Error deleting games");
+    
+    // Then delete the match
+    let matches_deleted = diesel::delete(matches::table.find(match_id))
+        .execute(connection)
+        .expect("Error deleting match");
+    
+    if matches_deleted > 0 {
+        println!("Successfully deleted match {} and {} associated games", match_id, games_deleted);
+    } else {
+        println!("No match was deleted (this shouldn't happen)");
     }
 }
