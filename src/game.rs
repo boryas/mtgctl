@@ -9,21 +9,33 @@ use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games};
 
 fn load_deck_names() -> Vec<String> {
-    match fs::read_to_string("deck_names.txt") {
+    match fs::read_to_string("definitions.md") {
         Ok(content) => {
+            let mut in_decks_section = false;
             content.lines()
-                .map(|line| {
+                .filter_map(|line| {
                     let line = line.trim();
-                    if line.is_empty() {
-                        return String::new();
+                    
+                    if line.starts_with("## Decks") {
+                        in_decks_section = true;
+                        return None;
                     }
+                    
+                    if line.starts_with("##") && !line.starts_with("## Decks") {
+                        in_decks_section = false;
+                        return None;
+                    }
+                    
+                    if !in_decks_section || line.is_empty() {
+                        return None;
+                    }
+                    
                     if let Some((deck_name, _category)) = line.split_once(';') {
-                        deck_name.trim().to_string()
+                        Some(deck_name.trim().to_string())
                     } else {
-                        line.to_string()
+                        Some(line.to_string())
                     }
                 })
-                .filter(|line| !line.is_empty())
                 .collect()
         },
         Err(_) => {
@@ -73,11 +85,23 @@ fn load_deck_names() -> Vec<String> {
 fn load_deck_categories() -> HashMap<String, DeckCategory> {
     let mut categories = HashMap::new();
     
-    match fs::read_to_string("deck_names.txt") {
+    match fs::read_to_string("definitions.md") {
         Ok(content) => {
+            let mut in_decks_section = false;
             for line in content.lines() {
                 let line = line.trim();
-                if line.is_empty() {
+                
+                if line.starts_with("## Decks") {
+                    in_decks_section = true;
+                    continue;
+                }
+                
+                if line.starts_with("##") && !line.starts_with("## Decks") {
+                    in_decks_section = false;
+                    continue;
+                }
+                
+                if !in_decks_section || line.is_empty() {
                     continue;
                 }
                 
@@ -102,6 +126,80 @@ fn load_deck_categories() -> HashMap<String, DeckCategory> {
     }
     
     categories
+}
+
+fn load_game_plans() -> Vec<String> {
+    match fs::read_to_string("definitions.md") {
+        Ok(content) => {
+            let mut in_game_plans_section = false;
+            content.lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    
+                    if line.starts_with("## Game Plans") {
+                        in_game_plans_section = true;
+                        return None;
+                    }
+                    
+                    if line.starts_with("##") && !line.starts_with("## Game Plans") {
+                        in_game_plans_section = false;
+                        return None;
+                    }
+                    
+                    if !in_game_plans_section || line.is_empty() {
+                        return None;
+                    }
+                    
+                    Some(line.to_string())
+                })
+                .collect()
+        },
+        Err(_) => {
+            vec![
+                "combo".to_string(),
+                "aggro".to_string(),
+                "control".to_string(),
+                "midrange".to_string(),
+            ]
+        }
+    }
+}
+
+fn load_win_conditions() -> Vec<String> {
+    match fs::read_to_string("definitions.md") {
+        Ok(content) => {
+            let mut in_win_cons_section = false;
+            content.lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    
+                    if line.starts_with("## Win Cons") {
+                        in_win_cons_section = true;
+                        return None;
+                    }
+                    
+                    if line.starts_with("##") && !line.starts_with("## Win Cons") {
+                        in_win_cons_section = false;
+                        return None;
+                    }
+                    
+                    if !in_win_cons_section || line.is_empty() {
+                        return None;
+                    }
+                    
+                    Some(line.to_string())
+                })
+                .collect()
+        },
+        Err(_) => {
+            vec![
+                "damage".to_string(),
+                "combo".to_string(),
+                "mill".to_string(),
+                "concede".to_string(),
+            ]
+        }
+    }
 }
 
 const EVENT_TYPES: &[&str] = &[
@@ -374,17 +472,30 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
             .unwrap();
         
         // Opening hand plan
-        let opening_hand_plan: String = Input::new()
-            .with_prompt("Opening hand plan")
-            .allow_empty(true)
-            .interact_text()
-            .unwrap();
+        let game_plans = load_game_plans();
+        let game_plans_refs: Vec<&str> = game_plans.iter().map(|s| s.as_str()).collect();
+        let mut game_plans_with_custom = game_plans_refs.clone();
+        game_plans_with_custom.push("Custom (type your own)");
         
-        let opening_hand_plan = if opening_hand_plan.is_empty() {
-            None
+        let plan_idx = Select::new()
+            .with_prompt("Opening hand plan")
+            .items(&game_plans_with_custom)
+            .default(0)
+            .interact()
+            .unwrap();
+            
+        let opening_hand_plan = if plan_idx == game_plans_with_custom.len() - 1 {
+            // Custom option selected
+            let custom_plan: String = Input::new()
+                .with_prompt("Enter custom game plan")
+                .allow_empty(true)
+                .interact_text()
+                .unwrap();
+            if custom_plan.is_empty() { None } else { Some(custom_plan) }
         } else {
-            Some(opening_hand_plan)
+            Some(game_plans[plan_idx].clone())
         };
+        
         
         // Game winner
         let game_winner = if Confirm::new()
@@ -401,13 +512,29 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
         
         // Win condition (only if you won)
         let win_condition = if matches!(game_winner, Winner::Me) {
-            let condition: String = Input::new()
-                .with_prompt("What did you win with?")
-                .allow_empty(true)
-                .interact_text()
-                .unwrap();
+            let win_cons = load_win_conditions();
+            let win_cons_refs: Vec<&str> = win_cons.iter().map(|s| s.as_str()).collect();
+            let mut win_cons_with_custom = win_cons_refs.clone();
+            win_cons_with_custom.push("Custom (type your own)");
             
-            if condition.is_empty() { None } else { Some(condition) }
+            let win_idx = Select::new()
+                .with_prompt("What did you win with?")
+                .items(&win_cons_with_custom)
+                .default(0)
+                .interact()
+                .unwrap();
+                
+            if win_idx == win_cons_with_custom.len() - 1 {
+                // Custom option selected
+                let custom_win: String = Input::new()
+                    .with_prompt("Enter custom win condition")
+                    .allow_empty(true)
+                    .interact_text()
+                    .unwrap();
+                if custom_win.is_empty() { None } else { Some(custom_win) }
+            } else {
+                Some(win_cons[win_idx].clone())
+            }
         } else {
             None
         };
@@ -1188,36 +1315,73 @@ fn add_deck_to_list(deck_name: Option<String>) {
         .unwrap();
     let category = category_options[category_idx];
     
-    // Read the existing file content to preserve format
-    let mut lines = Vec::new();
-    if let Ok(content) = fs::read_to_string("deck_names.txt") {
-        for line in content.lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                lines.push(line.to_string());
+    // Read the existing definitions.md file
+    let content = match fs::read_to_string("definitions.md") {
+        Ok(content) => content,
+        Err(_) => {
+            // Create a new file if it doesn't exist
+            "## Decks\n\n## Game Plans\n\n## Win Cons\n".to_string()
+        }
+    };
+    
+    // Find the Decks section and add the new deck
+    let lines: Vec<&str> = content.lines().collect();
+    let mut new_lines = Vec::new();
+    let mut in_decks_section = false;
+    let mut deck_lines = Vec::new();
+    
+    for line in lines {
+        if line.starts_with("## Decks") {
+            in_decks_section = true;
+            new_lines.push(line.to_string());
+            continue;
+        }
+        
+        if line.starts_with("##") && !line.starts_with("## Decks") {
+            if in_decks_section {
+                // Add the new deck before ending the section
+                deck_lines.push(format!("{}; {}", deck_name, category));
+                deck_lines.sort();
+                // Keep "Other" at the end
+                if let Some(pos) = deck_lines.iter().position(|l| l.starts_with("Other;")) {
+                    let other = deck_lines.remove(pos);
+                    deck_lines.push(other);
+                }
+                for deck_line in &deck_lines {
+                    new_lines.push(deck_line.clone());
+                }
+                deck_lines.clear();
+                in_decks_section = false;
             }
+            new_lines.push(line.to_string());
+            continue;
+        }
+        
+        if in_decks_section && !line.trim().is_empty() {
+            deck_lines.push(line.to_string());
+        } else {
+            new_lines.push(line.to_string());
         }
     }
     
-    // Add the new deck with category
-    let new_entry = format!("{}; {}", deck_name, category);
-    lines.push(new_entry);
-    
-    // Sort the list (keep "Other" at the end if it exists)
-    let other_pos = lines.iter().position(|line| line.starts_with("Other;"));
-    if let Some(pos) = other_pos {
-        let other = lines.remove(pos);
-        lines.sort();
-        lines.push(other);
-    } else {
-        lines.sort();
+    // If we're still in decks section at the end of file
+    if in_decks_section {
+        deck_lines.push(format!("{}; {}", deck_name, category));
+        deck_lines.sort();
+        if let Some(pos) = deck_lines.iter().position(|l| l.starts_with("Other;")) {
+            let other = deck_lines.remove(pos);
+            deck_lines.push(other);
+        }
+        for deck_line in &deck_lines {
+            new_lines.push(deck_line.clone());
+        }
     }
     
     // Write back to file
-    let content = lines.join("\n");
-    match fs::write("deck_names.txt", content) {
+    let new_content = new_lines.join("\n");
+    match fs::write("definitions.md", new_content) {
         Ok(_) => println!("Added '{}' with category '{}' to deck list", deck_name, category),
-        Err(e) => println!("Error writing to deck_names.txt: {}", e),
+        Err(e) => println!("Error writing to definitions.md: {}", e),
     }
 }
 
