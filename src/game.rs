@@ -202,6 +202,21 @@ fn load_win_conditions() -> Vec<String> {
     }
 }
 
+fn load_your_deck_names() -> Vec<String> {
+    let connection = &mut establish_connection();
+    
+    let deck_names: Result<Vec<String>, _> = matches::table
+        .select(matches::deck_name)
+        .distinct()
+        .order(matches::deck_name.asc())
+        .load(connection);
+    
+    match deck_names {
+        Ok(names) => names,
+        Err(_) => vec![], // Return empty vec if query fails
+    }
+}
+
 const EVENT_TYPES: &[&str] = &[
     "League", "Paper", "Casual", "Challenge", "Prelim", "Other"
 ];
@@ -345,11 +360,36 @@ fn add_match_interactive(date_arg: Option<String>) {
     
     println!("Date: {}", date);
     
-    // Get deck name
-    let deck_name: String = Input::new()
-        .with_prompt("Your deck name")
-        .interact_text()
-        .unwrap();
+    // Get deck name with fuzzy select from history
+    let your_decks = load_your_deck_names();
+    let deck_name = if your_decks.is_empty() {
+        // No deck history, use input
+        Input::new()
+            .with_prompt("Your deck name")
+            .interact_text()
+            .unwrap()
+    } else {
+        // Add option for custom deck entry
+        let mut deck_options = your_decks.clone();
+        deck_options.push("Custom (type new deck name)".to_string());
+        
+        let deck_idx = FuzzySelect::new()
+            .with_prompt("Your deck name")
+            .items(&deck_options)
+            .default(0)
+            .interact()
+            .unwrap();
+            
+        if deck_idx == deck_options.len() - 1 {
+            // Custom option selected
+            Input::new()
+                .with_prompt("Enter new deck name")
+                .interact_text()
+                .unwrap()
+        } else {
+            your_decks[deck_idx].clone()
+        }
+    };
     
     // Get opponent name
     let opponent_name: String = Input::new()
@@ -1102,13 +1142,39 @@ fn edit_match_interactive(match_id: i32) {
     }
     
     // Edit deck name
-    let new_deck_name: String = Input::new()
-        .with_prompt(&format!("Your deck name [{}]", match_data.deck_name))
-        .allow_empty(true)
-        .interact_text()
+    let change_deck = Confirm::new()
+        .with_prompt(&format!("Change your deck from '{}'?", match_data.deck_name))
+        .interact()
         .unwrap();
-    if !new_deck_name.is_empty() {
-        match_data.deck_name = new_deck_name;
+        
+    if change_deck {
+        let your_decks = load_your_deck_names();
+        let mut deck_options = your_decks.clone();
+        deck_options.push("Custom (type new deck name)".to_string());
+        
+        let current_deck_idx = your_decks.iter()
+            .position(|deck| deck == &match_data.deck_name)
+            .unwrap_or(0);
+        
+        let deck_idx = FuzzySelect::new()
+            .with_prompt("Your deck name")
+            .items(&deck_options)
+            .default(current_deck_idx)
+            .interact()
+            .unwrap();
+            
+        if deck_idx == deck_options.len() - 1 {
+            // Custom option selected
+            let new_deck_name: String = Input::new()
+                .with_prompt("Enter new deck name")
+                .interact_text()
+                .unwrap();
+            if !new_deck_name.is_empty() {
+                match_data.deck_name = new_deck_name;
+            }
+        } else {
+            match_data.deck_name = your_decks[deck_idx].clone();
+        }
     }
     
     // Edit opponent name
