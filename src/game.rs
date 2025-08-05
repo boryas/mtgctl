@@ -486,7 +486,7 @@ fn list_matches(limit: i64) {
     let connection = &mut establish_connection();
     
     let results = matches::table
-        .order(matches::date.desc())
+        .order((matches::date.desc(), matches::match_id.desc()))
         .limit(limit)
         .load::<Match>(connection)
         .expect("Error loading matches");
