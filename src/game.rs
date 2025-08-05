@@ -295,6 +295,10 @@ enum GameCommands {
         by_game_number: bool,
         #[arg(long, help = "Slice by mulligan count")]
         by_mulligans: bool,
+        #[arg(long, help = "Slice by game plan")]
+        by_game_plan: bool,
+        #[arg(long, help = "Slice by win condition")]
+        by_win_condition: bool,
     },
 }
 
@@ -316,8 +320,10 @@ pub fn run(args: GameArgs) {
             by_opponent_deck, 
             by_opponent_deck_category, 
             by_game_number, 
-            by_mulligans 
-        } => show_stats(deck, event, slice, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans),
+            by_mulligans,
+            by_game_plan,
+            by_win_condition
+        } => show_stats(deck, event, slice, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition),
     }
 }
 
@@ -692,7 +698,9 @@ fn show_stats(
     by_opponent_deck: bool, 
     by_opponent_deck_category: bool,
     by_game_number: bool,
-    by_mulligans: bool
+    by_mulligans: bool,
+    by_game_plan: bool,
+    by_win_condition: bool
 ) {
     let connection = &mut establish_connection();
     
@@ -751,6 +759,12 @@ fn show_stats(
     if by_mulligans {
         slices_to_show.push("mulligans");
     }
+    if by_game_plan {
+        slices_to_show.push("game-plan");
+    }
+    if by_win_condition {
+        slices_to_show.push("win-condition");
+    }
     
     if interactive_slice {
         // Interactive slice selection
@@ -760,7 +774,9 @@ fn show_stats(
             "opponent-deck", 
             "deck-category",
             "game-number",
-            "mulligans"
+            "mulligans",
+            "game-plan",
+            "win-condition"
         ];
         
         let selection = Select::new()
@@ -983,8 +999,62 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             }
         },
         
+        "game-plan" => {
+            println!("=== Statistics by Game Plan ===");
+            let mut plan_stats: std::collections::HashMap<String, Vec<&Game>> = std::collections::HashMap::new();
+            for g in all_games {
+                let plan = g.opening_hand_plan.as_deref().unwrap_or("No Plan");
+                plan_stats.entry(plan.to_string()).or_default().push(g);
+            }
+            
+            let mut plan_vec: Vec<_> = plan_stats.into_iter()
+                .map(|(plan, games)| {
+                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
+                    let total = games.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    (plan, wins, total, win_rate)
+                })
+                .collect();
+            
+            // Sort by win rate descending, then by total games descending
+            plan_vec.sort_by(|a, b| {
+                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.2.cmp(&a.2))
+            });
+            
+            for (plan, wins, total, win_rate) in plan_vec {
+                println!("  {}: {}-{} ({:.1}%)", plan, wins, total - wins, win_rate);
+            }
+        },
+        
+        "win-condition" => {
+            println!("=== Statistics by Win Condition ===");
+            let mut win_con_stats: std::collections::HashMap<String, (i32, i32)> = std::collections::HashMap::new();
+            
+            // Only count games you won (where win_condition is relevant)
+            for g in all_games.iter().filter(|g| g.game_winner == "me") {
+                let win_con = g.win_condition.as_deref().unwrap_or("Unknown");
+                let entry = win_con_stats.entry(win_con.to_string()).or_insert((0, 0));
+                entry.0 += 1; // wins (always 1 since we filtered for wins)
+                entry.1 += 1; // total games won with this condition
+            }
+            
+            let mut win_con_vec: Vec<_> = win_con_stats.into_iter()
+                .map(|(win_con, (wins, total))| {
+                    (win_con, wins, total)
+                })
+                .collect();
+            
+            // Sort by total usage descending
+            win_con_vec.sort_by(|a, b| b.2.cmp(&a.2));
+            
+            for (win_con, _wins, total) in win_con_vec {
+                println!("  {}: {} wins", win_con, total);
+            }
+        },
+        
         _ => {
-            println!("Unknown slice type: {}. Available options: opponent, opponent-deck, deck-category, game-number, mulligans", slice_type);
+            println!("Unknown slice type: {}. Available options: opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition", slice_type);
         }
     }
     println!();
