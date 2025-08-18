@@ -10,6 +10,7 @@ Omni-tell; Combo
 Sneak and Show; Combo
 Painter: R; Non-Blue
 Painter: U; Blue
+Painter: W; Non-Blue
 Mystic Forge; Combo
 Oops! All Spells; Combo
 Cephalid Breakfast; Combo
@@ -18,6 +19,7 @@ Nadu: Midrange; Blue
 Nadu: Elves; Combo
 Beanstalk: Sultai; Blue
 Beanstalk: Domain; Blue
+Beanstalk: Bant; Blue
 Beanstalk: Yorion; Blue
 Storm: TES; Combo
 Storm: ANT; Combo
@@ -40,6 +42,9 @@ Control: Bant; Blue
 Control: Sultai; Blue
 Nic-Fit; Non-Blue
 Scythecat Cub Aggro; Non-Blue
+Landstill; Blue
+Ninjas; Blue
+Initiative; Non-Blue
 Other; No Category
 
 ## Game Plans
