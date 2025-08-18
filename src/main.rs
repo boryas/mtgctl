@@ -1,10 +1,12 @@
 mod league;
 mod game;
 mod db;
+mod deck;
 
 use clap::{Parser, Subcommand};
 use league::LeagueArgs;
 use game::GameArgs;
+use deck::DeckArgs;
 
 #[derive(Parser)]
 #[command(name = "mtgctl")]
@@ -18,6 +20,7 @@ struct Cli {
 enum Commands {
     League(LeagueArgs),
     Game(GameArgs),
+    Deck(DeckArgs),
 }
 
 fn main() {
@@ -32,5 +35,6 @@ fn main() {
     match cli.command {
         Commands::League(args) => league::run(args),
         Commands::Game(args) => game::run(args),
+        Commands::Deck(args) => deck::run(args),
     }
 }

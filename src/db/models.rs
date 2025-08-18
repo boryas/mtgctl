@@ -106,3 +106,42 @@ pub struct NewGame {
     pub game_winner: String,
     pub win_condition: Option<String>,
 }
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = crate::db::schema::decks)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct Deck {
+    pub deck_id: i32,
+    pub name: String,
+    pub moxfield_url: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = crate::db::schema::decks)]
+pub struct NewDeck {
+    pub name: String,
+    pub moxfield_url: Option<String>,
+}
+
+#[derive(Queryable, Selectable, Debug)]
+#[diesel(table_name = crate::db::schema::cards)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct Card {
+    #[allow(dead_code)]
+    pub card_id: i32,
+    #[allow(dead_code)]
+    pub deck_id: i32,
+    pub card_name: String,
+    pub quantity: i32,
+    pub board: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = crate::db::schema::cards)]
+pub struct NewCard {
+    pub deck_id: i32,
+    pub card_name: String,
+    pub quantity: i32,
+    pub board: String,
+}

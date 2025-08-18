@@ -23,6 +23,10 @@ pub fn create_database_if_not_exists() -> Result<(), Box<dyn std::error::Error>>
         
         let connection = &mut establish_connection();
         create_tables(connection)?;
+    } else {
+        // Database exists, check if we need to add new tables
+        let connection = &mut establish_connection();
+        add_missing_tables(connection)?;
     }
     
     Ok(())
@@ -56,6 +60,51 @@ fn create_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::e
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (match_id) REFERENCES matches (match_id),
             UNIQUE(match_id, game_number)
+        )"
+    ).execute(connection)?;
+    
+    diesel::sql_query(
+        "CREATE TABLE decks (
+            deck_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            moxfield_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"
+    ).execute(connection)?;
+    
+    diesel::sql_query(
+        "CREATE TABLE cards (
+            card_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deck_id INTEGER NOT NULL,
+            card_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            board TEXT CHECK(board IN ('main', 'side')) NOT NULL,
+            FOREIGN KEY (deck_id) REFERENCES decks (deck_id) ON DELETE CASCADE
+        )"
+    ).execute(connection)?;
+    
+    Ok(())
+}
+
+fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Just try to create tables with IF NOT EXISTS - simpler and safer
+    diesel::sql_query(
+        "CREATE TABLE IF NOT EXISTS decks (
+            deck_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            moxfield_url TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"
+    ).execute(connection)?;
+    
+    diesel::sql_query(
+        "CREATE TABLE IF NOT EXISTS cards (
+            card_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            deck_id INTEGER NOT NULL,
+            card_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            board TEXT CHECK(board IN ('main', 'side')) NOT NULL,
+            FOREIGN KEY (deck_id) REFERENCES decks (deck_id) ON DELETE CASCADE
         )"
     ).execute(connection)?;
     

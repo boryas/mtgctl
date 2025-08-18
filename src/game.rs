@@ -205,16 +205,38 @@ fn load_win_conditions() -> Vec<String> {
 fn load_your_deck_names() -> Vec<String> {
     let connection = &mut establish_connection();
     
-    let deck_names: Result<Vec<String>, _> = matches::table
+    // Get deck names from match history
+    let historical_names: Result<Vec<String>, _> = matches::table
         .select(matches::deck_name)
         .distinct()
         .order(matches::deck_name.asc())
         .load(connection);
     
-    match deck_names {
-        Ok(names) => names,
-        Err(_) => vec![], // Return empty vec if query fails
+    // Get deck names from imported decks
+    let imported_names: Result<Vec<String>, _> = crate::db::schema::decks::table
+        .select(crate::db::schema::decks::name)
+        .order(crate::db::schema::decks::name.asc())
+        .load(connection);
+    
+    let mut all_names = Vec::new();
+    
+    // Add historical names
+    if let Ok(names) = historical_names {
+        all_names.extend(names);
     }
+    
+    // Add imported names (if not already present)
+    if let Ok(names) = imported_names {
+        for name in names {
+            if !all_names.contains(&name) {
+                all_names.push(name);
+            }
+        }
+    }
+    
+    // Sort the combined list
+    all_names.sort();
+    all_names
 }
 
 fn load_opponent_names() -> Vec<String> {
@@ -316,6 +338,8 @@ enum GameCommands {
         event: Option<String>,
         #[arg(long, help = "Show interactive slice selection menu")]
         slice: bool,
+        #[arg(long, help = "Slice by my deck")]
+        by_my_deck: bool,
         #[arg(long, help = "Slice by opponent")]
         by_opponent: bool,
         #[arg(long, help = "Slice by opponent deck")]
@@ -347,6 +371,7 @@ pub fn run(args: GameArgs) {
             deck, 
             event, 
             slice, 
+            by_my_deck,
             by_opponent, 
             by_opponent_deck, 
             by_opponent_deck_category, 
@@ -354,7 +379,7 @@ pub fn run(args: GameArgs) {
             by_mulligans,
             by_game_plan,
             by_win_condition
-        } => show_stats(deck, event, slice, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition),
+        } => show_stats(deck, event, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition),
     }
 }
 
@@ -775,6 +800,7 @@ fn show_stats(
     deck_filter: Option<String>, 
     event_filter: Option<String>, 
     interactive_slice: bool,
+    by_my_deck: bool,
     by_opponent: bool,
     by_opponent_deck: bool, 
     by_opponent_deck_category: bool,
@@ -825,6 +851,9 @@ fn show_stats(
     // Handle slice selection - determine which slices to show
     let mut slices_to_show = Vec::new();
     
+    if by_my_deck {
+        slices_to_show.push("my-deck");
+    }
     if by_opponent {
         slices_to_show.push("opponent");
     }
@@ -851,6 +880,7 @@ fn show_stats(
         // Interactive slice selection
         let slice_options = vec![
             "None (no slicing)",
+            "my-deck",
             "opponent",
             "opponent-deck", 
             "deck-category",
@@ -942,6 +972,33 @@ fn show_overall_stats(all_matches: &[Match], all_games: &[Game]) {
 
 fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str) {
     match slice_type {
+        "my-deck" => {
+            println!("=== Statistics by My Deck ===");
+            let mut deck_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
+            for m in all_matches {
+                deck_stats.entry(m.deck_name.clone()).or_default().push(m);
+            }
+            
+            let mut deck_vec: Vec<_> = deck_stats.into_iter()
+                .map(|(deck, matches)| {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    let total = matches.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    (deck, matches, wins, total, win_rate)
+                })
+                .collect();
+            
+            // Sort by win rate descending, then by total games descending
+            deck_vec.sort_by(|a, b| {
+                b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.3.cmp(&a.3))
+            });
+            
+            for (deck, _matches, wins, total, win_rate) in deck_vec {
+                println!("  with {}: {}-{} ({:.1}%)", deck, wins, total - wins, win_rate);
+            }
+        },
+        
         "opponent" => {
             println!("=== Statistics by Opponent ===");
             let mut opponent_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
@@ -1135,7 +1192,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
         },
         
         _ => {
-            println!("Unknown slice type: {}. Available options: opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition", slice_type);
+            println!("Unknown slice type: {}. Available options: my-deck, opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition", slice_type);
         }
     }
     println!();
