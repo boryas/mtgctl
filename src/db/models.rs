@@ -91,6 +91,7 @@ pub struct Game {
     pub opening_hand_plan: Option<String>,
     pub game_winner: String,
     pub win_condition: Option<String>,
+    pub turns: Option<i32>,
     #[allow(dead_code)]
     pub created_at: Option<String>,
 }
@@ -105,6 +106,7 @@ pub struct NewGame {
     pub opening_hand_plan: Option<String>,
     pub game_winner: String,
     pub win_condition: Option<String>,
+    pub turns: Option<i32>,
 }
 
 #[derive(Queryable, Selectable, Debug)]

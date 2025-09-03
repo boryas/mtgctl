@@ -57,6 +57,7 @@ fn create_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::e
             opening_hand_plan TEXT,
             game_winner TEXT CHECK(game_winner IN ('me', 'opponent')) NOT NULL,
             win_condition TEXT,
+            turns INTEGER CHECK(turns > 0),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (match_id) REFERENCES matches (match_id),
             UNIQUE(match_id, game_number)
@@ -107,6 +108,23 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
             FOREIGN KEY (deck_id) REFERENCES decks (deck_id) ON DELETE CASCADE
         )"
     ).execute(connection)?;
+    
+    // Add turns column to games table if it doesn't exist
+    add_turns_column_if_missing(connection)?;
+    
+    Ok(())
+}
+
+fn add_turns_column_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if the column exists by trying to select it
+    let column_exists = diesel::sql_query("SELECT turns FROM games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+    
+    if !column_exists {
+        diesel::sql_query("ALTER TABLE games ADD COLUMN turns INTEGER CHECK(turns > 0)")
+            .execute(connection)?;
+    }
     
     Ok(())
 }

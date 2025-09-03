@@ -354,6 +354,8 @@ enum GameCommands {
         by_game_plan: bool,
         #[arg(long, help = "Slice by win condition")]
         by_win_condition: bool,
+        #[arg(long, help = "Slice by game length")]
+        by_game_length: bool,
     },
 }
 
@@ -378,8 +380,9 @@ pub fn run(args: GameArgs) {
             by_game_number, 
             by_mulligans,
             by_game_plan,
-            by_win_condition
-        } => show_stats(deck, event, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition),
+            by_win_condition,
+            by_game_length
+        } => show_stats(deck, event, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition, by_game_length),
     }
 }
 
@@ -651,6 +654,23 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
             None
         };
         
+        // Number of turns
+        let turns: Option<i32> = Input::new()
+            .with_prompt("How many turns did the game last? (optional, press Enter to skip)")
+            .allow_empty(true)
+            .validate_with(|input: &String| -> Result<(), &str> {
+                if input.is_empty() {
+                    return Ok(());
+                }
+                match input.parse::<i32>() {
+                    Ok(n) if n > 0 => Ok(()),
+                    _ => Err("Turns must be a positive number")
+                }
+            })
+            .interact_text()
+            .ok()
+            .and_then(|s| if s.is_empty() { None } else { s.parse().ok() });
+        
         // Save the game
         let new_game = NewGame {
             match_id,
@@ -660,6 +680,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
             opening_hand_plan,
             game_winner: game_winner.to_string(),
             win_condition,
+            turns,
         };
         
         diesel::insert_into(games::table)
@@ -793,6 +814,9 @@ fn show_match_details(match_id: i32) {
         if let Some(condition) = &game.win_condition {
             println!("  Win condition: {}", condition);
         }
+        if let Some(turns) = &game.turns {
+            println!("  Turns: {}", turns);
+        }
     }
 }
 
@@ -807,7 +831,8 @@ fn show_stats(
     by_game_number: bool,
     by_mulligans: bool,
     by_game_plan: bool,
-    by_win_condition: bool
+    by_win_condition: bool,
+    by_game_length: bool
 ) {
     let connection = &mut establish_connection();
     
@@ -875,6 +900,9 @@ fn show_stats(
     if by_win_condition {
         slices_to_show.push("win-condition");
     }
+    if by_game_length {
+        slices_to_show.push("game-length");
+    }
     
     if interactive_slice {
         // Interactive slice selection
@@ -887,7 +915,8 @@ fn show_stats(
             "game-number",
             "mulligans",
             "game-plan",
-            "win-condition"
+            "win-condition",
+            "game-length"
         ];
         
         let selection = FuzzySelect::new()
@@ -967,6 +996,17 @@ fn show_overall_stats(all_matches: &[Match], all_games: &[Game]) {
     let total_mulligans: i32 = all_games.iter().map(|g| g.mulligans).sum();
     let avg_mulligans = if total_games > 0 { total_mulligans as f64 / total_games as f64 } else { 0.0 };
     println!("  Average Mulligans: {:.2}", avg_mulligans);
+    
+    // Game length statistics
+    let games_with_turns: Vec<&Game> = all_games.iter().filter(|g| g.turns.is_some()).collect();
+    if !games_with_turns.is_empty() {
+        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        let avg_turns = total_turns as f64 / games_with_turns.len() as f64;
+        println!("  Average Game Length: {:.1} turns ({}/{} games with turn data)", 
+                 avg_turns, games_with_turns.len(), total_games);
+    } else {
+        println!("  Average Game Length: No turn data available");
+    }
     println!();
 }
 
@@ -1191,8 +1231,65 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             }
         },
         
+        "game-length" => {
+            println!("=== Statistics by Game Length ===");
+            let mut length_stats: std::collections::HashMap<String, Vec<&Game>> = std::collections::HashMap::new();
+            
+            for g in all_games {
+                let length_category = match g.turns {
+                    None => "No turn data".to_string(),
+                    Some(turns) => {
+                        match turns {
+                            1..=3 => "Very Short (1-3 turns)".to_string(),
+                            4..=6 => "Short (4-6 turns)".to_string(),
+                            7..=10 => "Medium (7-10 turns)".to_string(),
+                            11..=15 => "Long (11-15 turns)".to_string(),
+                            _ => "Very Long (16+ turns)".to_string(),
+                        }
+                    }
+                };
+                length_stats.entry(length_category).or_default().push(g);
+            }
+            
+            let mut length_vec: Vec<_> = length_stats.into_iter()
+                .map(|(category, games)| {
+                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
+                    let total = games.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+                    
+                    // Calculate average turns for this category (excluding "No turn data")
+                    let avg_turns = if category == "No turn data" {
+                        None
+                    } else {
+                        let turns_sum: i32 = games.iter().filter_map(|g| g.turns).sum();
+                        let turns_count = games.iter().filter(|g| g.turns.is_some()).count();
+                        if turns_count > 0 {
+                            Some(turns_sum as f64 / turns_count as f64)
+                        } else {
+                            None
+                        }
+                    };
+                    
+                    (category, wins, total, win_rate, avg_turns)
+                })
+                .collect();
+            
+            // Sort by total games descending
+            length_vec.sort_by(|a, b| b.2.cmp(&a.2));
+            
+            for (category, wins, total, win_rate, avg_turns) in length_vec {
+                if let Some(avg) = avg_turns {
+                    println!("  {}: {}-{} ({:.1}%, avg {:.1} turns)", 
+                             category, wins, total - wins, win_rate, avg);
+                } else {
+                    println!("  {}: {}-{} ({:.1}%)", 
+                             category, wins, total - wins, win_rate);
+                }
+            }
+        },
+        
         _ => {
-            println!("Unknown slice type: {}. Available options: my-deck, opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition", slice_type);
+            println!("Unknown slice type: {}. Available options: my-deck, opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition, game-length", slice_type);
         }
     }
     println!();
@@ -1534,6 +1631,31 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
         game_data.win_condition = None;
     }
     
+    // Edit turns
+    let current_turns = game_data.turns.map(|t| t.to_string()).unwrap_or_else(|| "".to_string());
+    let new_turns: String = Input::new()
+        .with_prompt(&format!("Number of turns [{}]", current_turns))
+        .allow_empty(true)
+        .validate_with(|input: &String| -> Result<(), &str> {
+            if input.is_empty() {
+                return Ok(());
+            }
+            match input.parse::<i32>() {
+                Ok(n) if n > 0 => Ok(()),
+                _ => Err("Turns must be a positive number")
+            }
+        })
+        .interact_text()
+        .unwrap();
+    if !new_turns.is_empty() {
+        if let Ok(turns) = new_turns.parse::<i32>() {
+            game_data.turns = Some(turns);
+        }
+    } else if new_turns.is_empty() && current_turns.is_empty() {
+        // If they pressed enter and there was no current value, keep it as None
+        game_data.turns = None;
+    }
+    
     // Save changes
     diesel::update(games::table
         .filter(games::match_id.eq(match_id))
@@ -1544,6 +1666,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
             games::opening_hand_plan.eq(&game_data.opening_hand_plan),
             games::game_winner.eq(&game_data.game_winner),
             games::win_condition.eq(&game_data.win_condition),
+            games::turns.eq(&game_data.turns),
         ))
         .execute(connection)
         .expect("Error updating game");
