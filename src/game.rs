@@ -995,15 +995,46 @@ fn show_overall_stats(all_matches: &[Match], all_games: &[Game]) {
     // Mulligan statistics
     let total_mulligans: i32 = all_games.iter().map(|g| g.mulligans).sum();
     let avg_mulligans = if total_games > 0 { total_mulligans as f64 / total_games as f64 } else { 0.0 };
-    println!("  Average Mulligans: {:.2}", avg_mulligans);
+    
+    let winning_games: Vec<&Game> = all_games.iter().filter(|g| g.game_winner == "me").collect();
+    let losing_games: Vec<&Game> = all_games.iter().filter(|g| g.game_winner == "opponent").collect();
+    
+    let win_mulligans: i32 = winning_games.iter().map(|g| g.mulligans).sum();
+    let loss_mulligans: i32 = losing_games.iter().map(|g| g.mulligans).sum();
+    
+    let avg_win_mulligans = if !winning_games.is_empty() { win_mulligans as f64 / winning_games.len() as f64 } else { 0.0 };
+    let avg_loss_mulligans = if !losing_games.is_empty() { loss_mulligans as f64 / losing_games.len() as f64 } else { 0.0 };
+    
+    println!("  Average Mulligans: {:.2} (wins: {:.2}, losses: {:.2})", avg_mulligans, avg_win_mulligans, avg_loss_mulligans);
     
     // Game length statistics
     let games_with_turns: Vec<&Game> = all_games.iter().filter(|g| g.turns.is_some()).collect();
     if !games_with_turns.is_empty() {
         let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
         let avg_turns = total_turns as f64 / games_with_turns.len() as f64;
-        println!("  Average Game Length: {:.1} turns ({}/{} games with turn data)", 
-                 avg_turns, games_with_turns.len(), total_games);
+        
+        // Calculate win/loss averages for games with turn data
+        let winning_games_with_turns: Vec<&Game> = games_with_turns.iter()
+            .filter(|g| g.game_winner == "me")
+            .copied()
+            .collect();
+        let losing_games_with_turns: Vec<&Game> = games_with_turns.iter()
+            .filter(|g| g.game_winner == "opponent")
+            .copied()
+            .collect();
+        
+        let win_turns: i32 = winning_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        let loss_turns: i32 = losing_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        
+        let avg_win_turns = if !winning_games_with_turns.is_empty() { 
+            win_turns as f64 / winning_games_with_turns.len() as f64 
+        } else { 0.0 };
+        let avg_loss_turns = if !losing_games_with_turns.is_empty() { 
+            loss_turns as f64 / losing_games_with_turns.len() as f64 
+        } else { 0.0 };
+        
+        println!("  Average Game Length: {:.1} turns (wins: {:.1}, losses: {:.1}) [{}/{} games with turn data]", 
+                 avg_turns, avg_win_turns, avg_loss_turns, games_with_turns.len(), total_games);
     } else {
         println!("  Average Game Length: No turn data available");
     }
