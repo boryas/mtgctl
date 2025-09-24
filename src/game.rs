@@ -1049,7 +1049,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             for m in all_matches {
                 deck_stats.entry(m.deck_name.clone()).or_default().push(m);
             }
-            
+
             let mut deck_vec: Vec<_> = deck_stats.into_iter()
                 .map(|(deck, matches)| {
                     let wins = matches.iter().filter(|m| m.match_winner == "me").count();
@@ -1058,11 +1058,11 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     (deck, matches, wins, total, win_rate)
                 })
                 .collect();
-            
-            // Sort by win rate descending, then by total games descending
+
+            // Sort by total games descending, then by win rate descending
             deck_vec.sort_by(|a, b| {
-                b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.3.cmp(&a.3))
+                b.3.cmp(&a.3)
+                    .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
             });
             
             for (deck, _matches, wins, total, win_rate) in deck_vec {
@@ -1076,7 +1076,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             for m in all_matches {
                 opponent_stats.entry(m.opponent_name.clone()).or_default().push(m);
             }
-            
+
             let mut opponent_vec: Vec<_> = opponent_stats.into_iter()
                 .map(|(opponent, matches)| {
                     let wins = matches.iter().filter(|m| m.match_winner == "me").count();
@@ -1085,11 +1085,11 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     (opponent, matches, wins, total, win_rate)
                 })
                 .collect();
-            
-            // Sort by win rate descending, then by total games descending
+
+            // Sort by total games descending, then by win rate descending
             opponent_vec.sort_by(|a, b| {
-                b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.3.cmp(&a.3))
+                b.3.cmp(&a.3)
+                    .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
             });
             
             for (opponent, _matches, wins, total, win_rate) in opponent_vec {
@@ -1103,7 +1103,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             for m in all_matches {
                 deck_stats.entry(m.opponent_deck.clone()).or_default().push(m);
             }
-            
+
             let mut deck_vec: Vec<_> = deck_stats.into_iter()
                 .map(|(deck, matches)| {
                     let wins = matches.iter().filter(|m| m.match_winner == "me").count();
@@ -1112,11 +1112,11 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     (deck, matches, wins, total, win_rate)
                 })
                 .collect();
-            
-            // Sort by win rate descending, then by total games descending
+
+            // Sort by total games descending, then by win rate descending
             deck_vec.sort_by(|a, b| {
-                b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.3.cmp(&a.3))
+                b.3.cmp(&a.3)
+                    .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
             });
             
             for (deck, _matches, wins, total, win_rate) in deck_vec {
@@ -1141,10 +1141,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 })
                 .collect();
             
-            // Sort by win rate descending, then by total games descending
+            // Sort by total games descending, then by win rate descending
             category_vec.sort_by(|a, b| {
-                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.2.cmp(&a.2))
+                b.2.cmp(&a.2)
+                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
             
             for (category, wins, total, win_rate) in category_vec {
@@ -1170,10 +1170,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 })
                 .collect();
             
-            // Sort by win rate descending, then by total games descending
+            // Sort by total games descending, then by win rate descending
             game_vec.sort_by(|a, b| {
-                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.2.cmp(&a.2))
+                b.2.cmp(&a.2)
+                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
             
             for (game_num, wins, total, win_rate) in game_vec {
@@ -1197,10 +1197,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 })
                 .collect();
             
-            // Sort by win rate descending, then by total games descending
+            // Sort by total games descending, then by win rate descending
             mulligan_vec.sort_by(|a, b| {
-                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.2.cmp(&a.2))
+                b.2.cmp(&a.2)
+                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
             
             for (mulligans, wins, total, win_rate) in mulligan_vec {
@@ -1225,10 +1225,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 })
                 .collect();
             
-            // Sort by win rate descending, then by total games descending
+            // Sort by total games descending, then by win rate descending
             plan_vec.sort_by(|a, b| {
-                b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.2.cmp(&a.2))
+                b.2.cmp(&a.2)
+                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
             
             for (plan, wins, total, win_rate) in plan_vec {
