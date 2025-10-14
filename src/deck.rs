@@ -1,9 +1,10 @@
 use clap::{Args, Subcommand};
-use dialoguer::Confirm;
+use dialoguer::{Confirm, Input, MultiSelect, FuzzySelect};
 use diesel::prelude::*;
 use std::fs;
 use std::process::Command;
 use std::env;
+use std::collections::HashMap;
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{decks, cards};
@@ -23,22 +24,20 @@ enum DeckCommands {
         url: Option<String>,
     },
     List,
-    View {
-        #[arg(help = "Name or ID of the deck to view")]
-        deck: String,
-    },
-    Delete {
-        #[arg(help = "Name or ID of the deck to delete")]
-        deck: String,
-    },
+    View,
+    Delete,
+    Probability,
+    Sequential,
 }
 
 pub fn run(args: DeckArgs) {
     match args.command {
         DeckCommands::Import { name, url } => import_deck(&name, url),
         DeckCommands::List => list_decks(),
-        DeckCommands::View { deck } => view_deck(&deck),
-        DeckCommands::Delete { deck } => delete_deck(&deck),
+        DeckCommands::View => view_deck_interactive(),
+        DeckCommands::Delete => delete_deck_interactive(),
+        DeckCommands::Probability => calculate_probability_interactive(),
+        DeckCommands::Sequential => sequential_probability_interactive(),
     }
 }
 
@@ -340,6 +339,63 @@ fn view_deck(deck_identifier: &str) {
     }
 }
 
+fn select_deck() -> Option<String> {
+    let connection = &mut establish_connection();
+    
+    let deck_list: Result<Vec<Deck>, _> = decks::table
+        .order(decks::created_at.desc())
+        .load(connection);
+    
+    let decks_vec = match deck_list {
+        Ok(decks) => decks,
+        Err(_) => {
+            println!("Error loading decks");
+            return None;
+        }
+    };
+    
+    if decks_vec.is_empty() {
+        println!("No decks found. Import a deck first with: mtgctl deck import <name>");
+        return None;
+    }
+    
+    let deck_options: Vec<String> = decks_vec.iter()
+        .map(|deck| deck.name.clone())
+        .collect();
+    
+    let selection = FuzzySelect::new()
+        .with_prompt("Select a deck")
+        .items(&deck_options)
+        .interact()
+        .unwrap();
+    
+    Some(deck_options[selection].clone())
+}
+
+fn view_deck_interactive() {
+    if let Some(deck_name) = select_deck() {
+        view_deck(&deck_name);
+    }
+}
+
+fn delete_deck_interactive() {
+    if let Some(deck_name) = select_deck() {
+        delete_deck(&deck_name);
+    }
+}
+
+fn calculate_probability_interactive() {
+    if let Some(deck_name) = select_deck() {
+        calculate_probability(&deck_name);
+    }
+}
+
+fn sequential_probability_interactive() {
+    if let Some(deck_name) = select_deck() {
+        sequential_probability(&deck_name);
+    }
+}
+
 fn delete_deck(deck_identifier: &str) {
     let connection = &mut establish_connection();
     
@@ -389,6 +445,754 @@ fn delete_deck(deck_identifier: &str) {
     println!("Deck '{}' deleted successfully", deck.name);
 }
 
+
+fn calculate_probability(deck_identifier: &str) {
+    let connection = &mut establish_connection();
+    
+    // Find the deck
+    let deck: Result<Deck, _> = if let Ok(deck_id) = deck_identifier.parse::<i32>() {
+        decks::table.find(deck_id).first(connection)
+    } else {
+        decks::table
+            .filter(decks::name.eq(deck_identifier))
+            .first(connection)
+    };
+    
+    let deck = match deck {
+        Ok(d) => d,
+        Err(_) => {
+            println!("Deck '{}' not found", deck_identifier);
+            return;
+        }
+    };
+    
+    // Load cards for this deck (mainboard only)
+    let deck_cards: Result<Vec<Card>, _> = cards::table
+        .filter(cards::deck_id.eq(deck.deck_id))
+        .filter(cards::board.eq("main"))
+        .order(cards::card_name.asc())
+        .load(connection);
+    
+    let deck_cards = match deck_cards {
+        Ok(cards) => cards,
+        Err(_) => {
+            println!("Error loading cards for deck");
+            return;
+        }
+    };
+    
+    if deck_cards.is_empty() {
+        println!("No cards found in deck '{}'", deck.name);
+        return;
+    }
+    
+    println!("=== Probability Calculator: {} (Mainboard Only) ===", deck.name);
+    println!();
+    
+    // Step 1: Select eliminated cards
+    let eliminated_counts = select_eliminated_cards(&deck_cards);
+    
+    // Calculate remaining deck after eliminations
+    let remaining_cards = calculate_remaining_cards(&deck_cards, &eliminated_counts);
+    
+    if remaining_cards.is_empty() {
+        println!("No cards remaining in deck after eliminations");
+        return;
+    }
+    
+    let total_remaining: i32 = remaining_cards.values().sum();
+    println!("Remaining deck size: {} cards", total_remaining);
+    println!();
+    
+    // Step 2: Select wanted cards from remaining
+    let wanted_counts = select_wanted_cards(&remaining_cards);
+    
+    if wanted_counts.is_empty() {
+        println!("No wanted cards selected");
+        return;
+    }
+    
+    // Step 3: Choose calculation mode (OR vs AND)
+    let calculation_mode = if wanted_counts.len() > 1 {
+        let mode_options = vec![
+            "OR - At least one of the conditions (default)",
+            "AND - All conditions must be met"
+        ];
+        
+        let selection = FuzzySelect::new()
+            .with_prompt("How should multiple conditions be combined?")
+            .items(&mode_options)
+            .default(0)
+            .interact()
+            .unwrap();
+        
+        if selection == 0 { "OR" } else { "AND" }
+    } else {
+        "OR" // Single condition, mode doesn't matter
+    };
+    
+    // Step 4: Get number of cards to see
+    let cards_to_see: i32 = Input::new()
+        .with_prompt("How many cards will you see?")
+        .validate_with(|input: &i32| -> Result<(), &str> {
+            if *input > 0 && *input <= total_remaining {
+                Ok(())
+            } else {
+                Err("Must be between 1 and remaining deck size")
+            }
+        })
+        .interact_text()
+        .unwrap();
+    
+    // Step 5: Calculate probability based on selected mode
+    println!();
+    println!("=== Probability Results ===");
+    println!("Remaining deck: {} cards", total_remaining);
+    println!("Cards to see: {} cards", cards_to_see);
+    println!();
+    
+    // Show individual requirements
+    println!("Requirements:");
+    for (card_name, wanted_count) in &wanted_counts {
+        println!("  At least {} {}", wanted_count, card_name);
+    }
+    println!();
+    
+    let combined_probability = if calculation_mode == "AND" {
+        calculate_all_conditions_probability(
+            &wanted_counts,
+            &remaining_cards,
+            total_remaining,
+            cards_to_see,
+        )
+    } else {
+        calculate_combined_probability(
+            &wanted_counts,
+            &remaining_cards,
+            total_remaining,
+            cards_to_see,
+        )
+    };
+    
+    let result_text = if calculation_mode == "AND" {
+        "Probability of seeing ALL of the above"
+    } else {
+        "Probability of seeing at least one of the above"
+    };
+    
+    println!("{}: {:.2}%", result_text, combined_probability * 100.0);
+}
+
+fn sequential_probability(deck_identifier: &str) {
+    let connection = &mut establish_connection();
+    
+    // Find the deck
+    let deck: Result<Deck, _> = if let Ok(deck_id) = deck_identifier.parse::<i32>() {
+        decks::table.find(deck_id).first(connection)
+    } else {
+        decks::table
+            .filter(decks::name.eq(deck_identifier))
+            .first(connection)
+    };
+    
+    let deck = match deck {
+        Ok(d) => d,
+        Err(_) => {
+            println!("Deck '{}' not found", deck_identifier);
+            return;
+        }
+    };
+    
+    // Load cards for this deck (mainboard only)
+    let deck_cards: Result<Vec<Card>, _> = cards::table
+        .filter(cards::deck_id.eq(deck.deck_id))
+        .filter(cards::board.eq("main"))
+        .order(cards::card_name.asc())
+        .load(connection);
+    
+    let deck_cards = match deck_cards {
+        Ok(cards) => cards,
+        Err(_) => {
+            println!("Error loading cards for deck");
+            return;
+        }
+    };
+    
+    if deck_cards.is_empty() {
+        println!("No cards found in deck '{}'", deck.name);
+        return;
+    }
+    
+    println!("=== Sequential Probability Calculator: {} ===", deck.name);
+    println!("Track probability changes as you eliminate cards throughout the game");
+    println!();
+    
+    // Initialize state
+    let mut eliminated_total = HashMap::new();
+    let mut wanted_counts = HashMap::new();
+    let mut calculation_mode = "OR";
+    
+    loop {
+        // Calculate current remaining cards
+        let remaining_cards = calculate_remaining_cards(&deck_cards, &eliminated_total);
+        let total_remaining: i32 = remaining_cards.values().sum();
+        
+        if remaining_cards.is_empty() {
+            println!("No cards remaining in deck!");
+            break;
+        }
+        
+        println!("Current deck state: {} cards remaining", total_remaining);
+        
+        // Show menu options
+        let menu_options = vec![
+            "Eliminate more cards",
+            "Set/change wanted cards",
+            "Calculate probability", 
+            "Show current state",
+            "Quit"
+        ];
+        
+        let selection = FuzzySelect::new()
+            .with_prompt("What would you like to do?")
+            .items(&menu_options)
+            .interact()
+            .unwrap();
+        
+        match selection {
+            0 => {
+                // Eliminate more cards
+                let new_eliminations = select_eliminated_cards_from_remaining(&remaining_cards);
+                for (card_name, count) in new_eliminations {
+                    *eliminated_total.entry(card_name).or_insert(0) += count;
+                }
+            }
+            1 => {
+                // Set wanted cards
+                wanted_counts = select_wanted_cards(&remaining_cards);
+                
+                // Set calculation mode if multiple cards
+                if wanted_counts.len() > 1 {
+                    let mode_options = vec![
+                        "OR - At least one of the conditions",
+                        "AND - All conditions must be met"
+                    ];
+                    
+                    let mode_selection = FuzzySelect::new()
+                        .with_prompt("How should multiple conditions be combined?")
+                        .items(&mode_options)
+                        .default(if calculation_mode == "OR" { 0 } else { 1 })
+                        .interact()
+                        .unwrap();
+                    
+                    calculation_mode = if mode_selection == 0 { "OR" } else { "AND" };
+                }
+            }
+            2 => {
+                // Calculate probability
+                if wanted_counts.is_empty() {
+                    println!("Please set wanted cards first!");
+                    continue;
+                }
+                
+                let cards_to_see: i32 = Input::new()
+                    .with_prompt("How many cards will you see?")
+                    .validate_with(|input: &i32| -> Result<(), &str> {
+                        if *input > 0 && *input <= total_remaining {
+                            Ok(())
+                        } else {
+                            Err("Must be between 1 and remaining deck size")
+                        }
+                    })
+                    .interact_text()
+                    .unwrap();
+                
+                // Calculate probability
+                let probability = if calculation_mode == "AND" {
+                    calculate_all_conditions_probability(
+                        &wanted_counts,
+                        &remaining_cards,
+                        total_remaining,
+                        cards_to_see,
+                    )
+                } else {
+                    calculate_combined_probability(
+                        &wanted_counts,
+                        &remaining_cards,
+                        total_remaining,
+                        cards_to_see,
+                    )
+                };
+                
+                println!();
+                println!("=== Calculation Result ===");
+                println!("Remaining deck: {} cards", total_remaining);
+                println!("Cards to see: {} cards", cards_to_see);
+                println!("Mode: {}", calculation_mode);
+                println!();
+                
+                println!("Requirements:");
+                for (card_name, wanted_count) in &wanted_counts {
+                    println!("  At least {} {}", wanted_count, card_name);
+                }
+                
+                let result_text = if calculation_mode == "AND" {
+                    "Probability of seeing ALL of the above"
+                } else {
+                    "Probability of seeing at least one of the above"
+                };
+                
+                println!();
+                println!("{}: {:.2}%", result_text, probability * 100.0);
+                println!();
+            }
+            3 => {
+                // Show current state
+                println!();
+                println!("=== Current State ===");
+                println!("Deck: {}", deck.name);
+                println!("Remaining cards: {}", total_remaining);
+                
+                if !eliminated_total.is_empty() {
+                    println!();
+                    println!("Eliminated cards:");
+                    for (card_name, count) in &eliminated_total {
+                        println!("  {} x{}", card_name, count);
+                    }
+                }
+                
+                if !wanted_counts.is_empty() {
+                    println!();
+                    println!("Wanted cards ({} mode):", calculation_mode);
+                    for (card_name, count) in &wanted_counts {
+                        println!("  At least {} {}", count, card_name);
+                    }
+                }
+                println!();
+            }
+            4 => {
+                // Quit
+                println!("Exiting sequential calculator");
+                break;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn select_eliminated_cards_from_remaining(remaining_cards: &HashMap<String, i32>) -> HashMap<String, i32> {
+    println!();
+    println!("=== Eliminate Additional Cards ===");
+    println!("Mark cards that have been seen/played/discarded since last calculation");
+    println!();
+    
+    let mut eliminated = HashMap::new();
+    
+    let mut card_options: Vec<String> = remaining_cards.keys().cloned().collect();
+    card_options.sort();
+    
+    if card_options.is_empty() {
+        return eliminated;
+    }
+    
+    let selections = MultiSelect::new()
+        .with_prompt("Select card types to eliminate (space to toggle, enter to confirm)")
+        .items(&card_options)
+        .interact()
+        .unwrap();
+    
+    // For each selected card type, ask how many
+    for &idx in &selections {
+        let card_name = &card_options[idx];
+        let available = remaining_cards[card_name];
+        
+        let count: i32 = Input::new()
+            .with_prompt(&format!("How many {} to eliminate? (available: {})", card_name, available))
+            .default(1)
+            .validate_with(move |input: &i32| -> Result<(), &str> {
+                if *input >= 0 && *input <= available {
+                    Ok(())
+                } else {
+                    Err("Must be between 0 and available count")
+                }
+            })
+            .interact_text()
+            .unwrap();
+        
+        if count > 0 {
+            eliminated.insert(card_name.clone(), count);
+        }
+    }
+    
+    println!();
+    eliminated
+}
+
+fn select_eliminated_cards(deck_cards: &[Card]) -> HashMap<String, i32> {
+    println!("=== Step 1: Select Eliminated Cards ===");
+    println!("Mark cards that have been played, discarded, or otherwise eliminated");
+    println!();
+    
+    let mut eliminated = HashMap::new();
+    
+    // Group cards by name for easier selection
+    let mut card_groups: HashMap<String, i32> = HashMap::new();
+    for card in deck_cards {
+        *card_groups.entry(card.card_name.clone()).or_insert(0) += card.quantity;
+    }
+    
+    // Create options for multiselect (sorted for consistency)
+    let mut card_options: Vec<String> = card_groups.keys().cloned().collect();
+    card_options.sort();
+    
+    if card_options.is_empty() {
+        return eliminated;
+    }
+    
+    let selections = MultiSelect::new()
+        .with_prompt("Select eliminated card types (space to toggle, enter to confirm)")
+        .items(&card_options)
+        .interact()
+        .unwrap();
+    
+    // For each selected card type, ask how many
+    for &idx in &selections {
+        let card_name = &card_options[idx];
+        let available = card_groups[card_name];
+        
+        let count: i32 = Input::new()
+            .with_prompt(&format!("How many {} eliminated? (available: {})", card_name, available))
+            .default(1)
+            .validate_with(move |input: &i32| -> Result<(), &str> {
+                if *input >= 0 && *input <= available {
+                    Ok(())
+                } else {
+                    Err("Must be between 0 and available count")
+                }
+            })
+            .interact_text()
+            .unwrap();
+        
+        if count > 0 {
+            eliminated.insert(card_name.clone(), count);
+        }
+    }
+    
+    println!();
+    eliminated
+}
+
+fn calculate_remaining_cards(deck_cards: &[Card], eliminated: &HashMap<String, i32>) -> HashMap<String, i32> {
+    let mut remaining = HashMap::new();
+    
+    for card in deck_cards {
+        let eliminated_count = eliminated.get(&card.card_name).unwrap_or(&0);
+        let remaining_count = card.quantity - eliminated_count;
+        
+        if remaining_count > 0 {
+            *remaining.entry(card.card_name.clone()).or_insert(0) += remaining_count;
+        }
+    }
+    
+    remaining
+}
+
+fn select_wanted_cards(remaining_cards: &HashMap<String, i32>) -> HashMap<String, i32> {
+    println!("=== Step 2: Select Wanted Cards ===");
+    println!("Mark cards you want to find from the remaining deck");
+    println!();
+    
+    let mut wanted = HashMap::new();
+    
+    let mut card_options: Vec<String> = remaining_cards.keys().cloned().collect();
+    card_options.sort();
+    
+    if card_options.is_empty() {
+        return wanted;
+    }
+    
+    let selections = MultiSelect::new()
+        .with_prompt("Select wanted card types (space to toggle, enter to confirm)")
+        .items(&card_options)
+        .interact()
+        .unwrap();
+    
+    // For each selected card type, ask how many (default to all remaining)
+    for &idx in &selections {
+        let card_name = &card_options[idx];
+        let available = remaining_cards[card_name];
+        
+        let count: i32 = Input::new()
+            .with_prompt(&format!("How many {} do you want to see? (available: {})", card_name, available))
+            .default(1)
+            .validate_with(move |input: &i32| -> Result<(), &str> {
+                if *input >= 1 && *input <= available {
+                    Ok(())
+                } else {
+                    Err("Must be between 1 and available count")
+                }
+            })
+            .interact_text()
+            .unwrap();
+        
+        if count > 0 {
+            wanted.insert(card_name.clone(), count);
+        }
+    }
+    
+    println!();
+    wanted
+}
+
+fn calculate_all_conditions_probability(
+    wanted_counts: &HashMap<String, i32>,
+    remaining_cards: &HashMap<String, i32>,
+    total_remaining: i32,
+    cards_to_see: i32,
+) -> f64 {
+    let conditions: Vec<_> = wanted_counts.iter().collect();
+    
+    match conditions.len() {
+        1 => {
+            // Single condition - same as OR case
+            let (card_name, wanted_count) = conditions[0];
+            let available_count = remaining_cards[card_name];
+            calculate_hypergeometric_probability(
+                total_remaining,
+                available_count,
+                cards_to_see,
+                *wanted_count,
+            )
+        }
+        2 => {
+            // Two conditions - exact calculation using multivariate hypergeometric
+            let (card_a, wanted_a) = conditions[0];
+            let (card_b, wanted_b) = conditions[1];
+            let available_a = remaining_cards[card_a];
+            let available_b = remaining_cards[card_b];
+            
+            calculate_joint_probability(
+                total_remaining, cards_to_see,
+                available_a, *wanted_a,
+                available_b, *wanted_b,
+            )
+        }
+        _ => {
+            // More than 2 conditions - use approximation assuming independence
+            // This is less precise but computationally feasible
+            let mut prob_all = 1.0;
+            
+            for (card_name, wanted_count) in wanted_counts {
+                let available_count = remaining_cards[card_name];
+                let prob_this_condition = calculate_hypergeometric_probability(
+                    total_remaining,
+                    available_count,
+                    cards_to_see,
+                    *wanted_count,
+                );
+                // Approximate assuming independence (not perfectly accurate)
+                prob_all *= prob_this_condition;
+            }
+            
+            prob_all
+        }
+    }
+}
+
+fn calculate_combined_probability(
+    wanted_counts: &HashMap<String, i32>,
+    remaining_cards: &HashMap<String, i32>,
+    total_remaining: i32,
+    cards_to_see: i32,
+) -> f64 {
+    let conditions: Vec<_> = wanted_counts.iter().collect();
+    
+    match conditions.len() {
+        1 => {
+            // Single condition - simple hypergeometric
+            let (card_name, wanted_count) = conditions[0];
+            let available_count = remaining_cards[card_name];
+            calculate_hypergeometric_probability(
+                total_remaining,
+                available_count,
+                cards_to_see,
+                *wanted_count,
+            )
+        }
+        2 => {
+            // Two conditions - use inclusion-exclusion: P(A ∪ B) = P(A) + P(B) - P(A ∩ B)
+            let (card_a, wanted_a) = conditions[0];
+            let (card_b, wanted_b) = conditions[1];
+            let available_a = remaining_cards[card_a];
+            let available_b = remaining_cards[card_b];
+            
+            let prob_a = calculate_hypergeometric_probability(
+                total_remaining, available_a, cards_to_see, *wanted_a
+            );
+            let prob_b = calculate_hypergeometric_probability(
+                total_remaining, available_b, cards_to_see, *wanted_b
+            );
+            
+            // P(A ∩ B) - probability of both conditions being met
+            let prob_both = calculate_joint_probability(
+                total_remaining, cards_to_see,
+                available_a, *wanted_a,
+                available_b, *wanted_b,
+            );
+            
+            prob_a + prob_b - prob_both
+        }
+        _ => {
+            // More than 2 conditions - use approximation (1 - P(none))
+            // This is less precise but computationally feasible
+            let mut prob_none = 1.0;
+            
+            for (card_name, wanted_count) in wanted_counts {
+                let available_count = remaining_cards[card_name];
+                let prob_this_condition = calculate_hypergeometric_probability(
+                    total_remaining,
+                    available_count,
+                    cards_to_see,
+                    *wanted_count,
+                );
+                // Approximate assuming independence (not perfectly accurate)
+                prob_none *= 1.0 - prob_this_condition;
+            }
+            
+            1.0 - prob_none
+        }
+    }
+}
+
+fn calculate_joint_probability(
+    total_cards: i32,
+    cards_drawn: i32,
+    type_a_count: i32,
+    type_a_needed: i32,
+    type_b_count: i32,
+    type_b_needed: i32,
+) -> f64 {
+    // Calculate P(at least type_a_needed of A AND at least type_b_needed of B)
+    // This uses multivariate hypergeometric distribution
+    
+    let mut joint_prob = 0.0;
+    
+    // Sum over all valid combinations
+    for a_drawn in type_a_needed..=std::cmp::min(type_a_count, cards_drawn) {
+        for b_drawn in type_b_needed..=std::cmp::min(type_b_count, cards_drawn - a_drawn) {
+            let other_drawn = cards_drawn - a_drawn - b_drawn;
+            let other_available = total_cards - type_a_count - type_b_count;
+            
+            if other_drawn >= 0 && other_drawn <= other_available {
+                let prob = multivariate_hypergeometric_pmf(
+                    total_cards,
+                    cards_drawn,
+                    type_a_count,
+                    a_drawn,
+                    type_b_count,
+                    b_drawn,
+                    other_available,
+                    other_drawn,
+                );
+                joint_prob += prob;
+            }
+        }
+    }
+    
+    joint_prob
+}
+
+fn multivariate_hypergeometric_pmf(
+    total: i32,
+    drawn: i32,
+    type_a_total: i32,
+    type_a_drawn: i32,
+    type_b_total: i32,
+    type_b_drawn: i32,
+    other_total: i32,
+    other_drawn: i32,
+) -> f64 {
+    // P(X_A = a, X_B = b, X_other = other) = 
+    // C(K_A, a) * C(K_B, b) * C(K_other, other) / C(N, n)
+    
+    let numerator = binomial_coefficient(type_a_total, type_a_drawn) *
+                   binomial_coefficient(type_b_total, type_b_drawn) *
+                   binomial_coefficient(other_total, other_drawn);
+    let denominator = binomial_coefficient(total, drawn);
+    
+    numerator / denominator
+}
+
+fn calculate_hypergeometric_probability(
+    population_size: i32,
+    success_states: i32,
+    sample_size: i32,
+    successes_wanted: i32,
+) -> f64 {
+    // Calculate probability of getting AT LEAST successes_wanted
+    // P(X >= k) = 1 - P(X < k) = 1 - sum(P(X = i) for i = 0 to k-1)
+    
+    let mut cumulative_prob = 0.0;
+    
+    // Calculate P(X = i) for i = 0 to successes_wanted - 1
+    for i in 0..successes_wanted {
+        let prob_exactly_i = hypergeometric_pmf(
+            population_size,
+            success_states,
+            sample_size,
+            i,
+        );
+        cumulative_prob += prob_exactly_i;
+    }
+    
+    1.0 - cumulative_prob
+}
+
+fn hypergeometric_pmf(
+    population_size: i32,
+    success_states: i32,
+    sample_size: i32,
+    successes: i32,
+) -> f64 {
+    // P(X = k) = C(K, k) * C(N-K, n-k) / C(N, n)
+    // Where:
+    // N = population_size
+    // K = success_states  
+    // n = sample_size
+    // k = successes
+    
+    if successes > success_states || 
+       successes > sample_size || 
+       (sample_size - successes) > (population_size - success_states) {
+        return 0.0;
+    }
+    
+    let numerator = binomial_coefficient(success_states, successes) *
+                   binomial_coefficient(population_size - success_states, sample_size - successes);
+    let denominator = binomial_coefficient(population_size, sample_size);
+    
+    numerator / denominator
+}
+
+fn binomial_coefficient(n: i32, k: i32) -> f64 {
+    if k > n || k < 0 {
+        return 0.0;
+    }
+    
+    if k == 0 || k == n {
+        return 1.0;
+    }
+    
+    // Use symmetry: C(n,k) = C(n,n-k)
+    let k = if k > n - k { n - k } else { k };
+    
+    let mut result = 1.0;
+    for i in 0..k {
+        result = result * (n - i) as f64 / (i + 1) as f64;
+    }
+    
+    result
+}
 
 fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {

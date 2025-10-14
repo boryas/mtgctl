@@ -3,8 +3,10 @@ Reanimator: UB; Combo
 Reanimator: BR; Combo
 Stompy: Moon; Non-Blue
 Stompy: Eldrazi; Non-Blue
+Stompy: Mono-Black; Non-Blue
 Tempo: UB; Blue
 Tempo: UR; Blue
+Tempo: Grixis; Blue
 Lands; Non-Blue
 Omni-tell; Combo
 Sneak and Show; Combo
@@ -39,12 +41,20 @@ Cloudpost; Non-Blue
 Control: Grixis; Blue
 Control: Jeskai; Blue
 Control: Bant; Blue
+Control: Esper; Blue
 Control: Sultai; Blue
 Nic-Fit; Non-Blue
 Scythecat Cub Aggro; Non-Blue
 Landstill; Blue
 Ninjas; Blue
 Initiative; Non-Blue
+Loam Pox; Non-Blue
+Mardu Energy; Non-Blue
+Coveted Jewel; Combo
+Hogaak; Non-Blue
+Depths: GB; Non-Blue
+Depths: GW; Non-Blue
+Mono Black Helm; Combo
 Other; No Category
 
 ## Game Plans

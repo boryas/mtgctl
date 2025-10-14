@@ -280,13 +280,13 @@ impl DeckCategory {
 
 pub fn categorize_deck(deck_name: &str) -> DeckCategory {
     let categories = load_deck_categories();
-    
+
     // First try to get from file
     if let Some(category) = categories.get(deck_name) {
         return category.clone();
     }
 
-    return DeckCategory::Other
+    DeckCategory::Other
 }
 
 #[derive(Args)]
@@ -357,6 +357,10 @@ enum GameCommands {
         #[arg(long, help = "Slice by game length")]
         by_game_length: bool,
     },
+    HtmlStats {
+        #[arg(long, short, default_value = "stats.html", help = "Output HTML file path")]
+        output: String,
+    },
 }
 
 pub fn run(args: GameArgs) {
@@ -369,20 +373,21 @@ pub fn run(args: GameArgs) {
         GameCommands::AddDeck { deck_name } => add_deck_to_list(deck_name),
         GameCommands::BoardPlan { deck_name } => show_board_plan(deck_name),
         GameCommands::RemoveMatch { match_id } => remove_match_interactive(match_id),
-        GameCommands::Stats { 
-            deck, 
-            event, 
-            slice, 
+        GameCommands::Stats {
+            deck,
+            event,
+            slice,
             by_my_deck,
-            by_opponent, 
-            by_opponent_deck, 
-            by_opponent_deck_category, 
-            by_game_number, 
+            by_opponent,
+            by_opponent_deck,
+            by_opponent_deck_category,
+            by_game_number,
             by_mulligans,
             by_game_plan,
             by_win_condition,
             by_game_length
         } => show_stats(deck, event, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition, by_game_length),
+        GameCommands::HtmlStats { output } => crate::html_stats::generate_html_stats(&output),
     }
 }
 
@@ -1287,7 +1292,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     let wins = games.iter().filter(|g| g.game_winner == "me").count();
                     let total = games.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    
+
                     // Calculate average turns for this category (excluding "No turn data")
                     let avg_turns = if category == "No turn data" {
                         None
@@ -1300,13 +1305,33 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                             None
                         }
                     };
-                    
+
                     (category, wins, total, win_rate, avg_turns)
                 })
                 .collect();
-            
-            // Sort by total games descending
-            length_vec.sort_by(|a, b| b.2.cmp(&a.2));
+
+            // Sort by game length order (Very Short -> Very Long)
+            length_vec.sort_by(|a, b| {
+                let order_a = match a.0.as_str() {
+                    "Very Short (1-3 turns)" => 0,
+                    "Short (4-6 turns)" => 1,
+                    "Medium (7-10 turns)" => 2,
+                    "Long (11-15 turns)" => 3,
+                    "Very Long (16+ turns)" => 4,
+                    "No turn data" => 5,
+                    _ => 6,
+                };
+                let order_b = match b.0.as_str() {
+                    "Very Short (1-3 turns)" => 0,
+                    "Short (4-6 turns)" => 1,
+                    "Medium (7-10 turns)" => 2,
+                    "Long (11-15 turns)" => 3,
+                    "Very Long (16+ turns)" => 4,
+                    "No turn data" => 5,
+                    _ => 6,
+                };
+                order_a.cmp(&order_b)
+            });
             
             for (category, wins, total, win_rate, avg_turns) in length_vec {
                 if let Some(avg) = avg_turns {

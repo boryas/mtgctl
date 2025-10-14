@@ -2,6 +2,7 @@ mod league;
 mod game;
 mod db;
 mod deck;
+mod html_stats;
 
 use clap::{Parser, Subcommand};
 use league::LeagueArgs;

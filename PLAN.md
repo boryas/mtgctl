@@ -1,5 +1,5 @@
 cna# MTG CLI Tool - Project Plan
-
+/c
 ## Overview
 A comprehensive command-line interface tool for Magic: The Gathering players to manage decklists, track game results, calculate probabilities, and analyze tournament performance.
 
