@@ -28,6 +28,7 @@ enum DeckCommands {
     Delete,
     Probability,
     Sequential,
+    BackfillEras,
 }
 
 pub fn run(args: DeckArgs) {
@@ -38,6 +39,7 @@ pub fn run(args: DeckArgs) {
         DeckCommands::Delete => delete_deck_interactive(),
         DeckCommands::Probability => calculate_probability_interactive(),
         DeckCommands::Sequential => sequential_probability_interactive(),
+        DeckCommands::BackfillEras => backfill_eras(),
     }
 }
 
@@ -133,11 +135,24 @@ fn import_deck(name: &str, moxfield_url: Option<String>) {
         println!("Import cancelled");
         return;
     }
-    
+
+    // Parse era from deck name (pattern: name-X.Y -> era = X)
+    let default_era = parse_era_from_name(name);
+
+    // Prompt for era
+    let era_input: String = Input::new()
+        .with_prompt("What era is this deck from?")
+        .default(default_era.map(|e| e.to_string()).unwrap_or_else(|| "1".to_string()))
+        .interact_text()
+        .unwrap();
+
+    let era = era_input.parse::<i32>().ok();
+
     // Create deck in database
     let new_deck = NewDeck {
         name: name.to_string(),
         moxfield_url,
+        era,
     };
     
     diesel::insert_into(decks::table)
@@ -1200,4 +1215,86 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &s[..max_len-3])
     }
+}
+
+fn parse_era_from_name(name: &str) -> Option<i32> {
+    // Parse patterns:
+    // - "name-X.Y" -> era = X (e.g., "sprouts-1.2" -> 1)
+    // - "name-X" -> era = X (e.g., "sprouts-1" -> 1)
+    if let Some(dash_pos) = name.rfind('-') {
+        let after_dash = &name[dash_pos + 1..];
+        // Check if there's a dot (major.minor version)
+        if let Some(dot_pos) = after_dash.find('.') {
+            let era_str = &after_dash[..dot_pos];
+            return era_str.parse::<i32>().ok();
+        } else {
+            // Try to parse the whole thing as an integer
+            return after_dash.parse::<i32>().ok();
+        }
+    }
+    None
+}
+
+fn backfill_eras() {
+    use crate::db::schema::matches;
+
+    let connection = &mut establish_connection();
+
+    println!("=== Backfilling Era Data ===");
+    println!("This will parse deck names and populate era fields for existing decks and matches.\n");
+
+    // Step 1: Backfill decks
+    let all_decks: Vec<Deck> = decks::table
+        .load(connection)
+        .expect("Error loading decks");
+
+    let mut decks_updated = 0;
+    for deck in all_decks {
+        if deck.era.is_none() {
+            if let Some(parsed_era) = parse_era_from_name(&deck.name) {
+                diesel::update(decks::table.find(deck.deck_id))
+                    .set(decks::era.eq(parsed_era))
+                    .execute(connection)
+                    .expect("Error updating deck era");
+                println!("Updated deck '{}' with era {}", deck.name, parsed_era);
+                decks_updated += 1;
+            } else {
+                println!("Warning: Could not parse era from deck name '{}'", deck.name);
+            }
+        }
+    }
+
+    println!("\nUpdated {} decks with era data", decks_updated);
+
+    // Step 2: Backfill matches
+    let all_matches: Vec<crate::db::models::Match> = matches::table
+        .load(connection)
+        .expect("Error loading matches");
+
+    let mut matches_updated = 0;
+    for m in all_matches {
+        if m.era.is_none() {
+            // First try to get era from decks table
+            let deck_era: Option<Option<i32>> = decks::table
+                .filter(decks::name.eq(&m.deck_name))
+                .select(decks::era)
+                .first(connection)
+                .ok();
+
+            let era = deck_era.flatten().or_else(|| parse_era_from_name(&m.deck_name));
+
+            if let Some(era_value) = era {
+                diesel::update(matches::table.find(m.match_id))
+                    .set(matches::era.eq(era_value))
+                    .execute(connection)
+                    .expect("Error updating match era");
+                matches_updated += 1;
+            } else {
+                println!("Warning: Could not determine era for match {} (deck: {})", m.match_id, m.deck_name);
+            }
+        }
+    }
+
+    println!("Updated {} matches with era data", matches_updated);
+    println!("\nBackfill complete!");
 }

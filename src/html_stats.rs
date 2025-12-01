@@ -6,10 +6,12 @@ use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games};
 use crate::game::categorize_deck;
 
-pub fn generate_html_stats(output_path: &str) {
+pub fn generate_html_stats(output_path: &str, era_filter: Option<String>) {
     let connection = &mut establish_connection();
 
-    // Load all matches and games
+    // For HTML generation, we'll generate stats for all eras
+    // and let JavaScript handle the filtering
+    // But we still need to respect the era filter if provided for the data
     let all_matches = matches::table
         .order(matches::date.desc())
         .load::<Match>(connection)
@@ -26,8 +28,8 @@ pub fn generate_html_stats(output_path: &str) {
         .load::<Game>(connection)
         .expect("Error loading games");
 
-    // Generate HTML
-    let html = generate_html(&all_matches, &all_games);
+    // Generate HTML with era support
+    let html = generate_html(&all_matches, &all_games, era_filter);
 
     // Write to file
     fs::write(output_path, html).expect("Error writing HTML file");
@@ -35,7 +37,7 @@ pub fn generate_html_stats(output_path: &str) {
     println!("Generated stats HTML at: {}", output_path);
 }
 
-fn generate_html(all_matches: &[Match], all_games: &[Game]) -> String {
+fn generate_html(all_matches: &[Match], all_games: &[Game], _era_filter: Option<String>) -> String {
     let mut html = String::new();
 
     // HTML header with bur.io-inspired styling
@@ -167,6 +169,7 @@ fn generate_html(all_matches: &[Match], all_games: &[Game]) -> String {
         ("game-plan", "Opening Hand Game Plan"),
         ("win-condition", "Win Conditions"),
         ("game-length", "Statistics by Game Length"),
+        ("era", "Statistics by Era"),
     ];
 
     for (slice_type, title) in slices {
@@ -282,19 +285,20 @@ fn generate_overall_stats_html(all_matches: &[Match], all_games: &[Game]) -> Str
 
 fn generate_slice_table(all_matches: &[Match], all_games: &[Game], slice_type: &str) -> String {
     match slice_type {
-        "my-deck" => generate_my_deck_table(all_matches),
-        "opponent-deck" => generate_opponent_deck_table(all_matches),
-        "deck-category" => generate_deck_category_table(all_matches),
+        "my-deck" => generate_my_deck_table(all_matches, all_games),
+        "opponent-deck" => generate_opponent_deck_table(all_matches, all_games),
+        "deck-category" => generate_deck_category_table(all_matches, all_games),
         "game-number" => generate_game_number_table(all_games),
         "mulligans" => generate_mulligan_table(all_games),
         "game-plan" => generate_game_plan_table(all_games),
         "win-condition" => generate_win_condition_table(all_games),
         "game-length" => generate_game_length_table(all_games),
+        "era" => generate_era_table(all_matches, all_games),
         _ => String::new(),
     }
 }
 
-fn generate_my_deck_table(all_matches: &[Match]) -> String {
+fn generate_my_deck_table(all_matches: &[Match], all_games: &[Game]) -> String {
     let mut deck_stats: HashMap<String, Vec<&Match>> = HashMap::new();
     for m in all_matches {
         deck_stats.entry(m.deck_name.clone()).or_default().push(m);
@@ -305,7 +309,25 @@ fn generate_my_deck_table(all_matches: &[Match]) -> String {
             let wins = matches.iter().filter(|m| m.match_winner == "me").count();
             let total = matches.len();
             let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-            (deck, wins, total, win_rate)
+
+            // Get games for these matches
+            let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+            let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+            // Calculate average mulligans
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+            // Calculate average game length
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (deck, wins, total, win_rate, avg_mulligans, avg_turns)
         })
         .collect();
 
@@ -314,16 +336,18 @@ fn generate_my_deck_table(all_matches: &[Match]) -> String {
             .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    generate_table(&["Deck", "Record", "Win Rate"], deck_vec.iter().map(|(deck, wins, total, win_rate)| {
+    generate_table(&["Deck", "Record", "Win Rate", "Avg Mulls", "Avg Turns"], deck_vec.iter().map(|(deck, wins, total, win_rate, avg_mulligans, avg_turns)| {
         vec![
             deck.clone(),
             format!("{}-{}", wins, total - wins),
             format!("{:.1}%", win_rate),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }
 
-fn generate_opponent_deck_table(all_matches: &[Match]) -> String {
+fn generate_opponent_deck_table(all_matches: &[Match], all_games: &[Game]) -> String {
     let mut deck_stats: HashMap<String, Vec<&Match>> = HashMap::new();
     for m in all_matches {
         deck_stats.entry(m.opponent_deck.clone()).or_default().push(m);
@@ -334,7 +358,25 @@ fn generate_opponent_deck_table(all_matches: &[Match]) -> String {
             let wins = matches.iter().filter(|m| m.match_winner == "me").count();
             let total = matches.len();
             let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-            (deck, wins, total, win_rate)
+
+            // Get games for these matches
+            let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+            let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+            // Calculate average mulligans
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+            // Calculate average game length
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (deck, wins, total, win_rate, avg_mulligans, avg_turns)
         })
         .collect();
 
@@ -343,16 +385,18 @@ fn generate_opponent_deck_table(all_matches: &[Match]) -> String {
             .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    generate_table(&["Opponent Deck", "Record", "Win Rate"], deck_vec.iter().map(|(deck, wins, total, win_rate)| {
+    generate_table(&["Opponent Deck", "Record", "Win Rate", "Avg Mulls", "Avg Turns"], deck_vec.iter().map(|(deck, wins, total, win_rate, avg_mulligans, avg_turns)| {
         vec![
             deck.clone(),
             format!("{}-{}", wins, total - wins),
             format!("{:.1}%", win_rate),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }
 
-fn generate_deck_category_table(all_matches: &[Match]) -> String {
+fn generate_deck_category_table(all_matches: &[Match], all_games: &[Game]) -> String {
     let mut category_stats: HashMap<String, Vec<&Match>> = HashMap::new();
     for m in all_matches {
         let category = categorize_deck(&m.opponent_deck);
@@ -364,7 +408,25 @@ fn generate_deck_category_table(all_matches: &[Match]) -> String {
             let wins = matches.iter().filter(|m| m.match_winner == "me").count();
             let total = matches.len();
             let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-            (category, wins, total, win_rate)
+
+            // Get games for these matches
+            let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+            let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+            // Calculate average mulligans
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+            // Calculate average game length
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (category, wins, total, win_rate, avg_mulligans, avg_turns)
         })
         .collect();
 
@@ -373,11 +435,13 @@ fn generate_deck_category_table(all_matches: &[Match]) -> String {
             .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    generate_table(&["Category", "Record", "Win Rate"], category_vec.iter().map(|(category, wins, total, win_rate)| {
+    generate_table(&["Category", "Record", "Win Rate", "Avg Mulls", "Avg Turns"], category_vec.iter().map(|(category, wins, total, win_rate, avg_mulligans, avg_turns)| {
         vec![
             category.clone(),
             format!("{}-{}", wins, total - wins),
             format!("{:.1}%", win_rate),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }
@@ -394,7 +458,21 @@ fn generate_game_number_table(all_games: &[Game]) -> String {
                 let wins = games.iter().filter(|g| g.game_winner == "me").count();
                 let total = games.len();
                 let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                (game_num, wins, total, win_rate)
+
+                // Calculate average mulligans
+                let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                // Calculate average game length
+                let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                let avg_turns = if !games_with_turns.is_empty() {
+                    let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                    Some(total_turns as f64 / games_with_turns.len() as f64)
+                } else {
+                    None
+                };
+
+                (game_num, wins, total, win_rate, avg_mulligans, avg_turns)
             })
         })
         .collect();
@@ -404,11 +482,13 @@ fn generate_game_number_table(all_games: &[Game]) -> String {
             .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    generate_table(&["Game", "Record", "Win Rate"], game_vec.iter().map(|(game_num, wins, total, win_rate)| {
+    generate_table(&["Game", "Record", "Win Rate", "Avg Mulls", "Avg Turns"], game_vec.iter().map(|(game_num, wins, total, win_rate, avg_mulligans, avg_turns)| {
         vec![
             format!("Game {}", game_num),
             format!("{}-{}", wins, total - wins),
             format!("{:.1}%", win_rate),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }
@@ -424,7 +504,17 @@ fn generate_mulligan_table(all_games: &[Game]) -> String {
             let wins = games.iter().filter(|g| g.game_winner == "me").count();
             let total = games.len();
             let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-            (mulligans, wins, total, win_rate)
+
+            // Calculate average game length (but not average mulligans since we're slicing by that)
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (mulligans, wins, total, win_rate, avg_turns)
         })
         .collect();
 
@@ -433,11 +523,12 @@ fn generate_mulligan_table(all_games: &[Game]) -> String {
             .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    generate_table(&["Mulligans", "Record", "Win Rate"], mulligan_vec.iter().map(|(mulligans, wins, total, win_rate)| {
+    generate_table(&["Mulligans", "Record", "Win Rate", "Avg Turns"], mulligan_vec.iter().map(|(mulligans, wins, total, win_rate, avg_turns)| {
         vec![
             format!("{}", mulligans),
             format!("{}-{}", wins, total - wins),
             format!("{:.1}%", win_rate),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }
@@ -454,7 +545,21 @@ fn generate_game_plan_table(all_games: &[Game]) -> String {
             let wins = games.iter().filter(|g| g.game_winner == "me").count();
             let total = games.len();
             let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-            (plan, wins, total, win_rate)
+
+            // Calculate average mulligans
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+            // Calculate average game length
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (plan, wins, total, win_rate, avg_mulligans, avg_turns)
         })
         .collect();
 
@@ -463,30 +568,54 @@ fn generate_game_plan_table(all_games: &[Game]) -> String {
             .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
     });
 
-    generate_table(&["Game Plan", "Record", "Win Rate"], plan_vec.iter().map(|(plan, wins, total, win_rate)| {
+    generate_table(&["Game Plan", "Record", "Win Rate", "Avg Mulls", "Avg Turns"], plan_vec.iter().map(|(plan, wins, total, win_rate, avg_mulligans, avg_turns)| {
         vec![
             plan.clone(),
             format!("{}-{}", wins, total - wins),
             format!("{:.1}%", win_rate),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }
 
 fn generate_win_condition_table(all_games: &[Game]) -> String {
-    let mut win_con_stats: HashMap<String, i32> = HashMap::new();
+    let mut win_con_stats: HashMap<String, Vec<&Game>> = HashMap::new();
 
     for g in all_games.iter().filter(|g| g.game_winner == "me") {
         let win_con = g.win_condition.as_deref().unwrap_or("Unknown");
-        *win_con_stats.entry(win_con.to_string()).or_insert(0) += 1;
+        win_con_stats.entry(win_con.to_string()).or_default().push(g);
     }
 
-    let mut win_con_vec: Vec<_> = win_con_stats.into_iter().collect();
+    let mut win_con_vec: Vec<_> = win_con_stats.into_iter()
+        .map(|(win_con, games)| {
+            let wins = games.len(); // All games here are wins
+
+            // Calculate average mulligans
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+            // Calculate average game length
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (win_con, wins, avg_mulligans, avg_turns)
+        })
+        .collect();
+
     win_con_vec.sort_by(|a, b| b.1.cmp(&a.1));
 
-    generate_table(&["Win Condition", "Wins"], win_con_vec.iter().map(|(win_con, wins)| {
+    generate_table(&["Win Condition", "Wins", "Avg Mulls", "Avg Turns"], win_con_vec.iter().map(|(win_con, wins, avg_mulligans, avg_turns)| {
         vec![
             win_con.clone(),
             format!("{}", wins),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }
@@ -516,6 +645,10 @@ fn generate_game_length_table(all_games: &[Game]) -> String {
             let total = games.len();
             let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
 
+            // Calculate average mulligans (but not average game length since we're slicing by that)
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
             let avg_turns = if category == "No turn data" {
                 None
             } else {
@@ -528,7 +661,7 @@ fn generate_game_length_table(all_games: &[Game]) -> String {
                 }
             };
 
-            (category, wins, total, win_rate, avg_turns)
+            (category, wins, total, win_rate, avg_mulligans, avg_turns)
         })
         .collect();
 
@@ -555,12 +688,68 @@ fn generate_game_length_table(all_games: &[Game]) -> String {
         order_a.cmp(&order_b)
     });
 
-    generate_table(&["Game Length", "Record", "Win Rate", "Avg Turns"], length_vec.iter().map(|(category, wins, total, win_rate, avg_turns)| {
+    generate_table(&["Game Length", "Record", "Win Rate", "Avg Mulls", "Avg Turns"], length_vec.iter().map(|(category, wins, total, win_rate, avg_mulligans, avg_turns)| {
         vec![
             category.clone(),
             format!("{}-{}", wins, total - wins),
             format!("{:.1}%", win_rate),
+            format!("{:.2}", avg_mulligans),
             avg_turns.map(|a| format!("{:.1}", a)).unwrap_or_else(|| "-".to_string()),
+        ]
+    }).collect())
+}
+
+fn generate_era_table(all_matches: &[Match], all_games: &[Game]) -> String {
+    let mut era_stats: HashMap<Option<i32>, Vec<&Match>> = HashMap::new();
+    for m in all_matches {
+        era_stats.entry(m.era).or_default().push(m);
+    }
+
+    let mut era_vec: Vec<_> = era_stats.into_iter()
+        .map(|(era, matches)| {
+            let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+            let total = matches.len();
+            let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+
+            // Get games for these matches
+            let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+            let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+            // Calculate average mulligans
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+            // Calculate average game length
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (era, wins, total, win_rate, avg_mulligans, avg_turns)
+        })
+        .collect();
+
+    // Sort by era number ascending (with None at the end)
+    era_vec.sort_by(|a, b| {
+        match (a.0, b.0) {
+            (Some(a_era), Some(b_era)) => a_era.cmp(&b_era),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+
+    generate_table(&["Era", "Record", "Win Rate", "Avg Mulls", "Avg Turns"], era_vec.iter().map(|(era, wins, total, win_rate, avg_mulligans, avg_turns)| {
+        let era_str = era.map(|e| format!("Era {}", e)).unwrap_or_else(|| "Unknown".to_string());
+        vec![
+            era_str,
+            format!("{}-{}", wins, total - wins),
+            format!("{:.1}%", win_rate),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]
     }).collect())
 }

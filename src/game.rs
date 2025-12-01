@@ -336,6 +336,8 @@ enum GameCommands {
         deck: Option<String>,
         #[arg(long, help = "Filter by event type")]
         event: Option<String>,
+        #[arg(long, help = "Filter by era(s): single (e.g., '2'), multiple (e.g., '1,2,3'), or 'all'. Defaults to latest era")]
+        era: Option<String>,
         #[arg(long, help = "Show interactive slice selection menu")]
         slice: bool,
         #[arg(long, help = "Slice by my deck")]
@@ -356,10 +358,14 @@ enum GameCommands {
         by_win_condition: bool,
         #[arg(long, help = "Slice by game length")]
         by_game_length: bool,
+        #[arg(long, help = "Slice by era")]
+        by_era: bool,
     },
     HtmlStats {
         #[arg(long, short, default_value = "stats.html", help = "Output HTML file path")]
         output: String,
+        #[arg(long, help = "Filter by era(s): single (e.g., '2'), multiple (e.g., '1,2,3'), or 'all'. Defaults to latest era")]
+        era: Option<String>,
     },
 }
 
@@ -376,6 +382,7 @@ pub fn run(args: GameArgs) {
         GameCommands::Stats {
             deck,
             event,
+            era,
             slice,
             by_my_deck,
             by_opponent,
@@ -385,9 +392,10 @@ pub fn run(args: GameArgs) {
             by_mulligans,
             by_game_plan,
             by_win_condition,
-            by_game_length
-        } => show_stats(deck, event, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition, by_game_length),
-        GameCommands::HtmlStats { output } => crate::html_stats::generate_html_stats(&output),
+            by_game_length,
+            by_era
+        } => show_stats(deck, event, era, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition, by_game_length, by_era),
+        GameCommands::HtmlStats { output, era } => crate::html_stats::generate_html_stats(&output, era),
     }
 }
 
@@ -452,14 +460,14 @@ fn add_match_interactive(date_arg: Option<String>) {
         // Add option for custom opponent entry
         let mut opponent_options = opponents.clone();
         opponent_options.push("Custom (type new opponent)".to_string());
-        
+
         let opponent_idx = FuzzySelect::new()
             .with_prompt("Opponent name (type to search)")
             .items(&opponent_options)
             .default(0)
             .interact()
             .unwrap();
-            
+
         if opponent_idx == opponent_options.len() - 1 {
             // Custom option selected
             Input::new()
@@ -492,7 +500,21 @@ fn add_match_interactive(date_arg: Option<String>) {
     } else {
         Winner::Opponent
     };
-    
+
+    let connection = &mut establish_connection();
+
+    // Look up era from decks table, or parse from deck name if not found
+    let era = {
+        use crate::db::schema::decks;
+        decks::table
+            .filter(decks::name.eq(&deck_name))
+            .select(decks::era)
+            .first::<Option<i32>>(connection)
+            .ok()
+            .flatten()
+            .or_else(|| parse_era_from_deck_name(&deck_name))
+    };
+
     // Create the match without winner and opponent deck (will be determined after games)
     let new_match = NewMatch {
         date,
@@ -502,9 +524,8 @@ fn add_match_interactive(date_arg: Option<String>) {
         event_type,
         die_roll_winner: die_roll_winner.to_string(),
         match_winner: "unknown".to_string(), // Will be updated after games
+        era,
     };
-    
-    let connection = &mut establish_connection();
     
     diesel::insert_into(matches::table)
         .values(&new_match)
@@ -540,7 +561,7 @@ fn add_match_interactive(date_arg: Option<String>) {
             .interact()
             .unwrap();
         let opponent_deck = deck_names[opponent_deck_idx].clone();
-        
+
         // Update the match with the winner and opponent deck
         diesel::update(matches::table.find(match_id))
             .set((
@@ -825,47 +846,111 @@ fn show_match_details(match_id: i32) {
     }
 }
 
+enum EraFilter {
+    All,
+    Eras(Vec<i32>),
+}
+
+fn parse_era_filter(era_arg: Option<&str>, connection: &mut SqliteConnection) -> EraFilter {
+    match era_arg {
+        Some("all") => EraFilter::All,
+        Some(era_str) => {
+            // Parse comma-separated list of eras
+            let eras: Vec<i32> = era_str
+                .split(',')
+                .filter_map(|s| s.trim().parse::<i32>().ok())
+                .collect();
+
+            if eras.is_empty() {
+                // If parsing failed, default to latest era
+                get_default_era_filter(connection)
+            } else {
+                EraFilter::Eras(eras)
+            }
+        }
+        None => {
+            // Default to latest era if no era specified
+            get_default_era_filter(connection)
+        }
+    }
+}
+
+fn get_default_era_filter(connection: &mut SqliteConnection) -> EraFilter {
+    // Get the maximum era from the matches table
+    let max_era: Option<Option<i32>> = matches::table
+        .select(diesel::dsl::max(matches::era))
+        .first(connection)
+        .ok();
+
+    match max_era.flatten() {
+        Some(era) => EraFilter::Eras(vec![era]),
+        None => EraFilter::All, // If no era data, show all
+    }
+}
+
 fn show_stats(
-    deck_filter: Option<String>, 
-    event_filter: Option<String>, 
+    deck_filter: Option<String>,
+    event_filter: Option<String>,
+    era_filter: Option<String>,
     interactive_slice: bool,
     by_my_deck: bool,
     by_opponent: bool,
-    by_opponent_deck: bool, 
+    by_opponent_deck: bool,
     by_opponent_deck_category: bool,
     by_game_number: bool,
     by_mulligans: bool,
     by_game_plan: bool,
     by_win_condition: bool,
-    by_game_length: bool
+    by_game_length: bool,
+    by_era: bool
 ) {
     let connection = &mut establish_connection();
-    
+
+    // Determine era filter
+    let era_filter_parsed = parse_era_filter(era_filter.as_deref(), connection);
+
     // Build the base query
     let mut query = matches::table.into_boxed();
-    
+
     if let Some(deck) = &deck_filter {
         query = query.filter(matches::deck_name.like(format!("%{}%", deck)));
     }
-    
+
     if let Some(event) = &event_filter {
         query = query.filter(matches::event_type.like(format!("%{}%", event)));
     }
-    
+
+    // Apply era filter
+    match &era_filter_parsed {
+        EraFilter::All => {
+            // No filter needed
+        }
+        EraFilter::Eras(eras) => {
+            query = query.filter(matches::era.eq_any(eras));
+        }
+    }
+
     let all_matches = query.load::<Match>(connection)
         .expect("Error loading matches");
-    
+
     if all_matches.is_empty() {
         println!("No matches found");
         return;
     }
-    
+
     println!("=== Match Statistics ===");
     if let Some(deck) = &deck_filter {
         println!("Filtered by deck: {}", deck);
     }
     if let Some(event) = &event_filter {
         println!("Filtered by event: {}", event);
+    }
+    match &era_filter_parsed {
+        EraFilter::All => println!("Filtered by era: all"),
+        EraFilter::Eras(eras) => {
+            let era_str: Vec<String> = eras.iter().map(|e| e.to_string()).collect();
+            println!("Filtered by era: {}", era_str.join(", "));
+        }
     }
     println!();
     // Get all games for these matches
@@ -908,20 +993,24 @@ fn show_stats(
     if by_game_length {
         slices_to_show.push("game-length");
     }
-    
+    if by_era {
+        slices_to_show.push("era");
+    }
+
     if interactive_slice {
         // Interactive slice selection
         let slice_options = vec![
             "None (no slicing)",
             "my-deck",
             "opponent",
-            "opponent-deck", 
+            "opponent-deck",
             "deck-category",
             "game-number",
             "mulligans",
             "game-plan",
             "win-condition",
-            "game-length"
+            "game-length",
+            "era"
         ];
         
         let selection = FuzzySelect::new()
@@ -1060,7 +1149,25 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     let wins = matches.iter().filter(|m| m.match_winner == "me").count();
                     let total = matches.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    (deck, matches, wins, total, win_rate)
+
+                    // Get games for these matches
+                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (deck, matches, wins, total, win_rate, avg_mulligans, avg_turns)
                 })
                 .collect();
 
@@ -1069,9 +1176,11 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 b.3.cmp(&a.3)
                     .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
             });
-            
-            for (deck, _matches, wins, total, win_rate) in deck_vec {
-                println!("  with {}: {}-{} ({:.1}%)", deck, wins, total - wins, win_rate);
+
+            for (deck, _matches, wins, total, win_rate, avg_mulligans, avg_turns) in deck_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  with {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         deck, wins, total - wins, win_rate, avg_mulligans, turns_str);
             }
         },
         
@@ -1087,7 +1196,25 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     let wins = matches.iter().filter(|m| m.match_winner == "me").count();
                     let total = matches.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    (opponent, matches, wins, total, win_rate)
+
+                    // Get games for these matches
+                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (opponent, matches, wins, total, win_rate, avg_mulligans, avg_turns)
                 })
                 .collect();
 
@@ -1096,9 +1223,11 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 b.3.cmp(&a.3)
                     .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
             });
-            
-            for (opponent, _matches, wins, total, win_rate) in opponent_vec {
-                println!("  vs {}: {}-{} ({:.1}%)", opponent, wins, total - wins, win_rate);
+
+            for (opponent, _matches, wins, total, win_rate, avg_mulligans, avg_turns) in opponent_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  vs {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         opponent, wins, total - wins, win_rate, avg_mulligans, turns_str);
             }
         },
         
@@ -1114,7 +1243,25 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     let wins = matches.iter().filter(|m| m.match_winner == "me").count();
                     let total = matches.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    (deck, matches, wins, total, win_rate)
+
+                    // Get games for these matches
+                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (deck, matches, wins, total, win_rate, avg_mulligans, avg_turns)
                 })
                 .collect();
 
@@ -1123,9 +1270,11 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 b.3.cmp(&a.3)
                     .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
             });
-            
-            for (deck, _matches, wins, total, win_rate) in deck_vec {
-                println!("  vs {}: {}-{} ({:.1}%)", deck, wins, total - wins, win_rate);
+
+            for (deck, _matches, wins, total, win_rate, avg_mulligans, avg_turns) in deck_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  vs {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         deck, wins, total - wins, win_rate, avg_mulligans, turns_str);
             }
         },
         
@@ -1136,24 +1285,44 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 let category = categorize_deck(&m.opponent_deck);
                 category_stats.entry(category).or_default().push(m);
             }
-            
+
             let mut category_vec: Vec<_> = category_stats.into_iter()
                 .map(|(category, matches)| {
                     let wins = matches.iter().filter(|m| m.match_winner == "me").count();
                     let total = matches.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    (category, wins, total, win_rate)
+
+                    // Get games for these matches
+                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (category, wins, total, win_rate, avg_mulligans, avg_turns)
                 })
                 .collect();
-            
+
             // Sort by total games descending, then by win rate descending
             category_vec.sort_by(|a, b| {
                 b.2.cmp(&a.2)
                     .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
-            
-            for (category, wins, total, win_rate) in category_vec {
-                println!("  vs {} decks: {}-{} ({:.1}%)", category.to_string(), wins, total - wins, win_rate);
+
+            for (category, wins, total, win_rate, avg_mulligans, avg_turns) in category_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  vs {} decks: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         category.to_string(), wins, total - wins, win_rate, avg_mulligans, turns_str);
             }
         },
         
@@ -1163,26 +1332,42 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             for g in all_games {
                 game_stats.entry(g.game_number).or_default().push(g);
             }
-            
+
             let mut game_vec: Vec<_> = (1..=3)
                 .filter_map(|game_num| {
                     game_stats.get(&game_num).map(|games| {
                         let wins = games.iter().filter(|g| g.game_winner == "me").count();
                         let total = games.len();
                         let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                        (game_num, wins, total, win_rate)
+
+                        // Calculate average mulligans
+                        let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                        let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                        // Calculate average game length
+                        let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                        let avg_turns = if !games_with_turns.is_empty() {
+                            let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                            Some(total_turns as f64 / games_with_turns.len() as f64)
+                        } else {
+                            None
+                        };
+
+                        (game_num, wins, total, win_rate, avg_mulligans, avg_turns)
                     })
                 })
                 .collect();
-            
+
             // Sort by total games descending, then by win rate descending
             game_vec.sort_by(|a, b| {
                 b.2.cmp(&a.2)
                     .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
-            
-            for (game_num, wins, total, win_rate) in game_vec {
-                println!("  Game {}: {}-{} ({:.1}%)", game_num, wins, total - wins, win_rate);
+
+            for (game_num, wins, total, win_rate, avg_mulligans, avg_turns) in game_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  Game {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         game_num, wins, total - wins, win_rate, avg_mulligans, turns_str);
             }
         },
         
@@ -1192,24 +1377,36 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             for g in all_games {
                 mulligan_stats.entry(g.mulligans).or_default().push(g);
             }
-            
+
             let mut mulligan_vec: Vec<_> = mulligan_stats.into_iter()
                 .map(|(mulligans, games)| {
                     let wins = games.iter().filter(|g| g.game_winner == "me").count();
                     let total = games.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    (mulligans, wins, total, win_rate)
+
+                    // Calculate average game length (but not average mulligans since we're slicing by that)
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (mulligans, wins, total, win_rate, avg_turns)
                 })
                 .collect();
-            
+
             // Sort by total games descending, then by win rate descending
             mulligan_vec.sort_by(|a, b| {
                 b.2.cmp(&a.2)
                     .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
-            
-            for (mulligans, wins, total, win_rate) in mulligan_vec {
-                println!("  {} mulligans: {}-{} ({:.1}%)", mulligans, wins, total - wins, win_rate);
+
+            for (mulligans, wins, total, win_rate, avg_turns) in mulligan_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  {} mulligans: {}-{} ({:.1}%, avg turns: {})",
+                         mulligans, wins, total - wins, win_rate, turns_str);
             }
         },
         
@@ -1220,57 +1417,88 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 let plan = g.opening_hand_plan.as_deref().unwrap_or("No Plan");
                 plan_stats.entry(plan.to_string()).or_default().push(g);
             }
-            
+
             let mut plan_vec: Vec<_> = plan_stats.into_iter()
                 .map(|(plan, games)| {
                     let wins = games.iter().filter(|g| g.game_winner == "me").count();
                     let total = games.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-                    (plan, wins, total, win_rate)
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (plan, wins, total, win_rate, avg_mulligans, avg_turns)
                 })
                 .collect();
-            
+
             // Sort by total games descending, then by win rate descending
             plan_vec.sort_by(|a, b| {
                 b.2.cmp(&a.2)
                     .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
             });
-            
-            for (plan, wins, total, win_rate) in plan_vec {
-                println!("  {}: {}-{} ({:.1}%)", plan, wins, total - wins, win_rate);
+
+            for (plan, wins, total, win_rate, avg_mulligans, avg_turns) in plan_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         plan, wins, total - wins, win_rate, avg_mulligans, turns_str);
             }
         },
         
         "win-condition" => {
             println!("=== Statistics by Win Condition ===");
-            let mut win_con_stats: std::collections::HashMap<String, (i32, i32)> = std::collections::HashMap::new();
-            
+            let mut win_con_stats: std::collections::HashMap<String, Vec<&Game>> = std::collections::HashMap::new();
+
             // Only count games you won (where win_condition is relevant)
             for g in all_games.iter().filter(|g| g.game_winner == "me") {
                 let win_con = g.win_condition.as_deref().unwrap_or("Unknown");
-                let entry = win_con_stats.entry(win_con.to_string()).or_insert((0, 0));
-                entry.0 += 1; // wins (always 1 since we filtered for wins)
-                entry.1 += 1; // total games won with this condition
+                win_con_stats.entry(win_con.to_string()).or_default().push(g);
             }
-            
+
             let mut win_con_vec: Vec<_> = win_con_stats.into_iter()
-                .map(|(win_con, (wins, total))| {
-                    (win_con, wins, total)
+                .map(|(win_con, games)| {
+                    let wins = games.len(); // All games here are wins
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (win_con, wins, avg_mulligans, avg_turns)
                 })
                 .collect();
-            
+
             // Sort by total usage descending
-            win_con_vec.sort_by(|a, b| b.2.cmp(&a.2));
-            
-            for (win_con, _wins, total) in win_con_vec {
-                println!("  {}: {} wins", win_con, total);
+            win_con_vec.sort_by(|a, b| b.1.cmp(&a.1));
+
+            for (win_con, wins, avg_mulligans, avg_turns) in win_con_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  {}: {} wins (avg mulls: {:.2}, avg turns: {})",
+                         win_con, wins, avg_mulligans, turns_str);
             }
         },
         
         "game-length" => {
             println!("=== Statistics by Game Length ===");
             let mut length_stats: std::collections::HashMap<String, Vec<&Game>> = std::collections::HashMap::new();
-            
+
             for g in all_games {
                 let length_category = match g.turns {
                     None => "No turn data".to_string(),
@@ -1286,12 +1514,16 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 };
                 length_stats.entry(length_category).or_default().push(g);
             }
-            
+
             let mut length_vec: Vec<_> = length_stats.into_iter()
                 .map(|(category, games)| {
                     let wins = games.iter().filter(|g| g.game_winner == "me").count();
                     let total = games.len();
                     let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+
+                    // Calculate average mulligans (but not average game length since we're slicing by that)
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
 
                     // Calculate average turns for this category (excluding "No turn data")
                     let avg_turns = if category == "No turn data" {
@@ -1306,7 +1538,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                         }
                     };
 
-                    (category, wins, total, win_rate, avg_turns)
+                    (category, wins, total, win_rate, avg_mulligans, avg_turns)
                 })
                 .collect();
 
@@ -1332,20 +1564,72 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                 };
                 order_a.cmp(&order_b)
             });
-            
-            for (category, wins, total, win_rate, avg_turns) in length_vec {
+
+            for (category, wins, total, win_rate, avg_mulligans, avg_turns) in length_vec {
                 if let Some(avg) = avg_turns {
-                    println!("  {}: {}-{} ({:.1}%, avg {:.1} turns)", 
-                             category, wins, total - wins, win_rate, avg);
+                    println!("  {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg {:.1} turns)",
+                             category, wins, total - wins, win_rate, avg_mulligans, avg);
                 } else {
-                    println!("  {}: {}-{} ({:.1}%)", 
-                             category, wins, total - wins, win_rate);
+                    println!("  {}: {}-{} ({:.1}%, avg mulls: {:.2})",
+                             category, wins, total - wins, win_rate, avg_mulligans);
                 }
             }
         },
-        
+
+        "era" => {
+            println!("=== Statistics by Era ===");
+            let mut era_stats: std::collections::HashMap<Option<i32>, Vec<&Match>> = std::collections::HashMap::new();
+            for m in all_matches {
+                era_stats.entry(m.era).or_default().push(m);
+            }
+
+            let mut era_vec: Vec<_> = era_stats.into_iter()
+                .map(|(era, matches)| {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    let total = matches.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+
+                    // Get games for these matches
+                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (era, wins, total, win_rate, avg_mulligans, avg_turns)
+                })
+                .collect();
+
+            // Sort by era number ascending (with None at the end)
+            era_vec.sort_by(|a, b| {
+                match (a.0, b.0) {
+                    (Some(a_era), Some(b_era)) => a_era.cmp(&b_era),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+
+            for (era, wins, total, win_rate, avg_mulligans, avg_turns) in era_vec {
+                let era_str = era.map(|e| e.to_string()).unwrap_or_else(|| "Unknown".to_string());
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  Era {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         era_str, wins, total - wins, win_rate, avg_mulligans, turns_str);
+            }
+        },
+
         _ => {
-            println!("Unknown slice type: {}. Available options: my-deck, opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition, game-length", slice_type);
+            println!("Unknown slice type: {}. Available options: my-deck, opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition, game-length, era", slice_type);
         }
     }
     println!();
@@ -1956,4 +2240,22 @@ fn remove_match_interactive(match_id: i32) {
     } else {
         println!("No match was deleted (this shouldn't happen)");
     }
+}
+
+fn parse_era_from_deck_name(name: &str) -> Option<i32> {
+    // Parse patterns:
+    // - "name-X.Y" -> era = X (e.g., "sprouts-1.2" -> 1)
+    // - "name-X" -> era = X (e.g., "sprouts-1" -> 1)
+    if let Some(dash_pos) = name.rfind('-') {
+        let after_dash = &name[dash_pos + 1..];
+        // Check if there's a dot (major.minor version)
+        if let Some(dot_pos) = after_dash.find('.') {
+            let era_str = &after_dash[..dot_pos];
+            return era_str.parse::<i32>().ok();
+        } else {
+            // Try to parse the whole thing as an integer
+            return after_dash.parse::<i32>().ok();
+        }
+    }
+    None
 }

@@ -55,6 +55,12 @@ Hogaak; Non-Blue
 Depths: GB; Non-Blue
 Depths: GW; Non-Blue
 Mono Black Helm; Combo
+Necrodominance; Combo
+Death and Taxes: BW; Non-Blue
+Death and Taxes: W; Non-Blue
+Death and Taxes: Yorion; Non-Blue
+8-Cast: U; Blue
+8-Cast: UR; Blue
 Other; No Category
 
 ## Game Plans

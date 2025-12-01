@@ -63,6 +63,7 @@ pub struct Match {
     pub match_winner: String,
     #[allow(dead_code)]
     pub created_at: Option<String>,
+    pub era: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -75,6 +76,7 @@ pub struct NewMatch {
     pub event_type: String,
     pub die_roll_winner: String,
     pub match_winner: String,
+    pub era: Option<i32>,
 }
 
 #[derive(Queryable, Selectable, Debug)]
@@ -117,6 +119,7 @@ pub struct Deck {
     pub name: String,
     pub moxfield_url: Option<String>,
     pub created_at: Option<String>,
+    pub era: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -124,6 +127,7 @@ pub struct Deck {
 pub struct NewDeck {
     pub name: String,
     pub moxfield_url: Option<String>,
+    pub era: Option<i32>,
 }
 
 #[derive(Queryable, Selectable, Debug)]

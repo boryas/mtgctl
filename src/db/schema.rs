@@ -16,6 +16,7 @@ diesel::table! {
         name -> Text,
         moxfield_url -> Nullable<Text>,
         created_at -> Nullable<Text>,
+        era -> Nullable<Integer>,
     }
 }
 
@@ -45,6 +46,7 @@ diesel::table! {
         die_roll_winner -> Text,
         match_winner -> Text,
         created_at -> Nullable<Text>,
+        era -> Nullable<Integer>,
     }
 }
 

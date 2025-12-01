@@ -97,7 +97,7 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"
     ).execute(connection)?;
-    
+
     diesel::sql_query(
         "CREATE TABLE IF NOT EXISTS cards (
             card_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,10 +108,13 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
             FOREIGN KEY (deck_id) REFERENCES decks (deck_id) ON DELETE CASCADE
         )"
     ).execute(connection)?;
-    
+
     // Add turns column to games table if it doesn't exist
     add_turns_column_if_missing(connection)?;
-    
+
+    // Add era columns if they don't exist
+    add_era_columns_if_missing(connection)?;
+
     Ok(())
 }
 
@@ -120,11 +123,35 @@ fn add_turns_column_if_missing(connection: &mut SqliteConnection) -> Result<(), 
     let column_exists = diesel::sql_query("SELECT turns FROM games LIMIT 0")
         .execute(connection)
         .is_ok();
-    
+
     if !column_exists {
         diesel::sql_query("ALTER TABLE games ADD COLUMN turns INTEGER CHECK(turns > 0)")
             .execute(connection)?;
     }
-    
+
+    Ok(())
+}
+
+fn add_era_columns_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if era column exists in decks table
+    let decks_era_exists = diesel::sql_query("SELECT era FROM decks LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !decks_era_exists {
+        diesel::sql_query("ALTER TABLE decks ADD COLUMN era INTEGER")
+            .execute(connection)?;
+    }
+
+    // Check if era column exists in matches table
+    let matches_era_exists = diesel::sql_query("SELECT era FROM matches LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !matches_era_exists {
+        diesel::sql_query("ALTER TABLE matches ADD COLUMN era INTEGER")
+            .execute(connection)?;
+    }
+
     Ok(())
 }
