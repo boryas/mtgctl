@@ -1,0 +1,17 @@
+# Lands archetype
+name = "Lands"
+category = "Non-Blue"
+
+# For archetypes with subtypes, use [subtypes.X] sections
+# For standalone archetypes, use a default subtype
+
+[subtypes."Mono Green"]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes."Mono Green".lists]
+"sprouts-2.1" = "https://moxfield.com/..."
+"sprouts-2.2" = "https://moxfield.com/..."
+
+[board_plan]
+description = "Counter Life from the Loam, pressure life total"

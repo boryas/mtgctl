@@ -1,0 +1,18 @@
+# 8-Cast archetype
+name = "8-Cast"
+category = "Blue"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# U variant
+[subtypes.U]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# UR variant
+[subtypes.UR]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]

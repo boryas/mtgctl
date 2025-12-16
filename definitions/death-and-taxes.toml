@@ -1,0 +1,23 @@
+# Death and Taxes archetype
+name = "Death and Taxes"
+category = "Non-Blue"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# BW variant
+[subtypes.BW]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# W variant
+[subtypes.W]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Yorion variant
+[subtypes.Yorion]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]

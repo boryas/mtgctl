@@ -1,0 +1,33 @@
+# Control archetype
+name = "Control"
+category = "Blue"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Bant variant
+[subtypes.Bant]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Esper variant
+[subtypes.Esper]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Grixis variant
+[subtypes.Grixis]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Jeskai variant
+[subtypes.Jeskai]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Sultai variant
+[subtypes.Sultai]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]

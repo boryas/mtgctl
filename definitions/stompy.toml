@@ -1,0 +1,29 @@
+# Stompy archetype
+name = "Stompy"
+category = "Non-Blue"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Eldrazi variant
+[subtypes.Eldrazi]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.Eldrazi.board_plan]
+description = "Counter early threats, save removal for Reality Smasher"
+
+# Mono-Black variant
+[subtypes.Mono-Black]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Moon variant
+[subtypes.Moon]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.Moon.board_plan]
+description = "Counter chalice/moon, remove artifacts, win quickly"

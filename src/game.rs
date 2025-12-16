@@ -4,127 +4,366 @@ use chrono::{Local, NaiveDate};
 use diesel::prelude::*;
 use std::fs;
 use std::collections::HashMap;
+use std::path::Path;
+use serde::Deserialize;
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games};
 
-fn load_deck_names() -> Vec<String> {
-    match fs::read_to_string("definitions.md") {
-        Ok(content) => {
-            let mut in_decks_section = false;
-            content.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    
-                    if line.starts_with("## Decks") {
-                        in_decks_section = true;
-                        return None;
-                    }
-                    
-                    if line.starts_with("##") && !line.starts_with("## Decks") {
-                        in_decks_section = false;
-                        return None;
-                    }
-                    
-                    if !in_decks_section || line.is_empty() {
-                        return None;
-                    }
-                    
-                    if let Some((deck_name, _category)) = line.split_once(';') {
-                        Some(deck_name.trim().to_string())
-                    } else {
-                        Some(line.to_string())
-                    }
-                })
-                .collect()
-        },
-        Err(_) => {
-            // Fallback to hardcoded list if file doesn't exist
-            vec![
-                "Reanimator: UB".to_string(),
-                "Reanimator: BR".to_string(),
-                "Stompy: Moon".to_string(),
-                "Stompy: Eldrazi".to_string(),
-                "Tempo: UB".to_string(),
-                "Tempo: UR".to_string(),
-                "Lands".to_string(),
-                "Omni-tell".to_string(),
-                "Sneak and Show".to_string(),
-                "Painter: R".to_string(),
-                "Painter: U".to_string(),
-                "Mystic Forge".to_string(),
-                "Oops! All Spells".to_string(),
-                "Cephalid Breakfast".to_string(),
-                "Doomsday".to_string(),
-                "Nadu: Midrange".to_string(),
-                "Nadu: Elves".to_string(),
-                "Beanstalk: BUG".to_string(),
-                "Beanstalk: Domain".to_string(),
-                "Beanstalk: Yorion".to_string(),
-                "Storm: TES".to_string(),
-                "Storm: ANT".to_string(),
-                "Storm: Ruby".to_string(),
-                "Storm: Black Saga".to_string(),
-                "Goblins".to_string(),
-                "Combo Elves".to_string(),
-                "Cradle Control".to_string(),
-                "Dredge".to_string(),
-                "Maverick: GW".to_string(),
-                "Stiflenaught".to_string(),
-                "Stoneblade".to_string(),
-                "Miracles".to_string(),
-                "Infect".to_string(),
-                "Merfolk".to_string(),
-                "Cloudpost".to_string(),
-                "Other".to_string(),
-            ]
+#[derive(Debug, Deserialize)]
+struct UnifiedArchetypeDefinition {
+    name: String,
+    category: String,
+    #[serde(default)]
+    game_plans: Vec<String>,
+    #[serde(default)]
+    win_conditions: Vec<String>,
+    #[serde(default)]
+    board_plan: Option<BoardPlan>,
+    #[serde(default)]
+    subtypes: HashMap<String, SubtypeDefinition>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubtypeDefinition {
+    game_plans: Vec<String>,
+    win_conditions: Vec<String>,
+    #[serde(default)]
+    board_plan: Option<BoardPlan>,
+    #[serde(default)]
+    lists: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct BoardPlan {
+    description: String,
+}
+
+// Configuration file structure
+#[derive(Debug, Deserialize, Default)]
+struct Config {
+    #[serde(default)]
+    game_entry: GameEntryConfig,
+    #[serde(default)]
+    stats: StatsConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GameEntryConfig {
+    default_archetype: Option<String>,
+    default_subtype: Option<String>,
+    default_list: Option<String>,
+    default_era: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StatsConfig {
+    #[serde(default)]
+    default_slices: Vec<String>,
+    #[serde(default)]
+    min_games: i64,
+}
+
+// Structure for resolved archetype data (after looking up subtype)
+struct ArchetypeData {
+    game_plans: Vec<String>,
+    win_conditions: Vec<String>,
+    board_plan: Option<BoardPlan>,
+}
+
+/// Parse deck name to extract archetype and optional subtype
+/// Examples:
+///   "Doomsday: Tempo (tempo-doomsday-wasteland-1.0)" -> ("Doomsday", Some("Tempo"))
+///   "Reanimator: UB" -> ("Reanimator", Some("UB"))
+///   "Lands" -> ("Lands", None)
+fn parse_deck_name(deck_name: &str) -> (&str, Option<&str>) {
+    // First check if there's a list name in parentheses
+    let name_without_list = if let Some(pos) = deck_name.find(" (") {
+        &deck_name[..pos]
+    } else {
+        deck_name
+    };
+
+    // Now parse archetype and subtype
+    if let Some((archetype, subtype)) = name_without_list.split_once(": ") {
+        (archetype, Some(subtype))
+    } else {
+        (name_without_list, None)
+    }
+}
+
+/// Convert archetype name to filename
+fn archetype_to_filename(archetype: &str) -> String {
+    archetype
+        .to_lowercase()
+        .replace(" ", "-")
+        .replace("!", "")
+        + ".toml"
+}
+
+/// Load configuration from config.toml
+fn load_config() -> Config {
+    let path = Path::new("config.toml");
+    if let Ok(content) = fs::read_to_string(path) {
+        toml::from_str::<Config>(&content).unwrap_or_default()
+    } else {
+        Config::default()
+    }
+}
+
+/// Load archetype data for a specific deck name
+/// Handles both standalone archetypes and subtypes
+fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
+    let (archetype, subtype) = parse_deck_name(deck_name);
+    let filename = archetype_to_filename(archetype);
+
+    // Try unified definitions first
+    let path = Path::new("definitions").join(&filename);
+
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
+            // If there's a subtype, look it up
+            if let Some(subtype_name) = subtype {
+                if let Some(subtype_def) = unified.subtypes.get(subtype_name) {
+                    return Some(ArchetypeData {
+                        game_plans: subtype_def.game_plans.clone(),
+                        win_conditions: subtype_def.win_conditions.clone(),
+                        board_plan: subtype_def.board_plan.clone(),
+                    });
+                }
+            }
+
+            // No subtype or subtype not found, use base archetype data
+            return Some(ArchetypeData {
+                game_plans: unified.game_plans,
+                win_conditions: unified.win_conditions,
+                board_plan: unified.board_plan,
+            });
         }
     }
+
+    None
+}
+
+/// Load all archetype names from definitions/
+fn load_archetypes() -> Vec<String> {
+    let mut archetypes = Vec::new();
+
+    if let Ok(entries) = fs::read_dir("definitions") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
+                        archetypes.push(unified.name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort alphabetically, but keep "Other" at the end
+    archetypes.sort();
+    if let Some(pos) = archetypes.iter().position(|name| name == "Other") {
+        let other = archetypes.remove(pos);
+        archetypes.push(other);
+    }
+
+    archetypes
+}
+
+/// Load subtypes for a given archetype
+fn load_subtypes(archetype: &str) -> Vec<String> {
+    let filename = archetype_to_filename(archetype);
+    let path = Path::new("definitions").join(&filename);
+
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
+            let mut subtypes: Vec<String> = unified.subtypes.keys().cloned().collect();
+            subtypes.sort();
+            return subtypes;
+        }
+    }
+
+    Vec::new()
+}
+
+/// Load lists for a given archetype and subtype
+fn load_lists(archetype: &str, subtype: &str) -> Vec<String> {
+    let filename = archetype_to_filename(archetype);
+    let path = Path::new("definitions").join(&filename);
+
+    if let Ok(content) = fs::read_to_string(&path) {
+        if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
+            if let Some(subtype_def) = unified.subtypes.get(subtype) {
+                let mut lists: Vec<String> = subtype_def.lists.keys().cloned().collect();
+                lists.sort();
+                return lists;
+            }
+        }
+    }
+
+    Vec::new()
+}
+
+/// Legacy function for backward compatibility - loads historical deck names
+fn load_deck_names() -> Vec<String> {
+    let mut deck_names = Vec::new();
+
+    // If no archetypes found, fall back to definitions.md
+    if deck_names.is_empty() {
+        match fs::read_to_string("definitions.md") {
+            Ok(content) => {
+                let mut in_decks_section = false;
+                deck_names = content.lines()
+                    .filter_map(|line| {
+                        let line = line.trim();
+
+                        if line.starts_with("## Decks") {
+                            in_decks_section = true;
+                            return None;
+                        }
+
+                        if line.starts_with("##") && !line.starts_with("## Decks") {
+                            in_decks_section = false;
+                            return None;
+                        }
+
+                        if !in_decks_section || line.is_empty() {
+                            return None;
+                        }
+
+                        if let Some((deck_name, _category)) = line.split_once(';') {
+                            Some(deck_name.trim().to_string())
+                        } else {
+                            Some(line.to_string())
+                        }
+                    })
+                    .collect();
+            },
+            Err(_) => {
+                // Final fallback to hardcoded list
+                deck_names = vec![
+                    "Reanimator: UB".to_string(),
+                    "Reanimator: BR".to_string(),
+                    "Stompy: Moon".to_string(),
+                    "Stompy: Eldrazi".to_string(),
+                    "Tempo: UB".to_string(),
+                    "Tempo: UR".to_string(),
+                    "Lands".to_string(),
+                    "Omni-tell".to_string(),
+                    "Sneak and Show".to_string(),
+                    "Painter: R".to_string(),
+                    "Painter: U".to_string(),
+                    "Mystic Forge".to_string(),
+                    "Oops! All Spells".to_string(),
+                    "Cephalid Breakfast".to_string(),
+                    "Doomsday".to_string(),
+                    "Nadu: Midrange".to_string(),
+                    "Nadu: Elves".to_string(),
+                    "Beanstalk: BUG".to_string(),
+                    "Beanstalk: Domain".to_string(),
+                    "Beanstalk: Yorion".to_string(),
+                    "Storm: TES".to_string(),
+                    "Storm: ANT".to_string(),
+                    "Storm: Ruby".to_string(),
+                    "Storm: Black Saga".to_string(),
+                    "Goblins".to_string(),
+                    "Combo Elves".to_string(),
+                    "Cradle Control".to_string(),
+                    "Dredge".to_string(),
+                    "Maverick: GW".to_string(),
+                    "Stiflenaught".to_string(),
+                    "Stoneblade".to_string(),
+                    "Miracles".to_string(),
+                    "Infect".to_string(),
+                    "Merfolk".to_string(),
+                    "Cloudpost".to_string(),
+                    "Other".to_string(),
+                ];
+            }
+        }
+    }
+
+    deck_names
 }
 
 fn load_deck_categories() -> HashMap<String, DeckCategory> {
     let mut categories = HashMap::new();
-    
-    match fs::read_to_string("definitions.md") {
-        Ok(content) => {
-            let mut in_decks_section = false;
-            for line in content.lines() {
-                let line = line.trim();
-                
-                if line.starts_with("## Decks") {
-                    in_decks_section = true;
-                    continue;
-                }
-                
-                if line.starts_with("##") && !line.starts_with("## Decks") {
-                    in_decks_section = false;
-                    continue;
-                }
-                
-                if !in_decks_section || line.is_empty() {
-                    continue;
-                }
-                
-                if let Some((deck_name, category_str)) = line.split_once(';') {
-                    let deck_name = deck_name.trim().to_string();
-                    let category_str = category_str.trim();
-                    
-                    let category = match category_str {
-                        "Blue" => DeckCategory::Blue,
-                        "Combo" => DeckCategory::Combo,
-                        "Non-Blue" => DeckCategory::NonBlue,
-                        _ => DeckCategory::Other, // Default for "Other"
-                    };
-                    
-                    categories.insert(deck_name, category);
+
+    // Try unified definitions directory first
+    if let Ok(entries) = fs::read_dir("definitions") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
+                        let category = match unified.category.as_str() {
+                            "Blue" => DeckCategory::Blue,
+                            "Combo" => DeckCategory::Combo,
+                            "Non-Blue" => DeckCategory::NonBlue,
+                            _ => DeckCategory::Other,
+                        };
+
+                        // Add category for each subtype variant
+                        if !unified.subtypes.is_empty() {
+                            for subtype_name in unified.subtypes.keys() {
+                                let deck_name = format!("{}: {}", unified.name, subtype_name);
+                                categories.insert(deck_name, category.clone());
+                            }
+                        } else {
+                            // No subtypes, just add the archetype
+                            categories.insert(unified.name, category);
+                        }
+                    }
                 }
             }
-        },
-        Err(_) => {
-            // Fallback categories if file doesn't exist - empty map will use the hardcoded categorize_deck function
         }
     }
-    
+
+    // If no archetypes found, fall back to definitions.md
+    if categories.is_empty() {
+        match fs::read_to_string("definitions.md") {
+            Ok(content) => {
+                let mut in_decks_section = false;
+                for line in content.lines() {
+                    let line = line.trim();
+
+                    if line.starts_with("## Decks") {
+                        in_decks_section = true;
+                        continue;
+                    }
+
+                    if line.starts_with("##") && !line.starts_with("## Decks") {
+                        in_decks_section = false;
+                        continue;
+                    }
+
+                    if !in_decks_section || line.is_empty() {
+                        continue;
+                    }
+
+                    if let Some((deck_name, category_str)) = line.split_once(';') {
+                        let deck_name = deck_name.trim().to_string();
+                        let category_str = category_str.trim();
+
+                        let category = match category_str {
+                            "Blue" => DeckCategory::Blue,
+                            "Combo" => DeckCategory::Combo,
+                            "Non-Blue" => DeckCategory::NonBlue,
+                            _ => DeckCategory::Other,
+                        };
+
+                        categories.insert(deck_name, category);
+                    }
+                }
+            },
+            Err(_) => {
+                // Fallback categories if file doesn't exist - empty map will use the hardcoded categorize_deck function
+            }
+        }
+    }
+
     categories
 }
 
@@ -348,6 +587,10 @@ enum GameCommands {
         by_opponent_deck: bool,
         #[arg(long, help = "Slice by opponent deck category")]
         by_opponent_deck_category: bool,
+        #[arg(long, help = "Slice by my deck's archetype")]
+        by_my_deck_archetype: bool,
+        #[arg(long, help = "Slice by opponent deck's archetype")]
+        by_opponent_deck_archetype: bool,
         #[arg(long, help = "Slice by game number")]
         by_game_number: bool,
         #[arg(long, help = "Slice by mulligan count")]
@@ -388,20 +631,109 @@ pub fn run(args: GameArgs) {
             by_opponent,
             by_opponent_deck,
             by_opponent_deck_category,
+            by_my_deck_archetype,
+            by_opponent_deck_archetype,
             by_game_number,
             by_mulligans,
             by_game_plan,
             by_win_condition,
             by_game_length,
             by_era
-        } => show_stats(deck, event, era, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_game_number, by_mulligans, by_game_plan, by_win_condition, by_game_length, by_era),
+        } => show_stats(deck, event, era, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_my_deck_archetype, by_opponent_deck_archetype, by_game_number, by_mulligans, by_game_plan, by_win_condition, by_game_length, by_era),
         GameCommands::HtmlStats { output, era } => crate::html_stats::generate_html_stats(&output, era),
     }
 }
 
+/// Three-step deck selection: Archetype -> Subtype -> List
+fn select_deck_three_step(config: &Config) -> String {
+    // Step 1: Select Archetype
+    let archetypes = load_archetypes();
+
+    if archetypes.is_empty() {
+        // No archetypes found, fall back to text input
+        return Input::new()
+            .with_prompt("Your deck name")
+            .interact_text()
+            .unwrap();
+    }
+
+    // Determine default archetype index
+    let mut default_archetype_idx = 0;
+    if let Some(default_archetype) = &config.game_entry.default_archetype {
+        if let Some(idx) = archetypes.iter().position(|a| a == default_archetype) {
+            default_archetype_idx = idx;
+        }
+    }
+
+    let archetype_idx = FuzzySelect::new()
+        .with_prompt("Select archetype")
+        .items(&archetypes)
+        .default(default_archetype_idx)
+        .interact()
+        .unwrap();
+
+    let selected_archetype = &archetypes[archetype_idx];
+
+    // Step 2: Select Subtype
+    let subtypes = load_subtypes(selected_archetype);
+
+    if subtypes.is_empty() {
+        // No subtypes, return just the archetype name
+        return selected_archetype.clone();
+    }
+
+    // Determine default subtype index
+    let mut default_subtype_idx = 0;
+    if let Some(default_subtype) = &config.game_entry.default_subtype {
+        if let Some(idx) = subtypes.iter().position(|s| s == default_subtype) {
+            default_subtype_idx = idx;
+        }
+    }
+
+    let subtype_idx = FuzzySelect::new()
+        .with_prompt("Select subtype")
+        .items(&subtypes)
+        .default(default_subtype_idx)
+        .interact()
+        .unwrap();
+
+    let selected_subtype = &subtypes[subtype_idx];
+
+    // Step 3: Select List
+    let lists = load_lists(selected_archetype, selected_subtype);
+
+    if lists.is_empty() {
+        // No lists defined, return archetype: subtype format
+        return format!("{}: {}", selected_archetype, selected_subtype);
+    }
+
+    // Determine default list index
+    let mut default_list_idx = 0;
+    if let Some(default_list) = &config.game_entry.default_list {
+        if let Some(idx) = lists.iter().position(|l| l == default_list) {
+            default_list_idx = idx;
+        }
+    }
+
+    let list_idx = FuzzySelect::new()
+        .with_prompt("Select list")
+        .items(&lists)
+        .default(default_list_idx)
+        .interact()
+        .unwrap();
+
+    let selected_list = &lists[list_idx];
+
+    // Return the full deck name: "archetype: subtype (list)"
+    format!("{}: {} ({})", selected_archetype, selected_subtype, selected_list)
+}
+
 fn add_match_interactive(date_arg: Option<String>) {
     println!("=== Adding New Match ===");
-    
+
+    // Load configuration
+    let config = load_config();
+
     // Get date
     let date = if let Some(d) = date_arg {
         match NaiveDate::parse_from_str(&d, "%Y-%m-%d") {
@@ -414,39 +746,13 @@ fn add_match_interactive(date_arg: Option<String>) {
     } else {
         Local::now().format("%Y-%m-%d").to_string()
     };
-    
+
     println!("Date: {}", date);
-    
-    // Get deck name with fuzzy select from history
-    let your_decks = load_your_deck_names();
-    let deck_name = if your_decks.is_empty() {
-        // No deck history, use input
-        Input::new()
-            .with_prompt("Your deck name")
-            .interact_text()
-            .unwrap()
-    } else {
-        // Add option for custom deck entry
-        let mut deck_options = your_decks.clone();
-        deck_options.push("Custom (type new deck name)".to_string());
-        
-        let deck_idx = FuzzySelect::new()
-            .with_prompt("Your deck name")
-            .items(&deck_options)
-            .default(0)
-            .interact()
-            .unwrap();
-            
-        if deck_idx == deck_options.len() - 1 {
-            // Custom option selected
-            Input::new()
-                .with_prompt("Enter new deck name")
-                .interact_text()
-                .unwrap()
-        } else {
-            your_decks[deck_idx].clone()
-        }
-    };
+
+    // Three-step deck selection: Archetype -> Subtype -> List
+    let deck_name = select_deck_three_step(&config);
+
+    println!("Selected deck: {}", deck_name);
     
     // Get opponent name with fuzzy select from all opponents
     let opponents = load_opponent_names();
@@ -503,22 +809,15 @@ fn add_match_interactive(date_arg: Option<String>) {
 
     let connection = &mut establish_connection();
 
-    // Look up era from decks table, or parse from deck name if not found
-    let era = {
-        use crate::db::schema::decks;
-        decks::table
-            .filter(decks::name.eq(&deck_name))
-            .select(decks::era)
-            .first::<Option<i32>>(connection)
-            .ok()
-            .flatten()
-            .or_else(|| parse_era_from_deck_name(&deck_name))
-    };
+    // Get current era (eras are time periods, independent of deck choice)
+    // Use config default if set, otherwise auto-detect from database
+    let era = config.game_entry.default_era
+        .or_else(|| get_current_era(connection));
 
     // Create the match without winner and opponent deck (will be determined after games)
     let new_match = NewMatch {
         date,
-        deck_name,
+        deck_name: deck_name.clone(),
         opponent_name,
         opponent_deck: "unknown".to_string(), // Will be updated after match
         event_type,
@@ -526,23 +825,23 @@ fn add_match_interactive(date_arg: Option<String>) {
         match_winner: "unknown".to_string(), // Will be updated after games
         era,
     };
-    
+
     diesel::insert_into(matches::table)
         .values(&new_match)
         .execute(connection)
         .expect("Error saving new match");
-    
+
     // Get the most recent match for this combination (should be the one we just inserted)
     let match_id: i32 = matches::table
         .select(matches::match_id)
         .order(matches::match_id.desc())
         .first(connection)
         .expect("Error getting match ID");
-    
+
     println!("\nMatch created with ID: {}", match_id);
-    
+
     // Now add games and determine match winner
-    let match_winner = add_games_interactive(connection, match_id);
+    let match_winner = add_games_interactive(connection, match_id, &deck_name);
     
     // Check if opponent deck is still unknown after all games
     let current_match = matches::table
@@ -579,15 +878,18 @@ fn add_match_interactive(date_arg: Option<String>) {
     }
 }
 
-fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Winner {
+fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_name: &str) -> Winner {
     println!("\n=== Adding Games (Best of 3) ===");
-    
+
+    // Load archetype-specific definitions, or fall back to global definitions
+    let archetype = load_archetype_data(deck_name);
+
     let mut my_wins = 0;
     let mut opponent_wins = 0;
-    
+
     for game_num in 1..=3 {
         println!("\n--- Game {} ---", game_num);
-        
+
         // Play or draw
         let play_draw = if Confirm::new()
             .with_prompt("Did you play first? (no = draw)")
@@ -598,7 +900,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
         } else {
             PlayDraw::Draw
         };
-        
+
         // Mulligans
         let mulligans: i32 = Input::new()
             .with_prompt("Number of mulligans (0-7)")
@@ -611,20 +913,24 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
             })
             .interact_text()
             .unwrap();
-        
-        // Opening hand plan
-        let game_plans = load_game_plans();
+
+        // Opening hand plan - use archetype-specific or global
+        let game_plans = if let Some(ref arch) = archetype {
+            arch.game_plans.clone()
+        } else {
+            load_game_plans()
+        };
         let game_plans_refs: Vec<&str> = game_plans.iter().map(|s| s.as_str()).collect();
         let mut game_plans_with_custom = game_plans_refs.clone();
         game_plans_with_custom.push("Custom (type your own)");
-        
+
         let plan_idx = FuzzySelect::new()
             .with_prompt("Opening hand plan")
             .items(&game_plans_with_custom)
             .default(0)
             .interact()
             .unwrap();
-            
+
         let opening_hand_plan = if plan_idx == game_plans_with_custom.len() - 1 {
             // Custom option selected
             let custom_plan: String = Input::new()
@@ -650,21 +956,26 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32) -> Wi
             opponent_wins += 1;
             Winner::Opponent
         };
-        
-        // Win condition (only if you won)
+
+
+        // Win condition (only if you won) - use archetype-specific or global
         let win_condition = if matches!(game_winner, Winner::Me) {
-            let win_cons = load_win_conditions();
+            let win_cons = if let Some(ref arch) = archetype {
+                arch.win_conditions.clone()
+            } else {
+                load_win_conditions()
+            };
             let win_cons_refs: Vec<&str> = win_cons.iter().map(|s| s.as_str()).collect();
             let mut win_cons_with_custom = win_cons_refs.clone();
             win_cons_with_custom.push("Custom (type your own)");
-            
+
             let win_idx = FuzzySelect::new()
                 .with_prompt("What did you win with?")
                 .items(&win_cons_with_custom)
                 .default(0)
                 .interact()
                 .unwrap();
-                
+
             if win_idx == win_cons_with_custom.len() - 1 {
                 // Custom option selected
                 let custom_win: String = Input::new()
@@ -897,6 +1208,8 @@ fn show_stats(
     by_opponent: bool,
     by_opponent_deck: bool,
     by_opponent_deck_category: bool,
+    by_my_deck_archetype: bool,
+    by_opponent_deck_archetype: bool,
     by_game_number: bool,
     by_mulligans: bool,
     by_game_plan: bool,
@@ -962,10 +1275,13 @@ fn show_stats(
     
     // Show overall statistics first
     show_overall_stats(&all_matches, &all_games);
-    
+
+    // Load configuration
+    let config = load_config();
+
     // Handle slice selection - determine which slices to show
     let mut slices_to_show = Vec::new();
-    
+
     if by_my_deck {
         slices_to_show.push("my-deck");
     }
@@ -977,6 +1293,12 @@ fn show_stats(
     }
     if by_opponent_deck_category {
         slices_to_show.push("deck-category");
+    }
+    if by_my_deck_archetype {
+        slices_to_show.push("my-deck-archetype");
+    }
+    if by_opponent_deck_archetype {
+        slices_to_show.push("opponent-deck-archetype");
     }
     if by_game_number {
         slices_to_show.push("game-number");
@@ -997,13 +1319,22 @@ fn show_stats(
         slices_to_show.push("era");
     }
 
+    // If no slices specified via flags, use config defaults
+    if slices_to_show.is_empty() && !config.stats.default_slices.is_empty() {
+        for slice in &config.stats.default_slices {
+            slices_to_show.push(slice.as_str());
+        }
+    }
+
     if interactive_slice {
         // Interactive slice selection
         let slice_options = vec![
             "None (no slicing)",
             "my-deck",
+            "my-deck-archetype",
             "opponent",
             "opponent-deck",
+            "opponent-deck-archetype",
             "deck-category",
             "game-number",
             "mulligans",
@@ -1027,7 +1358,7 @@ fn show_stats(
                 let slice_type = slice_options[s];
                 println!("Sliced by: {}", slice_type);
                 println!();
-                show_sliced_stats(&all_matches, &all_games, slice_type);
+                show_sliced_stats(&all_matches, &all_games, slice_type, config.stats.min_games);
             },
             Err(_) => {
                 // Fallback to no slicing if not interactive
@@ -1038,7 +1369,7 @@ fn show_stats(
         for slice_type in slices_to_show {
             println!("Sliced by: {}", slice_type);
             println!();
-            show_sliced_stats(&all_matches, &all_games, slice_type);
+            show_sliced_stats(&all_matches, &all_games, slice_type, config.stats.min_games);
         }
     }
 }
@@ -1135,7 +1466,14 @@ fn show_overall_stats(all_matches: &[Match], all_games: &[Game]) {
     println!();
 }
 
-fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str) {
+/// Extract archetype from deck name (ignoring subtype)
+/// Examples: "Reanimator: UB" -> "Reanimator", "Lands" -> "Lands"
+fn extract_archetype(deck_name: &str) -> String {
+    let (archetype, _subtype) = parse_deck_name(deck_name);
+    archetype.to_string()
+}
+
+fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str, min_games: i64) {
     match slice_type {
         "my-deck" => {
             println!("=== Statistics by My Deck ===");
@@ -1178,6 +1516,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             });
 
             for (deck, _matches, wins, total, win_rate, avg_mulligans, avg_turns) in deck_vec {
+                // Apply minimum games filter
+                if total < min_games as usize {
+                    continue;
+                }
                 let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
                 println!("  with {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
                          deck, wins, total - wins, win_rate, avg_mulligans, turns_str);
@@ -1325,7 +1667,103 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                          category.to_string(), wins, total - wins, win_rate, avg_mulligans, turns_str);
             }
         },
-        
+
+        "my-deck-archetype" => {
+            println!("=== Statistics by My Deck Archetype ===");
+            let mut archetype_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
+            for m in all_matches {
+                let archetype = extract_archetype(&m.deck_name);
+                archetype_stats.entry(archetype).or_default().push(m);
+            }
+
+            let mut archetype_vec: Vec<_> = archetype_stats.into_iter()
+                .map(|(archetype, matches)| {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    let total = matches.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+
+                    // Get games for these matches
+                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (archetype, wins, total, win_rate, avg_mulligans, avg_turns)
+                })
+                .collect();
+
+            // Sort by total games descending, then by win rate descending
+            archetype_vec.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
+            });
+
+            for (archetype, wins, total, win_rate, avg_mulligans, avg_turns) in archetype_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  with {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         archetype, wins, total - wins, win_rate, avg_mulligans, turns_str);
+            }
+        },
+
+        "opponent-deck-archetype" => {
+            println!("=== Statistics by Opponent Deck Archetype ===");
+            let mut archetype_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
+            for m in all_matches {
+                let archetype = extract_archetype(&m.opponent_deck);
+                archetype_stats.entry(archetype).or_default().push(m);
+            }
+
+            let mut archetype_vec: Vec<_> = archetype_stats.into_iter()
+                .map(|(archetype, matches)| {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    let total = matches.len();
+                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
+
+                    // Get games for these matches
+                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+                    // Calculate average mulligans
+                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+                    // Calculate average game length
+                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    let avg_turns = if !games_with_turns.is_empty() {
+                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        Some(total_turns as f64 / games_with_turns.len() as f64)
+                    } else {
+                        None
+                    };
+
+                    (archetype, wins, total, win_rate, avg_mulligans, avg_turns)
+                })
+                .collect();
+
+            // Sort by total games descending, then by win rate descending
+            archetype_vec.sort_by(|a, b| {
+                b.2.cmp(&a.2)
+                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
+            });
+
+            for (archetype, wins, total, win_rate, avg_mulligans, avg_turns) in archetype_vec {
+                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
+                println!("  vs {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
+                         archetype, wins, total - wins, win_rate, avg_mulligans, turns_str);
+            }
+        },
+
         "game-number" => {
             println!("=== Statistics by Game Number ===");
             let mut game_stats: std::collections::HashMap<i32, Vec<&Game>> = std::collections::HashMap::new();
@@ -1629,7 +2067,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
         },
 
         _ => {
-            println!("Unknown slice type: {}. Available options: my-deck, opponent, opponent-deck, deck-category, game-number, mulligans, game-plan, win-condition, game-length, era", slice_type);
+            println!("Unknown slice type: {}. Available options: my-deck, my-deck-archetype, opponent, opponent-deck, opponent-deck-archetype, deck-category, game-number, mulligans, game-plan, win-condition, game-length, era", slice_type);
         }
     }
     println!();
@@ -2146,30 +2584,41 @@ fn show_board_plan(deck_name: Option<String>) {
             // Interactive mode - select from available decks
             let deck_names = load_deck_names();
             let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-            
+
             let selection = FuzzySelect::new()
                 .with_prompt("Select opponent deck to see board plan")
                 .items(&deck_names_refs)
                 .default(0)
                 .interact()
                 .unwrap();
-                
+
             deck_names[selection].clone()
         }
     };
-    
-    let board_plans = load_board_plans();
-    
+
     println!("=== Board Plan vs {} ===", deck_name);
-    
+
+    // Try to load from archetype definition first
+    if let Some(archetype) = load_archetype_data(&deck_name) {
+        if let Some(board_plan) = archetype.board_plan {
+            println!("{}", board_plan.description);
+            return;
+        }
+    }
+
+    // Fall back to board_plans.txt
+    let board_plans = load_board_plans();
     match board_plans.get(&deck_name) {
         Some(plan) => {
             println!("{}", plan);
         },
         None => {
             println!("No board plan found for '{}'", deck_name);
-            println!("You can add one by editing board_plans.txt");
-            println!("Format: Deck Name | Board Plan");
+            println!("You can add one by creating/editing definitions/{}.toml",
+                deck_name.to_lowercase().replace(": ", "-").replace(" ", "-").replace(",", ""));
+            println!("\nAdd this section to the file:");
+            println!("[board_plan]");
+            println!("description = \"Your board plan here\"");
         }
     }
 }
@@ -2240,6 +2689,16 @@ fn remove_match_interactive(match_id: i32) {
     } else {
         println!("No match was deleted (this shouldn't happen)");
     }
+}
+
+/// Get the current era (latest era from all matches)
+/// Eras are time periods independent of deck choice
+fn get_current_era(connection: &mut SqliteConnection) -> Option<i32> {
+    matches::table
+        .select(diesel::dsl::max(matches::era))
+        .first::<Option<i32>>(connection)
+        .ok()
+        .flatten()
 }
 
 fn parse_era_from_deck_name(name: &str) -> Option<i32> {

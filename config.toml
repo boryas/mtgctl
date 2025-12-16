@@ -1,0 +1,28 @@
+# mtgctl Configuration File
+
+[game_entry]
+# Default archetype to pre-select during match entry
+# Example: "Doomsday", "Lands"
+default_archetype = "Doomsday"
+
+# Default subtype to pre-select (only used if default_archetype is set)
+# Example: "Tempo", "Mono Green"
+default_subtype = "Tempo"
+
+# Default list/version to pre-select (only used if archetype and subtype are set)
+# Example: "tempo-doomsday-wasteland-1.0", "sprouts-2.1"
+default_list = "tempo-doomsday-wasteland-1.0"
+
+# Default era to assign to new matches
+# Use an integer without quotes (e.g., default_era = 2)
+# Leave empty or comment out to auto-detect current era from database
+default_era = 2
+
+[stats]
+# Default slicing dimensions to show
+# Options: "era", "my-deck", "opponent-deck", "my-deck-archetype", "opponent-deck-archetype"
+default_slices = ["era", "my-deck-archetype"]
+
+# Minimum games threshold for showing a slice
+# Only slices with this many or more games will be displayed
+min_games = 0

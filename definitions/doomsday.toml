@@ -1,0 +1,21 @@
+# Doomsday archetype
+name = "Doomsday"
+category = "Combo"
+
+[subtypes.Combo]
+game_plans = ["combo", "cantrips", "control"]
+win_conditions = ["doomsday", "other"]
+
+[subtypes.Combo.lists]
+# Add your Combo doomsday lists here
+# "combo-doomsday-1.0" = "https://moxfield.com/..."
+
+[subtypes.Tempo]
+game_plans = ["combo", "cantrips", "control", "creatures"]
+win_conditions = ["doomsday", "beatdown", "other"]
+
+[subtypes.Tempo.lists]
+"tempo-doomsday-wasteland-1.0" = "https://moxfield.com/decks/XQ8cIaH-Q0-yjdNzdN3JkQ"
+
+[board_plan]
+description = "flute doomsday, disrupt pile"

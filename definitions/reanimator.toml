@@ -1,0 +1,24 @@
+# Reanimator archetype
+name = "Reanimator"
+category = "Combo"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# BR variant
+[subtypes.BR]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.BR.board_plan]
+description = "Force backup, counter reanimation spells, surgical Griselbrand"
+
+# UB variant
+[subtypes.UB]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.UB.board_plan]
+description = "Force backup, counter reanimation spells, pressure with creatures"

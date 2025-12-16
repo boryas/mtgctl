@@ -1,0 +1,33 @@
+# Tempo archetype
+name = "Tempo"
+category = "Blue"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Grixis variant
+[subtypes.Grixis]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# UB variant
+[subtypes.UB]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.UB.board_plan]
+description = "Counter key threats, protect your gameplan, grind value"
+
+# UR variant
+[subtypes.UR]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.UR.board_plan]
+description = "Counter Delver/Murktide, answer Ragavan quickly"
+
+# Named deck versions with Moxfield links
+[versions]
+# Example: "tempo-2.1" = "https://moxfield.com/decks/abc123"

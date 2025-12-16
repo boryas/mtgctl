@@ -1,0 +1,24 @@
+# Nadu archetype
+name = "Nadu"
+category = "Combo"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Elves variant
+[subtypes.Elves]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.Elves.board_plan]
+description = "Wipe the board, counter Nadu, pressure life total"
+
+# Midrange variant
+[subtypes.Midrange]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.Midrange.board_plan]
+description = "Remove Nadu, counter key spells, outvalue"

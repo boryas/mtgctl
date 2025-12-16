@@ -1,0 +1,34 @@
+# Storm archetype
+name = "Storm"
+category = "Combo"
+
+# Base game plans and win conditions
+# (can be overridden by subtypes)
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# ANT variant
+[subtypes.ANT]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.ANT.board_plan]
+description = "Force backup, counter tutors, pressure life total"
+
+# Black Saga variant
+[subtypes.Black Saga]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# Ruby variant
+[subtypes.Ruby]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+# TES variant
+[subtypes.TES]
+game_plans = ["combo", "saga", "mana denial", "hate", "value"]
+win_conditions = ["marit lage", "constructs", "concede"]
+
+[subtypes.TES.board_plan]
+description = "Force backup, counter ritual effects, surgical key pieces"
