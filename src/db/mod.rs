@@ -115,6 +115,9 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
     // Add era columns if they don't exist
     add_era_columns_if_missing(connection)?;
 
+    // Add loss_reason column to games table if it doesn't exist
+    add_loss_reason_column_if_missing(connection)?;
+
     Ok(())
 }
 
@@ -150,6 +153,20 @@ fn add_era_columns_if_missing(connection: &mut SqliteConnection) -> Result<(), B
 
     if !matches_era_exists {
         diesel::sql_query("ALTER TABLE matches ADD COLUMN era INTEGER")
+            .execute(connection)?;
+    }
+
+    Ok(())
+}
+
+fn add_loss_reason_column_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if the column exists by trying to select it
+    let column_exists = diesel::sql_query("SELECT loss_reason FROM games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !column_exists {
+        diesel::sql_query("ALTER TABLE games ADD COLUMN loss_reason TEXT")
             .execute(connection)?;
     }
 

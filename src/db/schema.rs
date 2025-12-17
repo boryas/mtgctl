@@ -30,6 +30,7 @@ diesel::table! {
         opening_hand_plan -> Nullable<Text>,
         game_winner -> Text,
         win_condition -> Nullable<Text>,
+        loss_reason -> Nullable<Text>,
         turns -> Nullable<Integer>,
         created_at -> Nullable<Text>,
     }

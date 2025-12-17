@@ -1,11 +1,12 @@
 use clap::{Args, Subcommand};
-use dialoguer::{Input, FuzzySelect, Confirm};
+use dialoguer::{Input, FuzzySelect, Confirm, MultiSelect};
 use chrono::{Local, NaiveDate};
 use diesel::prelude::*;
 use std::fs;
 use std::collections::HashMap;
 use std::path::Path;
 use serde::Deserialize;
+use comfy_table::{Table, Cell, Attribute, ContentArrangement};
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games};
@@ -19,6 +20,8 @@ struct UnifiedArchetypeDefinition {
     #[serde(default)]
     win_conditions: Vec<String>,
     #[serde(default)]
+    loss_reasons: Vec<String>,
+    #[serde(default)]
     board_plan: Option<BoardPlan>,
     #[serde(default)]
     subtypes: HashMap<String, SubtypeDefinition>,
@@ -28,6 +31,8 @@ struct UnifiedArchetypeDefinition {
 struct SubtypeDefinition {
     game_plans: Vec<String>,
     win_conditions: Vec<String>,
+    #[serde(default)]
+    loss_reasons: Vec<String>,
     #[serde(default)]
     board_plan: Option<BoardPlan>,
     #[serde(default)]
@@ -59,15 +64,52 @@ struct GameEntryConfig {
 #[derive(Debug, Deserialize, Default)]
 struct StatsConfig {
     #[serde(default)]
-    default_slices: Vec<String>,
-    #[serde(default)]
     min_games: i64,
+    #[serde(default)]
+    filters: StatsFilters,
+    #[serde(default)]
+    default_groupbys: Vec<String>,
+    #[serde(default)]
+    default_statistics: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct StatsFilters {
+    era: Option<i32>,
+    my_deck: Option<String>,
+    opponent: Option<String>,
+    opponent_deck: Option<String>,
+    event_type: Option<String>,
+}
+
+// Statistics row data
+#[derive(Clone)]
+struct StatsRow {
+    label: String,
+    match_wins: usize,
+    match_losses: usize,
+    match_count: usize,
+    match_win_rate: f64,
+    game_wins: usize,
+    game_losses: usize,
+    game_count: usize,
+    #[allow(dead_code)]
+    game_win_rate: f64,
+    avg_mulligans: f64,
+    avg_win_mulligans: f64,
+    avg_loss_mulligans: f64,
+    avg_game_length: Option<f64>,
+    avg_win_length: Option<f64>,
+    avg_loss_length: Option<f64>,
+    win_conditions: HashMap<String, usize>,
+    loss_conditions: HashMap<String, usize>,
 }
 
 // Structure for resolved archetype data (after looking up subtype)
 struct ArchetypeData {
     game_plans: Vec<String>,
     win_conditions: Vec<String>,
+    loss_reasons: Vec<String>,
     board_plan: Option<BoardPlan>,
 }
 
@@ -128,6 +170,7 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
                     return Some(ArchetypeData {
                         game_plans: subtype_def.game_plans.clone(),
                         win_conditions: subtype_def.win_conditions.clone(),
+                        loss_reasons: subtype_def.loss_reasons.clone(),
                         board_plan: subtype_def.board_plan.clone(),
                     });
                 }
@@ -137,6 +180,7 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
             return Some(ArchetypeData {
                 game_plans: unified.game_plans,
                 win_conditions: unified.win_conditions,
+                loss_reasons: unified.loss_reasons,
                 board_plan: unified.board_plan,
             });
         }
@@ -480,16 +524,33 @@ fn load_your_deck_names() -> Vec<String> {
 
 fn load_opponent_names() -> Vec<String> {
     let connection = &mut establish_connection();
-    
+
     // Load all unique opponent names ordered by most recent match
     let opponent_names: Result<Vec<String>, _> = matches::table
         .select(matches::opponent_name)
         .distinct()
         .order(matches::created_at.desc())
         .load(connection);
-    
+
     match opponent_names {
         Ok(names) => names,
+        Err(_) => vec![], // Return empty vec if query fails
+    }
+}
+
+fn load_opponent_deck_names() -> Vec<String> {
+    let connection = &mut establish_connection();
+
+    // Load all unique opponent deck names ordered by most recent match
+    let opponent_decks: Result<Vec<String>, _> = matches::table
+        .select(matches::opponent_deck)
+        .filter(matches::opponent_deck.ne("unknown"))
+        .distinct()
+        .order(matches::created_at.desc())
+        .load(connection);
+
+    match opponent_decks {
+        Ok(decks) => decks,
         Err(_) => vec![], // Return empty vec if query fails
     }
 }
@@ -571,38 +632,8 @@ enum GameCommands {
         match_id: i32,
     },
     Stats {
-        #[arg(long, help = "Filter by deck name")]
-        deck: Option<String>,
-        #[arg(long, help = "Filter by event type")]
-        event: Option<String>,
-        #[arg(long, help = "Filter by era(s): single (e.g., '2'), multiple (e.g., '1,2,3'), or 'all'. Defaults to latest era")]
-        era: Option<String>,
-        #[arg(long, help = "Show interactive slice selection menu")]
-        slice: bool,
-        #[arg(long, help = "Slice by my deck")]
-        by_my_deck: bool,
-        #[arg(long, help = "Slice by opponent")]
-        by_opponent: bool,
-        #[arg(long, help = "Slice by opponent deck")]
-        by_opponent_deck: bool,
-        #[arg(long, help = "Slice by opponent deck category")]
-        by_opponent_deck_category: bool,
-        #[arg(long, help = "Slice by my deck's archetype")]
-        by_my_deck_archetype: bool,
-        #[arg(long, help = "Slice by opponent deck's archetype")]
-        by_opponent_deck_archetype: bool,
-        #[arg(long, help = "Slice by game number")]
-        by_game_number: bool,
-        #[arg(long, help = "Slice by mulligan count")]
-        by_mulligans: bool,
-        #[arg(long, help = "Slice by game plan")]
-        by_game_plan: bool,
-        #[arg(long, help = "Slice by win condition")]
-        by_win_condition: bool,
-        #[arg(long, help = "Slice by game length")]
-        by_game_length: bool,
-        #[arg(long, help = "Slice by era")]
-        by_era: bool,
+        #[arg(long, help = "Skip interactive prompts and use config defaults")]
+        defaults: bool,
     },
     HtmlStats {
         #[arg(long, short, default_value = "stats.html", help = "Output HTML file path")]
@@ -622,24 +653,7 @@ pub fn run(args: GameArgs) {
         GameCommands::AddDeck { deck_name } => add_deck_to_list(deck_name),
         GameCommands::BoardPlan { deck_name } => show_board_plan(deck_name),
         GameCommands::RemoveMatch { match_id } => remove_match_interactive(match_id),
-        GameCommands::Stats {
-            deck,
-            event,
-            era,
-            slice,
-            by_my_deck,
-            by_opponent,
-            by_opponent_deck,
-            by_opponent_deck_category,
-            by_my_deck_archetype,
-            by_opponent_deck_archetype,
-            by_game_number,
-            by_mulligans,
-            by_game_plan,
-            by_win_condition,
-            by_game_length,
-            by_era
-        } => show_stats(deck, event, era, slice, by_my_deck, by_opponent, by_opponent_deck, by_opponent_deck_category, by_my_deck_archetype, by_opponent_deck_archetype, by_game_number, by_mulligans, by_game_plan, by_win_condition, by_game_length, by_era),
+        GameCommands::Stats { defaults } => show_stats_interactive(defaults),
         GameCommands::HtmlStats { output, era } => crate::html_stats::generate_html_stats(&output, era),
     }
 }
@@ -990,7 +1004,43 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
         } else {
             None
         };
-        
+
+        // Loss reason (only if you lost) - use archetype-specific
+        let loss_reason = if matches!(game_winner, Winner::Opponent) {
+            if let Some(ref arch) = archetype {
+                if !arch.loss_reasons.is_empty() {
+                    let loss_reasons_refs: Vec<&str> = arch.loss_reasons.iter().map(|s| s.as_str()).collect();
+                    let mut loss_reasons_with_custom = loss_reasons_refs.clone();
+                    loss_reasons_with_custom.push("Custom (type your own)");
+
+                    let loss_idx = FuzzySelect::new()
+                        .with_prompt("Why did you lose?")
+                        .items(&loss_reasons_with_custom)
+                        .default(0)
+                        .interact()
+                        .unwrap();
+
+                    if loss_idx == loss_reasons_with_custom.len() - 1 {
+                        // Custom option selected
+                        let custom_loss: String = Input::new()
+                            .with_prompt("Enter custom loss reason")
+                            .allow_empty(true)
+                            .interact_text()
+                            .unwrap();
+                        if custom_loss.is_empty() { None } else { Some(custom_loss) }
+                    } else {
+                        Some(arch.loss_reasons[loss_idx].clone())
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Number of turns
         let turns: Option<i32> = Input::new()
             .with_prompt("How many turns did the game last? (optional, press Enter to skip)")
@@ -1017,6 +1067,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
             opening_hand_plan,
             game_winner: game_winner.to_string(),
             win_condition,
+            loss_reason,
             turns,
         };
         
@@ -1151,6 +1202,9 @@ fn show_match_details(match_id: i32) {
         if let Some(condition) = &game.win_condition {
             println!("  Win condition: {}", condition);
         }
+        if let Some(reason) = &game.loss_reason {
+            println!("  Loss reason: {}", reason);
+        }
         if let Some(turns) = &game.turns {
             println!("  Turns: {}", turns);
         }
@@ -1162,29 +1216,6 @@ enum EraFilter {
     Eras(Vec<i32>),
 }
 
-fn parse_era_filter(era_arg: Option<&str>, connection: &mut SqliteConnection) -> EraFilter {
-    match era_arg {
-        Some("all") => EraFilter::All,
-        Some(era_str) => {
-            // Parse comma-separated list of eras
-            let eras: Vec<i32> = era_str
-                .split(',')
-                .filter_map(|s| s.trim().parse::<i32>().ok())
-                .collect();
-
-            if eras.is_empty() {
-                // If parsing failed, default to latest era
-                get_default_era_filter(connection)
-            } else {
-                EraFilter::Eras(eras)
-            }
-        }
-        None => {
-            // Default to latest era if no era specified
-            get_default_era_filter(connection)
-        }
-    }
-}
 
 fn get_default_era_filter(connection: &mut SqliteConnection) -> EraFilter {
     // Get the maximum era from the matches table
@@ -1199,271 +1230,567 @@ fn get_default_era_filter(connection: &mut SqliteConnection) -> EraFilter {
     }
 }
 
-fn show_stats(
-    deck_filter: Option<String>,
-    event_filter: Option<String>,
-    era_filter: Option<String>,
-    interactive_slice: bool,
-    by_my_deck: bool,
-    by_opponent: bool,
-    by_opponent_deck: bool,
-    by_opponent_deck_category: bool,
-    by_my_deck_archetype: bool,
-    by_opponent_deck_archetype: bool,
-    by_game_number: bool,
-    by_mulligans: bool,
-    by_game_plan: bool,
-    by_win_condition: bool,
-    by_game_length: bool,
-    by_era: bool
-) {
+/// Calculate statistics for a group of matches and games
+fn calculate_stats(label: String, matches: &[&Match], all_games: &[Game]) -> StatsRow {
+    let match_count = matches.len();
+    let match_wins = matches.iter().filter(|m| m.match_winner == "me").count();
+    let match_losses = match_count - match_wins;
+    let match_win_rate = if match_count > 0 { (match_wins as f64 / match_count as f64) * 100.0 } else { 0.0 };
+
+    // Get games for these matches
+    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
+    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
+
+    let game_count = games.len();
+    let game_wins = games.iter().filter(|g| g.game_winner == "me").count();
+    let game_losses = game_count - game_wins;
+    let game_win_rate = if game_count > 0 { (game_wins as f64 / game_count as f64) * 100.0 } else { 0.0 };
+
+    // Mulligan statistics
+    let winning_games: Vec<&Game> = games.iter().filter(|g| g.game_winner == "me").copied().collect();
+    let losing_games: Vec<&Game> = games.iter().filter(|g| g.game_winner == "opponent").copied().collect();
+
+    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+    let win_mulligans: i32 = winning_games.iter().map(|g| g.mulligans).sum();
+    let avg_win_mulligans = if !winning_games.is_empty() { win_mulligans as f64 / winning_games.len() as f64 } else { 0.0 };
+
+    let loss_mulligans: i32 = losing_games.iter().map(|g| g.mulligans).sum();
+    let avg_loss_mulligans = if !losing_games.is_empty() { loss_mulligans as f64 / losing_games.len() as f64 } else { 0.0 };
+
+    // Game length statistics
+    let games_with_turns: Vec<&Game> = games.iter().filter(|g| g.turns.is_some()).copied().collect();
+    let avg_game_length = if !games_with_turns.is_empty() {
+        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        Some(total_turns as f64 / games_with_turns.len() as f64)
+    } else {
+        None
+    };
+
+    let win_games_with_turns: Vec<&Game> = winning_games.iter().filter(|g| g.turns.is_some()).copied().collect();
+    let avg_win_length = if !win_games_with_turns.is_empty() {
+        let total_turns: i32 = win_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        Some(total_turns as f64 / win_games_with_turns.len() as f64)
+    } else {
+        None
+    };
+
+    let loss_games_with_turns: Vec<&Game> = losing_games.iter().filter(|g| g.turns.is_some()).copied().collect();
+    let avg_loss_length = if !loss_games_with_turns.is_empty() {
+        let total_turns: i32 = loss_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        Some(total_turns as f64 / loss_games_with_turns.len() as f64)
+    } else {
+        None
+    };
+
+    // Win/Loss conditions
+    let mut win_conditions = HashMap::new();
+    for game in winning_games.iter() {
+        if let Some(condition) = &game.win_condition {
+            *win_conditions.entry(condition.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut loss_conditions = HashMap::new();
+    for game in losing_games.iter() {
+        if let Some(reason) = &game.loss_reason {
+            *loss_conditions.entry(reason.clone()).or_insert(0) += 1;
+        }
+    }
+
+    StatsRow {
+        label,
+        match_wins,
+        match_losses,
+        match_count,
+        match_win_rate,
+        game_wins,
+        game_losses,
+        game_count,
+        game_win_rate,
+        avg_mulligans,
+        avg_win_mulligans,
+        avg_loss_mulligans,
+        avg_game_length,
+        avg_win_length,
+        avg_loss_length,
+        win_conditions,
+        loss_conditions,
+    }
+}
+
+/// Display statistics in a table format with selected columns
+fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str) {
+    if rows.is_empty() {
+        return;
+    }
+
+    let mut table = Table::new();
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+
+    // Build header row
+    let mut headers = vec![""];
+    for &stat_idx in selected_stats {
+        match stat_idx {
+            0 => headers.push("Win Rate"),
+            1 => headers.push("Matches"),
+            2 => headers.push("Games"),
+            3 => headers.push("Mulligans"),
+            4 => headers.push("Game Length"),
+            5 => headers.push("Win Conditions"),
+            6 => headers.push("Loss Conditions"),
+            _ => {}
+        }
+    }
+
+    table.set_header(headers);
+
+    // Build data rows
+    for row in rows {
+        let mut cells = vec![Cell::new(&row.label).add_attribute(Attribute::Bold)];
+
+        for &stat_idx in selected_stats {
+            let cell_content = match stat_idx {
+                0 => {
+                    // Win Rate
+                    format!("{:.1}% ({}-{})", row.match_win_rate, row.match_wins, row.match_losses)
+                },
+                1 => {
+                    // Match Count
+                    format!("{} ({}-{})", row.match_count, row.match_wins, row.match_losses)
+                },
+                2 => {
+                    // Game Count
+                    format!("{} ({}-{})", row.game_count, row.game_wins, row.game_losses)
+                },
+                3 => {
+                    // Mulligans
+                    format!("{:.2} (W:{:.2} L:{:.2})", row.avg_mulligans, row.avg_win_mulligans, row.avg_loss_mulligans)
+                },
+                4 => {
+                    // Game Length
+                    if let Some(avg) = row.avg_game_length {
+                        let win_str = row.avg_win_length.map(|l| format!("{:.1}", l)).unwrap_or_else(|| "-".to_string());
+                        let loss_str = row.avg_loss_length.map(|l| format!("{:.1}", l)).unwrap_or_else(|| "-".to_string());
+                        format!("{:.1} (W:{} L:{})", avg, win_str, loss_str)
+                    } else {
+                        "-".to_string()
+                    }
+                },
+                5 => {
+                    // Win Conditions
+                    let mut conditions: Vec<_> = row.win_conditions.iter().collect();
+                    conditions.sort_by(|a, b| b.1.cmp(a.1));
+                    conditions.iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                6 => {
+                    // Loss Conditions
+                    let mut conditions: Vec<_> = row.loss_conditions.iter().collect();
+                    conditions.sort_by(|a, b| b.1.cmp(a.1));
+                    conditions.iter()
+                        .map(|(k, v)| format!("{}: {}", k, v))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                _ => String::new(),
+            };
+            cells.push(Cell::new(cell_content));
+        }
+
+        table.add_row(cells);
+    }
+
+    println!("\n{}", title);
+    println!("{}", table);
+}
+
+/// Interactive stats with three-step selection: Filters, Group-bys, Statistics
+fn show_stats_interactive(use_defaults: bool) {
     let connection = &mut establish_connection();
+    let config = load_config();
 
-    // Determine era filter
-    let era_filter_parsed = parse_era_filter(era_filter.as_deref(), connection);
+    println!("=== Match Statistics ===\n");
 
-    // Build the base query
+    // Apply filters from config or prompt interactively
+    let mut deck_name_filter: Option<String> = None;
+    let mut opponent_name_filter: Option<String> = None;
+    let mut opponent_deck_filter: Option<String> = None;
+    let mut event_type_filter: Option<String> = None;
+    let mut era_values: Option<Vec<i32>> = None;
+
+    if use_defaults {
+        // Use config defaults for filters
+        if let Some(era) = config.stats.filters.era {
+            era_values = Some(vec![era]);
+        }
+        deck_name_filter = config.stats.filters.my_deck.clone();
+        opponent_name_filter = config.stats.filters.opponent.clone();
+        opponent_deck_filter = config.stats.filters.opponent_deck.clone();
+        event_type_filter = config.stats.filters.event_type.clone();
+    } else {
+        // Interactive filter selection
+        let filter_options = vec![
+            "Era (latest only)",
+            "Era (all)",
+            "My Archetype",
+            "My Subtype",
+            "My List",
+            "Opponent",
+            "Opponent Deck",
+            "Event Type",
+        ];
+
+        // Pre-select filters based on config
+        let filter_defaults = vec![
+            config.stats.filters.era.is_some(),           // Era (latest only)
+            false,                                         // Era (all)
+            config.stats.filters.my_deck.is_some(),       // My Archetype
+            false,                                         // My Subtype (covered by my_deck)
+            false,                                         // My List (covered by my_deck)
+            config.stats.filters.opponent.is_some(),      // Opponent
+            config.stats.filters.opponent_deck.is_some(), // Opponent Deck
+            config.stats.filters.event_type.is_some(),    // Event Type
+        ];
+
+        let selected_filters = MultiSelect::new()
+            .with_prompt("Select filters (space to select, enter to continue)")
+            .items(&filter_options)
+            .defaults(&filter_defaults)
+            .interact()
+            .unwrap();
+
+        // Get all available options for fuzzy selection
+        let all_decks = load_your_deck_names();
+        let all_opponents = load_opponent_names();
+        let all_opponent_decks = load_opponent_deck_names();
+        let event_types = vec!["League", "Challenge", "Prelim", "Casual"];
+
+        // Extract unique archetypes, subtypes, and lists from deck names
+        let mut archetypes = std::collections::HashSet::new();
+        let mut subtypes = std::collections::HashSet::new();
+        let mut lists = std::collections::HashSet::new();
+
+        for deck in &all_decks {
+            let (archetype, subtype) = parse_deck_name(deck);
+            archetypes.insert(archetype.to_string());
+            if let Some(st) = subtype {
+                subtypes.insert(st.to_string());
+            }
+            // Extract list name if present (format: "Arch: Sub (list)")
+            if let Some(list_start) = deck.find(" (") {
+                if let Some(list_end) = deck.rfind(')') {
+                    let list = &deck[list_start + 2..list_end];
+                    lists.insert(list.to_string());
+                }
+            }
+        }
+
+        let archetype_list: Vec<String> = archetypes.into_iter().collect();
+        let subtype_list: Vec<String> = subtypes.into_iter().collect();
+        let list_list: Vec<String> = lists.into_iter().collect();
+
+        for &filter_idx in &selected_filters {
+            match filter_idx {
+                0 => {
+                    // Era (latest only)
+                    match get_default_era_filter(connection) {
+                        EraFilter::Eras(eras) => era_values = Some(eras),
+                        EraFilter::All => {}
+                    }
+                }
+                1 => {
+                    // Era (all) - no filter
+                }
+                2 => {
+                    // My Archetype - fuzzy select
+                    if !archetype_list.is_empty() {
+                        let default_idx = if let Some(ref default_deck) = config.stats.filters.my_deck {
+                            archetype_list.iter().position(|a| default_deck.contains(a)).unwrap_or(0)
+                        } else {
+                            0
+                        };
+
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select archetype to filter by")
+                            .items(&archetype_list)
+                            .default(default_idx)
+                            .interact()
+                            .unwrap();
+                        // Filter by archetype (partial match on deck name)
+                        deck_name_filter = Some(archetype_list[idx].clone());
+                    }
+                }
+                3 => {
+                    // My Subtype - fuzzy select
+                    if !subtype_list.is_empty() {
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select subtype to filter by")
+                            .items(&subtype_list)
+                            .interact()
+                            .unwrap();
+                        // Filter by subtype (will match "Archetype: Subtype")
+                        deck_name_filter = Some(format!(": {}", subtype_list[idx]));
+                    }
+                }
+                4 => {
+                    // My List - fuzzy select
+                    if !list_list.is_empty() {
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select list to filter by")
+                            .items(&list_list)
+                            .interact()
+                            .unwrap();
+                        // Filter by list name (will match "(list)")
+                        deck_name_filter = Some(format!("({})", list_list[idx]));
+                    }
+                }
+                5 => {
+                    // Opponent - fuzzy select
+                    if !all_opponents.is_empty() {
+                        let default_idx = if let Some(ref default_opp) = config.stats.filters.opponent {
+                            all_opponents.iter().position(|o| o.contains(default_opp)).unwrap_or(0)
+                        } else {
+                            0
+                        };
+
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select opponent to filter by")
+                            .items(&all_opponents)
+                            .default(default_idx)
+                            .interact()
+                            .unwrap();
+                        opponent_name_filter = Some(all_opponents[idx].clone());
+                    }
+                }
+                6 => {
+                    // Opponent Deck - fuzzy select
+                    if !all_opponent_decks.is_empty() {
+                        let default_idx = if let Some(ref default_opp_deck) = config.stats.filters.opponent_deck {
+                            all_opponent_decks.iter().position(|d| d.contains(default_opp_deck)).unwrap_or(0)
+                        } else {
+                            0
+                        };
+
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select opponent deck to filter by")
+                            .items(&all_opponent_decks)
+                            .default(default_idx)
+                            .interact()
+                            .unwrap();
+                        opponent_deck_filter = Some(all_opponent_decks[idx].clone());
+                    }
+                }
+                7 => {
+                    // Event Type - fuzzy select
+                    let default_idx = if let Some(ref default_event) = config.stats.filters.event_type {
+                        event_types.iter().position(|e| e.contains(default_event.as_str())).unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    let idx = FuzzySelect::new()
+                        .with_prompt("Select event type to filter by")
+                        .items(&event_types)
+                        .default(default_idx)
+                        .interact()
+                        .unwrap();
+                    event_type_filter = Some(event_types[idx].to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Step 2: Select Group-bys
+    let selected_groupbys = if use_defaults {
+        // Use config defaults
+        let mut defaults = Vec::new();
+        for default_groupby in &config.stats.default_groupbys {
+            match default_groupby.as_str() {
+                "my-archetype" => defaults.push(0),
+                "my-subtype" => defaults.push(1),
+                "my-list" => defaults.push(2),
+                "opponent" => defaults.push(3),
+                "opponent-deck" => defaults.push(4),
+                "opponent-deck-archetype" => defaults.push(5),
+                "opponent-deck-category" => defaults.push(6),
+                "era" => defaults.push(7),
+                "game-number" => defaults.push(8),
+                "mulligans" => defaults.push(9),
+                "game-plan" => defaults.push(10),
+                "win-condition" => defaults.push(11),
+                "game-length" => defaults.push(12),
+                _ => {}
+            }
+        }
+        defaults
+    } else {
+        let groupby_options = vec![
+            "My Archetype",
+            "My Subtype",
+            "My List",
+            "Opponent",
+            "Opponent Deck",
+            "Opponent Deck Archetype",
+            "Opponent Deck Category",
+            "Era",
+            "Game Number",
+            "Mulligan Count",
+            "Game Plan",
+            "Win Condition",
+            "Game Length",
+        ];
+
+        // Pre-select group-bys based on config
+        let groupby_defaults = vec![
+            config.stats.default_groupbys.contains(&"my-archetype".to_string()),
+            config.stats.default_groupbys.contains(&"my-subtype".to_string()),
+            config.stats.default_groupbys.contains(&"my-list".to_string()),
+            config.stats.default_groupbys.contains(&"opponent".to_string()),
+            config.stats.default_groupbys.contains(&"opponent-deck".to_string()),
+            config.stats.default_groupbys.contains(&"opponent-deck-archetype".to_string()),
+            config.stats.default_groupbys.contains(&"opponent-deck-category".to_string()),
+            config.stats.default_groupbys.contains(&"era".to_string()),
+            config.stats.default_groupbys.contains(&"game-number".to_string()),
+            config.stats.default_groupbys.contains(&"mulligans".to_string()),
+            config.stats.default_groupbys.contains(&"game-plan".to_string()),
+            config.stats.default_groupbys.contains(&"win-condition".to_string()),
+            config.stats.default_groupbys.contains(&"game-length".to_string()),
+        ];
+
+        MultiSelect::new()
+            .with_prompt("Select group-bys (space to select, enter to continue)")
+            .items(&groupby_options)
+            .defaults(&groupby_defaults)
+            .interact()
+            .unwrap()
+    };
+
+    // Step 3: Select Statistics
+    let selected_stats = if use_defaults {
+        // Use config defaults
+        let mut defaults = Vec::new();
+        for default_stat in &config.stats.default_statistics {
+            match default_stat.as_str() {
+                "win-rate" => defaults.push(0),
+                "match-count" => defaults.push(1),
+                "game-count" => defaults.push(2),
+                "mulligans" => defaults.push(3),
+                "game-length" => defaults.push(4),
+                "win-conditions" => defaults.push(5),
+                "loss-conditions" => defaults.push(6),
+                _ => {}
+            }
+        }
+        defaults
+    } else {
+        let stat_options = vec![
+            "Win Rate",
+            "Match Count",
+            "Game Count",
+            "Mulligan Stats",
+            "Game Length",
+            "Win Conditions",
+            "Loss Conditions",
+        ];
+
+        // Pre-select statistics based on config
+        let stat_defaults = vec![
+            config.stats.default_statistics.contains(&"win-rate".to_string()),
+            config.stats.default_statistics.contains(&"match-count".to_string()),
+            config.stats.default_statistics.contains(&"game-count".to_string()),
+            config.stats.default_statistics.contains(&"mulligans".to_string()),
+            config.stats.default_statistics.contains(&"game-length".to_string()),
+            config.stats.default_statistics.contains(&"win-conditions".to_string()),
+            config.stats.default_statistics.contains(&"loss-conditions".to_string()),
+        ];
+
+        MultiSelect::new()
+            .with_prompt("Select statistics to display (space to select, enter to continue)")
+            .items(&stat_options)
+            .defaults(&stat_defaults)
+            .interact()
+            .unwrap()
+    };
+
+    // Now build and execute query
     let mut query = matches::table.into_boxed();
 
-    if let Some(deck) = &deck_filter {
-        query = query.filter(matches::deck_name.like(format!("%{}%", deck)));
+    if let Some(ref eras) = era_values {
+        query = query.filter(matches::era.eq_any(eras));
     }
 
-    if let Some(event) = &event_filter {
-        query = query.filter(matches::event_type.like(format!("%{}%", event)));
+    if let Some(ref deck_name) = deck_name_filter {
+        query = query.filter(matches::deck_name.like(format!("%{}%", deck_name)));
     }
 
-    // Apply era filter
-    match &era_filter_parsed {
-        EraFilter::All => {
-            // No filter needed
-        }
-        EraFilter::Eras(eras) => {
-            query = query.filter(matches::era.eq_any(eras));
-        }
+    if let Some(ref opponent_name) = opponent_name_filter {
+        query = query.filter(matches::opponent_name.like(format!("%{}%", opponent_name)));
+    }
+
+    if let Some(ref opponent_deck) = opponent_deck_filter {
+        query = query.filter(matches::opponent_deck.like(format!("%{}%", opponent_deck)));
+    }
+
+    if let Some(ref event_type) = event_type_filter {
+        query = query.filter(matches::event_type.like(format!("%{}%", event_type)));
     }
 
     let all_matches = query.load::<Match>(connection)
         .expect("Error loading matches");
 
     if all_matches.is_empty() {
-        println!("No matches found");
+        println!("No matches found with selected filters");
         return;
     }
 
-    println!("=== Match Statistics ===");
-    if let Some(deck) = &deck_filter {
-        println!("Filtered by deck: {}", deck);
-    }
-    if let Some(event) = &event_filter {
-        println!("Filtered by event: {}", event);
-    }
-    match &era_filter_parsed {
-        EraFilter::All => println!("Filtered by era: all"),
-        EraFilter::Eras(eras) => {
-            let era_str: Vec<String> = eras.iter().map(|e| e.to_string()).collect();
-            println!("Filtered by era: {}", era_str.join(", "));
-        }
-    }
-    println!();
     // Get all games for these matches
     let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
     let all_games = games::table
         .filter(games::match_id.eq_any(&match_ids))
         .load::<Game>(connection)
         .expect("Error loading games");
-    
-    // Show overall statistics first
-    show_overall_stats(&all_matches, &all_games);
 
-    // Load configuration
-    let config = load_config();
+    println!("\nFound {} matches with {} total games\n", all_matches.len(), all_games.len());
 
-    // Handle slice selection - determine which slices to show
-    let mut slices_to_show = Vec::new();
-
-    if by_my_deck {
-        slices_to_show.push("my-deck");
-    }
-    if by_opponent {
-        slices_to_show.push("opponent");
-    }
-    if by_opponent_deck {
-        slices_to_show.push("opponent-deck");
-    }
-    if by_opponent_deck_category {
-        slices_to_show.push("deck-category");
-    }
-    if by_my_deck_archetype {
-        slices_to_show.push("my-deck-archetype");
-    }
-    if by_opponent_deck_archetype {
-        slices_to_show.push("opponent-deck-archetype");
-    }
-    if by_game_number {
-        slices_to_show.push("game-number");
-    }
-    if by_mulligans {
-        slices_to_show.push("mulligans");
-    }
-    if by_game_plan {
-        slices_to_show.push("game-plan");
-    }
-    if by_win_condition {
-        slices_to_show.push("win-condition");
-    }
-    if by_game_length {
-        slices_to_show.push("game-length");
-    }
-    if by_era {
-        slices_to_show.push("era");
+    // Show overall stats first if no group-bys selected
+    if selected_groupbys.is_empty() {
+        show_overall_stats(&all_matches, &all_games, &selected_stats);
+        return;
     }
 
-    // If no slices specified via flags, use config defaults
-    if slices_to_show.is_empty() && !config.stats.default_slices.is_empty() {
-        for slice in &config.stats.default_slices {
-            slices_to_show.push(slice.as_str());
-        }
-    }
+    // Apply group-bys
+    for &groupby_idx in &selected_groupbys {
+        let groupby_name = match groupby_idx {
+            0 => "my-deck-archetype",  // My Archetype
+            1 => "my-deck-subtype",     // My Subtype
+            2 => "my-deck-list",        // My List
+            3 => "opponent",
+            4 => "opponent-deck",
+            5 => "opponent-deck-archetype",
+            6 => "deck-category",
+            7 => "era",
+            8 => "game-number",
+            9 => "mulligans",
+            10 => "game-plan",
+            11 => "win-condition",
+            12 => "game-length",
+            _ => continue,
+        };
 
-    if interactive_slice {
-        // Interactive slice selection
-        let slice_options = vec![
-            "None (no slicing)",
-            "my-deck",
-            "my-deck-archetype",
-            "opponent",
-            "opponent-deck",
-            "opponent-deck-archetype",
-            "deck-category",
-            "game-number",
-            "mulligans",
-            "game-plan",
-            "win-condition",
-            "game-length",
-            "era"
-        ];
-        
-        let selection = FuzzySelect::new()
-            .with_prompt("Select how to slice the data")
-            .items(&slice_options)
-            .default(0)
-            .interact();
-        
-        match selection {
-            Ok(0) => {
-                // No slicing selected
-            },
-            Ok(s) => {
-                let slice_type = slice_options[s];
-                println!("Sliced by: {}", slice_type);
-                println!();
-                show_sliced_stats(&all_matches, &all_games, slice_type, config.stats.min_games);
-            },
-            Err(_) => {
-                // Fallback to no slicing if not interactive
-            }
-        }
-    } else {
-        // Show all requested slices
-        for slice_type in slices_to_show {
-            println!("Sliced by: {}", slice_type);
-            println!();
-            show_sliced_stats(&all_matches, &all_games, slice_type, config.stats.min_games);
-        }
+        show_sliced_stats(&all_matches, &all_games, groupby_name, config.stats.min_games, &selected_stats);
     }
 }
 
-fn show_overall_stats(all_matches: &[Match], all_games: &[Game]) {
-    // Calculate overall match statistics
-    let total_matches = all_matches.len();
-    let wins = all_matches.iter().filter(|m| m.match_winner == "me").count();
-    let losses = total_matches - wins;
-    let win_rate = if total_matches > 0 { (wins as f64 / total_matches as f64) * 100.0 } else { 0.0 };
-    
-    println!("Overall Record:");
-    println!("  Matches: {} ({}-{})", total_matches, wins, losses);
-    println!("  Win Rate: {:.1}%", win_rate);
-    
-    // Die roll statistics
-    let die_roll_wins = all_matches.iter().filter(|m| m.die_roll_winner == "me").count();
-    let die_roll_rate = if total_matches > 0 { (die_roll_wins as f64 / total_matches as f64) * 100.0 } else { 0.0 };
-    println!("  Die Roll Win Rate: {:.1}%", die_roll_rate);
-    println!();
-    
-    // Game statistics
-    let total_games = all_games.len();
-    let game_wins = all_games.iter().filter(|g| g.game_winner == "me").count();
-    let game_losses = total_games - game_wins;
-    let game_win_rate = if total_games > 0 { (game_wins as f64 / total_games as f64) * 100.0 } else { 0.0 };
-    
-    println!("Game Record:");
-    println!("  Games: {} ({}-{})", total_games, game_wins, game_losses);
-    println!("  Game Win Rate: {:.1}%", game_win_rate);
-    
-    // Play/Draw statistics
-    let play_games = all_games.iter().filter(|g| g.play_draw == "play").collect::<Vec<_>>();
-    let draw_games = all_games.iter().filter(|g| g.play_draw == "draw").collect::<Vec<_>>();
-    
-    if !play_games.is_empty() {
-        let play_wins = play_games.iter().filter(|g| g.game_winner == "me").count();
-        let play_win_rate = (play_wins as f64 / play_games.len() as f64) * 100.0;
-        println!("  On the Play: {}-{} ({:.1}%)", play_wins, play_games.len() - play_wins, play_win_rate);
-    }
-    
-    if !draw_games.is_empty() {
-        let draw_wins = draw_games.iter().filter(|g| g.game_winner == "me").count();
-        let draw_win_rate = (draw_wins as f64 / draw_games.len() as f64) * 100.0;
-        println!("  On the Draw: {}-{} ({:.1}%)", draw_wins, draw_games.len() - draw_wins, draw_win_rate);
-    }
-    
-    // Mulligan statistics
-    let total_mulligans: i32 = all_games.iter().map(|g| g.mulligans).sum();
-    let avg_mulligans = if total_games > 0 { total_mulligans as f64 / total_games as f64 } else { 0.0 };
-    
-    let winning_games: Vec<&Game> = all_games.iter().filter(|g| g.game_winner == "me").collect();
-    let losing_games: Vec<&Game> = all_games.iter().filter(|g| g.game_winner == "opponent").collect();
-    
-    let win_mulligans: i32 = winning_games.iter().map(|g| g.mulligans).sum();
-    let loss_mulligans: i32 = losing_games.iter().map(|g| g.mulligans).sum();
-    
-    let avg_win_mulligans = if !winning_games.is_empty() { win_mulligans as f64 / winning_games.len() as f64 } else { 0.0 };
-    let avg_loss_mulligans = if !losing_games.is_empty() { loss_mulligans as f64 / losing_games.len() as f64 } else { 0.0 };
-    
-    println!("  Average Mulligans: {:.2} (wins: {:.2}, losses: {:.2})", avg_mulligans, avg_win_mulligans, avg_loss_mulligans);
-    
-    // Game length statistics
-    let games_with_turns: Vec<&Game> = all_games.iter().filter(|g| g.turns.is_some()).collect();
-    if !games_with_turns.is_empty() {
-        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-        let avg_turns = total_turns as f64 / games_with_turns.len() as f64;
-        
-        // Calculate win/loss averages for games with turn data
-        let winning_games_with_turns: Vec<&Game> = games_with_turns.iter()
-            .filter(|g| g.game_winner == "me")
-            .copied()
-            .collect();
-        let losing_games_with_turns: Vec<&Game> = games_with_turns.iter()
-            .filter(|g| g.game_winner == "opponent")
-            .copied()
-            .collect();
-        
-        let win_turns: i32 = winning_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-        let loss_turns: i32 = losing_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-        
-        let avg_win_turns = if !winning_games_with_turns.is_empty() { 
-            win_turns as f64 / winning_games_with_turns.len() as f64 
-        } else { 0.0 };
-        let avg_loss_turns = if !losing_games_with_turns.is_empty() { 
-            loss_turns as f64 / losing_games_with_turns.len() as f64 
-        } else { 0.0 };
-        
-        println!("  Average Game Length: {:.1} turns (wins: {:.1}, losses: {:.1}) [{}/{} games with turn data]", 
-                 avg_turns, avg_win_turns, avg_loss_turns, games_with_turns.len(), total_games);
-    } else {
-        println!("  Average Game Length: No turn data available");
-    }
-    println!();
+
+fn show_overall_stats(all_matches: &[Match], all_games: &[Game], selected_stats: &[usize]) {
+    let match_refs: Vec<&Match> = all_matches.iter().collect();
+    let overall_row = calculate_stats("Overall".to_string(), &match_refs, all_games);
+    display_stats_table(&[overall_row], selected_stats, "=== Overall Statistics ===");
 }
 
 /// Extract archetype from deck name (ignoring subtype)
@@ -1473,604 +1800,181 @@ fn extract_archetype(deck_name: &str) -> String {
     archetype.to_string()
 }
 
-fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str, min_games: i64) {
-    match slice_type {
-        "my-deck" => {
-            println!("=== Statistics by My Deck ===");
-            let mut deck_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
-            for m in all_matches {
-                deck_stats.entry(m.deck_name.clone()).or_default().push(m);
-            }
-
-            let mut deck_vec: Vec<_> = deck_stats.into_iter()
-                .map(|(deck, matches)| {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    let total = matches.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Get games for these matches
-                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
-                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (deck, matches, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            deck_vec.sort_by(|a, b| {
-                b.3.cmp(&a.3)
-                    .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (deck, _matches, wins, total, win_rate, avg_mulligans, avg_turns) in deck_vec {
-                // Apply minimum games filter
-                if total < min_games as usize {
-                    continue;
-                }
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  with {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         deck, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-        
-        "opponent" => {
-            println!("=== Statistics by Opponent ===");
-            let mut opponent_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
-            for m in all_matches {
-                opponent_stats.entry(m.opponent_name.clone()).or_default().push(m);
-            }
-
-            let mut opponent_vec: Vec<_> = opponent_stats.into_iter()
-                .map(|(opponent, matches)| {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    let total = matches.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Get games for these matches
-                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
-                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (opponent, matches, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            opponent_vec.sort_by(|a, b| {
-                b.3.cmp(&a.3)
-                    .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (opponent, _matches, wins, total, win_rate, avg_mulligans, avg_turns) in opponent_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  vs {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         opponent, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-        
-        "opponent-deck" => {
-            println!("=== Statistics by Opponent Deck ===");
-            let mut deck_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
-            for m in all_matches {
-                deck_stats.entry(m.opponent_deck.clone()).or_default().push(m);
-            }
-
-            let mut deck_vec: Vec<_> = deck_stats.into_iter()
-                .map(|(deck, matches)| {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    let total = matches.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Get games for these matches
-                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
-                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (deck, matches, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            deck_vec.sort_by(|a, b| {
-                b.3.cmp(&a.3)
-                    .then_with(|| b.4.partial_cmp(&a.4).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (deck, _matches, wins, total, win_rate, avg_mulligans, avg_turns) in deck_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  vs {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         deck, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-        
-        "deck-category" => {
-            println!("=== Statistics by Deck Category ===");
-            let mut category_stats: std::collections::HashMap<DeckCategory, Vec<&Match>> = std::collections::HashMap::new();
-            for m in all_matches {
-                let category = categorize_deck(&m.opponent_deck);
-                category_stats.entry(category).or_default().push(m);
-            }
-
-            let mut category_vec: Vec<_> = category_stats.into_iter()
-                .map(|(category, matches)| {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    let total = matches.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Get games for these matches
-                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
-                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (category, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            category_vec.sort_by(|a, b| {
-                b.2.cmp(&a.2)
-                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (category, wins, total, win_rate, avg_mulligans, avg_turns) in category_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  vs {} decks: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         category.to_string(), wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-
-        "my-deck-archetype" => {
-            println!("=== Statistics by My Deck Archetype ===");
-            let mut archetype_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
-            for m in all_matches {
-                let archetype = extract_archetype(&m.deck_name);
-                archetype_stats.entry(archetype).or_default().push(m);
-            }
-
-            let mut archetype_vec: Vec<_> = archetype_stats.into_iter()
-                .map(|(archetype, matches)| {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    let total = matches.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Get games for these matches
-                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
-                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (archetype, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            archetype_vec.sort_by(|a, b| {
-                b.2.cmp(&a.2)
-                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (archetype, wins, total, win_rate, avg_mulligans, avg_turns) in archetype_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  with {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         archetype, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-
-        "opponent-deck-archetype" => {
-            println!("=== Statistics by Opponent Deck Archetype ===");
-            let mut archetype_stats: std::collections::HashMap<String, Vec<&Match>> = std::collections::HashMap::new();
-            for m in all_matches {
-                let archetype = extract_archetype(&m.opponent_deck);
-                archetype_stats.entry(archetype).or_default().push(m);
-            }
-
-            let mut archetype_vec: Vec<_> = archetype_stats.into_iter()
-                .map(|(archetype, matches)| {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    let total = matches.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Get games for these matches
-                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
-                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (archetype, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            archetype_vec.sort_by(|a, b| {
-                b.2.cmp(&a.2)
-                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (archetype, wins, total, win_rate, avg_mulligans, avg_turns) in archetype_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  vs {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         archetype, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-
-        "game-number" => {
-            println!("=== Statistics by Game Number ===");
-            let mut game_stats: std::collections::HashMap<i32, Vec<&Game>> = std::collections::HashMap::new();
-            for g in all_games {
-                game_stats.entry(g.game_number).or_default().push(g);
-            }
-
-            let mut game_vec: Vec<_> = (1..=3)
-                .filter_map(|game_num| {
-                    game_stats.get(&game_num).map(|games| {
-                        let wins = games.iter().filter(|g| g.game_winner == "me").count();
-                        let total = games.len();
-                        let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                        // Calculate average mulligans
-                        let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                        let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                        // Calculate average game length
-                        let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                        let avg_turns = if !games_with_turns.is_empty() {
-                            let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                            Some(total_turns as f64 / games_with_turns.len() as f64)
-                        } else {
-                            None
-                        };
-
-                        (game_num, wins, total, win_rate, avg_mulligans, avg_turns)
-                    })
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            game_vec.sort_by(|a, b| {
-                b.2.cmp(&a.2)
-                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (game_num, wins, total, win_rate, avg_mulligans, avg_turns) in game_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  Game {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         game_num, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-        
-        "mulligans" => {
-            println!("=== Statistics by Mulligan Count ===");
-            let mut mulligan_stats: std::collections::HashMap<i32, Vec<&Game>> = std::collections::HashMap::new();
-            for g in all_games {
-                mulligan_stats.entry(g.mulligans).or_default().push(g);
-            }
-
-            let mut mulligan_vec: Vec<_> = mulligan_stats.into_iter()
-                .map(|(mulligans, games)| {
-                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
-                    let total = games.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Calculate average game length (but not average mulligans since we're slicing by that)
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (mulligans, wins, total, win_rate, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            mulligan_vec.sort_by(|a, b| {
-                b.2.cmp(&a.2)
-                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (mulligans, wins, total, win_rate, avg_turns) in mulligan_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  {} mulligans: {}-{} ({:.1}%, avg turns: {})",
-                         mulligans, wins, total - wins, win_rate, turns_str);
-            }
-        },
-        
-        "game-plan" => {
-            println!("=== Statistics by Game Plan ===");
-            let mut plan_stats: std::collections::HashMap<String, Vec<&Game>> = std::collections::HashMap::new();
-            for g in all_games {
-                let plan = g.opening_hand_plan.as_deref().unwrap_or("No Plan");
-                plan_stats.entry(plan.to_string()).or_default().push(g);
-            }
-
-            let mut plan_vec: Vec<_> = plan_stats.into_iter()
-                .map(|(plan, games)| {
-                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
-                    let total = games.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (plan, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total games descending, then by win rate descending
-            plan_vec.sort_by(|a, b| {
-                b.2.cmp(&a.2)
-                    .then_with(|| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal))
-            });
-
-            for (plan, wins, total, win_rate, avg_mulligans, avg_turns) in plan_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         plan, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-        
-        "win-condition" => {
-            println!("=== Statistics by Win Condition ===");
-            let mut win_con_stats: std::collections::HashMap<String, Vec<&Game>> = std::collections::HashMap::new();
-
-            // Only count games you won (where win_condition is relevant)
-            for g in all_games.iter().filter(|g| g.game_winner == "me") {
-                let win_con = g.win_condition.as_deref().unwrap_or("Unknown");
-                win_con_stats.entry(win_con.to_string()).or_default().push(g);
-            }
-
-            let mut win_con_vec: Vec<_> = win_con_stats.into_iter()
-                .map(|(win_con, games)| {
-                    let wins = games.len(); // All games here are wins
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (win_con, wins, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by total usage descending
-            win_con_vec.sort_by(|a, b| b.1.cmp(&a.1));
-
-            for (win_con, wins, avg_mulligans, avg_turns) in win_con_vec {
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  {}: {} wins (avg mulls: {:.2}, avg turns: {})",
-                         win_con, wins, avg_mulligans, turns_str);
-            }
-        },
-        
-        "game-length" => {
-            println!("=== Statistics by Game Length ===");
-            let mut length_stats: std::collections::HashMap<String, Vec<&Game>> = std::collections::HashMap::new();
-
-            for g in all_games {
-                let length_category = match g.turns {
-                    None => "No turn data".to_string(),
-                    Some(turns) => {
-                        match turns {
-                            1..=3 => "Very Short (1-3 turns)".to_string(),
-                            4..=6 => "Short (4-6 turns)".to_string(),
-                            7..=10 => "Medium (7-10 turns)".to_string(),
-                            11..=15 => "Long (11-15 turns)".to_string(),
-                            _ => "Very Long (16+ turns)".to_string(),
-                        }
-                    }
-                };
-                length_stats.entry(length_category).or_default().push(g);
-            }
-
-            let mut length_vec: Vec<_> = length_stats.into_iter()
-                .map(|(category, games)| {
-                    let wins = games.iter().filter(|g| g.game_winner == "me").count();
-                    let total = games.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Calculate average mulligans (but not average game length since we're slicing by that)
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average turns for this category (excluding "No turn data")
-                    let avg_turns = if category == "No turn data" {
-                        None
-                    } else {
-                        let turns_sum: i32 = games.iter().filter_map(|g| g.turns).sum();
-                        let turns_count = games.iter().filter(|g| g.turns.is_some()).count();
-                        if turns_count > 0 {
-                            Some(turns_sum as f64 / turns_count as f64)
-                        } else {
-                            None
-                        }
-                    };
-
-                    (category, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by game length order (Very Short -> Very Long)
-            length_vec.sort_by(|a, b| {
-                let order_a = match a.0.as_str() {
-                    "Very Short (1-3 turns)" => 0,
-                    "Short (4-6 turns)" => 1,
-                    "Medium (7-10 turns)" => 2,
-                    "Long (11-15 turns)" => 3,
-                    "Very Long (16+ turns)" => 4,
-                    "No turn data" => 5,
-                    _ => 6,
-                };
-                let order_b = match b.0.as_str() {
-                    "Very Short (1-3 turns)" => 0,
-                    "Short (4-6 turns)" => 1,
-                    "Medium (7-10 turns)" => 2,
-                    "Long (11-15 turns)" => 3,
-                    "Very Long (16+ turns)" => 4,
-                    "No turn data" => 5,
-                    _ => 6,
-                };
-                order_a.cmp(&order_b)
-            });
-
-            for (category, wins, total, win_rate, avg_mulligans, avg_turns) in length_vec {
-                if let Some(avg) = avg_turns {
-                    println!("  {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg {:.1} turns)",
-                             category, wins, total - wins, win_rate, avg_mulligans, avg);
-                } else {
-                    println!("  {}: {}-{} ({:.1}%, avg mulls: {:.2})",
-                             category, wins, total - wins, win_rate, avg_mulligans);
+fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str, min_games: i64, selected_stats: &[usize]) {
+    // Determine title and grouping function
+    let (title, get_key): (&str, Box<dyn Fn(&Match) -> String>) = match slice_type {
+        "my-deck" => ("=== Statistics by My Deck ===", Box::new(|m: &Match| m.deck_name.clone())),
+        "my-deck-archetype" => ("=== Statistics by My Archetype ===", Box::new(|m: &Match| extract_archetype(&m.deck_name))),
+        "my-deck-subtype" => ("=== Statistics by My Subtype ===", Box::new(|m: &Match| {
+            let (_, subtype) = parse_deck_name(&m.deck_name);
+            subtype.unwrap_or("None").to_string()
+        })),
+        "my-deck-list" => ("=== Statistics by My List ===", Box::new(|m: &Match| {
+            // Extract list name from parentheses
+            if let Some(start) = m.deck_name.find(" (") {
+                if let Some(end) = m.deck_name[start..].find(')') {
+                    return m.deck_name[start + 2..start + end].to_string();
                 }
             }
-        },
+            "No list".to_string()
+        })),
+        "opponent" => ("=== Statistics by Opponent ===", Box::new(|m: &Match| m.opponent_name.clone())),
+        "opponent-deck" => ("=== Statistics by Opponent Deck ===", Box::new(|m: &Match| m.opponent_deck.clone())),
+        "opponent-deck-archetype" => ("=== Statistics by Opponent Deck Archetype ===", Box::new(|m: &Match| {
+            extract_archetype(&m.opponent_deck)
+        })),
+        "deck-category" => ("=== Statistics by Opponent Deck Category ===", Box::new(|m: &Match| {
+            categorize_deck(&m.opponent_deck).to_string().to_string()
+        })),
+        "era" => ("=== Statistics by Era ===", Box::new(|m: &Match| {
+            m.era.map(|e| format!("Era {}", e)).unwrap_or_else(|| "No Era".to_string())
+        })),
+        "game-number" => ("=== Statistics by Game Number ===", Box::new(|_m: &Match| {
+            // This one is special - we need to group by game number, not match
+            // For now, return empty to handle specially
+            String::new()
+        })),
+        "mulligans" => ("=== Statistics by Mulligan Count ===", Box::new(|_m: &Match| String::new())),
+        "game-plan" => ("=== Statistics by Game Plan ===", Box::new(|_m: &Match| String::new())),
+        "win-condition" => ("=== Statistics by Win Condition ===", Box::new(|_m: &Match| String::new())),
+        "game-length" => ("=== Statistics by Game Length ===", Box::new(|_m: &Match| String::new())),
+        _ => return,
+    };
 
-        "era" => {
-            println!("=== Statistics by Era ===");
-            let mut era_stats: std::collections::HashMap<Option<i32>, Vec<&Match>> = std::collections::HashMap::new();
-            for m in all_matches {
-                era_stats.entry(m.era).or_default().push(m);
+    // Special handling for game-based groupings
+    if slice_type == "game-number" {
+        let mut game_stats: HashMap<i32, Vec<&Match>> = HashMap::new();
+        for game in all_games {
+            if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
+                game_stats.entry(game.game_number).or_default().push(m);
             }
-
-            let mut era_vec: Vec<_> = era_stats.into_iter()
-                .map(|(era, matches)| {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    let total = matches.len();
-                    let win_rate = if total > 0 { (wins as f64 / total as f64) * 100.0 } else { 0.0 };
-
-                    // Get games for these matches
-                    let match_ids: Vec<i32> = matches.iter().map(|m| m.match_id).collect();
-                    let games: Vec<&Game> = all_games.iter().filter(|g| match_ids.contains(&g.match_id)).collect();
-
-                    // Calculate average mulligans
-                    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
-                    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
-
-                    // Calculate average game length
-                    let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    let avg_turns = if !games_with_turns.is_empty() {
-                        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        Some(total_turns as f64 / games_with_turns.len() as f64)
-                    } else {
-                        None
-                    };
-
-                    (era, wins, total, win_rate, avg_mulligans, avg_turns)
-                })
-                .collect();
-
-            // Sort by era number ascending (with None at the end)
-            era_vec.sort_by(|a, b| {
-                match (a.0, b.0) {
-                    (Some(a_era), Some(b_era)) => a_era.cmp(&b_era),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
-            });
-
-            for (era, wins, total, win_rate, avg_mulligans, avg_turns) in era_vec {
-                let era_str = era.map(|e| e.to_string()).unwrap_or_else(|| "Unknown".to_string());
-                let turns_str = avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string());
-                println!("  Era {}: {}-{} ({:.1}%, avg mulls: {:.2}, avg turns: {})",
-                         era_str, wins, total - wins, win_rate, avg_mulligans, turns_str);
-            }
-        },
-
-        _ => {
-            println!("Unknown slice type: {}. Available options: my-deck, my-deck-archetype, opponent, opponent-deck, opponent-deck-archetype, deck-category, game-number, mulligans, game-plan, win-condition, game-length, era", slice_type);
         }
+
+        let mut rows: Vec<StatsRow> = game_stats.into_iter()
+            .map(|(game_num, matches)| {
+                calculate_stats(format!("Game {}", game_num), &matches, all_games)
+            })
+            .filter(|row| row.match_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+        display_stats_table(&rows, selected_stats, title);
+        return;
     }
-    println!();
+
+    if slice_type == "mulligans" {
+        let mut mull_stats: HashMap<i32, Vec<&Match>> = HashMap::new();
+        for game in all_games {
+            if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
+                mull_stats.entry(game.mulligans).or_default().push(m);
+            }
+        }
+
+        let mut rows: Vec<StatsRow> = mull_stats.into_iter()
+            .map(|(mulls, matches)| {
+                calculate_stats(format!("{} mulligan{}", mulls, if mulls == 1 { "" } else { "s" }), &matches, all_games)
+            })
+            .filter(|row| row.match_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| a.label.cmp(&b.label));
+        display_stats_table(&rows, selected_stats, title);
+        return;
+    }
+
+    if slice_type == "game-plan" {
+        let mut plan_stats: HashMap<String, Vec<&Match>> = HashMap::new();
+        for game in all_games {
+            if let Some(plan) = &game.opening_hand_plan {
+                if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
+                    plan_stats.entry(plan.clone()).or_default().push(m);
+                }
+            }
+        }
+
+        let mut rows: Vec<StatsRow> = plan_stats.into_iter()
+            .map(|(plan, matches)| {
+                calculate_stats(plan, &matches, all_games)
+            })
+            .filter(|row| row.match_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+        display_stats_table(&rows, selected_stats, title);
+        return;
+    }
+
+    if slice_type == "win-condition" {
+        let mut cond_stats: HashMap<String, Vec<&Match>> = HashMap::new();
+        for game in all_games {
+            if let Some(condition) = &game.win_condition {
+                if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
+                    cond_stats.entry(condition.clone()).or_default().push(m);
+                }
+            }
+        }
+
+        let mut rows: Vec<StatsRow> = cond_stats.into_iter()
+            .map(|(condition, matches)| {
+                calculate_stats(condition, &matches, all_games)
+            })
+            .filter(|row| row.match_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+        display_stats_table(&rows, selected_stats, title);
+        return;
+    }
+
+    if slice_type == "game-length" {
+        let mut length_stats: HashMap<String, Vec<&Match>> = HashMap::new();
+        for game in all_games {
+            if let Some(turns) = game.turns {
+                let bucket = match turns {
+                    1..=3 => "1-3 turns",
+                    4..=6 => "4-6 turns",
+                    7..=9 => "7-9 turns",
+                    10..=12 => "10-12 turns",
+                    _ => "13+ turns",
+                };
+                if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
+                    length_stats.entry(bucket.to_string()).or_default().push(m);
+                }
+            }
+        }
+
+        let mut rows: Vec<StatsRow> = length_stats.into_iter()
+            .map(|(bucket, matches)| {
+                calculate_stats(bucket, &matches, all_games)
+            })
+            .filter(|row| row.match_count >= min_games as usize)
+            .collect();
+
+        // Sort by bucket order
+        let order = ["1-3 turns", "4-6 turns", "7-9 turns", "10-12 turns", "13+ turns"];
+        rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
+        display_stats_table(&rows, selected_stats, title);
+        return;
+    }
+
+    // Standard match-based grouping
+    let mut grouped_stats: HashMap<String, Vec<&Match>> = HashMap::new();
+    for m in all_matches {
+        let key = get_key(m);
+        grouped_stats.entry(key).or_default().push(m);
+    }
+
+    let mut rows: Vec<StatsRow> = grouped_stats.into_iter()
+        .map(|(label, matches)| {
+            calculate_stats(label, &matches, all_games)
+        })
+        .filter(|row| row.match_count >= min_games as usize)
+        .collect();
+
+    // Sort by total games descending
+    rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+
+    display_stats_table(&rows, selected_stats, title);
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
@@ -2405,10 +2309,22 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
         if !new_condition.is_empty() {
             game_data.win_condition = Some(new_condition);
         }
+        game_data.loss_reason = None;
     } else {
         game_data.win_condition = None;
+
+        // Edit loss reason (only if you lost)
+        let current_reason = game_data.loss_reason.as_deref().unwrap_or("");
+        let new_reason: String = Input::new()
+            .with_prompt(&format!("Why did you lose? [{}]", current_reason))
+            .allow_empty(true)
+            .interact_text()
+            .unwrap();
+        if !new_reason.is_empty() {
+            game_data.loss_reason = Some(new_reason);
+        }
     }
-    
+
     // Edit turns
     let current_turns = game_data.turns.map(|t| t.to_string()).unwrap_or_else(|| "".to_string());
     let new_turns: String = Input::new()
@@ -2444,6 +2360,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
             games::opening_hand_plan.eq(&game_data.opening_hand_plan),
             games::game_winner.eq(&game_data.game_winner),
             games::win_condition.eq(&game_data.win_condition),
+            games::loss_reason.eq(&game_data.loss_reason),
             games::turns.eq(&game_data.turns),
         ))
         .execute(connection)
@@ -2701,20 +2618,3 @@ fn get_current_era(connection: &mut SqliteConnection) -> Option<i32> {
         .flatten()
 }
 
-fn parse_era_from_deck_name(name: &str) -> Option<i32> {
-    // Parse patterns:
-    // - "name-X.Y" -> era = X (e.g., "sprouts-1.2" -> 1)
-    // - "name-X" -> era = X (e.g., "sprouts-1" -> 1)
-    if let Some(dash_pos) = name.rfind('-') {
-        let after_dash = &name[dash_pos + 1..];
-        // Check if there's a dot (major.minor version)
-        if let Some(dot_pos) = after_dash.find('.') {
-            let era_str = &after_dash[..dot_pos];
-            return era_str.parse::<i32>().ok();
-        } else {
-            // Try to parse the whole thing as an integer
-            return after_dash.parse::<i32>().ok();
-        }
-    }
-    None
-}

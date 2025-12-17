@@ -19,10 +19,31 @@ default_list = "tempo-doomsday-wasteland-1.0"
 default_era = 2
 
 [stats]
-# Default slicing dimensions to show
-# Options: "era", "my-deck", "opponent-deck", "my-deck-archetype", "opponent-deck-archetype"
-default_slices = ["era", "my-deck-archetype"]
+# Default groupings to show
+# Options: "my-archetype", "my-subtype", "my-list", "opponent", "opponent-deck",
+#          "opponent-deck-archetype", "opponent-deck-category", "era",
+#          "game-number", "mulligans", "game-plan", "win-condition", "game-length"
+default_groupbys = ["opponent-deck-archetype"]
 
-# Minimum games threshold for showing a slice
-# Only slices with this many or more games will be displayed
-min_games = 0
+# Default statistics to display
+# Options: "win-rate", "match-count", "game-count", "mulligans",
+#          "game-length", "win-conditions", "loss-conditions"
+default_statistics = ["win-rate", "win-conditions", "game-length"]
+
+# Default filters to apply
+# Available filter types: "era", "my-deck", "opponent", "opponent-deck", "event-type"
+[stats.filters]
+# Filter by specific era (use integer)
+era = 2
+
+# Filter by your deck name (partial match supported)
+my_deck = "Doomsday"
+
+# Filter by opponent name (partial match)
+# opponent = "John"
+
+# Filter by opponent deck (partial match)
+# opponent_deck = "Storm"
+
+# Filter by event type (partial match)
+# event_type = "League"
