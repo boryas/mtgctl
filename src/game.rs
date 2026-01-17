@@ -1645,6 +1645,7 @@ fn show_stats_interactive(use_defaults: bool) {
     let mut game_length_filter: Option<(i32, i32)> = None; // (min, max)
     let mut game_number_filter: Option<i32> = None;
     let mut play_draw_filter: Option<String> = None;
+    let mut selected_filter_indices: Vec<usize> = Vec::new();
 
     if use_defaults {
         // Use config defaults for filters
@@ -1700,6 +1701,9 @@ fn show_stats_interactive(use_defaults: bool) {
             .defaults(&filter_defaults)
             .interact()
             .unwrap();
+
+        // Save filter indices for later use in stat selection
+        selected_filter_indices = selected_filters.clone();
 
         // Get all available options for fuzzy selection
         let all_decks = load_your_deck_names();
@@ -2035,10 +2039,14 @@ fn show_stats_interactive(use_defaults: bool) {
             "Proportion",
         ];
 
-        // Pre-select statistics based on config
+        // Determine if game mode based on selected filters and group-bys
+        let picker_game_mode = has_game_level(&selected_filter_indices, FILTER_LEVELS)
+            || has_game_level(&selected_groupbys, GROUPBY_LEVELS);
+
+        // Pre-select statistics based on config, with appropriate win rate auto-selected
         let stat_defaults = vec![
-            config.stats.default_statistics.contains(&"match-win-rate".to_string()),
-            config.stats.default_statistics.contains(&"game-win-rate".to_string()),
+            !picker_game_mode || config.stats.default_statistics.contains(&"match-win-rate".to_string()),  // Match WR: auto-select in match mode
+            picker_game_mode || config.stats.default_statistics.contains(&"game-win-rate".to_string()),    // Game WR: auto-select in game mode
             config.stats.default_statistics.contains(&"match-count".to_string()),
             config.stats.default_statistics.contains(&"game-count".to_string()),
             config.stats.default_statistics.contains(&"mulligans".to_string()),
