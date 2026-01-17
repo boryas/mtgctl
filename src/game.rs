@@ -105,6 +105,79 @@ struct StatsRow {
     loss_conditions: HashMap<String, usize>,
 }
 
+/// Indicates whether a filter, group-by, or statistic operates at match or game level
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatsLevel {
+    Match,
+    Game,
+}
+
+/// Filter indices and their levels
+/// Indices correspond to the filter_options vec in show_stats_interactive
+const FILTER_LEVELS: &[(usize, &str, StatsLevel)] = &[
+    (0, "era-latest", StatsLevel::Match),
+    (1, "era-all", StatsLevel::Match),
+    (2, "my-archetype", StatsLevel::Match),
+    (3, "my-subtype", StatsLevel::Match),
+    (4, "my-list", StatsLevel::Match),
+    (5, "opponent", StatsLevel::Match),
+    (6, "opponent-deck", StatsLevel::Match),
+    (7, "event-type", StatsLevel::Match),
+    (8, "loss-reason", StatsLevel::Game),
+    (9, "win-condition", StatsLevel::Game),
+    (10, "game-plan", StatsLevel::Game),
+    (11, "mulligan-count", StatsLevel::Game),
+    (12, "game-length", StatsLevel::Game),
+    (13, "game-number", StatsLevel::Game),
+    (14, "play-draw", StatsLevel::Game),
+];
+
+/// Group-by indices and their levels
+/// Indices correspond to the groupby_options vec in show_stats_interactive
+const GROUPBY_LEVELS: &[(usize, &str, StatsLevel)] = &[
+    (0, "my-archetype", StatsLevel::Match),
+    (1, "my-subtype", StatsLevel::Match),
+    (2, "my-list", StatsLevel::Match),
+    (3, "opponent", StatsLevel::Match),
+    (4, "opponent-deck", StatsLevel::Match),
+    (5, "opponent-deck-archetype", StatsLevel::Match),
+    (6, "opponent-deck-category", StatsLevel::Match),
+    (7, "era", StatsLevel::Match),
+    (8, "game-number", StatsLevel::Game),
+    (9, "mulligans", StatsLevel::Game),
+    (10, "game-plan", StatsLevel::Game),
+    (11, "win-condition", StatsLevel::Game),
+    (12, "loss-reason", StatsLevel::Game),
+    (13, "game-length", StatsLevel::Game),
+    (14, "play-draw", StatsLevel::Game),
+];
+
+/// Statistic indices and their levels
+/// Indices correspond to the stat_options vec in show_stats_interactive
+const STAT_LEVELS: &[(usize, &str, StatsLevel)] = &[
+    (0, "match-win-rate", StatsLevel::Match),
+    (1, "game-win-rate", StatsLevel::Game),
+    (2, "match-count", StatsLevel::Match),
+    (3, "game-count", StatsLevel::Game),
+    (4, "mulligans", StatsLevel::Game),
+    (5, "game-length", StatsLevel::Game),
+    (6, "win-conditions", StatsLevel::Game),
+    (7, "loss-conditions", StatsLevel::Game),
+    (8, "proportion", StatsLevel::Game),
+];
+
+/// Helper to check if any selected indices include game-level items
+fn has_game_level(indices: &[usize], levels: &[(usize, &str, StatsLevel)]) -> bool {
+    indices.iter().any(|&idx| {
+        levels.iter().any(|(i, _, level)| *i == idx && *level == StatsLevel::Game)
+    })
+}
+
+/// Helper to get the level of a specific index
+fn get_level(idx: usize, levels: &[(usize, &str, StatsLevel)]) -> Option<StatsLevel> {
+    levels.iter().find(|(i, _, _)| *i == idx).map(|(_, _, level)| *level)
+}
+
 // Structure for resolved archetype data (after looking up subtype)
 struct ArchetypeData {
     game_plans: Vec<String>,
@@ -1454,14 +1527,15 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str,
     let mut headers = vec![""];
     for &stat_idx in selected_stats {
         match stat_idx {
-            0 => headers.push("Win Rate"),
-            1 => headers.push("Matches"),
-            2 => headers.push("Games"),
-            3 => headers.push("Mulligans"),
-            4 => headers.push("Game Length"),
-            5 => headers.push("Win Conditions"),
-            6 => headers.push("Loss Conditions"),
-            7 => headers.push("Proportion"),
+            0 => headers.push("Match Wins"),
+            1 => headers.push("Game Wins"),
+            2 => headers.push("Matches"),
+            3 => headers.push("Games"),
+            4 => headers.push("Mulligans"),
+            5 => headers.push("Game Length"),
+            6 => headers.push("Win Conditions"),
+            7 => headers.push("Loss Conditions"),
+            8 => headers.push("Proportion"),
             _ => {}
         }
     }
@@ -1482,26 +1556,26 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str,
         for &stat_idx in selected_stats {
             let cell_content = match stat_idx {
                 0 => {
-                    // Win Rate - use game stats for game-specific groupings
-                    if is_game_grouping {
-                        format!("{:.1}% ({}-{})", row.game_win_rate, row.game_wins, row.game_losses)
-                    } else {
-                        format!("{:.1}% ({}-{})", row.match_win_rate, row.match_wins, row.match_losses)
-                    }
+                    // Match Win Rate
+                    format!("{:.1}% ({}-{})", row.match_win_rate, row.match_wins, row.match_losses)
                 },
                 1 => {
+                    // Game Win Rate
+                    format!("{:.1}% ({}-{})", row.game_win_rate, row.game_wins, row.game_losses)
+                },
+                2 => {
                     // Match Count
                     format!("{} ({}-{})", row.match_count, row.match_wins, row.match_losses)
                 },
-                2 => {
+                3 => {
                     // Game Count
                     format!("{} ({}-{})", row.game_count, row.game_wins, row.game_losses)
                 },
-                3 => {
+                4 => {
                     // Mulligans
                     format!("{:.2} (W:{:.2} L:{:.2})", row.avg_mulligans, row.avg_win_mulligans, row.avg_loss_mulligans)
                 },
-                4 => {
+                5 => {
                     // Game Length
                     if let Some(avg) = row.avg_game_length {
                         let win_str = row.avg_win_length.map(|l| format!("{:.1}", l)).unwrap_or_else(|| "-".to_string());
@@ -1511,7 +1585,7 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str,
                         "-".to_string()
                     }
                 },
-                5 => {
+                6 => {
                     // Win Conditions
                     let mut conditions: Vec<_> = row.win_conditions.iter().collect();
                     conditions.sort_by(|a, b| b.1.cmp(a.1));
@@ -1520,7 +1594,7 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str,
                         .collect::<Vec<_>>()
                         .join(", ")
                 },
-                6 => {
+                7 => {
                     // Loss Conditions
                     let mut conditions: Vec<_> = row.loss_conditions.iter().collect();
                     conditions.sort_by(|a, b| b.1.cmp(a.1));
@@ -1529,7 +1603,7 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str,
                         .collect::<Vec<_>>()
                         .join(", ")
                 },
-                7 => {
+                8 => {
                     // Proportion of total
                     let count = if is_game_grouping { row.game_count } else { row.match_count };
                     if total_count > 0 {
@@ -1935,21 +2009,23 @@ fn show_stats_interactive(use_defaults: bool) {
         let mut defaults = Vec::new();
         for default_stat in &config.stats.default_statistics {
             match default_stat.as_str() {
-                "win-rate" => defaults.push(0),
-                "match-count" => defaults.push(1),
-                "game-count" => defaults.push(2),
-                "mulligans" => defaults.push(3),
-                "game-length" => defaults.push(4),
-                "win-conditions" => defaults.push(5),
-                "loss-conditions" => defaults.push(6),
-                "proportion" => defaults.push(7),
+                "match-wins" => defaults.push(0),
+                "game-wins" => defaults.push(1),
+                "match-count" => defaults.push(2),
+                "game-count" => defaults.push(3),
+                "mulligans" => defaults.push(4),
+                "game-length" => defaults.push(5),
+                "win-conditions" => defaults.push(6),
+                "loss-conditions" => defaults.push(7),
+                "proportion" => defaults.push(8),
                 _ => {}
             }
         }
         defaults
     } else {
         let stat_options = vec![
-            "Win Rate",
+            "Match Wins",
+            "Game Wins",
             "Match Count",
             "Game Count",
             "Mulligan Stats",
@@ -1961,7 +2037,8 @@ fn show_stats_interactive(use_defaults: bool) {
 
         // Pre-select statistics based on config
         let stat_defaults = vec![
-            config.stats.default_statistics.contains(&"win-rate".to_string()),
+            config.stats.default_statistics.contains(&"match-win-rate".to_string()),
+            config.stats.default_statistics.contains(&"game-win-rate".to_string()),
             config.stats.default_statistics.contains(&"match-count".to_string()),
             config.stats.default_statistics.contains(&"game-count".to_string()),
             config.stats.default_statistics.contains(&"mulligans".to_string()),
@@ -2067,6 +2144,35 @@ fn show_stats_interactive(use_defaults: bool) {
     }
 
     println!("\nFound {} matches with {} total games\n", all_matches.len(), all_games.len());
+
+    // Determine if we're in "game mode" (game-level filters or group-bys applied)
+    let has_game_groupbys = has_game_level(&selected_groupbys, GROUPBY_LEVELS);
+    let game_mode = has_game_filters || has_game_groupbys;
+
+    // Filter out match-level stats when in game mode, and auto-select appropriate win rate
+    let selected_stats: Vec<usize> = if game_mode {
+        let mut filtered: Vec<usize> = selected_stats.iter()
+            .copied()
+            .filter(|&idx| get_level(idx, STAT_LEVELS) != Some(StatsLevel::Match))
+            .collect();
+
+        // Auto-select game win rate if not already present
+        if !filtered.contains(&1) {
+            filtered.insert(0, 1); // Game Win Rate at the start
+        }
+
+        if filtered.len() != selected_stats.len() || !selected_stats.contains(&1) {
+            println!("Note: Game mode active - showing game win rate\n");
+        }
+        filtered
+    } else {
+        let mut stats = selected_stats;
+        // Auto-select match win rate if not already present
+        if !stats.contains(&0) {
+            stats.insert(0, 0); // Match Win Rate at the start
+        }
+        stats
+    };
 
     // Show overall stats first if no group-bys selected
     if selected_groupbys.is_empty() {
