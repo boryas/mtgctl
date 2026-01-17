@@ -6,13 +6,37 @@ use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games};
 use crate::game::categorize_deck;
 
-pub fn generate_html_stats(output_path: &str, era_filter: Option<String>) {
+pub fn generate_html_stats(
+    output_path: &str,
+    era_filter: Option<String>,
+    my_deck_filter: Option<String>,
+    opponent_filter: Option<String>,
+    opponent_deck_filter: Option<String>,
+    event_type_filter: Option<String>,
+) {
     let connection = &mut establish_connection();
 
-    // For HTML generation, we'll generate stats for all eras
-    // and let JavaScript handle the filtering
-    // But we still need to respect the era filter if provided for the data
-    let all_matches = matches::table
+    // Build query with filters
+    let mut query = matches::table.into_boxed();
+
+    // Apply filters
+    if let Some(ref my_deck) = my_deck_filter {
+        query = query.filter(matches::deck_name.like(format!("%{}%", my_deck)));
+    }
+
+    if let Some(ref opponent) = opponent_filter {
+        query = query.filter(matches::opponent_name.like(format!("%{}%", opponent)));
+    }
+
+    if let Some(ref opponent_deck) = opponent_deck_filter {
+        query = query.filter(matches::opponent_deck.like(format!("%{}%", opponent_deck)));
+    }
+
+    if let Some(ref event_type) = event_type_filter {
+        query = query.filter(matches::event_type.like(format!("%{}%", event_type)));
+    }
+
+    let all_matches = query
         .order(matches::date.desc())
         .load::<Match>(connection)
         .expect("Error loading matches");
@@ -168,6 +192,7 @@ fn generate_html(all_matches: &[Match], all_games: &[Game], _era_filter: Option<
         ("mulligans", "Statistics by Mulligan Count"),
         ("game-plan", "Opening Hand Game Plan"),
         ("win-condition", "Win Conditions"),
+        ("loss-reason", "Loss Reasons"),
         ("game-length", "Statistics by Game Length"),
         ("era", "Statistics by Era"),
     ];
@@ -292,6 +317,7 @@ fn generate_slice_table(all_matches: &[Match], all_games: &[Game], slice_type: &
         "mulligans" => generate_mulligan_table(all_games),
         "game-plan" => generate_game_plan_table(all_games),
         "win-condition" => generate_win_condition_table(all_games),
+        "loss-reason" => generate_loss_reason_table(all_games),
         "game-length" => generate_game_length_table(all_games),
         "era" => generate_era_table(all_matches, all_games),
         _ => String::new(),
@@ -614,6 +640,47 @@ fn generate_win_condition_table(all_games: &[Game]) -> String {
         vec![
             win_con.clone(),
             format!("{}", wins),
+            format!("{:.2}", avg_mulligans),
+            avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
+        ]
+    }).collect())
+}
+
+fn generate_loss_reason_table(all_games: &[Game]) -> String {
+    let mut loss_reason_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+
+    for g in all_games.iter().filter(|g| g.game_winner == "opponent") {
+        let reason = g.loss_reason.as_deref().unwrap_or("Unknown");
+        loss_reason_stats.entry(reason.to_string()).or_default().push(g);
+    }
+
+    let mut loss_reason_vec: Vec<_> = loss_reason_stats.into_iter()
+        .map(|(reason, games)| {
+            let losses = games.len(); // All games here are losses
+
+            // Calculate average mulligans
+            let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+            let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+            // Calculate average game length
+            let games_with_turns: Vec<&&Game> = games.iter().filter(|g| g.turns.is_some()).collect();
+            let avg_turns = if !games_with_turns.is_empty() {
+                let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                Some(total_turns as f64 / games_with_turns.len() as f64)
+            } else {
+                None
+            };
+
+            (reason, losses, avg_mulligans, avg_turns)
+        })
+        .collect();
+
+    loss_reason_vec.sort_by(|a, b| b.1.cmp(&a.1));
+
+    generate_table(&["Loss Reason", "Losses", "Avg Mulls", "Avg Turns"], loss_reason_vec.iter().map(|(reason, losses, avg_mulligans, avg_turns)| {
+        vec![
+            reason.clone(),
+            format!("{}", losses),
             format!("{:.2}", avg_mulligans),
             avg_turns.map(|t| format!("{:.1}", t)).unwrap_or_else(|| "-".to_string()),
         ]

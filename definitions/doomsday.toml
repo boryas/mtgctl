@@ -5,16 +5,19 @@ category = "Combo"
 [subtypes.Combo]
 game_plans = ["combo", "cantrips", "control"]
 win_conditions = ["doomsday", "other"]
-loss_reasons = ["bad-pile", "pre-pile", "in-pile"]
+loss_reasons = ["bad-pile", "pre-pile-pressure", "wasted", "pile-disruption", "combo"]
 
 [subtypes.Combo.lists]
 # Add your Combo doomsday lists here
 # "combo-doomsday-1.0" = "https://moxfield.com/..."
 
 [subtypes.Tempo]
-game_plans = ["combo", "tamiyo", "cantrips", "control", "creatures"]
-win_conditions = ["doomsday", "creatures", "tamiyo-ult", "other"]
-loss_reasons = ["bad-pile", "pre-pile", "in-pile", "non-pile"]
+game_plans = ["doomsday", "tamiyo", "cantrips", "control", "creatures"]
+win_conditions = ["doomsday", "creatures", "tamiyo-ult", "concede"]
+loss_reasons = ["bad-pile", "pre-pile-pressure", "grind", "mana", "pile-disruption", "combo"]
 
 [subtypes.Tempo.lists]
 "tempo-doomsday-wasteland-1.0" = "https://moxfield.com/decks/XQ8cIaH-Q0-yjdNzdN3JkQ"
+"tempo-doomsday-wasteland-1.1" = "https://moxfield.com/decks/KVLDeRmO2USc5k-Dp5CO1g"
+"tempo-doomsday-wasteland-1.2" = "https://moxfield.com/decks/dvIaku_xakGg_Hw0of4IOw"
+"tempo-doomsday-bug-1.0" = "https://moxfield.com/decks/Hp5JdlOWYUKqlxjwSS6Ndg"
