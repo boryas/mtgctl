@@ -555,6 +555,21 @@ fn load_opponent_deck_names() -> Vec<String> {
     }
 }
 
+fn load_loss_reasons() -> Vec<String> {
+    let connection = &mut establish_connection();
+
+    let reasons: Result<Vec<Option<String>>, _> = games::table
+        .select(games::loss_reason)
+        .filter(games::loss_reason.is_not_null())
+        .distinct()
+        .load(connection);
+
+    match reasons {
+        Ok(reasons) => reasons.into_iter().filter_map(|r| r).collect(),
+        Err(_) => vec![],
+    }
+}
+
 const EVENT_TYPES: &[&str] = &[
     "League", "Paper", "Casual", "Challenge", "Prelim", "Other"
 ];
@@ -640,6 +655,18 @@ enum GameCommands {
         output: String,
         #[arg(long, help = "Filter by era(s): single (e.g., '2'), multiple (e.g., '1,2,3'), or 'all'. Defaults to latest era")]
         era: Option<String>,
+        #[arg(long, help = "Filter by your deck name (partial match)")]
+        my_deck: Option<String>,
+        #[arg(long, help = "Filter by opponent name")]
+        opponent: Option<String>,
+        #[arg(long, help = "Filter by opponent deck name (partial match)")]
+        opponent_deck: Option<String>,
+        #[arg(long, help = "Filter by event type (League, Challenge, Prelim, Casual)")]
+        event_type: Option<String>,
+    },
+    ReconcileDeck {
+        #[arg(help = "Deck archetype name (e.g., 'Doomsday')")]
+        deck_name: String,
     },
 }
 
@@ -654,7 +681,10 @@ pub fn run(args: GameArgs) {
         GameCommands::BoardPlan { deck_name } => show_board_plan(deck_name),
         GameCommands::RemoveMatch { match_id } => remove_match_interactive(match_id),
         GameCommands::Stats { defaults } => show_stats_interactive(defaults),
-        GameCommands::HtmlStats { output, era } => crate::html_stats::generate_html_stats(&output, era),
+        GameCommands::HtmlStats { output, era, my_deck, opponent, opponent_deck, event_type } => {
+            crate::html_stats::generate_html_stats(&output, era, my_deck, opponent, opponent_deck, event_type)
+        },
+        GameCommands::ReconcileDeck { deck_name } => reconcile_deck(&deck_name),
     }
 }
 
@@ -1230,6 +1260,97 @@ fn get_default_era_filter(connection: &mut SqliteConnection) -> EraFilter {
     }
 }
 
+/// Calculate statistics from specific games (for game-specific groupings)
+fn calculate_stats_from_games(label: String, games: Vec<&Game>, all_matches: &[Match]) -> StatsRow {
+    // Get unique matches that contain these games
+    let match_ids: std::collections::HashSet<i32> = games.iter().map(|g| g.match_id).collect();
+    let matches: Vec<&Match> = all_matches.iter().filter(|m| match_ids.contains(&m.match_id)).collect();
+
+    let match_count = matches.len();
+    let match_wins = matches.iter().filter(|m| m.match_winner == "me").count();
+    let match_losses = match_count - match_wins;
+    let match_win_rate = if match_count > 0 { (match_wins as f64 / match_count as f64) * 100.0 } else { 0.0 };
+
+    // Use only the specific games passed in
+    let game_count = games.len();
+    let game_wins = games.iter().filter(|g| g.game_winner == "me").count();
+    let game_losses = game_count - game_wins;
+    let game_win_rate = if game_count > 0 { (game_wins as f64 / game_count as f64) * 100.0 } else { 0.0 };
+
+    // Mulligan statistics
+    let winning_games: Vec<&Game> = games.iter().filter(|g| g.game_winner == "me").copied().collect();
+    let losing_games: Vec<&Game> = games.iter().filter(|g| g.game_winner == "opponent").copied().collect();
+
+    let total_mulligans: i32 = games.iter().map(|g| g.mulligans).sum();
+    let avg_mulligans = if !games.is_empty() { total_mulligans as f64 / games.len() as f64 } else { 0.0 };
+
+    let win_mulligans: i32 = winning_games.iter().map(|g| g.mulligans).sum();
+    let avg_win_mulligans = if !winning_games.is_empty() { win_mulligans as f64 / winning_games.len() as f64 } else { 0.0 };
+
+    let loss_mulligans: i32 = losing_games.iter().map(|g| g.mulligans).sum();
+    let avg_loss_mulligans = if !losing_games.is_empty() { loss_mulligans as f64 / losing_games.len() as f64 } else { 0.0 };
+
+    // Game length statistics
+    let games_with_turns: Vec<&Game> = games.iter().filter(|g| g.turns.is_some()).copied().collect();
+    let avg_game_length = if !games_with_turns.is_empty() {
+        let total_turns: i32 = games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        Some(total_turns as f64 / games_with_turns.len() as f64)
+    } else {
+        None
+    };
+
+    let win_games_with_turns: Vec<&Game> = winning_games.iter().filter(|g| g.turns.is_some()).copied().collect();
+    let avg_win_length = if !win_games_with_turns.is_empty() {
+        let total_turns: i32 = win_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        Some(total_turns as f64 / win_games_with_turns.len() as f64)
+    } else {
+        None
+    };
+
+    let loss_games_with_turns: Vec<&Game> = losing_games.iter().filter(|g| g.turns.is_some()).copied().collect();
+    let avg_loss_length = if !loss_games_with_turns.is_empty() {
+        let total_turns: i32 = loss_games_with_turns.iter().map(|g| g.turns.unwrap()).sum();
+        Some(total_turns as f64 / loss_games_with_turns.len() as f64)
+    } else {
+        None
+    };
+
+    // Win/Loss conditions
+    let mut win_conditions = HashMap::new();
+    for game in winning_games.iter() {
+        if let Some(condition) = &game.win_condition {
+            *win_conditions.entry(condition.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut loss_conditions = HashMap::new();
+    for game in losing_games.iter() {
+        if let Some(reason) = &game.loss_reason {
+            *loss_conditions.entry(reason.clone()).or_insert(0) += 1;
+        }
+    }
+
+    StatsRow {
+        label,
+        match_wins,
+        match_losses,
+        match_count,
+        match_win_rate,
+        game_wins,
+        game_losses,
+        game_count,
+        game_win_rate,
+        avg_mulligans,
+        avg_win_mulligans,
+        avg_loss_mulligans,
+        avg_game_length,
+        avg_win_length,
+        avg_loss_length,
+        win_conditions,
+        loss_conditions,
+    }
+}
+
 /// Calculate statistics for a group of matches and games
 fn calculate_stats(label: String, matches: &[&Match], all_games: &[Game]) -> StatsRow {
     let match_count = matches.len();
@@ -1321,7 +1442,7 @@ fn calculate_stats(label: String, matches: &[&Match], all_games: &[Game]) -> Sta
 }
 
 /// Display statistics in a table format with selected columns
-fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str) {
+fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str, is_game_grouping: bool) {
     if rows.is_empty() {
         return;
     }
@@ -1353,8 +1474,12 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str)
         for &stat_idx in selected_stats {
             let cell_content = match stat_idx {
                 0 => {
-                    // Win Rate
-                    format!("{:.1}% ({}-{})", row.match_win_rate, row.match_wins, row.match_losses)
+                    // Win Rate - use game stats for game-specific groupings
+                    if is_game_grouping {
+                        format!("{:.1}% ({}-{})", row.game_win_rate, row.game_wins, row.game_losses)
+                    } else {
+                        format!("{:.1}% ({}-{})", row.match_win_rate, row.match_wins, row.match_losses)
+                    }
                 },
                 1 => {
                     // Match Count
@@ -1421,6 +1546,13 @@ fn show_stats_interactive(use_defaults: bool) {
     let mut opponent_deck_filter: Option<String> = None;
     let mut event_type_filter: Option<String> = None;
     let mut era_values: Option<Vec<i32>> = None;
+    let mut loss_reason_filter: Option<String> = None;
+    let mut win_condition_filter: Option<String> = None;
+    let mut game_plan_filter: Option<String> = None;
+    let mut mulligan_count_filter: Option<i32> = None;
+    let mut game_length_filter: Option<(i32, i32)> = None; // (min, max)
+    let mut game_number_filter: Option<i32> = None;
+    let mut play_draw_filter: Option<String> = None;
 
     if use_defaults {
         // Use config defaults for filters
@@ -1442,6 +1574,13 @@ fn show_stats_interactive(use_defaults: bool) {
             "Opponent",
             "Opponent Deck",
             "Event Type",
+            "Loss Reason",
+            "Win Condition",
+            "Game Plan",
+            "Mulligan Count",
+            "Game Length",
+            "Game Number",
+            "Play/Draw",
         ];
 
         // Pre-select filters based on config
@@ -1454,6 +1593,13 @@ fn show_stats_interactive(use_defaults: bool) {
             config.stats.filters.opponent.is_some(),      // Opponent
             config.stats.filters.opponent_deck.is_some(), // Opponent Deck
             config.stats.filters.event_type.is_some(),    // Event Type
+            false,                                         // Loss Reason
+            false,                                         // Win Condition
+            false,                                         // Game Plan
+            false,                                         // Mulligan Count
+            false,                                         // Game Length
+            false,                                         // Game Number
+            false,                                         // Play/Draw
         ];
 
         let selected_filters = MultiSelect::new()
@@ -1468,6 +1614,9 @@ fn show_stats_interactive(use_defaults: bool) {
         let all_opponents = load_opponent_names();
         let all_opponent_decks = load_opponent_deck_names();
         let event_types = vec!["League", "Challenge", "Prelim", "Casual"];
+        let all_loss_reasons = load_loss_reasons();
+        let all_win_conditions = load_win_conditions();
+        let all_game_plans = load_game_plans();
 
         // Extract unique archetypes, subtypes, and lists from deck names
         let mut archetypes = std::collections::HashSet::new();
@@ -1600,6 +1749,92 @@ fn show_stats_interactive(use_defaults: bool) {
                         .unwrap();
                     event_type_filter = Some(event_types[idx].to_string());
                 }
+                8 => {
+                    // Loss Reason - fuzzy select
+                    if !all_loss_reasons.is_empty() {
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select loss reason to filter by")
+                            .items(&all_loss_reasons)
+                            .interact()
+                            .unwrap();
+                        loss_reason_filter = Some(all_loss_reasons[idx].clone());
+                    }
+                }
+                9 => {
+                    // Win Condition - fuzzy select
+                    if !all_win_conditions.is_empty() {
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select win condition to filter by")
+                            .items(&all_win_conditions)
+                            .interact()
+                            .unwrap();
+                        win_condition_filter = Some(all_win_conditions[idx].clone());
+                    }
+                }
+                10 => {
+                    // Game Plan - fuzzy select
+                    if !all_game_plans.is_empty() {
+                        let idx = FuzzySelect::new()
+                            .with_prompt("Select game plan to filter by")
+                            .items(&all_game_plans)
+                            .interact()
+                            .unwrap();
+                        game_plan_filter = Some(all_game_plans[idx].clone());
+                    }
+                }
+                11 => {
+                    // Mulligan Count - number input
+                    let mulligan_options = vec!["0", "1", "2", "3", "4+"];
+                    let idx = FuzzySelect::new()
+                        .with_prompt("Select mulligan count to filter by")
+                        .items(&mulligan_options)
+                        .interact()
+                        .unwrap();
+                    mulligan_count_filter = Some(idx as i32);
+                }
+                12 => {
+                    // Game Length - turn range select
+                    let length_options = vec![
+                        "Very Short (1-3 turns)",
+                        "Short (4-6 turns)",
+                        "Medium (7-9 turns)",
+                        "Long (10-12 turns)",
+                        "Very Long (13+ turns)",
+                    ];
+                    let idx = FuzzySelect::new()
+                        .with_prompt("Select game length to filter by")
+                        .items(&length_options)
+                        .interact()
+                        .unwrap();
+                    game_length_filter = Some(match idx {
+                        0 => (1, 3),
+                        1 => (4, 6),
+                        2 => (7, 9),
+                        3 => (10, 12),
+                        4 => (13, 999),
+                        _ => (1, 999),
+                    });
+                }
+                13 => {
+                    // Game Number - game 1, 2, or 3
+                    let game_options = vec!["Game 1", "Game 2", "Game 3"];
+                    let idx = FuzzySelect::new()
+                        .with_prompt("Select game number to filter by")
+                        .items(&game_options)
+                        .interact()
+                        .unwrap();
+                    game_number_filter = Some((idx + 1) as i32);
+                }
+                14 => {
+                    // Play/Draw
+                    let play_draw_options = vec!["On the Play", "On the Draw"];
+                    let idx = FuzzySelect::new()
+                        .with_prompt("Select play/draw to filter by")
+                        .items(&play_draw_options)
+                        .interact()
+                        .unwrap();
+                    play_draw_filter = Some(if idx == 0 { "play".to_string() } else { "draw".to_string() });
+                }
                 _ => {}
             }
         }
@@ -1623,7 +1858,9 @@ fn show_stats_interactive(use_defaults: bool) {
                 "mulligans" => defaults.push(9),
                 "game-plan" => defaults.push(10),
                 "win-condition" => defaults.push(11),
-                "game-length" => defaults.push(12),
+                "loss-reason" => defaults.push(12),
+                "game-length" => defaults.push(13),
+                "play-draw" => defaults.push(14),
                 _ => {}
             }
         }
@@ -1642,7 +1879,9 @@ fn show_stats_interactive(use_defaults: bool) {
             "Mulligan Count",
             "Game Plan",
             "Win Condition",
+            "Loss Reason",
             "Game Length",
+            "Play/Draw",
         ];
 
         // Pre-select group-bys based on config
@@ -1659,7 +1898,9 @@ fn show_stats_interactive(use_defaults: bool) {
             config.stats.default_groupbys.contains(&"mulligans".to_string()),
             config.stats.default_groupbys.contains(&"game-plan".to_string()),
             config.stats.default_groupbys.contains(&"win-condition".to_string()),
+            config.stats.default_groupbys.contains(&"loss-reason".to_string()),
             config.stats.default_groupbys.contains(&"game-length".to_string()),
+            config.stats.default_groupbys.contains(&"play-draw".to_string()),
         ];
 
         MultiSelect::new()
@@ -1740,7 +1981,7 @@ fn show_stats_interactive(use_defaults: bool) {
         query = query.filter(matches::event_type.like(format!("%{}%", event_type)));
     }
 
-    let all_matches = query.load::<Match>(connection)
+    let mut all_matches = query.load::<Match>(connection)
         .expect("Error loading matches");
 
     if all_matches.is_empty() {
@@ -1748,12 +1989,61 @@ fn show_stats_interactive(use_defaults: bool) {
         return;
     }
 
-    // Get all games for these matches
+    // Get all games for these matches and apply game-specific filters
     let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
-    let all_games = games::table
-        .filter(games::match_id.eq_any(&match_ids))
-        .load::<Game>(connection)
+    let mut game_query = games::table.filter(games::match_id.eq_any(&match_ids)).into_boxed();
+
+    let has_game_filters = loss_reason_filter.is_some()
+        || win_condition_filter.is_some()
+        || game_plan_filter.is_some()
+        || mulligan_count_filter.is_some()
+        || game_length_filter.is_some()
+        || game_number_filter.is_some()
+        || play_draw_filter.is_some();
+
+    if let Some(ref reason) = loss_reason_filter {
+        game_query = game_query.filter(games::loss_reason.eq(reason));
+    }
+
+    if let Some(ref condition) = win_condition_filter {
+        game_query = game_query.filter(games::win_condition.eq(condition));
+    }
+
+    if let Some(ref plan) = game_plan_filter {
+        game_query = game_query.filter(games::opening_hand_plan.eq(plan));
+    }
+
+    if let Some(count) = mulligan_count_filter {
+        game_query = game_query.filter(games::mulligans.eq(count));
+    }
+
+    if let Some((min_turns, max_turns)) = game_length_filter {
+        game_query = game_query.filter(games::turns.ge(min_turns).and(games::turns.le(max_turns)));
+    }
+
+    if let Some(game_num) = game_number_filter {
+        game_query = game_query.filter(games::game_number.eq(game_num));
+    }
+
+    if let Some(ref play_draw) = play_draw_filter {
+        game_query = game_query.filter(games::play_draw.eq(play_draw));
+    }
+
+    let all_games = game_query.load::<Game>(connection)
         .expect("Error loading games");
+
+    // If game-specific filters were applied, filter matches to only those with matching games
+    if has_game_filters {
+        let filtered_match_ids: std::collections::HashSet<i32> = all_games.iter()
+            .map(|g| g.match_id)
+            .collect();
+        all_matches.retain(|m| filtered_match_ids.contains(&m.match_id));
+
+        if all_matches.is_empty() {
+            println!("No matches found with selected filters");
+            return;
+        }
+    }
 
     println!("\nFound {} matches with {} total games\n", all_matches.len(), all_games.len());
 
@@ -1778,7 +2068,9 @@ fn show_stats_interactive(use_defaults: bool) {
             9 => "mulligans",
             10 => "game-plan",
             11 => "win-condition",
-            12 => "game-length",
+            12 => "loss-reason",
+            13 => "game-length",
+            14 => "play-draw",
             _ => continue,
         };
 
@@ -1790,7 +2082,7 @@ fn show_stats_interactive(use_defaults: bool) {
 fn show_overall_stats(all_matches: &[Match], all_games: &[Game], selected_stats: &[usize]) {
     let match_refs: Vec<&Match> = all_matches.iter().collect();
     let overall_row = calculate_stats("Overall".to_string(), &match_refs, all_games);
-    display_stats_table(&[overall_row], selected_stats, "=== Overall Statistics ===");
+    display_stats_table(&[overall_row], selected_stats, "=== Overall Statistics ===", false);
 }
 
 /// Extract archetype from deck name (ignoring subtype)
@@ -1837,97 +2129,111 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
         "mulligans" => ("=== Statistics by Mulligan Count ===", Box::new(|_m: &Match| String::new())),
         "game-plan" => ("=== Statistics by Game Plan ===", Box::new(|_m: &Match| String::new())),
         "win-condition" => ("=== Statistics by Win Condition ===", Box::new(|_m: &Match| String::new())),
+        "loss-reason" => ("=== Statistics by Loss Reason ===", Box::new(|_m: &Match| String::new())),
         "game-length" => ("=== Statistics by Game Length ===", Box::new(|_m: &Match| String::new())),
+        "play-draw" => ("=== Statistics by Play/Draw ===", Box::new(|_m: &Match| String::new())),
         _ => return,
     };
 
     // Special handling for game-based groupings
     if slice_type == "game-number" {
-        let mut game_stats: HashMap<i32, Vec<&Match>> = HashMap::new();
+        let mut game_stats: HashMap<i32, Vec<&Game>> = HashMap::new();
         for game in all_games {
-            if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
-                game_stats.entry(game.game_number).or_default().push(m);
-            }
+            game_stats.entry(game.game_number).or_default().push(game);
         }
 
         let mut rows: Vec<StatsRow> = game_stats.into_iter()
-            .map(|(game_num, matches)| {
-                calculate_stats(format!("Game {}", game_num), &matches, all_games)
+            .map(|(game_num, games)| {
+                calculate_stats_from_games(format!("Game {}", game_num), games, all_matches)
             })
-            .filter(|row| row.match_count >= min_games as usize)
+            .filter(|row| row.game_count >= min_games as usize)
             .collect();
 
         rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
-        display_stats_table(&rows, selected_stats, title);
+        display_stats_table(&rows, selected_stats, title, true);
         return;
     }
 
     if slice_type == "mulligans" {
-        let mut mull_stats: HashMap<i32, Vec<&Match>> = HashMap::new();
+        let mut mull_stats: HashMap<i32, Vec<&Game>> = HashMap::new();
         for game in all_games {
-            if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
-                mull_stats.entry(game.mulligans).or_default().push(m);
-            }
+            mull_stats.entry(game.mulligans).or_default().push(game);
         }
 
         let mut rows: Vec<StatsRow> = mull_stats.into_iter()
-            .map(|(mulls, matches)| {
-                calculate_stats(format!("{} mulligan{}", mulls, if mulls == 1 { "" } else { "s" }), &matches, all_games)
+            .map(|(mulls, games)| {
+                calculate_stats_from_games(format!("{} mulligan{}", mulls, if mulls == 1 { "" } else { "s" }), games, all_matches)
             })
-            .filter(|row| row.match_count >= min_games as usize)
+            .filter(|row| row.game_count >= min_games as usize)
             .collect();
 
         rows.sort_by(|a, b| a.label.cmp(&b.label));
-        display_stats_table(&rows, selected_stats, title);
+        display_stats_table(&rows, selected_stats, title, true);
         return;
     }
 
     if slice_type == "game-plan" {
-        let mut plan_stats: HashMap<String, Vec<&Match>> = HashMap::new();
+        let mut plan_stats: HashMap<String, Vec<&Game>> = HashMap::new();
         for game in all_games {
             if let Some(plan) = &game.opening_hand_plan {
-                if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
-                    plan_stats.entry(plan.clone()).or_default().push(m);
-                }
+                plan_stats.entry(plan.clone()).or_default().push(game);
             }
         }
 
         let mut rows: Vec<StatsRow> = plan_stats.into_iter()
-            .map(|(plan, matches)| {
-                calculate_stats(plan, &matches, all_games)
+            .map(|(plan, games)| {
+                calculate_stats_from_games(plan, games, all_matches)
             })
-            .filter(|row| row.match_count >= min_games as usize)
+            .filter(|row| row.game_count >= min_games as usize)
             .collect();
 
         rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
-        display_stats_table(&rows, selected_stats, title);
+        display_stats_table(&rows, selected_stats, title, true);
         return;
     }
 
     if slice_type == "win-condition" {
-        let mut cond_stats: HashMap<String, Vec<&Match>> = HashMap::new();
+        let mut cond_stats: HashMap<String, Vec<&Game>> = HashMap::new();
         for game in all_games {
             if let Some(condition) = &game.win_condition {
-                if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
-                    cond_stats.entry(condition.clone()).or_default().push(m);
-                }
+                cond_stats.entry(condition.clone()).or_default().push(game);
             }
         }
 
         let mut rows: Vec<StatsRow> = cond_stats.into_iter()
-            .map(|(condition, matches)| {
-                calculate_stats(condition, &matches, all_games)
+            .map(|(condition, games)| {
+                calculate_stats_from_games(condition, games, all_matches)
             })
-            .filter(|row| row.match_count >= min_games as usize)
+            .filter(|row| row.game_count >= min_games as usize)
             .collect();
 
         rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
-        display_stats_table(&rows, selected_stats, title);
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
+    if slice_type == "loss-reason" {
+        let mut reason_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            if let Some(reason) = &game.loss_reason {
+                reason_stats.entry(reason.clone()).or_default().push(game);
+            }
+        }
+
+        let mut rows: Vec<StatsRow> = reason_stats.into_iter()
+            .map(|(reason, games)| {
+                calculate_stats_from_games(reason, games, all_matches)
+            })
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+        display_stats_table(&rows, selected_stats, title, true);
         return;
     }
 
     if slice_type == "game-length" {
-        let mut length_stats: HashMap<String, Vec<&Match>> = HashMap::new();
+        let mut length_stats: HashMap<String, Vec<&Game>> = HashMap::new();
         for game in all_games {
             if let Some(turns) = game.turns {
                 let bucket = match turns {
@@ -1937,23 +2243,46 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
                     10..=12 => "10-12 turns",
                     _ => "13+ turns",
                 };
-                if let Some(m) = all_matches.iter().find(|m| m.match_id == game.match_id) {
-                    length_stats.entry(bucket.to_string()).or_default().push(m);
-                }
+                length_stats.entry(bucket.to_string()).or_default().push(game);
             }
         }
 
         let mut rows: Vec<StatsRow> = length_stats.into_iter()
-            .map(|(bucket, matches)| {
-                calculate_stats(bucket, &matches, all_games)
+            .map(|(bucket, games)| {
+                calculate_stats_from_games(bucket, games, all_matches)
             })
-            .filter(|row| row.match_count >= min_games as usize)
+            .filter(|row| row.game_count >= min_games as usize)
             .collect();
 
         // Sort by bucket order
         let order = ["1-3 turns", "4-6 turns", "7-9 turns", "10-12 turns", "13+ turns"];
         rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
-        display_stats_table(&rows, selected_stats, title);
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
+    if slice_type == "play-draw" {
+        let mut play_draw_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            let label = match game.play_draw.as_str() {
+                "play" => "On the Play",
+                "draw" => "On the Draw",
+                _ => "Unknown",
+            };
+            play_draw_stats.entry(label.to_string()).or_default().push(game);
+        }
+
+        let mut rows: Vec<StatsRow> = play_draw_stats.into_iter()
+            .map(|(label, games)| {
+                calculate_stats_from_games(label, games, all_matches)
+            })
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        // Sort: Play first, then Draw
+        let order = ["On the Play", "On the Draw", "Unknown"];
+        rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
+        display_stats_table(&rows, selected_stats, title, true);
         return;
     }
 
@@ -1974,7 +2303,270 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
     // Sort by total games descending
     rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
 
-    display_stats_table(&rows, selected_stats, title);
+    display_stats_table(&rows, selected_stats, title, false);
+}
+
+fn reconcile_deck(deck_name: &str) {
+    use dialoguer::Select;
+    use std::fs;
+    use toml;
+
+    let connection = &mut establish_connection();
+
+    // Load the deck definition file
+    let def_path = format!("definitions/{}.toml", deck_name.to_lowercase());
+    let definition: UnifiedArchetypeDefinition = match fs::read_to_string(&def_path) {
+        Ok(content) => match toml::from_str(&content) {
+            Ok(def) => def,
+            Err(e) => {
+                println!("Error parsing {}: {}", def_path, e);
+                return;
+            }
+        },
+        Err(e) => {
+            println!("Error reading {}: {}", def_path, e);
+            println!("Make sure the definition file exists for '{}'", deck_name);
+            return;
+        }
+    };
+
+    println!("Reconciling deck: {}\n", definition.name);
+
+    // Get all games for this deck (matches deck name by archetype)
+    let all_matches = matches::table
+        .filter(matches::deck_name.like(format!("%{}%", deck_name)))
+        .load::<Match>(connection)
+        .expect("Error loading matches");
+
+    if all_matches.is_empty() {
+        println!("No matches found for deck '{}'", deck_name);
+        return;
+    }
+
+    let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
+    let all_games = games::table
+        .filter(games::match_id.eq_any(&match_ids))
+        .load::<Game>(connection)
+        .expect("Error loading games");
+
+    println!("Found {} matches with {} games\n", all_matches.len(), all_games.len());
+
+    // Collect all unique values from the database
+    let mut db_game_plans: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut db_win_conditions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut db_loss_reasons: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for game in &all_games {
+        if let Some(ref plan) = game.opening_hand_plan {
+            db_game_plans.insert(plan.clone());
+        }
+        if let Some(ref condition) = game.win_condition {
+            db_win_conditions.insert(condition.clone());
+        }
+        if let Some(ref reason) = game.loss_reason {
+            db_loss_reasons.insert(reason.clone());
+        }
+    }
+
+    // Collect all valid values from definition (including subtypes)
+    let mut def_game_plans: std::collections::HashSet<String> = definition.game_plans.iter().cloned().collect();
+    let mut def_win_conditions: std::collections::HashSet<String> = definition.win_conditions.iter().cloned().collect();
+    let mut def_loss_reasons: std::collections::HashSet<String> = definition.loss_reasons.iter().cloned().collect();
+
+    for (_, subtype) in &definition.subtypes {
+        def_game_plans.extend(subtype.game_plans.iter().cloned());
+        def_win_conditions.extend(subtype.win_conditions.iter().cloned());
+        def_loss_reasons.extend(subtype.loss_reasons.iter().cloned());
+    }
+
+    // Find mismatches
+    let mut changes_made = false;
+
+    // Check game plans
+    for db_value in &db_game_plans {
+        if !def_game_plans.contains(db_value) {
+            println!("═══════════════════════════════════════");
+            println!("Found game plan in database not in definition file:");
+            println!("  Database value: '{}'", db_value);
+            println!("  Count: {} games", all_games.iter().filter(|g| g.opening_hand_plan.as_ref() == Some(db_value)).count());
+            println!();
+
+            let choices = vec![
+                format!("Add '{}' to definition file", db_value),
+                "Change database entries to a value from file".to_string(),
+                "Skip (keep as is)".to_string(),
+            ];
+
+            let selection = Select::new()
+                .with_prompt("What would you like to do?")
+                .items(&choices)
+                .default(0)
+                .interact()
+                .unwrap();
+
+            match selection {
+                0 => {
+                    println!("Note: You'll need to manually add '{}' to {}", db_value, def_path);
+                    println!("Add it under the 'game_plans' array in the appropriate section.");
+                }
+                1 => {
+                    let mut file_values: Vec<String> = def_game_plans.iter().cloned().collect();
+                    file_values.sort();
+
+                    let choice = Select::new()
+                        .with_prompt("Select the value to use")
+                        .items(&file_values)
+                        .interact()
+                        .unwrap();
+
+                    let new_value = &file_values[choice];
+
+                    diesel::update(games::table)
+                        .filter(games::match_id.eq_any(&match_ids))
+                        .filter(games::opening_hand_plan.eq(db_value))
+                        .set(games::opening_hand_plan.eq(new_value))
+                        .execute(connection)
+                        .expect("Error updating games");
+
+                    println!("✓ Updated game plan from '{}' to '{}'", db_value, new_value);
+                    changes_made = true;
+                }
+                2 => {
+                    println!("Skipped");
+                }
+                _ => {}
+            }
+            println!();
+        }
+    }
+
+    // Check win conditions
+    for db_value in &db_win_conditions {
+        if !def_win_conditions.contains(db_value) {
+            println!("═══════════════════════════════════════");
+            println!("Found win condition in database not in definition file:");
+            println!("  Database value: '{}'", db_value);
+            println!("  Count: {} games", all_games.iter().filter(|g| g.win_condition.as_ref() == Some(db_value)).count());
+            println!();
+
+            let choices = vec![
+                format!("Add '{}' to definition file", db_value),
+                "Change database entries to a value from file".to_string(),
+                "Skip (keep as is)".to_string(),
+            ];
+
+            let selection = Select::new()
+                .with_prompt("What would you like to do?")
+                .items(&choices)
+                .default(0)
+                .interact()
+                .unwrap();
+
+            match selection {
+                0 => {
+                    println!("Note: You'll need to manually add '{}' to {}", db_value, def_path);
+                    println!("Add it under the 'win_conditions' array in the appropriate section.");
+                }
+                1 => {
+                    let mut file_values: Vec<String> = def_win_conditions.iter().cloned().collect();
+                    file_values.sort();
+
+                    let choice = Select::new()
+                        .with_prompt("Select the value to use")
+                        .items(&file_values)
+                        .interact()
+                        .unwrap();
+
+                    let new_value = &file_values[choice];
+
+                    diesel::update(games::table)
+                        .filter(games::match_id.eq_any(&match_ids))
+                        .filter(games::win_condition.eq(db_value))
+                        .set(games::win_condition.eq(new_value))
+                        .execute(connection)
+                        .expect("Error updating games");
+
+                    println!("✓ Updated win condition from '{}' to '{}'", db_value, new_value);
+                    changes_made = true;
+                }
+                2 => {
+                    println!("Skipped");
+                }
+                _ => {}
+            }
+            println!();
+        }
+    }
+
+    // Check loss reasons
+    for db_value in &db_loss_reasons {
+        if !def_loss_reasons.contains(db_value) {
+            println!("═══════════════════════════════════════");
+            println!("Found loss reason in database not in definition file:");
+            println!("  Database value: '{}'", db_value);
+            println!("  Count: {} games", all_games.iter().filter(|g| g.loss_reason.as_ref() == Some(db_value)).count());
+            println!();
+
+            let choices = vec![
+                format!("Add '{}' to definition file", db_value),
+                "Change database entries to a value from file".to_string(),
+                "Skip (keep as is)".to_string(),
+            ];
+
+            let selection = Select::new()
+                .with_prompt("What would you like to do?")
+                .items(&choices)
+                .default(0)
+                .interact()
+                .unwrap();
+
+            match selection {
+                0 => {
+                    println!("Note: You'll need to manually add '{}' to {}", db_value, def_path);
+                    println!("Add it under the 'loss_reasons' array in the appropriate section.");
+                }
+                1 => {
+                    let mut file_values: Vec<String> = def_loss_reasons.iter().cloned().collect();
+                    file_values.sort();
+
+                    let choice = Select::new()
+                        .with_prompt("Select the value to use")
+                        .items(&file_values)
+                        .interact()
+                        .unwrap();
+
+                    let new_value = &file_values[choice];
+
+                    diesel::update(games::table)
+                        .filter(games::match_id.eq_any(&match_ids))
+                        .filter(games::loss_reason.eq(db_value))
+                        .set(games::loss_reason.eq(new_value))
+                        .execute(connection)
+                        .expect("Error updating games");
+
+                    println!("✓ Updated loss reason from '{}' to '{}'", db_value, new_value);
+                    changes_made = true;
+                }
+                2 => {
+                    println!("Skipped");
+                }
+                _ => {}
+            }
+            println!();
+        }
+    }
+
+    if changes_made {
+        println!("═══════════════════════════════════════");
+        println!("✓ Reconciliation complete with changes!");
+    } else if db_game_plans.is_subset(&def_game_plans) &&
+              db_win_conditions.is_subset(&def_win_conditions) &&
+              db_loss_reasons.is_subset(&def_loss_reasons) {
+        println!("✓ All database values match the definition file - no reconciliation needed!");
+    } else {
+        println!("═══════════════════════════════════════");
+        println!("✓ Reconciliation complete!");
+    }
 }
 
 fn truncate(s: &str, max_len: usize) -> String {
