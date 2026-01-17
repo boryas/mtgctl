@@ -1461,11 +1461,19 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str,
             4 => headers.push("Game Length"),
             5 => headers.push("Win Conditions"),
             6 => headers.push("Loss Conditions"),
+            7 => headers.push("Proportion"),
             _ => {}
         }
     }
 
     table.set_header(headers);
+
+    // Calculate total count for proportion calculation
+    let total_count: usize = if is_game_grouping {
+        rows.iter().map(|r| r.game_count).sum()
+    } else {
+        rows.iter().map(|r| r.match_count).sum()
+    };
 
     // Build data rows
     for row in rows {
@@ -1520,6 +1528,16 @@ fn display_stats_table(rows: &[StatsRow], selected_stats: &[usize], title: &str,
                         .map(|(k, v)| format!("{}: {}", k, v))
                         .collect::<Vec<_>>()
                         .join(", ")
+                },
+                7 => {
+                    // Proportion of total
+                    let count = if is_game_grouping { row.game_count } else { row.match_count };
+                    if total_count > 0 {
+                        let percentage = (count as f64 / total_count as f64) * 100.0;
+                        format!("{}/{} ({:.1}%)", count, total_count, percentage)
+                    } else {
+                        "-".to_string()
+                    }
                 },
                 _ => String::new(),
             };
@@ -1924,6 +1942,7 @@ fn show_stats_interactive(use_defaults: bool) {
                 "game-length" => defaults.push(4),
                 "win-conditions" => defaults.push(5),
                 "loss-conditions" => defaults.push(6),
+                "proportion" => defaults.push(7),
                 _ => {}
             }
         }
@@ -1937,6 +1956,7 @@ fn show_stats_interactive(use_defaults: bool) {
             "Game Length",
             "Win Conditions",
             "Loss Conditions",
+            "Proportion",
         ];
 
         // Pre-select statistics based on config
@@ -1948,6 +1968,7 @@ fn show_stats_interactive(use_defaults: bool) {
             config.stats.default_statistics.contains(&"game-length".to_string()),
             config.stats.default_statistics.contains(&"win-conditions".to_string()),
             config.stats.default_statistics.contains(&"loss-conditions".to_string()),
+            config.stats.default_statistics.contains(&"proportion".to_string()),
         ];
 
         MultiSelect::new()
