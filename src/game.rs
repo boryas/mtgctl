@@ -249,11 +249,33 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
                 }
             }
 
-            // No subtype or subtype not found, use base archetype data
+            // No subtype specified - merge options from all subtypes plus root
+            let mut game_plans: Vec<String> = unified.game_plans.clone();
+            let mut win_conditions: Vec<String> = unified.win_conditions.clone();
+            let mut loss_reasons: Vec<String> = unified.loss_reasons.clone();
+
+            for subtype_def in unified.subtypes.values() {
+                for plan in &subtype_def.game_plans {
+                    if !game_plans.contains(plan) {
+                        game_plans.push(plan.clone());
+                    }
+                }
+                for cond in &subtype_def.win_conditions {
+                    if !win_conditions.contains(cond) {
+                        win_conditions.push(cond.clone());
+                    }
+                }
+                for reason in &subtype_def.loss_reasons {
+                    if !loss_reasons.contains(reason) {
+                        loss_reasons.push(reason.clone());
+                    }
+                }
+            }
+
             return Some(ArchetypeData {
-                game_plans: unified.game_plans,
-                win_conditions: unified.win_conditions,
-                loss_reasons: unified.loss_reasons,
+                game_plans,
+                win_conditions,
+                loss_reasons,
                 board_plan: unified.board_plan,
             });
         }
@@ -1710,9 +1732,10 @@ fn show_stats_interactive(use_defaults: bool) {
         let all_opponents = load_opponent_names();
         let all_opponent_decks = load_opponent_deck_names();
         let event_types = vec!["League", "Challenge", "Prelim", "Casual"];
-        let all_loss_reasons = load_loss_reasons();
-        let all_win_conditions = load_win_conditions();
-        let all_game_plans = load_game_plans();
+        // These will be reloaded based on selected deck
+        let mut all_loss_reasons = load_loss_reasons();
+        let mut all_win_conditions = load_win_conditions();
+        let mut all_game_plans = load_game_plans();
 
         // Extract unique archetypes, subtypes, and lists from deck names
         let mut archetypes = std::collections::HashSet::new();
@@ -1738,7 +1761,13 @@ fn show_stats_interactive(use_defaults: bool) {
         let subtype_list: Vec<String> = subtypes.into_iter().collect();
         let list_list: Vec<String> = lists.into_iter().collect();
 
-        for &filter_idx in &selected_filters {
+        // Sort filters: match-level first, then game-level
+        let mut sorted_filters = selected_filters.clone();
+        sorted_filters.sort_by_key(|&idx| {
+            if get_level(idx, FILTER_LEVELS) == Some(StatsLevel::Game) { 1 } else { 0 }
+        });
+
+        for &filter_idx in &sorted_filters {
             match filter_idx {
                 0 => {
                     // Era (latest only)
@@ -1766,7 +1795,21 @@ fn show_stats_interactive(use_defaults: bool) {
                             .interact()
                             .unwrap();
                         // Filter by archetype (partial match on deck name)
-                        deck_name_filter = Some(archetype_list[idx].clone());
+                        let selected_archetype = archetype_list[idx].clone();
+                        deck_name_filter = Some(selected_archetype.clone());
+
+                        // Reload deck-specific options
+                        if let Some(data) = load_archetype_data(&selected_archetype) {
+                            if !data.win_conditions.is_empty() {
+                                all_win_conditions = data.win_conditions;
+                            }
+                            if !data.loss_reasons.is_empty() {
+                                all_loss_reasons = data.loss_reasons;
+                            }
+                            if !data.game_plans.is_empty() {
+                                all_game_plans = data.game_plans;
+                            }
+                        }
                     }
                 }
                 3 => {
@@ -1779,6 +1822,7 @@ fn show_stats_interactive(use_defaults: bool) {
                             .unwrap();
                         // Filter by subtype (will match "Archetype: Subtype")
                         deck_name_filter = Some(format!(": {}", subtype_list[idx]));
+                        // Note: subtype alone doesn't give us enough info to load archetype data
                     }
                 }
                 4 => {
@@ -1791,6 +1835,7 @@ fn show_stats_interactive(use_defaults: bool) {
                             .unwrap();
                         // Filter by list name (will match "(list)")
                         deck_name_filter = Some(format!("({})", list_list[idx]));
+                        // Note: list alone doesn't give us enough info to load archetype data
                     }
                 }
                 5 => {
