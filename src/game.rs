@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
 use dialoguer::{Input, FuzzySelect, Confirm, MultiSelect};
+use skim::prelude::*;
+use std::io::Cursor;
 use chrono::{Local, NaiveDate};
 use diesel::prelude::*;
 use std::fs;
@@ -893,34 +895,43 @@ fn add_match_interactive(date_arg: Option<String>) {
 
     println!("Selected deck: {}", deck_name);
     
-    // Get opponent name with fuzzy select from all opponents
+    // Get opponent name with skim fuzzy finder - type to filter, Enter to select or use typed text
     let opponents = load_opponent_names();
     let opponent_name = if opponents.is_empty() {
-        // No opponent history, use text input
         Input::new()
             .with_prompt("Opponent name")
             .interact_text()
             .unwrap()
     } else {
-        // Add option for custom opponent entry
-        let mut opponent_options = opponents.clone();
-        opponent_options.push("Custom (type new opponent)".to_string());
-
-        let opponent_idx = FuzzySelect::new()
-            .with_prompt("Opponent name (type to search)")
-            .items(&opponent_options)
-            .default(0)
-            .interact()
+        let options = SkimOptionsBuilder::default()
+            .prompt(Some("Opponent name: "))
+            .query(None)
+            .select1(false)
+            .exit0(false)
+            .build()
             .unwrap();
 
-        if opponent_idx == opponent_options.len() - 1 {
-            // Custom option selected
-            Input::new()
-                .with_prompt("Enter opponent name")
-                .interact_text()
-                .unwrap()
-        } else {
-            opponents[opponent_idx].clone()
+        let input = opponents.join("\n");
+        let item_reader = SkimItemReader::default();
+        let items = item_reader.of_bufread(Cursor::new(input));
+
+        match Skim::run_with(&options, Some(items)) {
+            Some(output) if !output.is_abort => {
+                if output.selected_items.is_empty() {
+                    // No selection but not aborted - use the query as the name
+                    output.query
+                } else {
+                    // Use the selected item
+                    output.selected_items[0].output().to_string()
+                }
+            }
+            _ => {
+                // Aborted (Esc) - fall back to text input
+                Input::new()
+                    .with_prompt("Opponent name")
+                    .interact_text()
+                    .unwrap()
+            }
         }
     };
     
