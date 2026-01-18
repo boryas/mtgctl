@@ -1,5 +1,7 @@
 use clap::{Args, Subcommand};
-use dialoguer::{Confirm, Input, MultiSelect, FuzzySelect};
+use dialoguer::{Confirm, Input, MultiSelect};
+use skim::prelude::*;
+use std::io::Cursor;
 use diesel::prelude::*;
 use std::fs;
 use std::process::Command;
@@ -8,6 +10,40 @@ use std::collections::HashMap;
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{decks, cards};
+
+/// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
+fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
+    if options.is_empty() {
+        let result: String = Input::new()
+            .with_prompt(prompt)
+            .allow_empty(true)
+            .interact_text()
+            .ok()?;
+        return if result.is_empty() { None } else { Some(result) };
+    }
+
+    let prompt_str = format!("{}: ", prompt);
+    let skim_options = SkimOptionsBuilder::default()
+        .prompt(Some(&prompt_str))
+        .build()
+        .unwrap();
+
+    let input = options.join("\n");
+    let item_reader = SkimItemReader::default();
+    let items = item_reader.of_bufread(Cursor::new(input));
+
+    match Skim::run_with(&skim_options, Some(items)) {
+        Some(output) if !output.is_abort => {
+            if output.selected_items.is_empty() {
+                let query = output.query.trim().to_string();
+                if query.is_empty() { None } else { Some(query) }
+            } else {
+                Some(output.selected_items[0].output().to_string())
+            }
+        }
+        _ => None,
+    }
+}
 
 #[derive(Args)]
 pub struct DeckArgs {
@@ -377,14 +413,8 @@ fn select_deck() -> Option<String> {
     let deck_options: Vec<String> = decks_vec.iter()
         .map(|deck| deck.name.clone())
         .collect();
-    
-    let selection = FuzzySelect::new()
-        .with_prompt("Select a deck")
-        .items(&deck_options)
-        .interact()
-        .unwrap();
-    
-    Some(deck_options[selection].clone())
+
+    fuzzy_select("Select a deck", &deck_options)
 }
 
 fn view_deck_interactive() {
@@ -529,19 +559,15 @@ fn calculate_probability(deck_identifier: &str) {
     
     // Step 3: Choose calculation mode (OR vs AND)
     let calculation_mode = if wanted_counts.len() > 1 {
-        let mode_options = vec![
+        let mode_options: Vec<String> = vec![
             "OR - At least one of the conditions (default)",
             "AND - All conditions must be met"
-        ];
-        
-        let selection = FuzzySelect::new()
-            .with_prompt("How should multiple conditions be combined?")
-            .items(&mode_options)
-            .default(0)
-            .interact()
-            .unwrap();
-        
-        if selection == 0 { "OR" } else { "AND" }
+        ].iter().map(|s| s.to_string()).collect();
+
+        match fuzzy_select("How should multiple conditions be combined?", &mode_options) {
+            Some(s) if s.contains("AND") => "AND",
+            _ => "OR"
+        }
     } else {
         "OR" // Single condition, mode doesn't matter
     };
@@ -668,42 +694,35 @@ fn sequential_probability(deck_identifier: &str) {
             "Quit"
         ];
         
-        let selection = FuzzySelect::new()
-            .with_prompt("What would you like to do?")
-            .items(&menu_options)
-            .interact()
-            .unwrap();
-        
-        match selection {
-            0 => {
+        let menu_options_str: Vec<String> = menu_options.iter().map(|s| s.to_string()).collect();
+        let selection = fuzzy_select("What would you like to do?", &menu_options_str);
+
+        match selection.as_deref() {
+            Some(s) if s.contains("Eliminate") => {
                 // Eliminate more cards
                 let new_eliminations = select_eliminated_cards_from_remaining(&remaining_cards);
                 for (card_name, count) in new_eliminations {
                     *eliminated_total.entry(card_name).or_insert(0) += count;
                 }
             }
-            1 => {
+            Some(s) if s.contains("wanted") => {
                 // Set wanted cards
                 wanted_counts = select_wanted_cards(&remaining_cards);
-                
+
                 // Set calculation mode if multiple cards
                 if wanted_counts.len() > 1 {
-                    let mode_options = vec![
+                    let mode_options: Vec<String> = vec![
                         "OR - At least one of the conditions",
                         "AND - All conditions must be met"
-                    ];
-                    
-                    let mode_selection = FuzzySelect::new()
-                        .with_prompt("How should multiple conditions be combined?")
-                        .items(&mode_options)
-                        .default(if calculation_mode == "OR" { 0 } else { 1 })
-                        .interact()
-                        .unwrap();
-                    
-                    calculation_mode = if mode_selection == 0 { "OR" } else { "AND" };
+                    ].iter().map(|s| s.to_string()).collect();
+
+                    match fuzzy_select("How should multiple conditions be combined?", &mode_options) {
+                        Some(s) if s.contains("AND") => calculation_mode = "AND",
+                        _ => calculation_mode = "OR"
+                    }
                 }
             }
-            2 => {
+            Some(s) if s.contains("Calculate") => {
                 // Calculate probability
                 if wanted_counts.is_empty() {
                     println!("Please set wanted cards first!");
@@ -761,13 +780,13 @@ fn sequential_probability(deck_identifier: &str) {
                 println!("{}: {:.2}%", result_text, probability * 100.0);
                 println!();
             }
-            3 => {
+            Some(s) if s.contains("Show") => {
                 // Show current state
                 println!();
                 println!("=== Current State ===");
                 println!("Deck: {}", deck.name);
                 println!("Remaining cards: {}", total_remaining);
-                
+
                 if !eliminated_total.is_empty() {
                     println!();
                     println!("Eliminated cards:");
@@ -775,7 +794,7 @@ fn sequential_probability(deck_identifier: &str) {
                         println!("  {} x{}", card_name, count);
                     }
                 }
-                
+
                 if !wanted_counts.is_empty() {
                     println!();
                     println!("Wanted cards ({} mode):", calculation_mode);
@@ -785,7 +804,7 @@ fn sequential_probability(deck_identifier: &str) {
                 }
                 println!();
             }
-            4 => {
+            Some(s) if s.contains("Quit") => {
                 // Quit
                 println!("Exiting sequential calculator");
                 break;

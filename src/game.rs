@@ -1,5 +1,5 @@
 use clap::{Args, Subcommand};
-use dialoguer::{Input, FuzzySelect, Confirm, MultiSelect};
+use dialoguer::{Input, Confirm, MultiSelect};
 use skim::prelude::*;
 use std::io::Cursor;
 use chrono::{Local, NaiveDate};
@@ -12,6 +12,77 @@ use comfy_table::{Table, Cell, Attribute, ContentArrangement};
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games};
+
+/// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
+fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
+    if options.is_empty() {
+        // No options - fall back to text input
+        let result: String = Input::new()
+            .with_prompt(prompt)
+            .allow_empty(true)
+            .interact_text()
+            .ok()?;
+        return if result.is_empty() { None } else { Some(result) };
+    }
+
+    let prompt_str = format!("{}: ", prompt);
+    let skim_options = SkimOptionsBuilder::default()
+        .prompt(Some(&prompt_str))
+        .build()
+        .unwrap();
+
+    let input = options.join("\n");
+    let item_reader = SkimItemReader::default();
+    let items = item_reader.of_bufread(Cursor::new(input));
+
+    match Skim::run_with(&skim_options, Some(items)) {
+        Some(output) if !output.is_abort => {
+            if output.selected_items.is_empty() {
+                // No selection - use the query as the value
+                let query = output.query.trim().to_string();
+                if query.is_empty() { None } else { Some(query) }
+            } else {
+                Some(output.selected_items[0].output().to_string())
+            }
+        }
+        _ => None, // Aborted
+    }
+}
+
+/// Fuzzy select with a default value pre-filled in the query
+fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) -> Option<String> {
+    if options.is_empty() {
+        let result: String = Input::new()
+            .with_prompt(prompt)
+            .default(default.to_string())
+            .interact_text()
+            .ok()?;
+        return if result.is_empty() { None } else { Some(result) };
+    }
+
+    let prompt_str = format!("{}: ", prompt);
+    let skim_options = SkimOptionsBuilder::default()
+        .prompt(Some(&prompt_str))
+        .query(Some(default))
+        .build()
+        .unwrap();
+
+    let input = options.join("\n");
+    let item_reader = SkimItemReader::default();
+    let items = item_reader.of_bufread(Cursor::new(input));
+
+    match Skim::run_with(&skim_options, Some(items)) {
+        Some(output) if !output.is_abort => {
+            if output.selected_items.is_empty() {
+                let query = output.query.trim().to_string();
+                if query.is_empty() { None } else { Some(query) }
+            } else {
+                Some(output.selected_items[0].output().to_string())
+            }
+        }
+        _ => None,
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct UnifiedArchetypeDefinition {
@@ -792,78 +863,43 @@ fn select_deck_three_step(config: &Config) -> String {
 
     if archetypes.is_empty() {
         // No archetypes found, fall back to text input
-        return Input::new()
-            .with_prompt("Your deck name")
-            .interact_text()
-            .unwrap();
+        return fuzzy_select("Your deck name", &[])
+            .unwrap_or_else(|| "Unknown".to_string());
     }
 
-    // Determine default archetype index
-    let mut default_archetype_idx = 0;
-    if let Some(default_archetype) = &config.game_entry.default_archetype {
-        if let Some(idx) = archetypes.iter().position(|a| a == default_archetype) {
-            default_archetype_idx = idx;
-        }
-    }
+    // Get default archetype from config
+    let default_archetype = config.game_entry.default_archetype.as_deref().unwrap_or("");
 
-    let archetype_idx = FuzzySelect::new()
-        .with_prompt("Select archetype")
-        .items(&archetypes)
-        .default(default_archetype_idx)
-        .interact()
-        .unwrap();
-
-    let selected_archetype = &archetypes[archetype_idx];
+    let selected_archetype = fuzzy_select_with_default("Select archetype", &archetypes, default_archetype)
+        .unwrap_or_else(|| archetypes.first().cloned().unwrap_or_default());
 
     // Step 2: Select Subtype
-    let subtypes = load_subtypes(selected_archetype);
+    let subtypes = load_subtypes(&selected_archetype);
 
     if subtypes.is_empty() {
         // No subtypes, return just the archetype name
-        return selected_archetype.clone();
+        return selected_archetype;
     }
 
-    // Determine default subtype index
-    let mut default_subtype_idx = 0;
-    if let Some(default_subtype) = &config.game_entry.default_subtype {
-        if let Some(idx) = subtypes.iter().position(|s| s == default_subtype) {
-            default_subtype_idx = idx;
-        }
-    }
+    // Get default subtype from config
+    let default_subtype = config.game_entry.default_subtype.as_deref().unwrap_or("");
 
-    let subtype_idx = FuzzySelect::new()
-        .with_prompt("Select subtype")
-        .items(&subtypes)
-        .default(default_subtype_idx)
-        .interact()
-        .unwrap();
-
-    let selected_subtype = &subtypes[subtype_idx];
+    let selected_subtype = fuzzy_select_with_default("Select subtype", &subtypes, default_subtype)
+        .unwrap_or_else(|| subtypes.first().cloned().unwrap_or_default());
 
     // Step 3: Select List
-    let lists = load_lists(selected_archetype, selected_subtype);
+    let lists = load_lists(&selected_archetype, &selected_subtype);
 
     if lists.is_empty() {
         // No lists defined, return archetype: subtype format
         return format!("{}: {}", selected_archetype, selected_subtype);
     }
 
-    // Determine default list index
-    let mut default_list_idx = 0;
-    if let Some(default_list) = &config.game_entry.default_list {
-        if let Some(idx) = lists.iter().position(|l| l == default_list) {
-            default_list_idx = idx;
-        }
-    }
+    // Get default list from config
+    let default_list = config.game_entry.default_list.as_deref().unwrap_or("");
 
-    let list_idx = FuzzySelect::new()
-        .with_prompt("Select list")
-        .items(&lists)
-        .default(default_list_idx)
-        .interact()
-        .unwrap();
-
-    let selected_list = &lists[list_idx];
+    let selected_list = fuzzy_select_with_default("Select list", &lists, default_list)
+        .unwrap_or_else(|| lists.first().cloned().unwrap_or_default());
 
     // Return the full deck name: "archetype: subtype (list)"
     format!("{}: {} ({})", selected_archetype, selected_subtype, selected_list)
@@ -895,56 +931,17 @@ fn add_match_interactive(date_arg: Option<String>) {
 
     println!("Selected deck: {}", deck_name);
     
-    // Get opponent name with skim fuzzy finder - type to filter, Enter to select or use typed text
+    // Get opponent name
     let opponents = load_opponent_names();
-    let opponent_name = if opponents.is_empty() {
-        Input::new()
-            .with_prompt("Opponent name")
-            .interact_text()
-            .unwrap()
-    } else {
-        let options = SkimOptionsBuilder::default()
-            .prompt(Some("Opponent name: "))
-            .query(None)
-            .select1(false)
-            .exit0(false)
-            .build()
-            .unwrap();
+    let opponent_name = fuzzy_select("Opponent name", &opponents)
+        .unwrap_or_else(|| "Unknown".to_string());
 
-        let input = opponents.join("\n");
-        let item_reader = SkimItemReader::default();
-        let items = item_reader.of_bufread(Cursor::new(input));
-
-        match Skim::run_with(&options, Some(items)) {
-            Some(output) if !output.is_abort => {
-                if output.selected_items.is_empty() {
-                    // No selection but not aborted - use the query as the name
-                    output.query
-                } else {
-                    // Use the selected item
-                    output.selected_items[0].output().to_string()
-                }
-            }
-            _ => {
-                // Aborted (Esc) - fall back to text input
-                Input::new()
-                    .with_prompt("Opponent name")
-                    .interact_text()
-                    .unwrap()
-            }
-        }
-    };
-    
     // Opponent deck will be set after the match
-    
+
     // Get event type
-    let event_type_idx = FuzzySelect::new()
-        .with_prompt("Event type")
-        .items(EVENT_TYPES)
-        .default(0)
-        .interact()
-        .unwrap();
-    let event_type = EVENT_TYPES[event_type_idx].to_string();
+    let event_types: Vec<String> = EVENT_TYPES.iter().map(|s| s.to_string()).collect();
+    let event_type = fuzzy_select("Event type", &event_types)
+        .unwrap_or_else(|| "League".to_string());
     
     // Get die roll winner
     let die_roll_winner = if Confirm::new()
@@ -1002,14 +999,8 @@ fn add_match_interactive(date_arg: Option<String>) {
     if current_match.opponent_deck == "unknown" {
         println!("\n=== Match Complete ===");
         let deck_names = load_deck_names();
-        let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-        let opponent_deck_idx = FuzzySelect::new()
-            .with_prompt("What deck was your opponent playing?")
-            .items(&deck_names_refs)
-            .default(0)
-            .interact()
-            .unwrap();
-        let opponent_deck = deck_names[opponent_deck_idx].clone();
+        let opponent_deck = fuzzy_select("What deck was your opponent playing?", &deck_names)
+            .unwrap_or_else(|| "Unknown".to_string());
 
         // Update the match with the winner and opponent deck
         diesel::update(matches::table.find(match_id))
@@ -1070,28 +1061,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
         } else {
             load_game_plans()
         };
-        let game_plans_refs: Vec<&str> = game_plans.iter().map(|s| s.as_str()).collect();
-        let mut game_plans_with_custom = game_plans_refs.clone();
-        game_plans_with_custom.push("Custom (type your own)");
-
-        let plan_idx = FuzzySelect::new()
-            .with_prompt("Opening hand plan")
-            .items(&game_plans_with_custom)
-            .default(0)
-            .interact()
-            .unwrap();
-
-        let opening_hand_plan = if plan_idx == game_plans_with_custom.len() - 1 {
-            // Custom option selected
-            let custom_plan: String = Input::new()
-                .with_prompt("Enter custom game plan")
-                .allow_empty(true)
-                .interact_text()
-                .unwrap();
-            if custom_plan.is_empty() { None } else { Some(custom_plan) }
-        } else {
-            Some(game_plans[plan_idx].clone())
-        };
+        let opening_hand_plan = fuzzy_select("Opening hand plan", &game_plans);
         
         
         // Game winner
@@ -1115,28 +1085,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
             } else {
                 load_win_conditions()
             };
-            let win_cons_refs: Vec<&str> = win_cons.iter().map(|s| s.as_str()).collect();
-            let mut win_cons_with_custom = win_cons_refs.clone();
-            win_cons_with_custom.push("Custom (type your own)");
-
-            let win_idx = FuzzySelect::new()
-                .with_prompt("What did you win with?")
-                .items(&win_cons_with_custom)
-                .default(0)
-                .interact()
-                .unwrap();
-
-            if win_idx == win_cons_with_custom.len() - 1 {
-                // Custom option selected
-                let custom_win: String = Input::new()
-                    .with_prompt("Enter custom win condition")
-                    .allow_empty(true)
-                    .interact_text()
-                    .unwrap();
-                if custom_win.is_empty() { None } else { Some(custom_win) }
-            } else {
-                Some(win_cons[win_idx].clone())
-            }
+            fuzzy_select("What did you win with?", &win_cons)
         } else {
             None
         };
@@ -1144,32 +1093,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
         // Loss reason (only if you lost) - use archetype-specific
         let loss_reason = if matches!(game_winner, Winner::Opponent) {
             if let Some(ref arch) = archetype {
-                if !arch.loss_reasons.is_empty() {
-                    let loss_reasons_refs: Vec<&str> = arch.loss_reasons.iter().map(|s| s.as_str()).collect();
-                    let mut loss_reasons_with_custom = loss_reasons_refs.clone();
-                    loss_reasons_with_custom.push("Custom (type your own)");
-
-                    let loss_idx = FuzzySelect::new()
-                        .with_prompt("Why did you lose?")
-                        .items(&loss_reasons_with_custom)
-                        .default(0)
-                        .interact()
-                        .unwrap();
-
-                    if loss_idx == loss_reasons_with_custom.len() - 1 {
-                        // Custom option selected
-                        let custom_loss: String = Input::new()
-                            .with_prompt("Enter custom loss reason")
-                            .allow_empty(true)
-                            .interact_text()
-                            .unwrap();
-                        if custom_loss.is_empty() { None } else { Some(custom_loss) }
-                    } else {
-                        Some(arch.loss_reasons[loss_idx].clone())
-                    }
-                } else {
-                    None
-                }
+                fuzzy_select("Why did you lose?", &arch.loss_reasons)
             } else {
                 None
             }
@@ -1229,22 +1153,15 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
                 
             if knows_deck {
                 let deck_names = load_deck_names();
-                let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-                let opponent_deck_idx = FuzzySelect::new()
-                    .with_prompt("What deck is your opponent playing?")
-                    .items(&deck_names_refs)
-                    .default(0)
-                    .interact()
-                    .unwrap();
-                let opponent_deck = deck_names[opponent_deck_idx].clone();
-                
-                // Update the match with the opponent deck
-                diesel::update(matches::table.find(match_id))
-                    .set(matches::opponent_deck.eq(&opponent_deck))
-                    .execute(connection)
-                    .expect("Error updating opponent deck");
-                    
-                println!("Updated opponent deck to: {}", opponent_deck);
+                if let Some(opponent_deck) = fuzzy_select("What deck is your opponent playing?", &deck_names) {
+                    // Update the match with the opponent deck
+                    diesel::update(matches::table.find(match_id))
+                        .set(matches::opponent_deck.eq(&opponent_deck))
+                        .execute(connection)
+                        .expect("Error updating opponent deck");
+
+                    println!("Updated opponent deck to: {}", opponent_deck);
+                }
             }
         }
         
@@ -1742,7 +1659,7 @@ fn show_stats_interactive(use_defaults: bool) {
         let all_decks = load_your_deck_names();
         let all_opponents = load_opponent_names();
         let all_opponent_decks = load_opponent_deck_names();
-        let event_types = vec!["League", "Challenge", "Prelim", "Casual"];
+        let event_types: Vec<String> = vec!["League", "Challenge", "Prelim", "Casual"].iter().map(|s| s.to_string()).collect();
         // These will be reloaded based on selected deck
         let mut all_loss_reasons = load_loss_reasons();
         let mut all_win_conditions = load_win_conditions();
@@ -1792,21 +1709,9 @@ fn show_stats_interactive(use_defaults: bool) {
                 }
                 2 => {
                     // My Archetype - fuzzy select
-                    if !archetype_list.is_empty() {
-                        let default_idx = if let Some(ref default_deck) = config.stats.filters.my_deck {
-                            archetype_list.iter().position(|a| default_deck.contains(a)).unwrap_or(0)
-                        } else {
-                            0
-                        };
-
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select archetype to filter by")
-                            .items(&archetype_list)
-                            .default(default_idx)
-                            .interact()
-                            .unwrap();
+                    let default_deck = config.stats.filters.my_deck.as_deref().unwrap_or("");
+                    if let Some(selected_archetype) = fuzzy_select_with_default("Select archetype to filter by", &archetype_list, default_deck) {
                         // Filter by archetype (partial match on deck name)
-                        let selected_archetype = archetype_list[idx].clone();
                         deck_name_filter = Some(selected_archetype.clone());
 
                         // Reload deck-specific options
@@ -1825,167 +1730,90 @@ fn show_stats_interactive(use_defaults: bool) {
                 }
                 3 => {
                     // My Subtype - fuzzy select
-                    if !subtype_list.is_empty() {
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select subtype to filter by")
-                            .items(&subtype_list)
-                            .interact()
-                            .unwrap();
+                    if let Some(subtype) = fuzzy_select("Select subtype to filter by", &subtype_list) {
                         // Filter by subtype (will match "Archetype: Subtype")
-                        deck_name_filter = Some(format!(": {}", subtype_list[idx]));
+                        deck_name_filter = Some(format!(": {}", subtype));
                         // Note: subtype alone doesn't give us enough info to load archetype data
                     }
                 }
                 4 => {
                     // My List - fuzzy select
-                    if !list_list.is_empty() {
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select list to filter by")
-                            .items(&list_list)
-                            .interact()
-                            .unwrap();
+                    if let Some(list) = fuzzy_select("Select list to filter by", &list_list) {
                         // Filter by list name (will match "(list)")
-                        deck_name_filter = Some(format!("({})", list_list[idx]));
+                        deck_name_filter = Some(format!("({})", list));
                         // Note: list alone doesn't give us enough info to load archetype data
                     }
                 }
                 5 => {
                     // Opponent - fuzzy select
-                    if !all_opponents.is_empty() {
-                        let default_idx = if let Some(ref default_opp) = config.stats.filters.opponent {
-                            all_opponents.iter().position(|o| o.contains(default_opp)).unwrap_or(0)
-                        } else {
-                            0
-                        };
-
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select opponent to filter by")
-                            .items(&all_opponents)
-                            .default(default_idx)
-                            .interact()
-                            .unwrap();
-                        opponent_name_filter = Some(all_opponents[idx].clone());
-                    }
+                    let default_opp = config.stats.filters.opponent.as_deref().unwrap_or("");
+                    opponent_name_filter = fuzzy_select_with_default("Select opponent to filter by", &all_opponents, default_opp);
                 }
                 6 => {
                     // Opponent Deck - fuzzy select
-                    if !all_opponent_decks.is_empty() {
-                        let default_idx = if let Some(ref default_opp_deck) = config.stats.filters.opponent_deck {
-                            all_opponent_decks.iter().position(|d| d.contains(default_opp_deck)).unwrap_or(0)
-                        } else {
-                            0
-                        };
-
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select opponent deck to filter by")
-                            .items(&all_opponent_decks)
-                            .default(default_idx)
-                            .interact()
-                            .unwrap();
-                        opponent_deck_filter = Some(all_opponent_decks[idx].clone());
-                    }
+                    let default_deck = config.stats.filters.opponent_deck.as_deref().unwrap_or("");
+                    opponent_deck_filter = fuzzy_select_with_default("Select opponent deck to filter by", &all_opponent_decks, default_deck);
                 }
                 7 => {
                     // Event Type - fuzzy select
-                    let default_idx = if let Some(ref default_event) = config.stats.filters.event_type {
-                        event_types.iter().position(|e| e.contains(default_event.as_str())).unwrap_or(0)
-                    } else {
-                        0
-                    };
-
-                    let idx = FuzzySelect::new()
-                        .with_prompt("Select event type to filter by")
-                        .items(&event_types)
-                        .default(default_idx)
-                        .interact()
-                        .unwrap();
-                    event_type_filter = Some(event_types[idx].to_string());
+                    let default_event = config.stats.filters.event_type.as_deref().unwrap_or("");
+                    event_type_filter = fuzzy_select_with_default("Select event type to filter by", &event_types, default_event);
                 }
                 8 => {
                     // Loss Reason - fuzzy select
-                    if !all_loss_reasons.is_empty() {
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select loss reason to filter by")
-                            .items(&all_loss_reasons)
-                            .interact()
-                            .unwrap();
-                        loss_reason_filter = Some(all_loss_reasons[idx].clone());
-                    }
+                    loss_reason_filter = fuzzy_select("Select loss reason to filter by", &all_loss_reasons);
                 }
                 9 => {
                     // Win Condition - fuzzy select
-                    if !all_win_conditions.is_empty() {
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select win condition to filter by")
-                            .items(&all_win_conditions)
-                            .interact()
-                            .unwrap();
-                        win_condition_filter = Some(all_win_conditions[idx].clone());
-                    }
+                    win_condition_filter = fuzzy_select("Select win condition to filter by", &all_win_conditions);
                 }
                 10 => {
                     // Game Plan - fuzzy select
-                    if !all_game_plans.is_empty() {
-                        let idx = FuzzySelect::new()
-                            .with_prompt("Select game plan to filter by")
-                            .items(&all_game_plans)
-                            .interact()
-                            .unwrap();
-                        game_plan_filter = Some(all_game_plans[idx].clone());
-                    }
+                    game_plan_filter = fuzzy_select("Select game plan to filter by", &all_game_plans);
                 }
                 11 => {
                     // Mulligan Count - number input
-                    let mulligan_options = vec!["0", "1", "2", "3", "4+"];
-                    let idx = FuzzySelect::new()
-                        .with_prompt("Select mulligan count to filter by")
-                        .items(&mulligan_options)
-                        .interact()
-                        .unwrap();
-                    mulligan_count_filter = Some(idx as i32);
+                    let mulligan_options: Vec<String> = vec!["0", "1", "2", "3", "4+"].iter().map(|s| s.to_string()).collect();
+                    if let Some(selected) = fuzzy_select("Select mulligan count to filter by", &mulligan_options) {
+                        let idx = mulligan_options.iter().position(|o| o == &selected).unwrap_or(0);
+                        mulligan_count_filter = Some(idx as i32);
+                    }
                 }
                 12 => {
                     // Game Length - turn range select
-                    let length_options = vec![
+                    let length_options: Vec<String> = vec![
                         "Very Short (1-3 turns)",
                         "Short (4-6 turns)",
                         "Medium (7-9 turns)",
                         "Long (10-12 turns)",
                         "Very Long (13+ turns)",
-                    ];
-                    let idx = FuzzySelect::new()
-                        .with_prompt("Select game length to filter by")
-                        .items(&length_options)
-                        .interact()
-                        .unwrap();
-                    game_length_filter = Some(match idx {
-                        0 => (1, 3),
-                        1 => (4, 6),
-                        2 => (7, 9),
-                        3 => (10, 12),
-                        4 => (13, 999),
-                        _ => (1, 999),
-                    });
+                    ].iter().map(|s| s.to_string()).collect();
+                    if let Some(selected) = fuzzy_select("Select game length to filter by", &length_options) {
+                        let idx = length_options.iter().position(|o| o == &selected).unwrap_or(0);
+                        game_length_filter = Some(match idx {
+                            0 => (1, 3),
+                            1 => (4, 6),
+                            2 => (7, 9),
+                            3 => (10, 12),
+                            4 => (13, 999),
+                            _ => (1, 999),
+                        });
+                    }
                 }
                 13 => {
                     // Game Number - game 1, 2, or 3
-                    let game_options = vec!["Game 1", "Game 2", "Game 3"];
-                    let idx = FuzzySelect::new()
-                        .with_prompt("Select game number to filter by")
-                        .items(&game_options)
-                        .interact()
-                        .unwrap();
-                    game_number_filter = Some((idx + 1) as i32);
+                    let game_options: Vec<String> = vec!["Game 1", "Game 2", "Game 3"].iter().map(|s| s.to_string()).collect();
+                    if let Some(selected) = fuzzy_select("Select game number to filter by", &game_options) {
+                        let idx = game_options.iter().position(|o| o == &selected).unwrap_or(0);
+                        game_number_filter = Some((idx + 1) as i32);
+                    }
                 }
                 14 => {
                     // Play/Draw
-                    let play_draw_options = vec!["On the Play", "On the Draw"];
-                    let idx = FuzzySelect::new()
-                        .with_prompt("Select play/draw to filter by")
-                        .items(&play_draw_options)
-                        .interact()
-                        .unwrap();
-                    play_draw_filter = Some(if idx == 0 { "play".to_string() } else { "draw".to_string() });
+                    let play_draw_options: Vec<String> = vec!["On the Play", "On the Draw"].iter().map(|s| s.to_string()).collect();
+                    if let Some(selected) = fuzzy_select("Select play/draw to filter by", &play_draw_options) {
+                        play_draw_filter = Some(if selected == "On the Play" { "play".to_string() } else { "draw".to_string() });
+                    }
                 }
                 _ => {}
             }
@@ -2809,31 +2637,8 @@ fn edit_match_interactive(match_id: i32) {
         
     if change_deck {
         let your_decks = load_your_deck_names();
-        let mut deck_options = your_decks.clone();
-        deck_options.push("Custom (type new deck name)".to_string());
-        
-        let current_deck_idx = your_decks.iter()
-            .position(|deck| deck == &match_data.deck_name)
-            .unwrap_or(0);
-        
-        let deck_idx = FuzzySelect::new()
-            .with_prompt("Your deck name")
-            .items(&deck_options)
-            .default(current_deck_idx)
-            .interact()
-            .unwrap();
-            
-        if deck_idx == deck_options.len() - 1 {
-            // Custom option selected
-            let new_deck_name: String = Input::new()
-                .with_prompt("Enter new deck name")
-                .interact_text()
-                .unwrap();
-            if !new_deck_name.is_empty() {
-                match_data.deck_name = new_deck_name;
-            }
-        } else {
-            match_data.deck_name = your_decks[deck_idx].clone();
+        if let Some(new_deck) = fuzzy_select_with_default("Your deck name", &your_decks, &match_data.deck_name) {
+            match_data.deck_name = new_deck;
         }
     }
     
@@ -2845,86 +2650,35 @@ fn edit_match_interactive(match_id: i32) {
         
     if change_opponent {
         let opponents = load_opponent_names();
-        if opponents.is_empty() {
-            // No opponent history, use text input
-            let new_opponent_name: String = Input::new()
-                .with_prompt(&format!("Opponent name [{}]", match_data.opponent_name))
-                .allow_empty(true)
-                .interact_text()
-                .unwrap();
-            if !new_opponent_name.is_empty() {
-                match_data.opponent_name = new_opponent_name;
-            }
-        } else {
-            let mut opponent_options = opponents.clone();
-            opponent_options.push("Custom (type new opponent)".to_string());
-            
-            let current_opponent_idx = opponents.iter()
-                .position(|opp| opp == &match_data.opponent_name)
-                .unwrap_or(0);
-            
-            let opponent_idx = FuzzySelect::new()
-                .with_prompt("Opponent name (type to search)")
-                .items(&opponent_options)
-                .default(current_opponent_idx)
-                .interact()
-                .unwrap();
-                
-            if opponent_idx == opponent_options.len() - 1 {
-                // Custom option selected
-                let new_opponent_name: String = Input::new()
-                    .with_prompt("Enter opponent name")
-                    .interact_text()
-                    .unwrap();
-                if !new_opponent_name.is_empty() {
-                    match_data.opponent_name = new_opponent_name;
-                }
-            } else {
-                match_data.opponent_name = opponents[opponent_idx].clone();
-            }
+        if let Some(new_opponent) = fuzzy_select_with_default("Opponent name", &opponents, &match_data.opponent_name) {
+            match_data.opponent_name = new_opponent;
         }
     }
-    
+
     // Edit opponent deck
-    let deck_names = load_deck_names();
-    let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-    let current_deck_idx = deck_names.iter()
-        .position(|deck| deck == &match_data.opponent_deck)
-        .unwrap_or(0);
-        
     let change_deck = Confirm::new()
         .with_prompt(&format!("Change opponent deck from '{}'?", match_data.opponent_deck))
         .interact()
         .unwrap();
-        
+
     if change_deck {
-        let opponent_deck_idx = FuzzySelect::new()
-            .with_prompt("Opponent's deck")
-            .items(&deck_names_refs)
-            .default(current_deck_idx)
-            .interact()
-            .unwrap();
-        match_data.opponent_deck = deck_names[opponent_deck_idx].clone();
+        let deck_names = load_deck_names();
+        if let Some(new_deck) = fuzzy_select_with_default("Opponent's deck", &deck_names, &match_data.opponent_deck) {
+            match_data.opponent_deck = new_deck;
+        }
     }
     
     // Edit event type
-    let current_event_idx = EVENT_TYPES.iter()
-        .position(|&event| event == match_data.event_type)
-        .unwrap_or(0);
-        
     let change_event = Confirm::new()
         .with_prompt(&format!("Change event type from '{}'?", match_data.event_type))
         .interact()
         .unwrap();
-        
+
     if change_event {
-        let event_type_idx = FuzzySelect::new()
-            .with_prompt("Event type")
-            .items(EVENT_TYPES)
-            .default(current_event_idx)
-            .interact()
-            .unwrap();
-        match_data.event_type = EVENT_TYPES[event_type_idx].to_string();
+        let event_types: Vec<String> = EVENT_TYPES.iter().map(|s| s.to_string()).collect();
+        if let Some(new_event) = fuzzy_select_with_default("Event type", &event_types, &match_data.event_type) {
+            match_data.event_type = new_event;
+        }
     }
     
     // Edit die roll winner
@@ -3179,14 +2933,9 @@ fn add_deck_to_list(deck_name: Option<String>) {
     }
     
     // Ask for category
-    let category_options = vec!["Blue", "Combo", "Non-Blue", "Stompy"];
-    let category_idx = FuzzySelect::new()
-        .with_prompt("Select deck category")
-        .items(&category_options)
-        .default(0)
-        .interact()
-        .unwrap();
-    let category = category_options[category_idx];
+    let category_options: Vec<String> = vec!["Blue", "Combo", "Non-Blue", "Stompy"].iter().map(|s| s.to_string()).collect();
+    let category = fuzzy_select("Select deck category", &category_options)
+        .unwrap_or_else(|| "Blue".to_string());
     
     // Read the existing definitions.md file
     let content = match fs::read_to_string("definitions.md") {
@@ -3283,16 +3032,8 @@ fn show_board_plan(deck_name: Option<String>) {
         None => {
             // Interactive mode - select from available decks
             let deck_names = load_deck_names();
-            let deck_names_refs: Vec<&str> = deck_names.iter().map(|s| s.as_str()).collect();
-
-            let selection = FuzzySelect::new()
-                .with_prompt("Select opponent deck to see board plan")
-                .items(&deck_names_refs)
-                .default(0)
-                .interact()
-                .unwrap();
-
-            deck_names[selection].clone()
+            fuzzy_select("Select opponent deck to see board plan", &deck_names)
+                .unwrap_or_else(|| "Unknown".to_string())
         }
     };
 
