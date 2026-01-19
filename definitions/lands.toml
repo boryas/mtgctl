@@ -11,5 +11,6 @@ win_conditions = ["marit lage", "constructs", "concede"]
 loss_reasons = ["wasteland", "lage-answered", "sweeper", "gy-hate", "combo", "creatures"]
 
 [subtypes."Mono Green".lists]
+"sprouts-1.1" = "https://moxfield.com/..."
 "sprouts-2.1" = "https://moxfield.com/..."
 "sprouts-2.2" = "https://moxfield.com/..."

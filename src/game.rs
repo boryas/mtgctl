@@ -141,6 +141,8 @@ struct StatsConfig {
     #[serde(default)]
     filters: StatsFilters,
     #[serde(default)]
+    default_filters: Vec<String>,
+    #[serde(default)]
     default_groupbys: Vec<String>,
     #[serde(default)]
     default_statistics: Vec<String>,
@@ -1626,23 +1628,24 @@ fn show_stats_interactive(use_defaults: bool) {
             "Play/Draw",
         ];
 
-        // Pre-select filters based on config
+        // Pre-select filters based on config (either explicit values or default_filters list)
+        let df = &config.stats.default_filters;
         let filter_defaults = vec![
-            config.stats.filters.era.is_some(),           // Era (latest only)
-            false,                                         // Era (all)
-            config.stats.filters.my_deck.is_some(),       // My Archetype
-            false,                                         // My Subtype (covered by my_deck)
-            false,                                         // My List (covered by my_deck)
-            config.stats.filters.opponent.is_some(),      // Opponent
-            config.stats.filters.opponent_deck.is_some(), // Opponent Deck
-            config.stats.filters.event_type.is_some(),    // Event Type
-            false,                                         // Loss Reason
-            false,                                         // Win Condition
-            false,                                         // Game Plan
-            false,                                         // Mulligan Count
-            false,                                         // Game Length
-            false,                                         // Game Number
-            false,                                         // Play/Draw
+            config.stats.filters.era.is_some() || df.contains(&"era-latest".to_string()),
+            df.contains(&"era-all".to_string()),
+            config.stats.filters.my_deck.is_some() || df.contains(&"my-archetype".to_string()),
+            df.contains(&"my-subtype".to_string()),
+            df.contains(&"my-list".to_string()),
+            config.stats.filters.opponent.is_some() || df.contains(&"opponent".to_string()),
+            config.stats.filters.opponent_deck.is_some() || df.contains(&"opponent-deck".to_string()),
+            config.stats.filters.event_type.is_some() || df.contains(&"event-type".to_string()),
+            df.contains(&"loss-reason".to_string()),
+            df.contains(&"win-condition".to_string()),
+            df.contains(&"game-plan".to_string()),
+            df.contains(&"mulligan-count".to_string()),
+            df.contains(&"game-length".to_string()),
+            df.contains(&"game-number".to_string()),
+            df.contains(&"play-draw".to_string()),
         ];
 
         let selected_filters = MultiSelect::new()
@@ -2035,7 +2038,50 @@ fn show_stats_interactive(use_defaults: bool) {
         }
     }
 
-    println!("\nFound {} matches with {} total games\n", all_matches.len(), all_games.len());
+    // Display active filters prominently
+    let mut active_filters: Vec<String> = Vec::new();
+    if let Some(ref eras) = era_values {
+        let era_str = eras.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
+        active_filters.push(format!("Era: {}", era_str));
+    }
+    if let Some(ref deck) = deck_name_filter {
+        active_filters.push(format!("My Deck: {}", deck));
+    }
+    if let Some(ref opp) = opponent_name_filter {
+        active_filters.push(format!("Opponent: {}", opp));
+    }
+    if let Some(ref opp_deck) = opponent_deck_filter {
+        active_filters.push(format!("Opponent Deck: {}", opp_deck));
+    }
+    if let Some(ref event) = event_type_filter {
+        active_filters.push(format!("Event: {}", event));
+    }
+    if let Some(ref reason) = loss_reason_filter {
+        active_filters.push(format!("Loss Reason: {}", reason));
+    }
+    if let Some(ref cond) = win_condition_filter {
+        active_filters.push(format!("Win Condition: {}", cond));
+    }
+    if let Some(ref plan) = game_plan_filter {
+        active_filters.push(format!("Game Plan: {}", plan));
+    }
+    if let Some(count) = mulligan_count_filter {
+        active_filters.push(format!("Mulligans: {}", count));
+    }
+    if let Some((min, max)) = game_length_filter {
+        active_filters.push(format!("Game Length: {}-{} turns", min, max));
+    }
+    if let Some(num) = game_number_filter {
+        active_filters.push(format!("Game: {}", num));
+    }
+    if let Some(ref pd) = play_draw_filter {
+        active_filters.push(format!("Play/Draw: {}", pd));
+    }
+
+    if !active_filters.is_empty() {
+        println!("\nFilters: {}", active_filters.join(" | "));
+    }
+    println!("Found {} matches with {} total games\n", all_matches.len(), all_games.len());
 
     // Determine if we're in "game mode" (game-level filters or group-bys applied)
     let has_game_groupbys = has_game_level(&selected_groupbys, GROUPBY_LEVELS);

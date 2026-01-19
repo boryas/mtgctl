@@ -11,7 +11,7 @@ default_subtype = "Tempo"
 
 # Default list/version to pre-select (only used if archetype and subtype are set)
 # Example: "tempo-doomsday-wasteland-1.0", "sprouts-2.1"
-default_list = "tempo-doomsday-bug-1.0"
+# default_list = "tempo-doomsday-bug-1.0"
 
 # Default era to assign to new matches
 # Use an integer without quotes (e.g., default_era = 2)
@@ -19,6 +19,13 @@ default_list = "tempo-doomsday-bug-1.0"
 default_era = 2
 
 [stats]
+# Pre-select these filters (you'll still be prompted for values)
+# Options: "era-latest", "era-all", "my-archetype", "my-subtype", "my-list",
+#          "opponent", "opponent-deck", "event-type", "loss-reason",
+#          "win-condition", "game-plan", "mulligan-count", "game-length",
+#          "game-number", "play-draw"
+default_filters = ["era-latest", "my-archetype"]
+
 # Default groupings to show
 # Options: "my-archetype", "my-subtype", "my-list", "opponent", "opponent-deck",
 #          "opponent-deck-archetype", "opponent-deck-category", "era",
@@ -28,22 +35,10 @@ default_era = 2
 # Default statistics to display
 # Options: "win-rate", "match-count", "game-count", "mulligans",
 #          "game-length", "win-conditions", "loss-conditions"
-default_statistics = ["win-rate", "game-count", "proportion"]
+default_statistics = ["win-rate", "proportion"]
 
 # Default filters to apply
 # Available filter types: "era", "my-deck", "opponent", "opponent-deck", "event-type"
 [stats.filters]
 # Filter by specific era (use integer)
-era = 2
-
-# Filter by your deck name (partial match supported)
-my_deck = "Doomsday"
-
-# Filter by opponent name (partial match)
-# opponent = "John"
-
-# Filter by opponent deck (partial match)
-# opponent_deck = "Storm"
-
-# Filter by event type (partial match)
-# event_type = "League"
+# era = 2
