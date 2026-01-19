@@ -197,14 +197,16 @@ const FILTER_LEVELS: &[(usize, &str, StatsLevel)] = &[
     (4, "my-list", StatsLevel::Match),
     (5, "opponent", StatsLevel::Match),
     (6, "opponent-deck", StatsLevel::Match),
-    (7, "event-type", StatsLevel::Match),
-    (8, "loss-reason", StatsLevel::Game),
-    (9, "win-condition", StatsLevel::Game),
-    (10, "game-plan", StatsLevel::Game),
-    (11, "mulligan-count", StatsLevel::Game),
-    (12, "game-length", StatsLevel::Game),
-    (13, "game-number", StatsLevel::Game),
-    (14, "play-draw", StatsLevel::Game),
+    (7, "opponent-deck-archetype", StatsLevel::Match),
+    (8, "opponent-deck-category", StatsLevel::Match),
+    (9, "event-type", StatsLevel::Match),
+    (10, "loss-reason", StatsLevel::Game),
+    (11, "win-condition", StatsLevel::Game),
+    (12, "game-plan", StatsLevel::Game),
+    (13, "mulligan-count", StatsLevel::Game),
+    (14, "game-length", StatsLevel::Game),
+    (15, "game-number", StatsLevel::Game),
+    (16, "play-draw", StatsLevel::Game),
 ];
 
 /// Group-by indices and their levels
@@ -219,12 +221,13 @@ const GROUPBY_LEVELS: &[(usize, &str, StatsLevel)] = &[
     (6, "opponent-deck-category", StatsLevel::Match),
     (7, "era", StatsLevel::Match),
     (8, "game-number", StatsLevel::Game),
-    (9, "mulligans", StatsLevel::Game),
-    (10, "game-plan", StatsLevel::Game),
-    (11, "win-condition", StatsLevel::Game),
-    (12, "loss-reason", StatsLevel::Game),
-    (13, "game-length", StatsLevel::Game),
-    (14, "play-draw", StatsLevel::Game),
+    (9, "pre-post-board", StatsLevel::Game),
+    (10, "mulligans", StatsLevel::Game),
+    (11, "game-plan", StatsLevel::Game),
+    (12, "win-condition", StatsLevel::Game),
+    (13, "loss-reason", StatsLevel::Game),
+    (14, "game-length", StatsLevel::Game),
+    (15, "play-draw", StatsLevel::Game),
 ];
 
 /// Statistic indices and their levels
@@ -1588,6 +1591,8 @@ fn show_stats_interactive(use_defaults: bool) {
     let mut deck_name_filter: Option<String> = None;
     let mut opponent_name_filter: Option<String> = None;
     let mut opponent_deck_filter: Option<String> = None;
+    let mut opponent_deck_archetype_filter: Option<String> = None;
+    let mut opponent_deck_category_filter: Option<String> = None;
     let mut event_type_filter: Option<String> = None;
     let mut era_values: Option<Vec<i32>> = None;
     let mut loss_reason_filter: Option<String> = None;
@@ -1595,7 +1600,7 @@ fn show_stats_interactive(use_defaults: bool) {
     let mut game_plan_filter: Option<String> = None;
     let mut mulligan_count_filter: Option<i32> = None;
     let mut game_length_filter: Option<(i32, i32)> = None; // (min, max)
-    let mut game_number_filter: Option<i32> = None;
+    let mut game_number_filter: Option<Vec<i32>> = None;
     let mut play_draw_filter: Option<String> = None;
     let mut selected_filter_indices: Vec<usize> = Vec::new();
 
@@ -1618,6 +1623,8 @@ fn show_stats_interactive(use_defaults: bool) {
             "My List",
             "Opponent",
             "Opponent Deck",
+            "Opponent Deck Archetype",
+            "Opponent Deck Category",
             "Event Type",
             "Loss Reason",
             "Win Condition",
@@ -1638,6 +1645,8 @@ fn show_stats_interactive(use_defaults: bool) {
             df.contains(&"my-list".to_string()),
             config.stats.filters.opponent.is_some() || df.contains(&"opponent".to_string()),
             config.stats.filters.opponent_deck.is_some() || df.contains(&"opponent-deck".to_string()),
+            df.contains(&"opponent-deck-archetype".to_string()),
+            df.contains(&"opponent-deck-category".to_string()),
             config.stats.filters.event_type.is_some() || df.contains(&"event-type".to_string()),
             df.contains(&"loss-reason".to_string()),
             df.contains(&"win-condition".to_string()),
@@ -1691,6 +1700,17 @@ fn show_stats_interactive(use_defaults: bool) {
         let archetype_list: Vec<String> = archetypes.into_iter().collect();
         let subtype_list: Vec<String> = subtypes.into_iter().collect();
         let list_list: Vec<String> = lists.into_iter().collect();
+
+        // Extract opponent deck archetypes and categories
+        let mut opponent_archetypes: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut opponent_categories: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for deck in &all_opponent_decks {
+            let (archetype, _) = parse_deck_name(deck);
+            opponent_archetypes.insert(archetype.to_string());
+            opponent_categories.insert(categorize_deck(deck).to_string().to_string());
+        }
+        let opponent_archetype_list: Vec<String> = opponent_archetypes.into_iter().collect();
+        let opponent_category_list: Vec<String> = opponent_categories.into_iter().collect();
 
         // Sort filters: match-level first, then game-level
         let mut sorted_filters = selected_filters.clone();
@@ -1758,23 +1778,31 @@ fn show_stats_interactive(use_defaults: bool) {
                     opponent_deck_filter = fuzzy_select_with_default("Select opponent deck to filter by", &all_opponent_decks, default_deck);
                 }
                 7 => {
+                    // Opponent Deck Archetype - fuzzy select
+                    opponent_deck_archetype_filter = fuzzy_select("Select opponent deck archetype to filter by", &opponent_archetype_list);
+                }
+                8 => {
+                    // Opponent Deck Category - fuzzy select
+                    opponent_deck_category_filter = fuzzy_select("Select opponent deck category to filter by", &opponent_category_list);
+                }
+                9 => {
                     // Event Type - fuzzy select
                     let default_event = config.stats.filters.event_type.as_deref().unwrap_or("");
                     event_type_filter = fuzzy_select_with_default("Select event type to filter by", &event_types, default_event);
                 }
-                8 => {
+                10 => {
                     // Loss Reason - fuzzy select
                     loss_reason_filter = fuzzy_select("Select loss reason to filter by", &all_loss_reasons);
                 }
-                9 => {
+                11 => {
                     // Win Condition - fuzzy select
                     win_condition_filter = fuzzy_select("Select win condition to filter by", &all_win_conditions);
                 }
-                10 => {
+                12 => {
                     // Game Plan - fuzzy select
                     game_plan_filter = fuzzy_select("Select game plan to filter by", &all_game_plans);
                 }
-                11 => {
+                13 => {
                     // Mulligan Count - number input
                     let mulligan_options: Vec<String> = vec!["0", "1", "2", "3", "4+"].iter().map(|s| s.to_string()).collect();
                     if let Some(selected) = fuzzy_select("Select mulligan count to filter by", &mulligan_options) {
@@ -1782,7 +1810,7 @@ fn show_stats_interactive(use_defaults: bool) {
                         mulligan_count_filter = Some(idx as i32);
                     }
                 }
-                12 => {
+                14 => {
                     // Game Length - turn range select
                     let length_options: Vec<String> = vec![
                         "Very Short (1-3 turns)",
@@ -1803,15 +1831,20 @@ fn show_stats_interactive(use_defaults: bool) {
                         });
                     }
                 }
-                13 => {
-                    // Game Number - game 1, 2, or 3
-                    let game_options: Vec<String> = vec!["Game 1", "Game 2", "Game 3"].iter().map(|s| s.to_string()).collect();
+                15 => {
+                    // Game Number - game 1, 2, 3, or post-board (2+3)
+                    let game_options: Vec<String> = vec!["Game 1", "Game 2", "Game 3", "Post-board (2+3)"].iter().map(|s| s.to_string()).collect();
                     if let Some(selected) = fuzzy_select("Select game number to filter by", &game_options) {
-                        let idx = game_options.iter().position(|o| o == &selected).unwrap_or(0);
-                        game_number_filter = Some((idx + 1) as i32);
+                        game_number_filter = Some(match selected.as_str() {
+                            "Game 1" => vec![1],
+                            "Game 2" => vec![2],
+                            "Game 3" => vec![3],
+                            "Post-board (2+3)" => vec![2, 3],
+                            _ => vec![1],
+                        });
                     }
                 }
-                14 => {
+                16 => {
                     // Play/Draw
                     let play_draw_options: Vec<String> = vec!["On the Play", "On the Draw"].iter().map(|s| s.to_string()).collect();
                     if let Some(selected) = fuzzy_select("Select play/draw to filter by", &play_draw_options) {
@@ -1838,12 +1871,13 @@ fn show_stats_interactive(use_defaults: bool) {
                 "opponent-deck-category" => defaults.push(6),
                 "era" => defaults.push(7),
                 "game-number" => defaults.push(8),
-                "mulligans" => defaults.push(9),
-                "game-plan" => defaults.push(10),
-                "win-condition" => defaults.push(11),
-                "loss-reason" => defaults.push(12),
-                "game-length" => defaults.push(13),
-                "play-draw" => defaults.push(14),
+                "pre-post-board" => defaults.push(9),
+                "mulligans" => defaults.push(10),
+                "game-plan" => defaults.push(11),
+                "win-condition" => defaults.push(12),
+                "loss-reason" => defaults.push(13),
+                "game-length" => defaults.push(14),
+                "play-draw" => defaults.push(15),
                 _ => {}
             }
         }
@@ -1859,6 +1893,7 @@ fn show_stats_interactive(use_defaults: bool) {
             "Opponent Deck Category",
             "Era",
             "Game Number",
+            "Pre/Post-board",
             "Mulligan Count",
             "Game Plan",
             "Win Condition",
@@ -1878,6 +1913,7 @@ fn show_stats_interactive(use_defaults: bool) {
             config.stats.default_groupbys.contains(&"opponent-deck-category".to_string()),
             config.stats.default_groupbys.contains(&"era".to_string()),
             config.stats.default_groupbys.contains(&"game-number".to_string()),
+            config.stats.default_groupbys.contains(&"pre-post-board".to_string()),
             config.stats.default_groupbys.contains(&"mulligans".to_string()),
             config.stats.default_groupbys.contains(&"game-plan".to_string()),
             config.stats.default_groupbys.contains(&"win-condition".to_string()),
@@ -1977,6 +2013,20 @@ fn show_stats_interactive(use_defaults: bool) {
     let mut all_matches = query.load::<Match>(connection)
         .expect("Error loading matches");
 
+    // Apply post-load filters for computed fields
+    if let Some(ref arch_filter) = opponent_deck_archetype_filter {
+        all_matches.retain(|m| {
+            let (archetype, _) = parse_deck_name(&m.opponent_deck);
+            archetype == arch_filter
+        });
+    }
+
+    if let Some(ref cat_filter) = opponent_deck_category_filter {
+        all_matches.retain(|m| {
+            categorize_deck(&m.opponent_deck).to_string() == cat_filter
+        });
+    }
+
     if all_matches.is_empty() {
         println!("No matches found with selected filters");
         return;
@@ -2014,8 +2064,8 @@ fn show_stats_interactive(use_defaults: bool) {
         game_query = game_query.filter(games::turns.ge(min_turns).and(games::turns.le(max_turns)));
     }
 
-    if let Some(game_num) = game_number_filter {
-        game_query = game_query.filter(games::game_number.eq(game_num));
+    if let Some(ref game_nums) = game_number_filter {
+        game_query = game_query.filter(games::game_number.eq_any(game_nums));
     }
 
     if let Some(ref play_draw) = play_draw_filter {
@@ -2053,6 +2103,12 @@ fn show_stats_interactive(use_defaults: bool) {
     if let Some(ref opp_deck) = opponent_deck_filter {
         active_filters.push(format!("Opponent Deck: {}", opp_deck));
     }
+    if let Some(ref opp_arch) = opponent_deck_archetype_filter {
+        active_filters.push(format!("Opponent Archetype: {}", opp_arch));
+    }
+    if let Some(ref opp_cat) = opponent_deck_category_filter {
+        active_filters.push(format!("Opponent Category: {}", opp_cat));
+    }
     if let Some(ref event) = event_type_filter {
         active_filters.push(format!("Event: {}", event));
     }
@@ -2071,8 +2127,15 @@ fn show_stats_interactive(use_defaults: bool) {
     if let Some((min, max)) = game_length_filter {
         active_filters.push(format!("Game Length: {}-{} turns", min, max));
     }
-    if let Some(num) = game_number_filter {
-        active_filters.push(format!("Game: {}", num));
+    if let Some(ref nums) = game_number_filter {
+        let label = match nums.as_slice() {
+            [1] => "Game 1".to_string(),
+            [2] => "Game 2".to_string(),
+            [3] => "Game 3".to_string(),
+            [2, 3] => "Post-board (2+3)".to_string(),
+            _ => format!("Games {:?}", nums),
+        };
+        active_filters.push(label);
     }
     if let Some(ref pd) = play_draw_filter {
         active_filters.push(format!("Play/Draw: {}", pd));
@@ -2130,12 +2193,13 @@ fn show_stats_interactive(use_defaults: bool) {
             6 => "deck-category",
             7 => "era",
             8 => "game-number",
-            9 => "mulligans",
-            10 => "game-plan",
-            11 => "win-condition",
-            12 => "loss-reason",
-            13 => "game-length",
-            14 => "play-draw",
+            9 => "pre-post-board",
+            10 => "mulligans",
+            11 => "game-plan",
+            12 => "win-condition",
+            13 => "loss-reason",
+            14 => "game-length",
+            15 => "play-draw",
             _ => continue,
         };
 
@@ -2191,6 +2255,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             // For now, return empty to handle specially
             String::new()
         })),
+        "pre-post-board" => ("=== Statistics by Pre/Post-board ===", Box::new(|_m: &Match| String::new())),
         "mulligans" => ("=== Statistics by Mulligan Count ===", Box::new(|_m: &Match| String::new())),
         "game-plan" => ("=== Statistics by Game Plan ===", Box::new(|_m: &Match| String::new())),
         "win-condition" => ("=== Statistics by Win Condition ===", Box::new(|_m: &Match| String::new())),
@@ -2215,6 +2280,35 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
             .collect();
 
         rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
+    if slice_type == "pre-post-board" {
+        let mut pre_board: Vec<&Game> = Vec::new();
+        let mut post_board: Vec<&Game> = Vec::new();
+        for game in all_games {
+            if game.game_number == 1 {
+                pre_board.push(game);
+            } else {
+                post_board.push(game);
+            }
+        }
+
+        let mut rows: Vec<StatsRow> = Vec::new();
+        if !pre_board.is_empty() {
+            let row = calculate_stats_from_games("Game 1 (Pre-board)".to_string(), pre_board, all_matches);
+            if row.game_count >= min_games as usize {
+                rows.push(row);
+            }
+        }
+        if !post_board.is_empty() {
+            let row = calculate_stats_from_games("Games 2+3 (Post-board)".to_string(), post_board, all_matches);
+            if row.game_count >= min_games as usize {
+                rows.push(row);
+            }
+        }
+
         display_stats_table(&rows, selected_stats, title, true);
         return;
     }
