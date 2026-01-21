@@ -1,0 +1,15 @@
+# non blue aggro decks like mono black or rakdos
+name = "Aggro"
+category = "Non-Blue"
+
+[subtypes.Rakdos]
+game_plans = ["creatures"]
+win_conditions = ["creatures"]
+
+[subtypes.Mono-Black]
+game_plans = ["creatures"]
+win_conditions = ["creatures"]
+
+[subtypes.Cub]
+game_plans = ["creatures", "control"]
+win_conditions = ["creatures"]

@@ -102,7 +102,9 @@ struct UnifiedArchetypeDefinition {
 
 #[derive(Debug, Deserialize)]
 struct SubtypeDefinition {
+    #[serde(default)]
     game_plans: Vec<String>,
+    #[serde(default)]
     win_conditions: Vec<String>,
     #[serde(default)]
     loss_reasons: Vec<String>,
@@ -3280,5 +3282,80 @@ fn get_current_era(connection: &mut SqliteConnection) -> Option<i32> {
         .first::<Option<i32>>(connection)
         .ok()
         .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_definition_files_parse() {
+        let mut parsed = Vec::new();
+        let mut errors = Vec::new();
+
+        if let Ok(entries) = fs::read_dir("definitions") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                    match fs::read_to_string(&path) {
+                        Ok(content) => {
+                            match toml::from_str::<UnifiedArchetypeDefinition>(&content) {
+                                Ok(unified) => {
+                                    parsed.push(unified.name.clone());
+                                }
+                                Err(e) => {
+                                    errors.push(format!("{:?}: {}", path, e));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            errors.push(format!("{:?}: read error: {}", path, e));
+                        }
+                    }
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            panic!("Failed to parse definition files:\n{}", errors.join("\n"));
+        }
+
+        // Verify we loaded a reasonable number of archetypes
+        assert!(parsed.len() >= 30, "Expected at least 30 archetypes, got {}", parsed.len());
+    }
+
+    #[test]
+    fn test_load_archetypes_returns_all() {
+        let archetypes = load_archetypes();
+
+        // Verify key archetypes are present
+        let expected = vec![
+            "Affinity", "Aggro", "Beanstalk", "Control", "Death and Taxes",
+            "Depths", "Doomsday", "Dredge", "Lands", "Painter", "Reanimator",
+            "Stompy", "Storm", "Tempo",
+        ];
+
+        for name in expected {
+            assert!(
+                archetypes.iter().any(|a| a == name),
+                "Missing archetype: {}. Found: {:?}", name, archetypes
+            );
+        }
+    }
+
+    #[test]
+    fn test_load_subtypes() {
+        // Test that subtypes load correctly for archetypes that have them
+        let doomsday_subtypes = load_subtypes("Doomsday");
+        assert!(doomsday_subtypes.contains(&"Tempo".to_string()), "Doomsday should have Tempo subtype");
+        assert!(doomsday_subtypes.contains(&"Combo".to_string()), "Doomsday should have Combo subtype");
+
+        let storm_subtypes = load_subtypes("Storm");
+        assert!(storm_subtypes.contains(&"ANT".to_string()), "Storm should have ANT subtype");
+        assert!(storm_subtypes.contains(&"TES".to_string()), "Storm should have TES subtype");
+
+        let affinity_subtypes = load_subtypes("Affinity");
+        assert!(affinity_subtypes.contains(&"8-Cast".to_string()), "Affinity should have 8-Cast subtype");
+    }
 }
 

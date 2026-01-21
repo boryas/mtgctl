@@ -2,22 +2,14 @@
 name = "Death and Taxes"
 category = "Non-Blue"
 
-# Base game plans and win conditions
-# (can be overridden by subtypes)
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+game_plans = ["creatures", "mana denial", "hate"]
+win_conditions = ["creatures", "lock-pieces"]
 
-# BW variant
 [subtypes.BW]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures", "lock-pieces"]
 
-# W variant
 [subtypes.W]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures", "lock-pieces"]
 
-# Yorion variant
 [subtypes.Yorion]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures", "lock-pieces"]

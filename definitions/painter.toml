@@ -2,28 +2,20 @@
 name = "Painter"
 category = "Non-Blue"
 
-# Base game plans and win conditions
-# (can be overridden by subtypes)
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+game_plans = ["combo", "artifacts"]
+win_conditions = ["combo"]
 
-# R variant
 [subtypes.R]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["combo"]
 
 [subtypes.R.board_plan]
 description = "Counter combo pieces, remove artifacts, pressure"
 
-# U variant
 [subtypes.U]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["combo"]
 
 [subtypes.U.board_plan]
 description = "Force backup, counter Painter, surgical key pieces"
 
-# W variant
 [subtypes.W]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["combo"]

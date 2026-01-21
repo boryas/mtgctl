@@ -2,27 +2,17 @@
 name = "Beanstalk"
 category = "Blue"
 
-# Base game plans and win conditions
-# (can be overridden by subtypes)
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+game_plans = ["value", "control", "ramp"]
+win_conditions = ["creatures", "planeswalkers"]
 
-# Bant variant
 [subtypes.Bant]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures", "planeswalkers"]
 
-# Domain variant
 [subtypes.Domain]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures", "planeswalkers"]
 
-# Sultai variant
 [subtypes.Sultai]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures", "planeswalkers"]
 
-# Yorion variant
 [subtypes.Yorion]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures", "planeswalkers"]

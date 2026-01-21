@@ -2,11 +2,8 @@
 name = "Goblins"
 category = "Non-Blue"
 
-# Game plans specific to this archetype
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-
-# Win conditions for this archetype
-win_conditions = ["marit lage", "constructs", "concede"]
+game_plans = ["creatures", "combo"]
+win_conditions = ["creatures", "combo"]
 
 [board_plan]
 description = "Board wipes, remove key threats, stabilize"

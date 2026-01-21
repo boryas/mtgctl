@@ -2,12 +2,8 @@
 name = "Maverick"
 category = "Non-Blue"
 
-# Base game plans and win conditions
-# (can be overridden by subtypes)
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+game_plans = ["creatures", "hate", "toolbox"]
+win_conditions = ["creatures"]
 
-# GW variant
 [subtypes.GW]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures"]

@@ -2,23 +2,17 @@
 name = "Reanimator"
 category = "Combo"
 
-# Base game plans and win conditions
-# (can be overridden by subtypes)
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+game_plans = ["combo", "graveyard"]
+win_conditions = ["creatures"]
 
-# BR variant
 [subtypes.BR]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures"]
 
 [subtypes.BR.board_plan]
 description = "Force backup, counter reanimation spells, surgical Griselbrand"
 
-# UB variant
 [subtypes.UB]
-game_plans = ["combo", "saga", "mana denial", "hate", "value"]
-win_conditions = ["marit lage", "constructs", "concede"]
+win_conditions = ["creatures"]
 
 [subtypes.UB.board_plan]
 description = "Force backup, counter reanimation spells, pressure with creatures"
