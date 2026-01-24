@@ -310,63 +310,55 @@ fn load_config() -> Config {
 /// Handles both standalone archetypes and subtypes
 fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
     let (archetype, subtype) = parse_deck_name(deck_name);
-    let filename = archetype_to_filename(archetype);
 
-    // Try unified definitions first
-    let path = Path::new("definitions").join(&filename);
+    let unified = load_definition(archetype)?;
 
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
-            // If there's a subtype, look it up
-            if let Some(subtype_name) = subtype {
-                if let Some(subtype_def) = unified.subtypes.get(subtype_name) {
-                    return Some(ArchetypeData {
-                        game_plans: subtype_def.game_plans.clone(),
-                        win_conditions: subtype_def.win_conditions.clone(),
-                        loss_reasons: subtype_def.loss_reasons.clone(),
-                        board_plan: subtype_def.board_plan.clone(),
-                    });
-                }
-            }
-
-            // No subtype specified - merge options from all subtypes plus root
-            let mut game_plans: Vec<String> = unified.game_plans.clone();
-            let mut win_conditions: Vec<String> = unified.win_conditions.clone();
-            let mut loss_reasons: Vec<String> = unified.loss_reasons.clone();
-
-            for subtype_def in unified.subtypes.values() {
-                for plan in &subtype_def.game_plans {
-                    if !game_plans.contains(plan) {
-                        game_plans.push(plan.clone());
-                    }
-                }
-                for cond in &subtype_def.win_conditions {
-                    if !win_conditions.contains(cond) {
-                        win_conditions.push(cond.clone());
-                    }
-                }
-                for reason in &subtype_def.loss_reasons {
-                    if !loss_reasons.contains(reason) {
-                        loss_reasons.push(reason.clone());
-                    }
-                }
-            }
-
+    // If there's a subtype, look it up
+    if let Some(subtype_name) = subtype {
+        if let Some(subtype_def) = unified.subtypes.get(subtype_name) {
             return Some(ArchetypeData {
-                game_plans,
-                win_conditions,
-                loss_reasons,
-                board_plan: unified.board_plan,
+                game_plans: subtype_def.game_plans.clone(),
+                win_conditions: subtype_def.win_conditions.clone(),
+                loss_reasons: subtype_def.loss_reasons.clone(),
+                board_plan: subtype_def.board_plan.clone(),
             });
         }
     }
 
-    None
+    // No subtype specified - merge options from all subtypes plus root
+    let mut game_plans: Vec<String> = unified.game_plans.clone();
+    let mut win_conditions: Vec<String> = unified.win_conditions.clone();
+    let mut loss_reasons: Vec<String> = unified.loss_reasons.clone();
+
+    for subtype_def in unified.subtypes.values() {
+        for plan in &subtype_def.game_plans {
+            if !game_plans.contains(plan) {
+                game_plans.push(plan.clone());
+            }
+        }
+        for cond in &subtype_def.win_conditions {
+            if !win_conditions.contains(cond) {
+                win_conditions.push(cond.clone());
+            }
+        }
+        for reason in &subtype_def.loss_reasons {
+            if !loss_reasons.contains(reason) {
+                loss_reasons.push(reason.clone());
+            }
+        }
+    }
+
+    Some(ArchetypeData {
+        game_plans,
+        win_conditions,
+        loss_reasons,
+        board_plan: unified.board_plan,
+    })
 }
 
-/// Load all archetype names from definitions/
-fn load_archetypes() -> Vec<String> {
-    let mut archetypes = Vec::new();
+/// Load all archetype definitions from the definitions directory
+fn load_all_definitions() -> Vec<UnifiedArchetypeDefinition> {
+    let mut definitions = Vec::new();
 
     if let Ok(entries) = fs::read_dir("definitions") {
         for entry in entries.flatten() {
@@ -374,211 +366,191 @@ fn load_archetypes() -> Vec<String> {
             if path.extension().and_then(|s| s.to_str()) == Some("toml") {
                 if let Ok(content) = fs::read_to_string(&path) {
                     if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
-                        archetypes.push(unified.name);
+                        definitions.push(unified);
                     }
                 }
             }
         }
     }
 
-    // Sort alphabetically, but keep "Other" at the end
-    archetypes.sort();
-    if let Some(pos) = archetypes.iter().position(|name| name == "Other") {
-        let other = archetypes.remove(pos);
-        archetypes.push(other);
-    }
+    definitions
+}
 
+/// Load a single archetype definition by name
+fn load_definition(archetype: &str) -> Option<UnifiedArchetypeDefinition> {
+    let filename = archetype_to_filename(archetype);
+    let path = Path::new("definitions").join(&filename);
+
+    if let Ok(content) = fs::read_to_string(&path) {
+        toml::from_str::<UnifiedArchetypeDefinition>(&content).ok()
+    } else {
+        None
+    }
+}
+
+/// Helper to sort a list alphabetically with "Other" at the end
+fn sort_with_other_last(items: &mut Vec<String>) {
+    items.sort();
+    if let Some(pos) = items.iter().position(|name| name == "Other") {
+        let other = items.remove(pos);
+        items.push(other);
+    }
+}
+
+/// Generate all deck names from a definition (handles subtypes)
+fn deck_names_from_definition(def: &UnifiedArchetypeDefinition) -> Vec<String> {
+    if !def.subtypes.is_empty() {
+        def.subtypes.keys()
+            .map(|subtype| format!("{}: {}", def.name, subtype))
+            .collect()
+    } else {
+        vec![def.name.clone()]
+    }
+}
+
+fn load_archetypes() -> Vec<String> {
+    let mut archetypes: Vec<String> = load_all_definitions()
+        .into_iter()
+        .map(|def| def.name)
+        .collect();
+
+    sort_with_other_last(&mut archetypes);
     archetypes
 }
 
 /// Load subtypes for a given archetype
 fn load_subtypes(archetype: &str) -> Vec<String> {
-    let filename = archetype_to_filename(archetype);
-    let path = Path::new("definitions").join(&filename);
-
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
-            let mut subtypes: Vec<String> = unified.subtypes.keys().cloned().collect();
-            subtypes.sort();
-            return subtypes;
-        }
+    if let Some(def) = load_definition(archetype) {
+        let mut subtypes: Vec<String> = def.subtypes.keys().cloned().collect();
+        subtypes.sort();
+        return subtypes;
     }
-
     Vec::new()
 }
 
 /// Load lists for a given archetype and subtype
 fn load_lists(archetype: &str, subtype: &str) -> Vec<String> {
-    let filename = archetype_to_filename(archetype);
-    let path = Path::new("definitions").join(&filename);
-
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
-            if let Some(subtype_def) = unified.subtypes.get(subtype) {
-                let mut lists: Vec<String> = subtype_def.lists.keys().cloned().collect();
-                lists.sort();
-                return lists;
-            }
+    if let Some(def) = load_definition(archetype) {
+        if let Some(subtype_def) = def.subtypes.get(subtype) {
+            let mut lists: Vec<String> = subtype_def.lists.keys().cloned().collect();
+            lists.sort();
+            return lists;
         }
     }
-
     Vec::new()
 }
 
-/// Legacy function for backward compatibility - loads historical deck names
+/// Load all deck names from definitions
 fn load_deck_names() -> Vec<String> {
-    let mut deck_names = Vec::new();
+    let definitions = load_all_definitions();
 
-    // If no archetypes found, fall back to definitions.md
-    if deck_names.is_empty() {
-        match fs::read_to_string("definitions.md") {
-            Ok(content) => {
-                let mut in_decks_section = false;
-                deck_names = content.lines()
-                    .filter_map(|line| {
-                        let line = line.trim();
+    let mut deck_names: Vec<String> = if !definitions.is_empty() {
+        definitions.iter()
+            .flat_map(deck_names_from_definition)
+            .collect()
+    } else {
+        // Fall back to definitions.md if no TOML files found
+        load_deck_names_from_md()
+    };
 
-                        if line.starts_with("## Decks") {
-                            in_decks_section = true;
-                            return None;
-                        }
-
-                        if line.starts_with("##") && !line.starts_with("## Decks") {
-                            in_decks_section = false;
-                            return None;
-                        }
-
-                        if !in_decks_section || line.is_empty() {
-                            return None;
-                        }
-
-                        if let Some((deck_name, _category)) = line.split_once(';') {
-                            Some(deck_name.trim().to_string())
-                        } else {
-                            Some(line.to_string())
-                        }
-                    })
-                    .collect();
-            },
-            Err(_) => {
-                // Final fallback to hardcoded list
-                deck_names = vec![
-                    "Reanimator: UB".to_string(),
-                    "Reanimator: BR".to_string(),
-                    "Stompy: Moon".to_string(),
-                    "Stompy: Eldrazi".to_string(),
-                    "Tempo: UB".to_string(),
-                    "Tempo: UR".to_string(),
-                    "Lands".to_string(),
-                    "Omni-tell".to_string(),
-                    "Sneak and Show".to_string(),
-                    "Painter: R".to_string(),
-                    "Painter: U".to_string(),
-                    "Mystic Forge".to_string(),
-                    "Oops! All Spells".to_string(),
-                    "Cephalid Breakfast".to_string(),
-                    "Doomsday".to_string(),
-                    "Nadu: Midrange".to_string(),
-                    "Nadu: Elves".to_string(),
-                    "Beanstalk: BUG".to_string(),
-                    "Beanstalk: Domain".to_string(),
-                    "Beanstalk: Yorion".to_string(),
-                    "Storm: TES".to_string(),
-                    "Storm: ANT".to_string(),
-                    "Storm: Ruby".to_string(),
-                    "Storm: Black Saga".to_string(),
-                    "Goblins".to_string(),
-                    "Combo Elves".to_string(),
-                    "Cradle Control".to_string(),
-                    "Dredge".to_string(),
-                    "Maverick: GW".to_string(),
-                    "Stiflenaught".to_string(),
-                    "Stoneblade".to_string(),
-                    "Miracles".to_string(),
-                    "Infect".to_string(),
-                    "Merfolk".to_string(),
-                    "Cloudpost".to_string(),
-                    "Other".to_string(),
-                ];
-            }
-        }
-    }
-
+    sort_with_other_last(&mut deck_names);
     deck_names
 }
 
-fn load_deck_categories() -> HashMap<String, DeckCategory> {
-    let mut categories = HashMap::new();
-
-    // Try unified definitions directory first
-    if let Ok(entries) = fs::read_dir("definitions") {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("toml") {
-                if let Ok(content) = fs::read_to_string(&path) {
-                    if let Ok(unified) = toml::from_str::<UnifiedArchetypeDefinition>(&content) {
-                        let category = match unified.category.as_str() {
-                            "Blue" => DeckCategory::Blue,
-                            "Combo" => DeckCategory::Combo,
-                            "Non-Blue" => DeckCategory::NonBlue,
-                            _ => DeckCategory::Other,
-                        };
-
-                        // Add category for each subtype variant
-                        if !unified.subtypes.is_empty() {
-                            for subtype_name in unified.subtypes.keys() {
-                                let deck_name = format!("{}: {}", unified.name, subtype_name);
-                                categories.insert(deck_name, category.clone());
-                            }
-                        } else {
-                            // No subtypes, just add the archetype
-                            categories.insert(unified.name, category);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // If no archetypes found, fall back to definitions.md
-    if categories.is_empty() {
-        match fs::read_to_string("definitions.md") {
-            Ok(content) => {
-                let mut in_decks_section = false;
-                for line in content.lines() {
+/// Fallback: load deck names from definitions.md
+fn load_deck_names_from_md() -> Vec<String> {
+    match fs::read_to_string("definitions.md") {
+        Ok(content) => {
+            let mut in_decks_section = false;
+            content.lines()
+                .filter_map(|line| {
                     let line = line.trim();
 
                     if line.starts_with("## Decks") {
                         in_decks_section = true;
-                        continue;
+                        return None;
                     }
 
                     if line.starts_with("##") && !line.starts_with("## Decks") {
                         in_decks_section = false;
-                        continue;
+                        return None;
                     }
 
                     if !in_decks_section || line.is_empty() {
-                        continue;
+                        return None;
                     }
 
-                    if let Some((deck_name, category_str)) = line.split_once(';') {
-                        let deck_name = deck_name.trim().to_string();
-                        let category_str = category_str.trim();
-
-                        let category = match category_str {
-                            "Blue" => DeckCategory::Blue,
-                            "Combo" => DeckCategory::Combo,
-                            "Non-Blue" => DeckCategory::NonBlue,
-                            _ => DeckCategory::Other,
-                        };
-
-                        categories.insert(deck_name, category);
+                    if let Some((deck_name, _category)) = line.split_once(';') {
+                        Some(deck_name.trim().to_string())
+                    } else {
+                        Some(line.to_string())
                     }
-                }
-            },
-            Err(_) => {
-                // Fallback categories if file doesn't exist - empty map will use the hardcoded categorize_deck function
+                })
+                .collect()
+        },
+        Err(_) => Vec::new()
+    }
+}
+
+fn load_deck_categories() -> HashMap<String, DeckCategory> {
+    let definitions = load_all_definitions();
+
+    if !definitions.is_empty() {
+        let mut categories = HashMap::new();
+        for def in definitions {
+            let category = match def.category.as_str() {
+                "Blue" => DeckCategory::Blue,
+                "Combo" => DeckCategory::Combo,
+                "Non-Blue" => DeckCategory::NonBlue,
+                _ => DeckCategory::Other,
+            };
+
+            for deck_name in deck_names_from_definition(&def) {
+                categories.insert(deck_name, category.clone());
+            }
+        }
+        categories
+    } else {
+        // Fall back to definitions.md
+        load_deck_categories_from_md()
+    }
+}
+
+/// Fallback: load deck categories from definitions.md
+fn load_deck_categories_from_md() -> HashMap<String, DeckCategory> {
+    let mut categories = HashMap::new();
+
+    if let Ok(content) = fs::read_to_string("definitions.md") {
+        let mut in_decks_section = false;
+        for line in content.lines() {
+            let line = line.trim();
+
+            if line.starts_with("## Decks") {
+                in_decks_section = true;
+                continue;
+            }
+
+            if line.starts_with("##") && !line.starts_with("## Decks") {
+                in_decks_section = false;
+                continue;
+            }
+
+            if !in_decks_section || line.is_empty() {
+                continue;
+            }
+
+            if let Some((deck_name, category_str)) = line.split_once(';') {
+                let deck_name = deck_name.trim().to_string();
+                let category_str = category_str.trim();
+
+                let category = match category_str {
+                    "Blue" => DeckCategory::Blue,
+                    "Combo" => DeckCategory::Combo,
+                    "Non-Blue" => DeckCategory::NonBlue,
+                    _ => DeckCategory::Other,
+                };
+
+                categories.insert(deck_name, category);
             }
         }
     }
