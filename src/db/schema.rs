@@ -21,6 +21,19 @@ diesel::table! {
 }
 
 diesel::table! {
+    doomsday_games (id) {
+        id -> Integer,
+        game_id -> Integer,
+        doomsday_resolved -> Nullable<Bool>,
+        pile_cards -> Nullable<Text>,
+        pile_plan -> Nullable<Text>,
+        sideboard_plan -> Nullable<Text>,
+        juke -> Nullable<Text>,
+        created_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     games (game_id) {
         game_id -> Integer,
         match_id -> Integer,
@@ -37,6 +50,20 @@ diesel::table! {
 }
 
 diesel::table! {
+    leagues (league_id) {
+        league_id -> Integer,
+        start_date -> Text,
+        end_date -> Nullable<Text>,
+        deck_name -> Text,
+        status -> Text,
+        result -> Nullable<Text>,
+        wins -> Integer,
+        losses -> Integer,
+        created_at -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     matches (match_id) {
         match_id -> Integer,
         date -> Text,
@@ -48,15 +75,20 @@ diesel::table! {
         match_winner -> Text,
         created_at -> Nullable<Text>,
         era -> Nullable<Integer>,
+        league_id -> Nullable<Integer>,
     }
 }
 
 diesel::joinable!(cards -> decks (deck_id));
+diesel::joinable!(doomsday_games -> games (game_id));
 diesel::joinable!(games -> matches (match_id));
+diesel::joinable!(matches -> leagues (league_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     cards,
     decks,
+    doomsday_games,
     games,
+    leagues,
     matches,
 );

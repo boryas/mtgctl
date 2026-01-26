@@ -2,16 +2,17 @@ use clap::{Args, Subcommand};
 use dialoguer::{Input, Confirm, MultiSelect};
 use skim::prelude::*;
 use std::io::Cursor;
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 use diesel::prelude::*;
 use std::fs;
 use std::collections::HashMap;
 use std::path::Path;
 use serde::Deserialize;
 use comfy_table::{Table, Cell, Attribute, ContentArrangement};
+use textplots::{Chart, Plot, Shape};
 
 use crate::db::{establish_connection, models::*};
-use crate::db::schema::{matches, games};
+use crate::db::schema::{matches, games, doomsday_games, leagues};
 
 /// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
 fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
@@ -98,6 +99,13 @@ struct UnifiedArchetypeDefinition {
     board_plan: Option<BoardPlan>,
     #[serde(default)]
     subtypes: HashMap<String, SubtypeDefinition>,
+    // Doomsday-specific fields (optional, only present in doomsday.toml)
+    #[serde(default)]
+    sideboard_options: Vec<String>,
+    #[serde(default)]
+    juke_options: Vec<String>,
+    #[serde(default)]
+    common_pile_cards: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +165,396 @@ struct StatsFilters {
     opponent: Option<String>,
     opponent_deck: Option<String>,
     event_type: Option<String>,
+}
+
+/// Runtime filter selection - holds all possible filter values
+#[derive(Debug, Clone, Default)]
+struct FilterSelection {
+    // Match-level filters
+    era_values: Option<Vec<i32>>,
+    deck_name: Option<String>,
+    opponent_name: Option<String>,
+    opponent_deck: Option<String>,
+    opponent_deck_archetype: Option<String>,
+    opponent_deck_category: Option<String>,
+    event_type: Option<String>,
+    // Game-level filters
+    loss_reason: Option<String>,
+    win_condition: Option<String>,
+    game_plan: Option<String>,
+    mulligan_count: Option<i32>,
+    game_length: Option<(i32, i32)>,
+    game_number: Option<Vec<i32>>,
+    play_draw: Option<String>,
+}
+
+impl FilterSelection {
+    /// Get active filter descriptions for display
+    fn active_filter_descriptions(&self) -> Vec<String> {
+        let mut filters = Vec::new();
+        if let Some(ref eras) = self.era_values {
+            let era_str = eras.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
+            filters.push(format!("Era: {}", era_str));
+        }
+        if let Some(ref deck) = self.deck_name {
+            filters.push(format!("Deck: {}", deck));
+        }
+        if let Some(ref opp) = self.opponent_name {
+            filters.push(format!("Opponent: {}", opp));
+        }
+        if let Some(ref opp_deck) = self.opponent_deck {
+            filters.push(format!("Vs Deck: {}", opp_deck));
+        }
+        if let Some(ref opp_arch) = self.opponent_deck_archetype {
+            filters.push(format!("Vs Archetype: {}", opp_arch));
+        }
+        if let Some(ref opp_cat) = self.opponent_deck_category {
+            filters.push(format!("Vs Category: {}", opp_cat));
+        }
+        if let Some(ref ev_type) = self.event_type {
+            filters.push(format!("Event: {}", ev_type));
+        }
+        if let Some(ref reason) = self.loss_reason {
+            filters.push(format!("Loss Reason: {}", reason));
+        }
+        if let Some(ref condition) = self.win_condition {
+            filters.push(format!("Win Condition: {}", condition));
+        }
+        if let Some(ref plan) = self.game_plan {
+            filters.push(format!("Game Plan: {}", plan));
+        }
+        if let Some(count) = self.mulligan_count {
+            filters.push(format!("Mulligans: {}", count));
+        }
+        if let Some((min, max)) = self.game_length {
+            filters.push(format!("Turns: {}-{}", min, max));
+        }
+        if let Some(ref nums) = self.game_number {
+            let nums_str = nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+            filters.push(format!("Game: {}", nums_str));
+        }
+        if let Some(ref pd) = self.play_draw {
+            filters.push(format!("Play/Draw: {}", pd));
+        }
+        filters
+    }
+
+    /// Load filtered matches and games from database
+    fn load_filtered_data(&self, connection: &mut diesel::sqlite::SqliteConnection) -> (Vec<Match>, Vec<Game>) {
+        use diesel::prelude::*;
+
+        // Build match query with filters
+        let mut query = matches::table.order(matches::date.asc()).into_boxed();
+
+        if let Some(ref eras) = self.era_values {
+            query = query.filter(matches::era.eq_any(eras));
+        }
+        if let Some(ref deck) = self.deck_name {
+            query = query.filter(matches::deck_name.like(format!("%{}%", deck)));
+        }
+        if let Some(ref opp) = self.opponent_name {
+            query = query.filter(matches::opponent_name.like(format!("%{}%", opp)));
+        }
+        if let Some(ref opp_deck) = self.opponent_deck {
+            query = query.filter(matches::opponent_deck.like(format!("%{}%", opp_deck)));
+        }
+        if let Some(ref ev_type) = self.event_type {
+            query = query.filter(matches::event_type.like(format!("%{}%", ev_type)));
+        }
+
+        let mut all_matches: Vec<Match> = query.load(connection).expect("Error loading matches");
+
+        // Apply post-load filters for computed fields
+        if let Some(ref arch_filter) = self.opponent_deck_archetype {
+            all_matches.retain(|m| {
+                let (archetype, _) = parse_deck_name(&m.opponent_deck);
+                archetype == arch_filter
+            });
+        }
+        if let Some(ref cat_filter) = self.opponent_deck_category {
+            all_matches.retain(|m| {
+                categorize_deck(&m.opponent_deck).to_string() == cat_filter
+            });
+        }
+
+        if all_matches.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        // Load games for these matches
+        let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
+        let mut game_query = games::table.filter(games::match_id.eq_any(&match_ids)).into_boxed();
+
+        // Apply game-level filters
+        if let Some(ref reason) = self.loss_reason {
+            game_query = game_query.filter(games::loss_reason.eq(reason));
+        }
+        if let Some(ref condition) = self.win_condition {
+            game_query = game_query.filter(games::win_condition.eq(condition));
+        }
+        if let Some(ref plan) = self.game_plan {
+            game_query = game_query.filter(games::opening_hand_plan.eq(plan));
+        }
+        if let Some(count) = self.mulligan_count {
+            game_query = game_query.filter(games::mulligans.eq(count));
+        }
+        if let Some((min_turns, max_turns)) = self.game_length {
+            game_query = game_query.filter(games::turns.ge(min_turns).and(games::turns.le(max_turns)));
+        }
+        if let Some(ref nums) = self.game_number {
+            game_query = game_query.filter(games::game_number.eq_any(nums));
+        }
+        if let Some(ref pd) = self.play_draw {
+            game_query = game_query.filter(games::play_draw.eq(pd));
+        }
+
+        let all_games: Vec<Game> = game_query.load(connection).expect("Error loading games");
+
+        // If game-level filters applied, also filter matches to only those with matching games
+        let has_game_filters = self.loss_reason.is_some()
+            || self.win_condition.is_some()
+            || self.game_plan.is_some()
+            || self.mulligan_count.is_some()
+            || self.game_length.is_some()
+            || self.game_number.is_some()
+            || self.play_draw.is_some();
+
+        if has_game_filters {
+            let filtered_match_ids: std::collections::HashSet<i32> = all_games.iter()
+                .map(|g| g.match_id)
+                .collect();
+            all_matches.retain(|m| filtered_match_ids.contains(&m.match_id));
+        }
+
+        (all_matches, all_games)
+    }
+}
+
+/// Interactive filter selection - shared by stats and graph commands
+fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection) -> FilterSelection {
+    let config = load_config();
+
+    let filter_options = vec![
+        "Era (latest only)",
+        "Era (all)",
+        "My Archetype",
+        "My Subtype",
+        "My List",
+        "Opponent",
+        "Opponent Deck",
+        "Opponent Deck Archetype",
+        "Opponent Deck Category",
+        "Event Type",
+        "Loss Reason",
+        "Win Condition",
+        "Game Plan",
+        "Mulligan Count",
+        "Game Length",
+        "Game Number",
+        "Play/Draw",
+    ];
+
+    // Pre-select filters based on config
+    let df = &config.stats.default_filters;
+    let filter_defaults = vec![
+        config.stats.filters.era.is_some() || df.contains(&"era-latest".to_string()),
+        df.contains(&"era-all".to_string()),
+        config.stats.filters.my_deck.is_some() || df.contains(&"my-archetype".to_string()),
+        df.contains(&"my-subtype".to_string()),
+        df.contains(&"my-list".to_string()),
+        config.stats.filters.opponent.is_some() || df.contains(&"opponent".to_string()),
+        config.stats.filters.opponent_deck.is_some() || df.contains(&"opponent-deck".to_string()),
+        df.contains(&"opponent-deck-archetype".to_string()),
+        df.contains(&"opponent-deck-category".to_string()),
+        config.stats.filters.event_type.is_some() || df.contains(&"event-type".to_string()),
+        df.contains(&"loss-reason".to_string()),
+        df.contains(&"win-condition".to_string()),
+        df.contains(&"game-plan".to_string()),
+        df.contains(&"mulligan-count".to_string()),
+        df.contains(&"game-length".to_string()),
+        df.contains(&"game-number".to_string()),
+        df.contains(&"play-draw".to_string()),
+    ];
+
+    let selected_filters = MultiSelect::new()
+        .with_prompt("Select filters (space to select, enter to continue)")
+        .items(&filter_options)
+        .defaults(&filter_defaults)
+        .interact()
+        .unwrap();
+
+    // Load available options
+    let all_decks = load_your_deck_names();
+    let all_opponents = load_opponent_names();
+    let all_opponent_decks = load_opponent_deck_names();
+    let event_types: Vec<String> = vec!["League", "Challenge", "Prelim", "Casual"].iter().map(|s| s.to_string()).collect();
+    let mut all_loss_reasons = load_loss_reasons();
+    let mut all_win_conditions = load_win_conditions();
+    let mut all_game_plans = load_game_plans();
+
+    // Extract unique archetypes, subtypes, and lists
+    let mut archetypes = std::collections::HashSet::new();
+    let mut subtypes = std::collections::HashSet::new();
+    let mut lists = std::collections::HashSet::new();
+
+    for deck in &all_decks {
+        let (archetype, subtype) = parse_deck_name(deck);
+        archetypes.insert(archetype.to_string());
+        if let Some(st) = subtype {
+            subtypes.insert(st.to_string());
+        }
+        if let Some(list_start) = deck.find(" (") {
+            if let Some(list_end) = deck.rfind(')') {
+                let list = &deck[list_start + 2..list_end];
+                lists.insert(list.to_string());
+            }
+        }
+    }
+
+    let archetype_list: Vec<String> = archetypes.into_iter().collect();
+    let subtype_list: Vec<String> = subtypes.into_iter().collect();
+    let list_list: Vec<String> = lists.into_iter().collect();
+
+    // Extract opponent deck archetypes and categories
+    let mut opponent_archetypes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut opponent_categories: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for deck in &all_opponent_decks {
+        let (archetype, _) = parse_deck_name(deck);
+        opponent_archetypes.insert(archetype.to_string());
+        opponent_categories.insert(categorize_deck(deck).to_string().to_string());
+    }
+    let opponent_archetype_list: Vec<String> = opponent_archetypes.into_iter().collect();
+    let opponent_category_list: Vec<String> = opponent_categories.into_iter().collect();
+
+    // Build FilterSelection based on user choices
+    let mut filters = FilterSelection::default();
+
+    for &filter_idx in &selected_filters {
+        match filter_idx {
+            0 => {
+                // Era (latest only)
+                match get_default_era_filter(connection) {
+                    EraFilter::Eras(eras) => filters.era_values = Some(eras),
+                    EraFilter::All => {}
+                }
+            }
+            1 => {
+                // Era (all) - no filter
+            }
+            2 => {
+                // My Archetype
+                let default_deck = config.stats.filters.my_deck.as_deref().unwrap_or("");
+                if let Some(selected_archetype) = fuzzy_select_with_default("Select archetype to filter by", &archetype_list, default_deck) {
+                    filters.deck_name = Some(selected_archetype.clone());
+                    // Reload deck-specific options
+                    if let Some(data) = load_archetype_data(&selected_archetype) {
+                        if !data.win_conditions.is_empty() { all_win_conditions = data.win_conditions; }
+                        if !data.loss_reasons.is_empty() { all_loss_reasons = data.loss_reasons; }
+                        if !data.game_plans.is_empty() { all_game_plans = data.game_plans; }
+                    }
+                }
+            }
+            3 => {
+                // My Subtype
+                if let Some(subtype) = fuzzy_select("Select subtype to filter by", &subtype_list) {
+                    filters.deck_name = Some(format!(": {}", subtype));
+                }
+            }
+            4 => {
+                // My List
+                if let Some(list) = fuzzy_select("Select list to filter by", &list_list) {
+                    filters.deck_name = Some(format!("({})", list));
+                }
+            }
+            5 => {
+                // Opponent
+                let default_opp = config.stats.filters.opponent.as_deref().unwrap_or("");
+                filters.opponent_name = fuzzy_select_with_default("Select opponent to filter by", &all_opponents, default_opp);
+            }
+            6 => {
+                // Opponent Deck
+                let default_deck = config.stats.filters.opponent_deck.as_deref().unwrap_or("");
+                filters.opponent_deck = fuzzy_select_with_default("Select opponent deck to filter by", &all_opponent_decks, default_deck);
+            }
+            7 => {
+                // Opponent Deck Archetype
+                filters.opponent_deck_archetype = fuzzy_select("Select opponent deck archetype to filter by", &opponent_archetype_list);
+            }
+            8 => {
+                // Opponent Deck Category
+                filters.opponent_deck_category = fuzzy_select("Select opponent deck category to filter by", &opponent_category_list);
+            }
+            9 => {
+                // Event Type
+                let default_event = config.stats.filters.event_type.as_deref().unwrap_or("");
+                filters.event_type = fuzzy_select_with_default("Select event type to filter by", &event_types, default_event);
+            }
+            10 => {
+                // Loss Reason
+                filters.loss_reason = fuzzy_select("Select loss reason to filter by", &all_loss_reasons);
+            }
+            11 => {
+                // Win Condition
+                filters.win_condition = fuzzy_select("Select win condition to filter by", &all_win_conditions);
+            }
+            12 => {
+                // Game Plan
+                filters.game_plan = fuzzy_select("Select game plan to filter by", &all_game_plans);
+            }
+            13 => {
+                // Mulligan Count
+                let mulligan_options: Vec<String> = vec!["0", "1", "2", "3", "4+"].iter().map(|s| s.to_string()).collect();
+                if let Some(selected) = fuzzy_select("Select mulligan count to filter by", &mulligan_options) {
+                    let idx = mulligan_options.iter().position(|o| o == &selected).unwrap_or(0);
+                    filters.mulligan_count = Some(idx as i32);
+                }
+            }
+            14 => {
+                // Game Length
+                let length_options: Vec<String> = vec![
+                    "Very Short (1-3 turns)",
+                    "Short (4-6 turns)",
+                    "Medium (7-9 turns)",
+                    "Long (10-12 turns)",
+                    "Very Long (13+ turns)",
+                ].iter().map(|s| s.to_string()).collect();
+                if let Some(selected) = fuzzy_select("Select game length to filter by", &length_options) {
+                    let idx = length_options.iter().position(|o| o == &selected).unwrap_or(0);
+                    filters.game_length = Some(match idx {
+                        0 => (1, 3),
+                        1 => (4, 6),
+                        2 => (7, 9),
+                        3 => (10, 12),
+                        4 => (13, 999),
+                        _ => (1, 999),
+                    });
+                }
+            }
+            15 => {
+                // Game Number
+                let game_options: Vec<String> = vec!["Game 1", "Game 2", "Game 3", "Post-board (2+3)"].iter().map(|s| s.to_string()).collect();
+                if let Some(selected) = fuzzy_select("Select game number to filter by", &game_options) {
+                    filters.game_number = Some(match selected.as_str() {
+                        "Game 1" => vec![1],
+                        "Game 2" => vec![2],
+                        "Game 3" => vec![3],
+                        "Post-board (2+3)" => vec![2, 3],
+                        _ => vec![1],
+                    });
+                }
+            }
+            16 => {
+                // Play/Draw
+                let play_draw_options: Vec<String> = vec!["On the Play", "On the Draw"].iter().map(|s| s.to_string()).collect();
+                if let Some(selected) = fuzzy_select("Select play/draw to filter by", &play_draw_options) {
+                    filters.play_draw = Some(if selected == "On the Play" { "play".to_string() } else { "draw".to_string() });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    filters
 }
 
 // Statistics row data
@@ -264,6 +662,11 @@ struct ArchetypeData {
     win_conditions: Vec<String>,
     loss_reasons: Vec<String>,
     board_plan: Option<BoardPlan>,
+    // Doomsday-specific fields
+    sideboard_options: Vec<String>,
+    juke_options: Vec<String>,
+    common_pile_cards: Vec<String>,
+    is_doomsday: bool,
 }
 
 /// Parse deck name to extract archetype and optional subtype
@@ -313,6 +716,9 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
 
     let unified = load_definition(archetype)?;
 
+    // Check if this is a doomsday deck
+    let is_doomsday = unified.name.to_lowercase() == "doomsday";
+
     // If there's a subtype, look it up
     if let Some(subtype_name) = subtype {
         if let Some(subtype_def) = unified.subtypes.get(subtype_name) {
@@ -321,6 +727,10 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
                 win_conditions: subtype_def.win_conditions.clone(),
                 loss_reasons: subtype_def.loss_reasons.clone(),
                 board_plan: subtype_def.board_plan.clone(),
+                sideboard_options: unified.sideboard_options.clone(),
+                juke_options: unified.juke_options.clone(),
+                common_pile_cards: unified.common_pile_cards.clone(),
+                is_doomsday,
             });
         }
     }
@@ -353,6 +763,10 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
         win_conditions,
         loss_reasons,
         board_plan: unified.board_plan,
+        sideboard_options: unified.sideboard_options.clone(),
+        juke_options: unified.juke_options.clone(),
+        common_pile_cards: unified.common_pile_cards.clone(),
+        is_doomsday,
     })
 }
 
@@ -815,6 +1229,24 @@ enum GameCommands {
         #[arg(help = "Deck archetype name (e.g., 'Doomsday')")]
         deck_name: String,
     },
+    LeagueStats {
+        #[arg(long, help = "Filter by deck name")]
+        deck: Option<String>,
+        #[arg(long, help = "Show league history list")]
+        list: bool,
+    },
+    Graph {
+        #[arg(long, default_value = "win-rate", help = "Metric to graph: win-rate, mulligans, game-length, matches-played")]
+        metric: String,
+        #[arg(long, default_value = "week", help = "Time grouping: day, week, month, era")]
+        by: String,
+        #[arg(long, default_value = "20", help = "Number of periods to show")]
+        periods: usize,
+        #[arg(long, help = "Output HTML file instead of ASCII")]
+        html: Option<String>,
+        #[arg(long, default_value = "5", help = "Moving average window size for smoothing (1 = no smoothing)")]
+        smoothing: usize,
+    },
 }
 
 pub fn run(args: GameArgs) {
@@ -828,6 +1260,10 @@ pub fn run(args: GameArgs) {
         GameCommands::BoardPlan { deck_name } => show_board_plan(deck_name),
         GameCommands::RemoveMatch { match_id } => remove_match_interactive(match_id),
         GameCommands::Stats { defaults } => show_stats_interactive(defaults),
+        GameCommands::LeagueStats { deck, list } => show_league_stats(deck, list),
+        GameCommands::Graph { metric, by, periods, html, smoothing } => {
+            show_graph(&metric, &by, periods, html, smoothing)
+        },
         GameCommands::HtmlStats { output, era, my_deck, opponent, opponent_deck, event_type } => {
             crate::html_stats::generate_html_stats(&output, era, my_deck, opponent, opponent_deck, event_type)
         },
@@ -940,16 +1376,24 @@ fn add_match_interactive(date_arg: Option<String>) {
     let era = config.game_entry.default_era
         .or_else(|| get_current_era(connection));
 
+    // Handle league tracking if this is a league match
+    let league_id = if event_type == "League" {
+        get_or_create_league(connection, &deck_name, &date)
+    } else {
+        None
+    };
+
     // Create the match without winner and opponent deck (will be determined after games)
     let new_match = NewMatch {
-        date,
+        date: date.clone(),
         deck_name: deck_name.clone(),
         opponent_name,
         opponent_deck: "unknown".to_string(), // Will be updated after match
-        event_type,
+        event_type: event_type.clone(),
         die_roll_winner: die_roll_winner.to_string(),
         match_winner: "unknown".to_string(), // Will be updated after games
         era,
+        league_id,
     };
 
     diesel::insert_into(matches::table)
@@ -995,6 +1439,11 @@ fn add_match_interactive(date_arg: Option<String>) {
             .set(matches::match_winner.eq(match_winner.to_string()))
             .execute(connection)
             .expect("Error updating match winner");
+    }
+
+    // Update league record if this is a league match
+    if let Some(lid) = league_id {
+        update_league_after_match(connection, lid, &match_winner, &date);
     }
 }
 
@@ -1109,12 +1558,26 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
             loss_reason,
             turns,
         };
-        
+
         diesel::insert_into(games::table)
             .values(&new_game)
             .execute(connection)
             .expect("Error saving new game");
-        
+
+        // Get the game_id that was just inserted
+        let game_id: i32 = games::table
+            .select(games::game_id)
+            .order(games::game_id.desc())
+            .first(connection)
+            .expect("Error getting game ID");
+
+        // If this is a doomsday deck, prompt for doomsday-specific data
+        if let Some(ref arch) = archetype {
+            if arch.is_doomsday {
+                collect_doomsday_data(connection, game_id, game_num, arch);
+            }
+        }
+
         println!("Game {} saved", game_num);
         println!("Current score: You {}-{} Opponent", my_wins, opponent_wins);
         
@@ -1160,6 +1623,586 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
     } else {
         Winner::Opponent
     }
+}
+
+/// Collect doomsday-specific data after a game and save to doomsday_games table
+fn collect_doomsday_data(connection: &mut SqliteConnection, game_id: i32, game_num: i32, arch: &ArchetypeData) {
+    println!("\n--- Doomsday Details ---");
+
+    // Did Doomsday resolve?
+    let doomsday_resolved = Confirm::new()
+        .with_prompt("Did Doomsday resolve?")
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+
+    // If Doomsday resolved, ask about pile
+    let (pile_cards, pile_plan) = if doomsday_resolved {
+        let made_pile = Confirm::new()
+            .with_prompt("Did you make a pile?")
+            .default(true)
+            .interact()
+            .unwrap_or(true);
+
+        if made_pile {
+            println!("Enter pile cards (5 cards, top to bottom):");
+            let mut pile = Vec::new();
+            for i in 1..=5 {
+                let prompt = format!("Card {}", i);
+                if let Some(card) = fuzzy_select(&prompt, &arch.common_pile_cards) {
+                    pile.push(card);
+                }
+            }
+
+            // Serialize pile as JSON
+            let pile_json = if pile.len() == 5 {
+                Some(format!("[{}]", pile.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(",")))
+            } else {
+                None
+            };
+
+            // Optional pile plan
+            let plan: String = Input::new()
+                .with_prompt("Pile plan (optional, press Enter to skip)")
+                .allow_empty(true)
+                .interact_text()
+                .unwrap_or_default();
+
+            let pile_plan = if plan.is_empty() { None } else { Some(plan) };
+
+            (pile_json, pile_plan)
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    // Games 2 and 3 only: sideboard plan and juke
+    let (sideboard_plan, juke) = if game_num > 1 {
+        let sb_plan = if !arch.sideboard_options.is_empty() {
+            fuzzy_select("Sideboard plan", &arch.sideboard_options)
+        } else {
+            None
+        };
+
+        let juke_opt = if !arch.juke_options.is_empty() {
+            fuzzy_select("Juke strategy (optional)", &arch.juke_options)
+        } else {
+            None
+        };
+
+        (sb_plan, juke_opt)
+    } else {
+        (None, None)
+    };
+
+    // Insert into doomsday_games table
+    let new_doomsday_game = NewDoomsdayGame {
+        game_id,
+        doomsday_resolved: Some(doomsday_resolved),
+        pile_cards,
+        pile_plan,
+        sideboard_plan,
+        juke,
+    };
+
+    diesel::insert_into(doomsday_games::table)
+        .values(&new_doomsday_game)
+        .execute(connection)
+        .expect("Error saving doomsday game data");
+
+    println!("Doomsday game data saved");
+}
+
+/// Find an active league for the given deck, or prompt to create a new one
+/// Returns Some(league_id) if a league is active or created, None if skipped
+fn get_or_create_league(connection: &mut SqliteConnection, deck_name: &str, date: &str) -> Option<i32> {
+    // Look for an in-progress league with a similar deck
+    let active_leagues: Vec<League> = leagues::table
+        .filter(leagues::status.eq("in_progress"))
+        .order(leagues::created_at.desc())
+        .load(connection)
+        .unwrap_or_default();
+
+    // Find leagues with the same deck (matching archetype)
+    let (archetype, _) = parse_deck_name(deck_name);
+    let matching_league = active_leagues.iter().find(|l| {
+        let (league_arch, _) = parse_deck_name(&l.deck_name);
+        league_arch == archetype
+    });
+
+    if let Some(league) = matching_league {
+        println!("\n=== Active League Found ===");
+        println!("Deck: {}", league.deck_name);
+        println!("Record: {}-{}", league.wins, league.losses);
+
+        let continue_league = Confirm::new()
+            .with_prompt("Continue this league?")
+            .default(true)
+            .interact()
+            .unwrap_or(true);
+
+        if continue_league {
+            return Some(league.league_id);
+        }
+
+        // Ask if they want to drop
+        let drop_league = Confirm::new()
+            .with_prompt("Did you drop from this league?")
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+
+        if drop_league {
+            // Mark league as dropped
+            diesel::update(leagues::table.find(league.league_id))
+                .set((
+                    leagues::status.eq("dropped"),
+                    leagues::result.eq("dropped"),
+                    leagues::end_date.eq(date),
+                ))
+                .execute(connection)
+                .expect("Error updating league");
+            println!("League marked as dropped ({}-{})", league.wins, league.losses);
+        }
+    }
+
+    // No active league or chose not to continue - ask to start a new one
+    let start_new = Confirm::new()
+        .with_prompt("Start a new league?")
+        .default(true)
+        .interact()
+        .unwrap_or(true);
+
+    if start_new {
+        let new_league = NewLeague {
+            start_date: date.to_string(),
+            end_date: None,
+            deck_name: deck_name.to_string(),
+            status: "in_progress".to_string(),
+            result: Some("pending".to_string()),
+            wins: 0,
+            losses: 0,
+        };
+
+        diesel::insert_into(leagues::table)
+            .values(&new_league)
+            .execute(connection)
+            .expect("Error creating league");
+
+        let league_id: i32 = leagues::table
+            .select(leagues::league_id)
+            .order(leagues::league_id.desc())
+            .first(connection)
+            .expect("Error getting league ID");
+
+        println!("Started new league (ID: {})", league_id);
+        return Some(league_id);
+    }
+
+    None
+}
+
+/// Update league record after a match and detect completion
+fn update_league_after_match(connection: &mut SqliteConnection, league_id: i32, match_winner: &Winner, date: &str) {
+    let league: League = leagues::table
+        .find(league_id)
+        .first(connection)
+        .expect("Error loading league");
+
+    let (new_wins, new_losses) = match match_winner {
+        Winner::Me => (league.wins + 1, league.losses),
+        Winner::Opponent => (league.wins, league.losses + 1),
+    };
+
+    // Check for league completion
+    let (new_status, new_result) = if new_wins >= 5 {
+        println!("\n🏆 TROPHY! You finished the league 5-{}!", new_losses);
+        ("completed".to_string(), Some("trophy".to_string()))
+    } else if new_losses >= 3 {
+        println!("\n😔 League complete: {}-3", new_wins);
+        ("completed".to_string(), Some("elimination".to_string()))
+    } else {
+        println!("\nLeague record: {}-{}", new_wins, new_losses);
+        ("in_progress".to_string(), Some("pending".to_string()))
+    };
+
+    let end_date = if new_status == "completed" {
+        Some(date.to_string())
+    } else {
+        None
+    };
+
+    diesel::update(leagues::table.find(league_id))
+        .set((
+            leagues::wins.eq(new_wins),
+            leagues::losses.eq(new_losses),
+            leagues::status.eq(&new_status),
+            leagues::result.eq(&new_result),
+            leagues::end_date.eq(&end_date),
+        ))
+        .execute(connection)
+        .expect("Error updating league");
+}
+
+/// Show league statistics
+fn show_league_stats(deck_filter: Option<String>, show_list: bool) {
+    let connection = &mut establish_connection();
+
+    // Load all leagues
+    let mut query = leagues::table.into_boxed();
+
+    if let Some(ref deck) = deck_filter {
+        query = query.filter(leagues::deck_name.like(format!("%{}%", deck)));
+    }
+
+    let all_leagues: Vec<League> = query
+        .order(leagues::created_at.desc())
+        .load(connection)
+        .expect("Error loading leagues");
+
+    if all_leagues.is_empty() {
+        println!("No leagues found");
+        return;
+    }
+
+    // Calculate statistics
+    let total_leagues = all_leagues.len();
+    let in_progress = all_leagues.iter().filter(|l| l.status == "in_progress").count();
+    let completed = all_leagues.iter().filter(|l| l.status == "completed").count();
+    let dropped = all_leagues.iter().filter(|l| l.status == "dropped").count();
+
+    let trophies = all_leagues.iter().filter(|l| l.result.as_deref() == Some("trophy")).count();
+    let eliminations = all_leagues.iter().filter(|l| l.result.as_deref() == Some("elimination")).count();
+
+    // Only count completed leagues for trophy rate
+    let trophy_rate = if completed > 0 {
+        (trophies as f64 / completed as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    // Calculate averages from completed leagues
+    let completed_leagues: Vec<&League> = all_leagues.iter()
+        .filter(|l| l.status == "completed")
+        .collect();
+
+    let avg_wins = if !completed_leagues.is_empty() {
+        completed_leagues.iter().map(|l| l.wins as f64).sum::<f64>() / completed_leagues.len() as f64
+    } else {
+        0.0
+    };
+
+    // Total match record in leagues
+    let total_wins: i32 = all_leagues.iter().map(|l| l.wins).sum();
+    let total_losses: i32 = all_leagues.iter().map(|l| l.losses).sum();
+    let total_matches = total_wins + total_losses;
+    let match_win_rate = if total_matches > 0 {
+        (total_wins as f64 / total_matches as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    println!("=== League Statistics ===");
+    println!("Total leagues: {}", total_leagues);
+    println!("  In progress: {}", in_progress);
+    println!("  Completed: {}", completed);
+    println!("  Dropped: {}", dropped);
+    println!();
+    println!("Trophies: {} ({:.1}% rate)", trophies, trophy_rate);
+    println!("Eliminations: {}", eliminations);
+    println!("Average wins per league: {:.1}", avg_wins);
+    println!("Match record in leagues: {}-{} ({:.1}%)", total_wins, total_losses, match_win_rate);
+
+    // Show list if requested
+    if show_list {
+        println!("\n=== League History ===");
+        println!("{:<4} {:<12} {:<25} {:<10} {:<12}", "ID", "Date", "Deck", "Record", "Result");
+        println!("{}", "-".repeat(70));
+
+        for league in all_leagues.iter().take(20) {
+            let result_str = match league.result.as_deref() {
+                Some("trophy") => "🏆 Trophy",
+                Some("elimination") => "Eliminated",
+                Some("dropped") => "Dropped",
+                Some("pending") => "In Progress",
+                _ => "Unknown",
+            };
+            println!("{:<4} {:<12} {:<25} {:<10} {:<12}",
+                league.league_id,
+                &league.start_date,
+                truncate(&league.deck_name, 25),
+                format!("{}-{}", league.wins, league.losses),
+                result_str);
+        }
+    }
+}
+
+/// Show graph of statistics over time
+fn show_graph(
+    metric: &str,
+    by: &str,
+    periods: usize,
+    html_output: Option<String>,
+    smoothing: usize,
+) {
+    let connection = &mut establish_connection();
+
+    // Get filters interactively (same UI as stats)
+    let filters = select_filters_interactive(connection);
+
+    // Load filtered data
+    let (all_matches, all_games) = filters.load_filtered_data(connection);
+
+    if all_matches.is_empty() {
+        println!("No matches found with the given filters");
+        return;
+    }
+
+    // Show active filters
+    let active_filters = filters.active_filter_descriptions();
+    if !active_filters.is_empty() {
+        println!("Filters: {}\n", active_filters.join(" | "));
+    }
+
+    // Group by time period
+    let grouped = group_by_period(&all_matches, &all_games, by);
+
+    if grouped.is_empty() {
+        println!("No data to graph");
+        return;
+    }
+
+    // Calculate metric for each period
+    let data_points: Vec<(String, f64)> = grouped.iter()
+        .map(|(period, matches, games)| {
+            let value = match metric {
+                "win-rate" => {
+                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
+                    if matches.is_empty() { 0.0 } else { (wins as f64 / matches.len() as f64) * 100.0 }
+                },
+                "mulligans" => {
+                    let total: i32 = games.iter().map(|g| g.mulligans).sum();
+                    if games.is_empty() { 0.0 } else { total as f64 / games.len() as f64 }
+                },
+                "game-length" => {
+                    let with_turns: Vec<_> = games.iter().filter(|g| g.turns.is_some()).collect();
+                    if with_turns.is_empty() {
+                        0.0
+                    } else {
+                        let total: i32 = with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                        total as f64 / with_turns.len() as f64
+                    }
+                },
+                "matches-played" => matches.len() as f64,
+                _ => 0.0,
+            };
+            (period.clone(), value)
+        })
+        .collect();
+
+    // Apply moving average smoothing
+    let smoothing = smoothing.max(1); // Ensure at least 1
+    let smoothed_data: Vec<(String, f64)> = if smoothing > 1 {
+        data_points.iter().enumerate().map(|(i, (period, _))| {
+            let start = i.saturating_sub(smoothing - 1);
+            let window: Vec<f64> = data_points[start..=i].iter().map(|(_, v)| *v).collect();
+            let avg = window.iter().sum::<f64>() / window.len() as f64;
+            (period.clone(), avg)
+        }).collect()
+    } else {
+        data_points
+    };
+
+    // Take last N periods
+    let data_points: Vec<_> = smoothed_data.into_iter().rev().take(periods).rev().collect();
+
+    if data_points.is_empty() {
+        println!("No data points to graph");
+        return;
+    }
+
+    // Output
+    if let Some(path) = html_output {
+        generate_graph_html(&path, metric, by, &data_points);
+    } else {
+        // ASCII graph
+        print_ascii_graph(metric, by, &data_points, smoothing);
+    }
+}
+
+/// Group matches by time period
+fn group_by_period<'a>(
+    matches: &'a [Match],
+    games: &'a [Game],
+    by: &str,
+) -> Vec<(String, Vec<&'a Match>, Vec<&'a Game>)> {
+    let mut groups: HashMap<String, (Vec<&'a Match>, Vec<&'a Game>)> = HashMap::new();
+
+    for m in matches {
+        let period = match by {
+            "day" => m.date.clone(),
+            "week" => {
+                if let Ok(date) = NaiveDate::parse_from_str(&m.date, "%Y-%m-%d") {
+                    let iso_week = date.iso_week();
+                    format!("{}-W{:02}", iso_week.year(), iso_week.week())
+                } else {
+                    m.date.clone()
+                }
+            },
+            "month" => {
+                if m.date.len() >= 7 {
+                    m.date[..7].to_string()
+                } else {
+                    m.date.clone()
+                }
+            },
+            "era" => {
+                m.era.map(|e| format!("Era {}", e)).unwrap_or_else(|| "No Era".to_string())
+            },
+            _ => m.date.clone(),
+        };
+
+        let entry = groups.entry(period).or_insert((Vec::new(), Vec::new()));
+        entry.0.push(m);
+
+        // Add games for this match
+        for g in games.iter().filter(|g| g.match_id == m.match_id) {
+            entry.1.push(g);
+        }
+    }
+
+    // Sort by period
+    let mut sorted: Vec<_> = groups.into_iter()
+        .map(|(period, (matches, games))| (period, matches, games))
+        .collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    sorted
+}
+
+/// Print ASCII line graph using textplots with a legend
+fn print_ascii_graph(metric: &str, by: &str, data: &[(String, f64)], smoothing: usize) {
+    let metric_label = match metric {
+        "win-rate" => "Win Rate (%)",
+        "mulligans" => "Avg Mulligans",
+        "game-length" => "Avg Game Length",
+        "matches-played" => "Matches Played",
+        _ => metric,
+    };
+
+    let smoothing_label = if smoothing > 1 {
+        format!(" ({}-period moving avg)", smoothing)
+    } else {
+        String::new()
+    };
+    println!("=== {} by {}{} ===\n", metric_label, by, smoothing_label);
+
+    if data.is_empty() {
+        println!("No data");
+        return;
+    }
+
+    // Convert to (f32, f32) points for textplots
+    let points: Vec<(f32, f32)> = data
+        .iter()
+        .enumerate()
+        .map(|(i, (_, v))| (i as f32, *v as f32))
+        .collect();
+
+    let max_value = data.iter().map(|(_, v)| *v as f32).fold(0.0_f32, f32::max);
+
+    // Y-axis always starts at 0, with padding at top
+    let y_padding = max_value * 0.1;
+    let y_min = 0.0;
+    let y_max = max_value + y_padding;
+
+    // Draw the line chart
+    Chart::new_with_y_range(100, 30, 0.0, (data.len() - 1) as f32, y_min, y_max)
+        .lineplot(&Shape::Lines(&points))
+        .display();
+
+    // Print legend mapping x-axis positions to period labels
+    println!("\nLegend:");
+    let cols = 3; // Number of columns in legend
+    let rows = (data.len() + cols - 1) / cols;
+    for row in 0..rows {
+        for col in 0..cols {
+            let idx = row + col * rows;
+            if idx < data.len() {
+                let (label, value) = &data[idx];
+                print!("  {:>2}. {:12} {:>6.1}", idx, label, value);
+            }
+        }
+        println!();
+    }
+    println!();
+}
+
+/// Generate HTML graph using Chart.js
+fn generate_graph_html(path: &str, metric: &str, by: &str, data: &[(String, f64)]) {
+    let metric_label = match metric {
+        "win-rate" => "Win Rate (%)",
+        "mulligans" => "Average Mulligans",
+        "game-length" => "Average Game Length (turns)",
+        "matches-played" => "Matches Played",
+        _ => metric,
+    };
+
+    let labels: Vec<_> = data.iter().map(|(l, _)| format!("\"{}\"", l)).collect();
+    let values: Vec<_> = data.iter().map(|(_, v)| format!("{:.2}", v)).collect();
+
+    let html = format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{} by {}</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; }}
+        h1 {{ font-size: 24px; margin-bottom: 20px; }}
+        canvas {{ max-height: 400px; }}
+    </style>
+</head>
+<body>
+    <h1>{} by {}</h1>
+    <canvas id="chart"></canvas>
+    <script>
+        new Chart(document.getElementById('chart'), {{
+            type: 'line',
+            data: {{
+                labels: [{}],
+                datasets: [{{
+                    label: '{}',
+                    data: [{}],
+                    borderColor: 'rgb(75, 192, 192)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                    fill: true,
+                    tension: 0.1
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                scales: {{
+                    y: {{ beginAtZero: {} }}
+                }}
+            }}
+        }});
+    </script>
+</body>
+</html>"#,
+        metric_label, by,
+        metric_label, by,
+        labels.join(", "),
+        metric_label,
+        values.join(", "),
+true
+    );
+
+    fs::write(path, html).expect("Error writing HTML file");
+    println!("Generated graph at: {}", path);
 }
 
 fn list_matches(limit: i64) {

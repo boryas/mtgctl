@@ -71,7 +71,12 @@ fn generate_html(all_matches: &[Match], all_games: &[Game], _era_filter: Option<
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MTG Match Statistics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
+        .chart-container {
+            margin: 40px 0;
+            height: 300px;
+        }
         * {
             margin: 0;
             padding: 0;
@@ -182,6 +187,9 @@ fn generate_html(all_matches: &[Match], all_games: &[Game], _era_filter: Option<
     html.push_str("    <div class=\"overall-stats\">\n");
     html.push_str(&generate_overall_stats_html(all_matches, all_games));
     html.push_str("    </div>\n\n");
+
+    // Win rate over time chart
+    html.push_str(&generate_time_series_chart(all_matches));
 
     // Sliced statistics sections
     let slices = vec![
@@ -846,4 +854,103 @@ fn generate_table(headers: &[&str], rows: Vec<Vec<String>>) -> String {
     html.push_str("        </table>\n");
 
     html
+}
+
+fn generate_time_series_chart(all_matches: &[Match]) -> String {
+    use std::collections::BTreeMap;
+    use chrono::{Datelike, NaiveDate};
+
+    // Group matches by week
+    let mut weekly_stats: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+
+    for m in all_matches {
+        if let Ok(date) = NaiveDate::parse_from_str(&m.date, "%Y-%m-%d") {
+            let iso_week = date.iso_week();
+            let week_key = format!("{}-W{:02}", iso_week.year(), iso_week.week());
+
+            let entry = weekly_stats.entry(week_key).or_insert((0, 0));
+            entry.1 += 1; // total
+            if m.match_winner == "me" {
+                entry.0 += 1; // wins
+            }
+        }
+    }
+
+    if weekly_stats.is_empty() {
+        return String::new();
+    }
+
+    // Take last 20 weeks
+    let weekly_data: Vec<_> = weekly_stats.iter().rev().take(20).rev().collect();
+
+    // Generate labels and data
+    let labels: Vec<_> = weekly_data.iter().map(|(week, _)| format!("\"{}\"", week)).collect();
+    let win_rates: Vec<_> = weekly_data.iter().map(|(_, (wins, total))| {
+        if *total > 0 {
+            format!("{:.1}", (*wins as f64 / *total as f64) * 100.0)
+        } else {
+            "0".to_string()
+        }
+    }).collect();
+    let match_counts: Vec<_> = weekly_data.iter().map(|(_, (_, total))| total.to_string()).collect();
+
+    format!(r#"    <div class="section">
+        <h2>Win Rate Over Time</h2>
+        <div class="chart-container">
+            <canvas id="winRateChart"></canvas>
+        </div>
+    </div>
+    <script>
+        new Chart(document.getElementById('winRateChart'), {{
+            type: 'line',
+            data: {{
+                labels: [{}],
+                datasets: [{{
+                    label: 'Win Rate (%)',
+                    data: [{}],
+                    borderColor: 'rgb(75, 192, 192)',
+                    backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                    fill: true,
+                    tension: 0.1,
+                    yAxisID: 'y'
+                }}, {{
+                    label: 'Matches',
+                    data: [{}],
+                    borderColor: 'rgb(153, 102, 255)',
+                    backgroundColor: 'rgba(153, 102, 255, 0.1)',
+                    fill: false,
+                    tension: 0.1,
+                    yAxisID: 'y1'
+                }}]
+            }},
+            options: {{
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: {{
+                    mode: 'index',
+                    intersect: false
+                }},
+                scales: {{
+                    y: {{
+                        type: 'linear',
+                        display: true,
+                        position: 'left',
+                        title: {{ display: true, text: 'Win Rate (%)' }},
+                        min: 0,
+                        max: 100
+                    }},
+                    y1: {{
+                        type: 'linear',
+                        display: true,
+                        position: 'right',
+                        title: {{ display: true, text: 'Matches' }},
+                        min: 0,
+                        grid: {{ drawOnChartArea: false }}
+                    }}
+                }}
+            }}
+        }});
+    </script>
+
+"#, labels.join(", "), win_rates.join(", "), match_counts.join(", "))
 }

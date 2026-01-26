@@ -118,6 +118,15 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
     // Add loss_reason column to games table if it doesn't exist
     add_loss_reason_column_if_missing(connection)?;
 
+    // Add leagues table if it doesn't exist
+    add_leagues_table_if_missing(connection)?;
+
+    // Add doomsday_games table if it doesn't exist
+    add_doomsday_games_table_if_missing(connection)?;
+
+    // Add league_id column to matches table if it doesn't exist
+    add_league_id_column_if_missing(connection)?;
+
     Ok(())
 }
 
@@ -167,6 +176,55 @@ fn add_loss_reason_column_if_missing(connection: &mut SqliteConnection) -> Resul
 
     if !column_exists {
         diesel::sql_query("ALTER TABLE games ADD COLUMN loss_reason TEXT")
+            .execute(connection)?;
+    }
+
+    Ok(())
+}
+
+fn add_leagues_table_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    diesel::sql_query(
+        "CREATE TABLE IF NOT EXISTS leagues (
+            league_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_date TEXT NOT NULL,
+            end_date TEXT,
+            deck_name TEXT NOT NULL,
+            status TEXT CHECK(status IN ('in_progress', 'completed', 'dropped')) NOT NULL,
+            result TEXT CHECK(result IN ('trophy', 'elimination', 'dropped', 'pending')),
+            wins INTEGER DEFAULT 0,
+            losses INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"
+    ).execute(connection)?;
+
+    Ok(())
+}
+
+fn add_doomsday_games_table_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    diesel::sql_query(
+        "CREATE TABLE IF NOT EXISTS doomsday_games (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            game_id INTEGER NOT NULL UNIQUE REFERENCES games(game_id),
+            doomsday_resolved BOOLEAN,
+            pile_cards TEXT,
+            pile_plan TEXT,
+            sideboard_plan TEXT,
+            juke TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )"
+    ).execute(connection)?;
+
+    Ok(())
+}
+
+fn add_league_id_column_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if the column exists by trying to select it
+    let column_exists = diesel::sql_query("SELECT league_id FROM matches LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !column_exists {
+        diesel::sql_query("ALTER TABLE matches ADD COLUMN league_id INTEGER REFERENCES leagues(league_id)")
             .execute(connection)?;
     }
 
