@@ -101,10 +101,6 @@ struct UnifiedArchetypeDefinition {
     subtypes: HashMap<String, SubtypeDefinition>,
     // Doomsday-specific fields (optional, only present in doomsday.toml)
     #[serde(default)]
-    sideboard_options: Vec<String>,
-    #[serde(default)]
-    juke_options: Vec<String>,
-    #[serde(default)]
     common_pile_cards: Vec<String>,
 }
 
@@ -663,8 +659,6 @@ struct ArchetypeData {
     loss_reasons: Vec<String>,
     board_plan: Option<BoardPlan>,
     // Doomsday-specific fields
-    sideboard_options: Vec<String>,
-    juke_options: Vec<String>,
     common_pile_cards: Vec<String>,
     is_doomsday: bool,
 }
@@ -727,8 +721,6 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
                 win_conditions: subtype_def.win_conditions.clone(),
                 loss_reasons: subtype_def.loss_reasons.clone(),
                 board_plan: subtype_def.board_plan.clone(),
-                sideboard_options: unified.sideboard_options.clone(),
-                juke_options: unified.juke_options.clone(),
                 common_pile_cards: unified.common_pile_cards.clone(),
                 is_doomsday,
             });
@@ -763,8 +755,6 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
         win_conditions,
         loss_reasons,
         board_plan: unified.board_plan,
-        sideboard_options: unified.sideboard_options.clone(),
-        juke_options: unified.juke_options.clone(),
         common_pile_cards: unified.common_pile_cards.clone(),
         is_doomsday,
     })
@@ -1629,81 +1619,59 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
 fn collect_doomsday_data(connection: &mut SqliteConnection, game_id: i32, game_num: i32, arch: &ArchetypeData) {
     println!("\n--- Doomsday Details ---");
 
-    // Did Doomsday resolve?
-    let doomsday_resolved = Confirm::new()
-        .with_prompt("Did Doomsday resolve?")
+    // Did you doomsday (make a pile)?
+    let doomsday = Confirm::new()
+        .with_prompt("Doomsday?")
         .default(false)
         .interact()
         .unwrap_or(false);
 
-    // If Doomsday resolved, ask about pile
-    let (pile_cards, pile_plan) = if doomsday_resolved {
-        let made_pile = Confirm::new()
-            .with_prompt("Did you make a pile?")
-            .default(true)
-            .interact()
-            .unwrap_or(true);
-
-        if made_pile {
-            println!("Enter pile cards (5 cards, top to bottom):");
-            let mut pile = Vec::new();
-            for i in 1..=5 {
-                let prompt = format!("Card {}", i);
-                if let Some(card) = fuzzy_select(&prompt, &arch.common_pile_cards) {
-                    pile.push(card);
-                }
+    // If doomsday, ask about pile details
+    let (pile_cards, pile_plan) = if doomsday {
+        println!("Enter pile cards (5 cards, top to bottom):");
+        let mut pile = Vec::new();
+        for i in 1..=5 {
+            let prompt = format!("Card {}", i);
+            if let Some(card) = fuzzy_select(&prompt, &arch.common_pile_cards) {
+                pile.push(card);
             }
-
-            // Serialize pile as JSON
-            let pile_json = if pile.len() == 5 {
-                Some(format!("[{}]", pile.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(",")))
-            } else {
-                None
-            };
-
-            // Optional pile plan
-            let plan: String = Input::new()
-                .with_prompt("Pile plan (optional, press Enter to skip)")
-                .allow_empty(true)
-                .interact_text()
-                .unwrap_or_default();
-
-            let pile_plan = if plan.is_empty() { None } else { Some(plan) };
-
-            (pile_json, pile_plan)
-        } else {
-            (None, None)
         }
+
+        // Serialize pile as JSON
+        let pile_json = if pile.len() == 5 {
+            Some(format!("[{}]", pile.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(",")))
+        } else {
+            None
+        };
+
+        // Optional pile plan
+        let plan: String = Input::new()
+            .with_prompt("Pile plan (optional, press Enter to skip)")
+            .allow_empty(true)
+            .interact_text()
+            .unwrap_or_default();
+
+        let pile_plan = if plan.is_empty() { None } else { Some(plan) };
+
+        (pile_json, pile_plan)
     } else {
         (None, None)
     };
 
-    // Games 2 and 3 only: sideboard plan and juke
-    let (sideboard_plan, juke) = if game_num > 1 {
-        let sb_plan = if !arch.sideboard_options.is_empty() {
-            fuzzy_select("Sideboard plan", &arch.sideboard_options)
-        } else {
-            None
-        };
-
-        let juke_opt = if !arch.juke_options.is_empty() {
-            fuzzy_select("Juke strategy (optional)", &arch.juke_options)
-        } else {
-            None
-        };
-
-        (sb_plan, juke_opt)
+    // Games 2 and 3 only: juke strategy
+    let juke = if game_num > 1 {
+        let juke_options = vec!["none".to_string(), "partial".to_string(), "full".to_string()];
+        fuzzy_select("Juke?", &juke_options)
     } else {
-        (None, None)
+        None
     };
 
     // Insert into doomsday_games table
     let new_doomsday_game = NewDoomsdayGame {
         game_id,
-        doomsday_resolved: Some(doomsday_resolved),
+        doomsday: Some(doomsday),
         pile_cards,
         pile_plan,
-        sideboard_plan,
         juke,
     };
 

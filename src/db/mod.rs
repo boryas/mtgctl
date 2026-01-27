@@ -205,10 +205,9 @@ fn add_doomsday_games_table_if_missing(connection: &mut SqliteConnection) -> Res
         "CREATE TABLE IF NOT EXISTS doomsday_games (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             game_id INTEGER NOT NULL UNIQUE REFERENCES games(game_id),
-            doomsday_resolved BOOLEAN,
+            doomsday BOOLEAN,
             pile_cards TEXT,
             pile_plan TEXT,
-            sideboard_plan TEXT,
             juke TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )"

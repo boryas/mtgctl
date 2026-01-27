@@ -24,10 +24,9 @@ diesel::table! {
     doomsday_games (id) {
         id -> Integer,
         game_id -> Integer,
-        doomsday_resolved -> Nullable<Bool>,
+        doomsday -> Nullable<Bool>,
         pile_cards -> Nullable<Text>,
         pile_plan -> Nullable<Text>,
-        sideboard_plan -> Nullable<Text>,
         juke -> Nullable<Text>,
         created_at -> Nullable<Text>,
     }

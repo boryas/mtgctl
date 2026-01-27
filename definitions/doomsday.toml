@@ -3,18 +3,13 @@ name = "Doomsday"
 category = "Combo"
 
 # Doomsday-specific tracking options (shared across subtypes)
-sideboard_options = ["combo-in", "combo-out", "partial"]
-juke_options = ["no-juke", "heavy-juke", "light-juke"]
 common_pile_cards = [
     "Thassa's Oracle",
     "Street Wraith",
     "Edge of Autumn",
-    "Grief",
     "Consider",
     "Brainstorm",
     "Ponder",
-    "Preordain",
-    "Gitaxian Probe",
     "Dark Ritual",
     "Lotus Petal",
     "Lion's Eye Diamond",
@@ -23,10 +18,17 @@ common_pile_cards = [
     "Cavern of Souls",
     "Unearth",
     "Reanimate",
-    "Deep Analysis",
-    "Ideas Unbound",
-    "Shelldock Isle",
-    "Emrakul, the Aeons Torn",
+    "Thoughtseize",
+    "Underground Sea",
+    "Polluted Delta",
+    "Island",
+    "Jace, Weilder of Mysteries",
+    "Barrowgoyf",
+    "Orcish Bowmasters",
+    "Doomsday",
+    "Long Goodbye",
+    "Abrupt Decay",
+    "Carpet of Flowers",
 ]
 
 [subtypes.Combo]

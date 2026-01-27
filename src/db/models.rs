@@ -250,10 +250,9 @@ pub struct NewLeague {
 pub struct DoomsdayGame {
     pub id: i32,
     pub game_id: i32,
-    pub doomsday_resolved: Option<bool>,
+    pub doomsday: Option<bool>,
     pub pile_cards: Option<String>,
     pub pile_plan: Option<String>,
-    pub sideboard_plan: Option<String>,
     pub juke: Option<String>,
     pub created_at: Option<String>,
 }
@@ -262,9 +261,8 @@ pub struct DoomsdayGame {
 #[diesel(table_name = crate::db::schema::doomsday_games)]
 pub struct NewDoomsdayGame {
     pub game_id: i32,
-    pub doomsday_resolved: Option<bool>,
+    pub doomsday: Option<bool>,
     pub pile_cards: Option<String>,
     pub pile_plan: Option<String>,
-    pub sideboard_plan: Option<String>,
     pub juke: Option<String>,
 }
