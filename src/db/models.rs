@@ -182,6 +182,7 @@ impl LeagueStatus {
 pub enum LeagueResult {
     Trophy,
     Elimination,
+    Completed,  // Finished 5 matches without trophy or elimination (4-1, 3-2)
     Dropped,
     Pending,
 }
@@ -191,6 +192,7 @@ impl LeagueResult {
         match s {
             "trophy" => Some(LeagueResult::Trophy),
             "elimination" => Some(LeagueResult::Elimination),
+            "completed" => Some(LeagueResult::Completed),
             "dropped" => Some(LeagueResult::Dropped),
             "pending" => Some(LeagueResult::Pending),
             _ => None,
@@ -201,6 +203,7 @@ impl LeagueResult {
         match self {
             LeagueResult::Trophy => "trophy",
             LeagueResult::Elimination => "elimination",
+            LeagueResult::Completed => "completed",
             LeagueResult::Dropped => "dropped",
             LeagueResult::Pending => "pending",
         }
@@ -255,6 +258,11 @@ pub struct DoomsdayGame {
     pub pile_plan: Option<String>,
     pub juke: Option<String>,
     pub created_at: Option<String>,
+    // New v2 columns
+    pub pile_type: Option<String>,
+    pub better_pile: Option<i32>,  // SQLite stores booleans as integers
+    pub no_doomsday_reason: Option<String>,
+    pub sb_juke_plan: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -265,4 +273,9 @@ pub struct NewDoomsdayGame {
     pub pile_cards: Option<String>,
     pub pile_plan: Option<String>,
     pub juke: Option<String>,
+    // New v2 columns
+    pub pile_type: Option<String>,
+    pub better_pile: Option<i32>,
+    pub no_doomsday_reason: Option<String>,
+    pub sb_juke_plan: Option<String>,
 }

@@ -124,6 +124,12 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
     // Add doomsday_games table if it doesn't exist
     add_doomsday_games_table_if_missing(connection)?;
 
+    // Add missing columns to doomsday_games table
+    add_doomsday_games_columns_if_missing(connection)?;
+
+    // Add new doomsday tracking columns (v2)
+    add_doomsday_games_v2_columns_if_missing(connection)?;
+
     // Add league_id column to matches table if it doesn't exist
     add_league_id_column_if_missing(connection)?;
 
@@ -216,6 +222,50 @@ fn add_doomsday_games_table_if_missing(connection: &mut SqliteConnection) -> Res
     Ok(())
 }
 
+fn add_doomsday_games_columns_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Check if doomsday column exists
+    let doomsday_exists = diesel::sql_query("SELECT doomsday FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !doomsday_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN doomsday BOOLEAN")
+            .execute(connection)?;
+    }
+
+    // Check if pile_cards column exists
+    let pile_cards_exists = diesel::sql_query("SELECT pile_cards FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !pile_cards_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN pile_cards TEXT")
+            .execute(connection)?;
+    }
+
+    // Check if pile_plan column exists
+    let pile_plan_exists = diesel::sql_query("SELECT pile_plan FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !pile_plan_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN pile_plan TEXT")
+            .execute(connection)?;
+    }
+
+    // Check if juke column exists
+    let juke_exists = diesel::sql_query("SELECT juke FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !juke_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN juke TEXT")
+            .execute(connection)?;
+    }
+
+    Ok(())
+}
+
 fn add_league_id_column_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
     // Check if the column exists by trying to select it
     let column_exists = diesel::sql_query("SELECT league_id FROM matches LIMIT 0")
@@ -224,6 +274,53 @@ fn add_league_id_column_if_missing(connection: &mut SqliteConnection) -> Result<
 
     if !column_exists {
         diesel::sql_query("ALTER TABLE matches ADD COLUMN league_id INTEGER REFERENCES leagues(league_id)")
+            .execute(connection)?;
+    }
+
+    Ok(())
+}
+
+fn add_doomsday_games_v2_columns_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Add pile_type column (replaces pile_cards for new entries)
+    let pile_type_exists = diesel::sql_query("SELECT pile_type FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !pile_type_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN pile_type TEXT")
+            .execute(connection)?;
+    }
+
+    // Add better_pile column (boolean for losses where doomsday resolved)
+    let better_pile_exists = diesel::sql_query("SELECT better_pile FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !better_pile_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN better_pile INTEGER")
+            .execute(connection)?;
+    }
+
+    // Add no_doomsday_reason column (why doomsday wasn't cast)
+    let no_doomsday_reason_exists = diesel::sql_query("SELECT no_doomsday_reason FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !no_doomsday_reason_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN no_doomsday_reason TEXT")
+            .execute(connection)?;
+    }
+
+    // Add sb_juke_plan column (renamed from juke - asked BEFORE the game)
+    let sb_juke_plan_exists = diesel::sql_query("SELECT sb_juke_plan FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !sb_juke_plan_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN sb_juke_plan TEXT")
+            .execute(connection)?;
+        // Migrate existing juke data to sb_juke_plan
+        diesel::sql_query("UPDATE doomsday_games SET sb_juke_plan = juke WHERE juke IS NOT NULL")
             .execute(connection)?;
     }
 

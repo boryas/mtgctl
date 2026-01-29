@@ -29,6 +29,10 @@ diesel::table! {
         pile_plan -> Nullable<Text>,
         juke -> Nullable<Text>,
         created_at -> Nullable<Text>,
+        pile_type -> Nullable<Text>,
+        better_pile -> Nullable<Integer>,
+        no_doomsday_reason -> Nullable<Text>,
+        sb_juke_plan -> Nullable<Text>,
     }
 }
 

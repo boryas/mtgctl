@@ -31,14 +31,69 @@ common_pile_cards = [
     "Carpet of Flowers",
 ]
 
-[subtypes.Combo]
-game_plans = ["combo", "cantrips", "control"]
-win_conditions = ["doomsday", "other"]
-loss_reasons = ["bad-pile", "pre-pile-pressure", "wasted", "pile-disruption", "combo"]
+common_pile_disruption = [
+    "Swords to Plowshares",
+    "Fatal Push",
+    "Lightning Bolt",
+    "Consign to Memory",
+    "Stifle",
+    "Orcish Bowmasters",
+    "Force of Will",
+    "Disruptor Flute",
+    "Wasteland",
+    "Ghost Quarter",
+    "Boseiju, Who Endures",
+    "Endurance",
+    "Runehorn Hellkite",
+    "Echo of Aeons",
+    "Grindstone",
+    "Torpor Orb",
+    "Doorkeeper Thrull",
+    "Blood Moon",
+    "Magus of the Moon",
+    "Eldrazi Linebreaker",
+    "Glaring Fleshraker",
+    "Thoughtknot Seer",
+]
 
-[subtypes.Combo.lists]
-# Add your Combo doomsday lists here
+common_pile_types = [
+    "Cyclers",
+    "Fetch+Cyclers",
+    "Brainstorm LED",
+    "Multiple Passes",
+    "Chumps",
+    "Removal",
+    "Jace LED",
+    "Consign Unearth",
+    "Other",
+]
+
+no_doomsday_reasons = [
+    "Mana",
+    "Counter",
+    "Discard",
+    "No Doomsday",
+    "Life Total",
+    "Combo Killed",
+    "Tempo Gameplan",
+    "Sideboarded",
+]
+
+non_doomsday_wincons = [
+    "concede", # e.g. countered oops/storm into the ground
+    "creatures",
+    "tamiyo-ult",
+]
+
+[subtypes.Turbo]
+game_plans = ["combo", "cantrips", "control", "creatures"]
+win_conditions = ["doomsday", "other", "creatures"]
+loss_reasons = ["bad-pile", "pre-pile-pressure", "mana", "pile-disruption", "combo", "grind"]
+
+[subtypes.Turbo.lists]
+# Add your Turbo doomsday lists here
 # "combo-doomsday-1.0" = "https://moxfield.com/..."
+"turbo-doomsday-1.0" = "https://moxfield.com/decks/-8yQN7Uc9ka_u3J8dJcKBg"
 
 [subtypes.Tempo]
 game_plans = ["doomsday", "tamiyo", "cantrips", "control", "creatures"]

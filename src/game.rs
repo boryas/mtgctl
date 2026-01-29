@@ -29,10 +29,13 @@ struct CollectedGame {
 
 /// Collected doomsday-specific data before DB insertion
 struct CollectedDoomsdayData {
-    doomsday: bool,
-    pile_cards: Option<String>,
-    pile_plan: Option<String>,
-    juke: Option<String>,
+    doomsday_resolved: bool,
+    pile_type: Option<String>,
+    better_pile: Option<bool>,
+    no_doomsday_reason: Option<String>,
+    sb_juke_plan: Option<String>,
+    // If set, overrides the game's win_condition
+    win_condition_override: Option<String>,
 }
 
 
@@ -124,6 +127,14 @@ struct UnifiedArchetypeDefinition {
     // Doomsday-specific fields (optional, only present in doomsday.toml)
     #[serde(default)]
     common_pile_cards: Vec<String>,
+    #[serde(default)]
+    common_pile_types: Vec<String>,
+    #[serde(default)]
+    common_pile_disruption: Vec<String>,
+    #[serde(default)]
+    no_doomsday_reasons: Vec<String>,
+    #[serde(default)]
+    non_doomsday_wincons: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -646,6 +657,11 @@ const GROUPBY_LEVELS: &[(usize, &str, StatsLevel)] = &[
     (13, "loss-reason", StatsLevel::Game),
     (14, "game-length", StatsLevel::Game),
     (15, "play-draw", StatsLevel::Game),
+    // Doomsday-specific (only shown when filtering for doomsday)
+    (16, "doomsday-resolved", StatsLevel::Game),
+    (17, "sb-juke-plan", StatsLevel::Game),
+    (18, "pile-type", StatsLevel::Game),
+    (19, "no-doomsday-reason", StatsLevel::Game),
 ];
 
 /// Statistic indices and their levels
@@ -682,6 +698,10 @@ struct ArchetypeData {
     board_plan: Option<BoardPlan>,
     // Doomsday-specific fields
     common_pile_cards: Vec<String>,
+    common_pile_types: Vec<String>,
+    common_pile_disruption: Vec<String>,
+    no_doomsday_reasons: Vec<String>,
+    non_doomsday_wincons: Vec<String>,
     is_doomsday: bool,
 }
 
@@ -744,6 +764,10 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
                 loss_reasons: subtype_def.loss_reasons.clone(),
                 board_plan: subtype_def.board_plan.clone(),
                 common_pile_cards: unified.common_pile_cards.clone(),
+                common_pile_types: unified.common_pile_types.clone(),
+                common_pile_disruption: unified.common_pile_disruption.clone(),
+                no_doomsday_reasons: unified.no_doomsday_reasons.clone(),
+                non_doomsday_wincons: unified.non_doomsday_wincons.clone(),
                 is_doomsday,
             });
         }
@@ -778,6 +802,10 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
         loss_reasons,
         board_plan: unified.board_plan,
         common_pile_cards: unified.common_pile_cards.clone(),
+        common_pile_types: unified.common_pile_types.clone(),
+        common_pile_disruption: unified.common_pile_disruption.clone(),
+        no_doomsday_reasons: unified.no_doomsday_reasons.clone(),
+        non_doomsday_wincons: unified.non_doomsday_wincons.clone(),
         is_doomsday,
     })
 }
@@ -1529,10 +1557,14 @@ fn add_match_interactive(date_arg: Option<String>) {
 
             let new_dd = NewDoomsdayGame {
                 game_id,
-                doomsday: Some(dd.doomsday),
-                pile_cards: dd.pile_cards.clone(),
-                pile_plan: dd.pile_plan.clone(),
-                juke: dd.juke.clone(),
+                doomsday: Some(dd.doomsday_resolved),
+                pile_cards: None,  // Deprecated
+                pile_plan: None,   // Deprecated
+                juke: None,        // Deprecated, use sb_juke_plan instead
+                pile_type: dd.pile_type.clone(),
+                better_pile: dd.better_pile.map(|b| if b { 1 } else { 0 }),
+                no_doomsday_reason: dd.no_doomsday_reason.clone(),
+                sb_juke_plan: dd.sb_juke_plan.clone(),
             };
 
             diesel::insert_into(doomsday_games::table)
@@ -1561,6 +1593,22 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
 
     for game_num in 1..=3 {
         println!("\n--- Game {} ---", game_num);
+
+        // Ask sideboard juke plan BEFORE games 2-3 (for doomsday)
+        let sb_juke_plan = if game_num > 1 {
+            if let Some(ref arch) = archetype {
+                if arch.is_doomsday {
+                    let juke_options = vec!["none".to_string(), "partial".to_string(), "full".to_string()];
+                    fuzzy_select("Sideboard plan (juke)", &juke_options)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Play or draw is determined automatically
         let play_draw = if game_num == 1 {
@@ -1666,12 +1714,19 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
         // Doomsday data if applicable
         let doomsday_data = if let Some(ref arch) = archetype {
             if arch.is_doomsday {
-                collect_doomsday_data_only(game_num, arch)?
+                collect_doomsday_data_only(&game_winner, sb_juke_plan.clone(), arch)?
             } else {
                 None
             }
         } else {
             None
+        };
+
+        // Apply doomsday win_condition_override if present
+        let final_win_condition = if let Some(ref dd) = doomsday_data {
+            dd.win_condition_override.clone().or(win_condition)
+        } else {
+            win_condition
         };
 
         games.push(CollectedGame {
@@ -1680,7 +1735,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
             mulligans,
             opening_hand_plan,
             game_winner: game_winner.to_string(),
-            win_condition,
+            win_condition: final_win_condition,
             loss_reason,
             turns,
             doomsday_data,
@@ -1735,11 +1790,16 @@ struct CollectedMatchData {
 }
 
 /// Collect doomsday-specific data without writing to DB. Returns None if cancelled.
-fn collect_doomsday_data_only(game_num: i32, arch: &ArchetypeData) -> Option<Option<CollectedDoomsdayData>> {
+/// Now takes game_winner and sb_juke_plan (asked before the game for games 2-3).
+fn collect_doomsday_data_only(
+    game_winner: &Winner,
+    sb_juke_plan: Option<String>,
+    arch: &ArchetypeData,
+) -> Option<Option<CollectedDoomsdayData>> {
     println!("\n--- Doomsday Details ---");
 
-    let doomsday = match Confirm::new()
-        .with_prompt("Doomsday?")
+    let doomsday_resolved = match Confirm::new()
+        .with_prompt("Did you resolve Doomsday?")
         .default(false)
         .interact()
     {
@@ -1747,48 +1807,138 @@ fn collect_doomsday_data_only(game_num: i32, arch: &ArchetypeData) -> Option<Opt
         Err(_) => return None,
     };
 
-    let (pile_cards, pile_plan) = if doomsday {
-        println!("Enter pile cards (5 cards, top to bottom):");
-        let mut pile = Vec::new();
-        for i in 1..=5 {
-            let prompt = format!("Card {}", i);
-            if let Some(card) = fuzzy_select(&prompt, &arch.common_pile_cards) {
-                pile.push(card);
-            }
-        }
+    let you_won = matches!(game_winner, Winner::Me);
 
-        let pile_json = if pile.len() == 5 {
-            Some(format!("[{}]", pile.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(",")))
+    let (pile_type, better_pile, no_doomsday_reason, win_condition_override) = if you_won {
+        // WIN path
+        if doomsday_resolved {
+            // Won with doomsday - ask pile type, set win_condition to "doomsday"
+            let pile_type = fuzzy_select_with_auto_add(
+                "Pile type",
+                &arch.common_pile_types,
+                "definitions/doomsday.toml",
+                "common_pile_types",
+            );
+
+            (pile_type, None, None, Some("doomsday".to_string()))
         } else {
-            None
-        };
-
-        let plan: String = Input::new()
-            .with_prompt("Pile plan (optional, press Enter to skip)")
-            .allow_empty(true)
-            .interact_text()
-            .unwrap_or_default();
-
-        let pile_plan = if plan.is_empty() { None } else { Some(plan) };
-
-        (pile_json, pile_plan)
+            // Won without doomsday - ask how (goes into win_condition)
+            let wincon = fuzzy_select_with_auto_add(
+                "Win condition",
+                &arch.non_doomsday_wincons,
+                "definitions/doomsday.toml",
+                "non_doomsday_wincons",
+            );
+            (None, None, None, wincon)
+        }
     } else {
-        (None, None)
-    };
+        // LOSE path - no win_condition_override needed
+        if doomsday_resolved {
+            // Lost after resolving doomsday
+            let pile_type = fuzzy_select_with_auto_add(
+                "Pile type",
+                &arch.common_pile_types,
+                "definitions/doomsday.toml",
+                "common_pile_types",
+            );
 
-    let juke = if game_num > 1 {
-        let juke_options = vec!["none".to_string(), "partial".to_string(), "full".to_string()];
-        fuzzy_select("Juke?", &juke_options)
-    } else {
-        None
+            let better_pile = match Confirm::new()
+                .with_prompt("Could you have won with a better pile/play?")
+                .default(false)
+                .interact()
+            {
+                Ok(b) => Some(b),
+                Err(_) => None,
+            };
+
+            (pile_type, better_pile, None, None)
+        } else {
+            // Lost without casting doomsday
+            let reason = fuzzy_select_with_auto_add(
+                "Why didn't you cast Doomsday?",
+                &arch.no_doomsday_reasons,
+                "definitions/doomsday.toml",
+                "no_doomsday_reasons",
+            );
+            (None, None, reason, None)
+        }
     };
 
     Some(Some(CollectedDoomsdayData {
-        doomsday,
-        pile_cards,
-        pile_plan,
-        juke,
+        doomsday_resolved,
+        pile_type,
+        better_pile,
+        no_doomsday_reason,
+        sb_juke_plan,
+        win_condition_override,
     }))
+}
+
+/// Fuzzy select that auto-adds new values to a TOML file if the user enters something new
+fn fuzzy_select_with_auto_add(
+    prompt: &str,
+    options: &[String],
+    toml_path: &str,
+    list_name: &str,
+) -> Option<String> {
+    let result = fuzzy_select(prompt, options)?;
+
+    // Check if this is a new value not in the options
+    if !options.iter().any(|o| o == &result) {
+        let add_to_toml = Confirm::new()
+            .with_prompt(format!("Add '{}' to {}?", result, list_name))
+            .default(true)
+            .interact()
+            .unwrap_or(false);
+
+        if add_to_toml {
+            append_to_toml_list(toml_path, list_name, &result);
+        }
+    }
+
+    Some(result)
+}
+
+/// Append a new value to a TOML array
+fn append_to_toml_list(toml_path: &str, list_name: &str, new_value: &str) {
+    let content = match fs::read_to_string(toml_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error reading {}: {}", toml_path, e);
+            return;
+        }
+    };
+
+    // Find the list and append the new value
+    // Look for pattern: list_name = [
+    let list_start = format!("{} = [", list_name);
+    if let Some(start_idx) = content.find(&list_start) {
+        // Find the closing bracket
+        let search_start = start_idx + list_start.len();
+        if let Some(end_offset) = content[search_start..].find(']') {
+            let end_idx = search_start + end_offset;
+
+            // Insert the new value before the closing bracket
+            let before = &content[..end_idx];
+            let after = &content[end_idx..];
+
+            // Check if we need a comma (if the list isn't empty)
+            let trimmed = before.trim_end();
+            let needs_comma = !trimmed.ends_with('[') && !trimmed.ends_with(',');
+
+            let new_content = if needs_comma {
+                format!("{},\n    \"{}\"{}", before.trim_end(), new_value, after)
+            } else {
+                format!("{}\n    \"{}\"{}", before.trim_end(), new_value, after)
+            };
+
+            if let Err(e) = fs::write(toml_path, new_content) {
+                eprintln!("Error writing to {}: {}", toml_path, e);
+            } else {
+                println!("Added '{}' to {}", new_value, list_name);
+            }
+        }
+    }
 }
 
 /// Find an active league for the given deck, or prompt to create a new one
@@ -1892,13 +2042,18 @@ fn update_league_after_match(connection: &mut SqliteConnection, league_id: i32, 
         Winner::Opponent => (league.wins, league.losses + 1),
     };
 
-    // Check for league completion
+    // Check for league completion (5 matches total, or 3 losses for early elimination)
+    let total_matches = new_wins + new_losses;
     let (new_status, new_result) = if new_wins >= 5 {
-        println!("\n🏆 TROPHY! You finished the league 5-{}!", new_losses);
+        println!("\nTROPHY! You finished the league 5-{}!", new_losses);
         ("completed".to_string(), Some("trophy".to_string()))
     } else if new_losses >= 3 {
-        println!("\n😔 League complete: {}-3", new_wins);
+        println!("\nLeague complete: {}-3", new_wins);
         ("completed".to_string(), Some("elimination".to_string()))
+    } else if total_matches >= 5 {
+        // Completed 5 matches without trophy or elimination (4-1, 3-2, etc.)
+        println!("\nLeague complete: {}-{}", new_wins, new_losses);
+        ("completed".to_string(), Some("completed".to_string()))
     } else {
         println!("\nLeague record: {}-{}", new_wins, new_losses);
         ("in_progress".to_string(), Some("pending".to_string()))
@@ -2682,6 +2837,7 @@ fn show_stats_interactive(use_defaults: bool) {
 
     // Apply filters from config or prompt interactively
     let mut deck_name_filter: Option<String> = None;
+    let mut selected_archetype: Option<String> = None;  // Track archetype even when filtering by subtype/list
     let mut opponent_name_filter: Option<String> = None;
     let mut opponent_deck_filter: Option<String> = None;
     let mut opponent_deck_archetype_filter: Option<String> = None;
@@ -2703,6 +2859,16 @@ fn show_stats_interactive(use_defaults: bool) {
             era_values = Some(vec![era]);
         }
         deck_name_filter = config.stats.filters.my_deck.clone();
+        // Try to extract archetype from config filter (e.g., "Doomsday" or "Doomsday: Tempo")
+        if let Some(ref filter) = deck_name_filter {
+            let (arch, _) = parse_deck_name(filter);
+            if !arch.is_empty() && arch != filter {
+                selected_archetype = Some(arch.to_string());
+            } else {
+                // Filter might just be the archetype name
+                selected_archetype = Some(filter.clone());
+            }
+        }
         opponent_name_filter = config.stats.filters.opponent.clone();
         opponent_deck_filter = config.stats.filters.opponent_deck.clone();
         event_type_filter = config.stats.filters.event_type.clone();
@@ -2826,12 +2992,13 @@ fn show_stats_interactive(use_defaults: bool) {
                 2 => {
                     // My Archetype - fuzzy select
                     let default_deck = config.stats.filters.my_deck.as_deref().unwrap_or("");
-                    if let Some(selected_archetype) = fuzzy_select_with_default("Select archetype to filter by", &archetype_list, default_deck) {
+                    if let Some(arch) = fuzzy_select_with_default("Select archetype to filter by", &archetype_list, default_deck) {
                         // Filter by archetype (partial match on deck name)
-                        deck_name_filter = Some(selected_archetype.clone());
+                        deck_name_filter = Some(arch.clone());
+                        selected_archetype = Some(arch.clone());
 
                         // Reload deck-specific options
-                        if let Some(data) = load_archetype_data(&selected_archetype) {
+                        if let Some(data) = load_archetype_data(&arch) {
                             if !data.win_conditions.is_empty() {
                                 all_win_conditions = data.win_conditions;
                             }
@@ -2849,7 +3016,17 @@ fn show_stats_interactive(use_defaults: bool) {
                     if let Some(subtype) = fuzzy_select("Select subtype to filter by", &subtype_list) {
                         // Filter by subtype (will match "Archetype: Subtype")
                         deck_name_filter = Some(format!(": {}", subtype));
-                        // Note: subtype alone doesn't give us enough info to load archetype data
+                        // If archetype already selected, keep it; otherwise try to find which archetype has this subtype
+                        if selected_archetype.is_none() {
+                            // Check which archetype this subtype belongs to
+                            for arch in &archetype_list {
+                                let subtypes = load_subtypes(arch);
+                                if subtypes.contains(&subtype) {
+                                    selected_archetype = Some(arch.clone());
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
                 4 => {
@@ -2857,7 +3034,21 @@ fn show_stats_interactive(use_defaults: bool) {
                     if let Some(list) = fuzzy_select("Select list to filter by", &list_list) {
                         // Filter by list name (will match "(list)")
                         deck_name_filter = Some(format!("({})", list));
-                        // Note: list alone doesn't give us enough info to load archetype data
+                        // If archetype already selected, keep it; otherwise try to find which archetype has this list
+                        if selected_archetype.is_none() {
+                            for arch in &archetype_list {
+                                for subtype in load_subtypes(arch) {
+                                    let lists = load_lists(arch, &subtype);
+                                    if lists.contains(&list) {
+                                        selected_archetype = Some(arch.clone());
+                                        break;
+                                    }
+                                }
+                                if selected_archetype.is_some() {
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
                 5 => {
@@ -2949,6 +3140,16 @@ fn show_stats_interactive(use_defaults: bool) {
         }
     }
 
+    // Detect if filtering for Doomsday decks (check both archetype and filter string)
+    let is_doomsday_filter = selected_archetype
+        .as_ref()
+        .map(|a| a.to_lowercase() == "doomsday")
+        .unwrap_or(false)
+        || deck_name_filter
+            .as_ref()
+            .map(|f| f.to_lowercase().contains("doomsday"))
+            .unwrap_or(false);
+
     // Step 2: Select Group-bys
     let selected_groupbys = if use_defaults {
         // Use config defaults
@@ -2971,12 +3172,17 @@ fn show_stats_interactive(use_defaults: bool) {
                 "loss-reason" => defaults.push(13),
                 "game-length" => defaults.push(14),
                 "play-draw" => defaults.push(15),
+                // Doomsday-specific (only available when filtering for doomsday)
+                "doomsday-resolved" if is_doomsday_filter => defaults.push(16),
+                "sb-juke-plan" if is_doomsday_filter => defaults.push(17),
+                "pile-type" if is_doomsday_filter => defaults.push(18),
+                "no-doomsday-reason" if is_doomsday_filter => defaults.push(19),
                 _ => {}
             }
         }
         defaults
     } else {
-        let groupby_options = vec![
+        let mut groupby_options = vec![
             "My Archetype",
             "My Subtype",
             "My List",
@@ -2995,8 +3201,16 @@ fn show_stats_interactive(use_defaults: bool) {
             "Play/Draw",
         ];
 
+        // Add doomsday-specific options if filtering for doomsday
+        if is_doomsday_filter {
+            groupby_options.push("Doomsday Resolved");
+            groupby_options.push("Sideboard Juke Plan");
+            groupby_options.push("Pile Type");
+            groupby_options.push("No-Doomsday Reason");
+        }
+
         // Pre-select group-bys based on config
-        let groupby_defaults = vec![
+        let mut groupby_defaults = vec![
             config.stats.default_groupbys.contains(&"my-archetype".to_string()),
             config.stats.default_groupbys.contains(&"my-subtype".to_string()),
             config.stats.default_groupbys.contains(&"my-list".to_string()),
@@ -3014,6 +3228,14 @@ fn show_stats_interactive(use_defaults: bool) {
             config.stats.default_groupbys.contains(&"game-length".to_string()),
             config.stats.default_groupbys.contains(&"play-draw".to_string()),
         ];
+
+        // Add doomsday-specific defaults if filtering for doomsday
+        if is_doomsday_filter {
+            groupby_defaults.push(config.stats.default_groupbys.contains(&"doomsday-resolved".to_string()));
+            groupby_defaults.push(config.stats.default_groupbys.contains(&"sb-juke-plan".to_string()));
+            groupby_defaults.push(config.stats.default_groupbys.contains(&"pile-type".to_string()));
+            groupby_defaults.push(config.stats.default_groupbys.contains(&"no-doomsday-reason".to_string()));
+        }
 
         MultiSelect::new()
             .with_prompt("Select group-bys (space to select, enter to continue)")
@@ -3168,6 +3390,18 @@ fn show_stats_interactive(use_defaults: bool) {
     let all_games = game_query.load::<Game>(connection)
         .expect("Error loading games");
 
+    // Load doomsday games data if filtering for doomsday
+    let doomsday_games_data: Vec<DoomsdayGame> = if is_doomsday_filter {
+        let game_ids: Vec<i32> = all_games.iter().map(|g| g.game_id).collect();
+        doomsday_games::table
+            .filter(doomsday_games::game_id.eq_any(&game_ids))
+            .select(DoomsdayGame::as_select())
+            .load(connection)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     // If game-specific filters were applied, filter matches to only those with matching games
     if has_game_filters {
         let filtered_match_ids: std::collections::HashSet<i32> = all_games.iter()
@@ -3293,10 +3527,14 @@ fn show_stats_interactive(use_defaults: bool) {
             13 => "loss-reason",
             14 => "game-length",
             15 => "play-draw",
+            16 => "doomsday-resolved",
+            17 => "sb-juke-plan",
+            18 => "pile-type",
+            19 => "no-doomsday-reason",
             _ => continue,
         };
 
-        show_sliced_stats(&all_matches, &all_games, groupby_name, config.stats.min_games, &selected_stats);
+        show_sliced_stats(&all_matches, &all_games, &doomsday_games_data, groupby_name, config.stats.min_games, &selected_stats);
     }
 }
 
@@ -3314,7 +3552,7 @@ fn extract_archetype(deck_name: &str) -> String {
     archetype.to_string()
 }
 
-fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str, min_games: i64, selected_stats: &[usize]) {
+fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: &[DoomsdayGame], slice_type: &str, min_games: i64, selected_stats: &[usize]) {
     // Determine title and grouping function
     let (title, get_key): (&str, Box<dyn Fn(&Match) -> String>) = match slice_type {
         "my-deck" => ("=== Statistics by My Deck ===", Box::new(|m: &Match| m.deck_name.clone())),
@@ -3343,11 +3581,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
         "era" => ("=== Statistics by Era ===", Box::new(|m: &Match| {
             m.era.map(|e| format!("Era {}", e)).unwrap_or_else(|| "No Era".to_string())
         })),
-        "game-number" => ("=== Statistics by Game Number ===", Box::new(|_m: &Match| {
-            // This one is special - we need to group by game number, not match
-            // For now, return empty to handle specially
-            String::new()
-        })),
+        "game-number" => ("=== Statistics by Game Number ===", Box::new(|_m: &Match| String::new())),
         "pre-post-board" => ("=== Statistics by Pre/Post-board ===", Box::new(|_m: &Match| String::new())),
         "mulligans" => ("=== Statistics by Mulligan Count ===", Box::new(|_m: &Match| String::new())),
         "game-plan" => ("=== Statistics by Game Plan ===", Box::new(|_m: &Match| String::new())),
@@ -3355,6 +3589,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
         "loss-reason" => ("=== Statistics by Loss Reason ===", Box::new(|_m: &Match| String::new())),
         "game-length" => ("=== Statistics by Game Length ===", Box::new(|_m: &Match| String::new())),
         "play-draw" => ("=== Statistics by Play/Draw ===", Box::new(|_m: &Match| String::new())),
+        "doomsday-resolved" => ("=== Statistics by Doomsday Resolved ===", Box::new(|_m: &Match| String::new())),
+        "sb-juke-plan" => ("=== Statistics by Sideboard Juke Plan ===", Box::new(|_m: &Match| String::new())),
+        "pile-type" => ("=== Statistics by Pile Type ===", Box::new(|_m: &Match| String::new())),
+        "no-doomsday-reason" => ("=== Statistics by No-Doomsday Reason ===", Box::new(|_m: &Match| String::new())),
         _ => return,
     };
 
@@ -3534,6 +3772,126 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], slice_type: &str
         // Sort: Play first, then Draw
         let order = ["On the Play", "On the Draw", "Unknown"];
         rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
+    // Doomsday-specific group-bys
+    if slice_type == "doomsday-resolved" {
+        // Build a map from game_id to doomsday data
+        let dd_map: HashMap<i32, &DoomsdayGame> = doomsday_games.iter()
+            .map(|dd| (dd.game_id, dd))
+            .collect();
+
+        let mut dd_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            let label = if let Some(dd) = dd_map.get(&game.game_id) {
+                if dd.doomsday.unwrap_or(false) { "Cast Doomsday" } else { "No Doomsday" }
+            } else {
+                "No Data"
+            };
+            dd_stats.entry(label.to_string()).or_default().push(game);
+        }
+
+        let mut rows: Vec<StatsRow> = dd_stats.into_iter()
+            .map(|(label, games)| calculate_stats_from_games(label, games, all_matches))
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        let order = ["Cast Doomsday", "No Doomsday", "No Data"];
+        rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
+    if slice_type == "sb-juke-plan" {
+        // Build a map from game_id to doomsday data
+        let dd_map: HashMap<i32, &DoomsdayGame> = doomsday_games.iter()
+            .map(|dd| (dd.game_id, dd))
+            .collect();
+
+        let mut juke_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            // Only include games 2 and 3 (post-board) for juke stats
+            if game.game_number == 1 {
+                continue;
+            }
+            let label = if let Some(dd) = dd_map.get(&game.game_id) {
+                // Try new sb_juke_plan first, fall back to old juke column
+                dd.sb_juke_plan.as_deref()
+                    .or(dd.juke.as_deref())
+                    .unwrap_or("No Data")
+            } else {
+                "No Data"
+            };
+            juke_stats.entry(label.to_string()).or_default().push(game);
+        }
+
+        let mut rows: Vec<StatsRow> = juke_stats.into_iter()
+            .map(|(label, games)| calculate_stats_from_games(label, games, all_matches))
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        let order = ["none", "partial", "full", "No Data"];
+        rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
+    if slice_type == "pile-type" {
+        let dd_map: HashMap<i32, &DoomsdayGame> = doomsday_games.iter()
+            .map(|dd| (dd.game_id, dd))
+            .collect();
+
+        let mut pile_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            let label = if let Some(dd) = dd_map.get(&game.game_id) {
+                if dd.doomsday.unwrap_or(false) {
+                    dd.pile_type.as_deref().unwrap_or("No Data")
+                } else {
+                    continue; // Skip games without doomsday for pile-type stats
+                }
+            } else {
+                continue;
+            };
+            pile_stats.entry(label.to_string()).or_default().push(game);
+        }
+
+        let mut rows: Vec<StatsRow> = pile_stats.into_iter()
+            .map(|(label, games)| calculate_stats_from_games(label, games, all_matches))
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
+    if slice_type == "no-doomsday-reason" {
+        let dd_map: HashMap<i32, &DoomsdayGame> = doomsday_games.iter()
+            .map(|dd| (dd.game_id, dd))
+            .collect();
+
+        let mut reason_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            let label = if let Some(dd) = dd_map.get(&game.game_id) {
+                if !dd.doomsday.unwrap_or(false) {
+                    dd.no_doomsday_reason.as_deref().unwrap_or("No Data")
+                } else {
+                    continue; // Skip games where doomsday was cast
+                }
+            } else {
+                continue;
+            };
+            reason_stats.entry(label.to_string()).or_default().push(game);
+        }
+
+        let mut rows: Vec<StatsRow> = reason_stats.into_iter()
+            .map(|(label, games)| calculate_stats_from_games(label, games, all_matches))
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
         display_stats_table(&rows, selected_stats, title, true);
         return;
     }
