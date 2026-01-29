@@ -14,6 +14,28 @@ use textplots::{Chart, Plot, Shape};
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games, doomsday_games, leagues};
 
+/// Collected game data before DB insertion
+struct CollectedGame {
+    game_number: i32,
+    play_draw: String,
+    mulligans: i32,
+    opening_hand_plan: Option<String>,
+    game_winner: String,
+    win_condition: Option<String>,
+    loss_reason: Option<String>,
+    turns: Option<i32>,
+    doomsday_data: Option<CollectedDoomsdayData>,
+}
+
+/// Collected doomsday-specific data before DB insertion
+struct CollectedDoomsdayData {
+    doomsday: bool,
+    pile_cards: Option<String>,
+    pile_plan: Option<String>,
+    juke: Option<String>,
+}
+
+
 /// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
 fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
     if options.is_empty() {
@@ -1089,6 +1111,54 @@ fn load_opponent_names() -> Vec<String> {
     }
 }
 
+fn show_opponent_history(connection: &mut SqliteConnection, opponent_name: &str) {
+    use std::collections::HashMap;
+
+    // Query all previous matches against this opponent
+    let previous_matches: Vec<Match> = matches::table
+        .filter(matches::opponent_name.eq(opponent_name))
+        .order(matches::date.desc())
+        .load(connection)
+        .unwrap_or_default();
+
+    if previous_matches.is_empty() {
+        println!("\nFirst time playing against {}", opponent_name);
+    } else {
+        let wins = previous_matches.iter().filter(|m| m.match_winner == "me").count();
+        let losses = previous_matches.iter().filter(|m| m.match_winner == "opponent").count();
+
+        // Count decks they've played
+        let mut deck_counts: HashMap<String, usize> = HashMap::new();
+        for m in &previous_matches {
+            if m.opponent_deck != "unknown" {
+                *deck_counts.entry(m.opponent_deck.clone()).or_insert(0) += 1;
+            }
+        }
+
+        println!("\n=== History vs {} ===", opponent_name);
+        println!("Record: {}-{}", wins, losses);
+
+        if !deck_counts.is_empty() {
+            let mut decks: Vec<_> = deck_counts.into_iter().collect();
+            decks.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count descending
+            let deck_strs: Vec<String> = decks.iter().map(|(deck, count)| {
+                if *count > 1 { format!("{} ({})", deck, count) } else { deck.clone() }
+            }).collect();
+            println!("Decks: {}", deck_strs.join(", "));
+        }
+    }
+
+    // Always show MTGGoldfish link
+    println!("https://www.mtggoldfish.com/player/{}", opponent_name);
+
+    // Wait for user to press Enter
+    let _: String = Input::new()
+        .with_prompt("Press Enter to continue")
+        .allow_empty(true)
+        .interact_text()
+        .unwrap_or_default();
+}
+
 fn load_opponent_deck_names() -> Vec<String> {
     let connection = &mut establish_connection();
 
@@ -1335,34 +1405,67 @@ fn add_match_interactive(date_arg: Option<String>) {
     let deck_name = select_deck_three_step(&config);
 
     println!("Selected deck: {}", deck_name);
-    
+
     // Get opponent name
     let opponents = load_opponent_names();
-    let opponent_name = fuzzy_select("Opponent name", &opponents)
-        .unwrap_or_else(|| "Unknown".to_string());
+    let Some(opponent_name) = fuzzy_select("Opponent name", &opponents) else {
+        println!("\nCancelled.");
+        return;
+    };
 
-    // Opponent deck will be set after the match
+    // Show opponent history (uses its own connection for read-only query)
+    {
+        let connection = &mut establish_connection();
+        show_opponent_history(connection, &opponent_name);
+    }
 
     // Get event type
     let event_types: Vec<String> = EVENT_TYPES.iter().map(|s| s.to_string()).collect();
-    let event_type = fuzzy_select("Event type", &event_types)
-        .unwrap_or_else(|| "League".to_string());
-    
-    // Get die roll winner
-    let die_roll_winner = if Confirm::new()
-        .with_prompt("Did you win the die roll?")
-        .interact()
-        .unwrap()
-    {
-        Winner::Me
-    } else {
-        Winner::Opponent
+    let Some(event_type) = fuzzy_select("Event type", &event_types) else {
+        println!("\nCancelled.");
+        return;
     };
 
+    // Get die roll winner
+    let die_roll_result = Confirm::new()
+        .with_prompt("Did you win the die roll?")
+        .interact();
+    let die_roll_winner = match die_roll_result {
+        Ok(true) => Winner::Me,
+        Ok(false) => Winner::Opponent,
+        Err(_) => {
+            println!("\nCancelled.");
+            return;
+        }
+    };
+
+    // Load archetype data for game entry prompts
+    let archetype = load_archetype_data(&deck_name);
+
+    // Collect all game data BEFORE any DB writes
+    println!("\n=== Adding Games (Best of 3) ===");
+    let collected = match collect_games_data(&die_roll_winner, &archetype) {
+        Some(data) => data,
+        None => {
+            println!("\nCancelled.");
+            return;
+        }
+    };
+
+    // Ask for opponent deck at the end if not already known
+    let opponent_deck = if collected.opponent_deck == "unknown" {
+        println!("\n=== Match Complete ===");
+        let deck_names = load_deck_names();
+        fuzzy_select("What deck was your opponent playing?", &deck_names)
+            .unwrap_or_else(|| "Unknown".to_string())
+    } else {
+        collected.opponent_deck
+    };
+
+    // === ALL DATA COLLECTED - NOW COMMIT TO DATABASE ===
     let connection = &mut establish_connection();
 
-    // Get current era (eras are time periods, independent of deck choice)
-    // Use config default if set, otherwise auto-detect from database
+    // Get current era
     let era = config.game_entry.default_era
         .or_else(|| get_current_era(connection));
 
@@ -1373,15 +1476,15 @@ fn add_match_interactive(date_arg: Option<String>) {
         None
     };
 
-    // Create the match without winner and opponent deck (will be determined after games)
+    // Insert the match
     let new_match = NewMatch {
         date: date.clone(),
         deck_name: deck_name.clone(),
         opponent_name,
-        opponent_deck: "unknown".to_string(), // Will be updated after match
-        event_type: event_type.clone(),
+        opponent_deck,
+        event_type,
         die_roll_winner: die_roll_winner.to_string(),
-        match_winner: "unknown".to_string(), // Will be updated after games
+        match_winner: collected.match_winner.clone(),
         era,
         league_id,
     };
@@ -1391,112 +1494,138 @@ fn add_match_interactive(date_arg: Option<String>) {
         .execute(connection)
         .expect("Error saving new match");
 
-    // Get the most recent match for this combination (should be the one we just inserted)
     let match_id: i32 = matches::table
         .select(matches::match_id)
         .order(matches::match_id.desc())
         .first(connection)
         .expect("Error getting match ID");
 
-    println!("\nMatch created with ID: {}", match_id);
+    // Insert all games
+    for game in &collected.games {
+        let new_game = NewGame {
+            match_id,
+            game_number: game.game_number,
+            play_draw: game.play_draw.clone(),
+            mulligans: game.mulligans,
+            opening_hand_plan: game.opening_hand_plan.clone(),
+            game_winner: game.game_winner.clone(),
+            win_condition: game.win_condition.clone(),
+            loss_reason: game.loss_reason.clone(),
+            turns: game.turns,
+        };
 
-    // Now add games and determine match winner
-    let match_winner = add_games_interactive(connection, match_id, &deck_name);
-    
-    // Check if opponent deck is still unknown after all games
-    let current_match = matches::table
-        .find(match_id)
-        .first::<Match>(connection)
-        .expect("Error loading current match");
-        
-    if current_match.opponent_deck == "unknown" {
-        println!("\n=== Match Complete ===");
-        let deck_names = load_deck_names();
-        let opponent_deck = fuzzy_select("What deck was your opponent playing?", &deck_names)
-            .unwrap_or_else(|| "Unknown".to_string());
+        diesel::insert_into(games::table)
+            .values(&new_game)
+            .execute(connection)
+            .expect("Error saving game");
 
-        // Update the match with the winner and opponent deck
-        diesel::update(matches::table.find(match_id))
-            .set((
-                matches::match_winner.eq(match_winner.to_string()),
-                matches::opponent_deck.eq(opponent_deck)
-            ))
-            .execute(connection)
-            .expect("Error updating match");
-    } else {
-        // Just update the match winner
-        diesel::update(matches::table.find(match_id))
-            .set(matches::match_winner.eq(match_winner.to_string()))
-            .execute(connection)
-            .expect("Error updating match winner");
+        // If there's doomsday data, insert it
+        if let Some(ref dd) = game.doomsday_data {
+            let game_id: i32 = games::table
+                .select(games::game_id)
+                .order(games::game_id.desc())
+                .first(connection)
+                .expect("Error getting game ID");
+
+            let new_dd = NewDoomsdayGame {
+                game_id,
+                doomsday: Some(dd.doomsday),
+                pile_cards: dd.pile_cards.clone(),
+                pile_plan: dd.pile_plan.clone(),
+                juke: dd.juke.clone(),
+            };
+
+            diesel::insert_into(doomsday_games::table)
+                .values(&new_dd)
+                .execute(connection)
+                .expect("Error saving doomsday data");
+        }
     }
 
     // Update league record if this is a league match
     if let Some(lid) = league_id {
-        update_league_after_match(connection, lid, &match_winner, &date);
+        let winner = Winner::from_str(&collected.match_winner).unwrap_or(Winner::Me);
+        update_league_after_match(connection, lid, &winner, &date);
     }
+
+    println!("\nMatch {} saved successfully!", match_id);
 }
 
-fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_name: &str) -> Winner {
-    println!("\n=== Adding Games (Best of 3) ===");
-
-    // Load archetype-specific definitions, or fall back to global definitions
-    let archetype = load_archetype_data(deck_name);
-
+/// Collect all game data without writing to DB. Returns None if cancelled.
+fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData>) -> Option<CollectedMatchData> {
+    let mut games: Vec<CollectedGame> = Vec::new();
     let mut my_wins = 0;
     let mut opponent_wins = 0;
+    let mut previous_game_winner: Option<Winner> = None;
+    let mut opponent_deck = "unknown".to_string();
 
     for game_num in 1..=3 {
         println!("\n--- Game {} ---", game_num);
 
-        // Play or draw
-        let play_draw = if Confirm::new()
-            .with_prompt("Did you play first? (no = draw)")
-            .interact()
-            .unwrap()
-        {
-            PlayDraw::Play
+        // Play or draw is determined automatically
+        let play_draw = if game_num == 1 {
+            match die_roll_winner {
+                Winner::Me => {
+                    println!("On the play (won die roll)");
+                    PlayDraw::Play
+                }
+                Winner::Opponent => {
+                    println!("On the draw (lost die roll)");
+                    PlayDraw::Draw
+                }
+            }
         } else {
-            PlayDraw::Draw
+            match previous_game_winner {
+                Some(Winner::Me) => {
+                    println!("On the draw (won previous game)");
+                    PlayDraw::Draw
+                }
+                Some(Winner::Opponent) => {
+                    println!("On the play (lost previous game)");
+                    PlayDraw::Play
+                }
+                None => unreachable!(),
+            }
         };
 
         // Mulligans
-        let mulligans: i32 = Input::new()
+        let mulligans: i32 = match Input::new()
             .with_prompt("Number of mulligans (0-7)")
             .validate_with(|input: &i32| -> Result<(), &str> {
-                if *input >= 0 && *input <= 7 {
-                    Ok(())
-                } else {
-                    Err("Mulligans must be between 0 and 7")
-                }
+                if *input >= 0 && *input <= 7 { Ok(()) } else { Err("Mulligans must be between 0 and 7") }
             })
             .interact_text()
-            .unwrap();
+        {
+            Ok(m) => m,
+            Err(_) => return None,
+        };
 
-        // Opening hand plan - use archetype-specific or global
+        // Opening hand plan
         let game_plans = if let Some(ref arch) = archetype {
             arch.game_plans.clone()
         } else {
             load_game_plans()
         };
         let opening_hand_plan = fuzzy_select("Opening hand plan", &game_plans);
-        
-        
+
         // Game winner
-        let game_winner = if Confirm::new()
+        let game_winner = match Confirm::new()
             .with_prompt("Did you win this game?")
             .interact()
-            .unwrap()
         {
-            my_wins += 1;
-            Winner::Me
-        } else {
-            opponent_wins += 1;
-            Winner::Opponent
+            Ok(true) => {
+                my_wins += 1;
+                Winner::Me
+            }
+            Ok(false) => {
+                opponent_wins += 1;
+                Winner::Opponent
+            }
+            Err(_) => return None,
         };
+        previous_game_winner = Some(game_winner.clone());
 
-
-        // Win condition (only if you won) - use archetype-specific or global
+        // Win condition (only if you won)
         let win_condition = if matches!(game_winner, Winner::Me) {
             let win_cons = if let Some(ref arch) = archetype {
                 arch.win_conditions.clone()
@@ -1508,7 +1637,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
             None
         };
 
-        // Loss reason (only if you lost) - use archetype-specific
+        // Loss reason (only if you lost)
         let loss_reason = if matches!(game_winner, Winner::Opponent) {
             if let Some(ref arch) = archetype {
                 fuzzy_select("Why did you lose?", &arch.loss_reasons)
@@ -1524,9 +1653,7 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
             .with_prompt("How many turns did the game last? (optional, press Enter to skip)")
             .allow_empty(true)
             .validate_with(|input: &String| -> Result<(), &str> {
-                if input.is_empty() {
-                    return Ok(());
-                }
+                if input.is_empty() { return Ok(()); }
                 match input.parse::<i32>() {
                     Ok(n) if n > 0 => Ok(()),
                     _ => Err("Turns must be a positive number")
@@ -1535,10 +1662,19 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
             .interact_text()
             .ok()
             .and_then(|s| if s.is_empty() { None } else { s.parse().ok() });
-        
-        // Save the game
-        let new_game = NewGame {
-            match_id,
+
+        // Doomsday data if applicable
+        let doomsday_data = if let Some(ref arch) = archetype {
+            if arch.is_doomsday {
+                collect_doomsday_data_only(game_num, arch)?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        games.push(CollectedGame {
             game_number: game_num,
             play_draw: play_draw.to_string(),
             mulligans,
@@ -1547,86 +1683,70 @@ fn add_games_interactive(connection: &mut SqliteConnection, match_id: i32, deck_
             win_condition,
             loss_reason,
             turns,
-        };
+            doomsday_data,
+        });
 
-        diesel::insert_into(games::table)
-            .values(&new_game)
-            .execute(connection)
-            .expect("Error saving new game");
-
-        // Get the game_id that was just inserted
-        let game_id: i32 = games::table
-            .select(games::game_id)
-            .order(games::game_id.desc())
-            .first(connection)
-            .expect("Error getting game ID");
-
-        // If this is a doomsday deck, prompt for doomsday-specific data
-        if let Some(ref arch) = archetype {
-            if arch.is_doomsday {
-                collect_doomsday_data(connection, game_id, game_num, arch);
-            }
-        }
-
-        println!("Game {} saved", game_num);
+        println!("Game {} recorded", game_num);
         println!("Current score: You {}-{} Opponent", my_wins, opponent_wins);
-        
-        // Check if we know the opponent's deck yet
-        let current_match = matches::table
-            .find(match_id)
-            .first::<Match>(connection)
-            .expect("Error loading current match");
-            
-        if current_match.opponent_deck == "unknown" {
-            let knows_deck = Confirm::new()
+
+        // Ask about opponent deck if still unknown
+        if opponent_deck == "unknown" {
+            let knows_deck = match Confirm::new()
                 .with_prompt("Do you know what deck your opponent is playing yet?")
                 .interact()
-                .unwrap();
-                
+            {
+                Ok(k) => k,
+                Err(_) => return None,
+            };
+
             if knows_deck {
                 let deck_names = load_deck_names();
-                if let Some(opponent_deck) = fuzzy_select("What deck is your opponent playing?", &deck_names) {
-                    // Update the match with the opponent deck
-                    diesel::update(matches::table.find(match_id))
-                        .set(matches::opponent_deck.eq(&opponent_deck))
-                        .execute(connection)
-                        .expect("Error updating opponent deck");
-
-                    println!("Updated opponent deck to: {}", opponent_deck);
+                if let Some(deck) = fuzzy_select("What deck is your opponent playing?", &deck_names) {
+                    opponent_deck = deck;
+                    println!("Opponent deck: {}", opponent_deck);
                 }
             }
         }
-        
-        // Check if match is decided (first to 2 wins)
+
+        // Check if match is decided
         if my_wins == 2 {
-            println!("\n🎉 You won the match 2-{}!", opponent_wins);
-            return Winner::Me;
+            println!("\nYou won the match 2-{}!", opponent_wins);
+            break;
         } else if opponent_wins == 2 {
-            println!("\n😞 You lost the match {}-2", my_wins);
-            return Winner::Opponent;
+            println!("\nYou lost the match {}-2", my_wins);
+            break;
         }
     }
-    
-    // This shouldn't happen in best of 3, but just in case
-    if my_wins > opponent_wins {
-        Winner::Me
-    } else {
-        Winner::Opponent
-    }
+
+    let match_winner = if my_wins > opponent_wins { "me" } else { "opponent" };
+
+    Some(CollectedMatchData {
+        games,
+        match_winner: match_winner.to_string(),
+        opponent_deck,
+    })
 }
 
-/// Collect doomsday-specific data after a game and save to doomsday_games table
-fn collect_doomsday_data(connection: &mut SqliteConnection, game_id: i32, game_num: i32, arch: &ArchetypeData) {
+/// Collected data from game entry (before DB commit)
+struct CollectedMatchData {
+    games: Vec<CollectedGame>,
+    match_winner: String,
+    opponent_deck: String,
+}
+
+/// Collect doomsday-specific data without writing to DB. Returns None if cancelled.
+fn collect_doomsday_data_only(game_num: i32, arch: &ArchetypeData) -> Option<Option<CollectedDoomsdayData>> {
     println!("\n--- Doomsday Details ---");
 
-    // Did you doomsday (make a pile)?
-    let doomsday = Confirm::new()
+    let doomsday = match Confirm::new()
         .with_prompt("Doomsday?")
         .default(false)
         .interact()
-        .unwrap_or(false);
+    {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
 
-    // If doomsday, ask about pile details
     let (pile_cards, pile_plan) = if doomsday {
         println!("Enter pile cards (5 cards, top to bottom):");
         let mut pile = Vec::new();
@@ -1637,14 +1757,12 @@ fn collect_doomsday_data(connection: &mut SqliteConnection, game_id: i32, game_n
             }
         }
 
-        // Serialize pile as JSON
         let pile_json = if pile.len() == 5 {
             Some(format!("[{}]", pile.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(",")))
         } else {
             None
         };
 
-        // Optional pile plan
         let plan: String = Input::new()
             .with_prompt("Pile plan (optional, press Enter to skip)")
             .allow_empty(true)
@@ -1658,7 +1776,6 @@ fn collect_doomsday_data(connection: &mut SqliteConnection, game_id: i32, game_n
         (None, None)
     };
 
-    // Games 2 and 3 only: juke strategy
     let juke = if game_num > 1 {
         let juke_options = vec!["none".to_string(), "partial".to_string(), "full".to_string()];
         fuzzy_select("Juke?", &juke_options)
@@ -1666,21 +1783,12 @@ fn collect_doomsday_data(connection: &mut SqliteConnection, game_id: i32, game_n
         None
     };
 
-    // Insert into doomsday_games table
-    let new_doomsday_game = NewDoomsdayGame {
-        game_id,
-        doomsday: Some(doomsday),
+    Some(Some(CollectedDoomsdayData {
+        doomsday,
         pile_cards,
         pile_plan,
         juke,
-    };
-
-    diesel::insert_into(doomsday_games::table)
-        .values(&new_doomsday_game)
-        .execute(connection)
-        .expect("Error saving doomsday game data");
-
-    println!("Doomsday game data saved");
+    }))
 }
 
 /// Find an active league for the given deck, or prompt to create a new one
