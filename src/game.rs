@@ -126,11 +126,7 @@ struct UnifiedArchetypeDefinition {
     subtypes: HashMap<String, SubtypeDefinition>,
     // Doomsday-specific fields (optional, only present in doomsday.toml)
     #[serde(default)]
-    common_pile_cards: Vec<String>,
-    #[serde(default)]
     common_pile_types: Vec<String>,
-    #[serde(default)]
-    common_pile_disruption: Vec<String>,
     #[serde(default)]
     no_doomsday_reasons: Vec<String>,
     #[serde(default)]
@@ -697,9 +693,7 @@ struct ArchetypeData {
     loss_reasons: Vec<String>,
     board_plan: Option<BoardPlan>,
     // Doomsday-specific fields
-    common_pile_cards: Vec<String>,
     common_pile_types: Vec<String>,
-    common_pile_disruption: Vec<String>,
     no_doomsday_reasons: Vec<String>,
     non_doomsday_wincons: Vec<String>,
     is_doomsday: bool,
@@ -763,9 +757,7 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
                 win_conditions: subtype_def.win_conditions.clone(),
                 loss_reasons: subtype_def.loss_reasons.clone(),
                 board_plan: subtype_def.board_plan.clone(),
-                common_pile_cards: unified.common_pile_cards.clone(),
                 common_pile_types: unified.common_pile_types.clone(),
-                common_pile_disruption: unified.common_pile_disruption.clone(),
                 no_doomsday_reasons: unified.no_doomsday_reasons.clone(),
                 non_doomsday_wincons: unified.non_doomsday_wincons.clone(),
                 is_doomsday,
@@ -801,9 +793,7 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
         win_conditions,
         loss_reasons,
         board_plan: unified.board_plan,
-        common_pile_cards: unified.common_pile_cards.clone(),
         common_pile_types: unified.common_pile_types.clone(),
-        common_pile_disruption: unified.common_pile_disruption.clone(),
         no_doomsday_reasons: unified.no_doomsday_reasons.clone(),
         non_doomsday_wincons: unified.non_doomsday_wincons.clone(),
         is_doomsday,
@@ -1599,7 +1589,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
             if let Some(ref arch) = archetype {
                 if arch.is_doomsday {
                     let juke_options = vec!["none".to_string(), "partial".to_string(), "full".to_string()];
-                    fuzzy_select("Sideboard plan (juke)", &juke_options)
+                    fuzzy_select(&format!("Sideboard plan for G{}", game_num), &juke_options)
                 } else {
                     None
                 }
@@ -1673,8 +1663,9 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
         };
         previous_game_winner = Some(game_winner.clone());
 
-        // Win condition (only if you won)
-        let win_condition = if matches!(game_winner, Winner::Me) {
+        // Win condition (only if you won, and not a doomsday deck - doomsday handles this itself)
+        let is_doomsday_deck = archetype.as_ref().map_or(false, |a| a.is_doomsday);
+        let win_condition = if matches!(game_winner, Winner::Me) && !is_doomsday_deck {
             let win_cons = if let Some(ref arch) = archetype {
                 arch.win_conditions.clone()
             } else {
@@ -1685,8 +1676,8 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
             None
         };
 
-        // Loss reason (only if you lost)
-        let loss_reason = if matches!(game_winner, Winner::Opponent) {
+        // Loss reason (only if you lost, and not a doomsday deck - doomsday handles this itself)
+        let loss_reason = if matches!(game_winner, Winner::Opponent) && !is_doomsday_deck {
             if let Some(ref arch) = archetype {
                 fuzzy_select("Why did you lose?", &arch.loss_reasons)
             } else {
@@ -1714,7 +1705,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
         // Doomsday data if applicable
         let doomsday_data = if let Some(ref arch) = archetype {
             if arch.is_doomsday {
-                collect_doomsday_data_only(&game_winner, sb_juke_plan.clone(), arch)?
+                collect_doomsday_data_only(game_num, &game_winner, sb_juke_plan.clone(), arch)?
             } else {
                 None
             }
@@ -1792,11 +1783,12 @@ struct CollectedMatchData {
 /// Collect doomsday-specific data without writing to DB. Returns None if cancelled.
 /// Now takes game_winner and sb_juke_plan (asked before the game for games 2-3).
 fn collect_doomsday_data_only(
+    game_number: i32,
     game_winner: &Winner,
     sb_juke_plan: Option<String>,
     arch: &ArchetypeData,
 ) -> Option<Option<CollectedDoomsdayData>> {
-    println!("\n--- Doomsday Details ---");
+    println!("\n--- G{} Doomsday Details ---", game_number);
 
     let doomsday_resolved = match Confirm::new()
         .with_prompt("Did you resolve Doomsday?")
@@ -4477,7 +4469,162 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
         // If they pressed enter and there was no current value, keep it as None
         game_data.turns = None;
     }
-    
+
+    // Check if this is a doomsday deck and handle doomsday-specific fields
+    let match_data = matches::table
+        .find(match_id)
+        .first::<Match>(connection)
+        .ok();
+
+    let is_doomsday_deck = match_data
+        .as_ref()
+        .map(|m| load_archetype_data(&m.deck_name))
+        .flatten()
+        .map(|a| a.is_doomsday)
+        .unwrap_or(false);
+
+    if is_doomsday_deck {
+        // Load existing doomsday data or create new
+        let existing_dd = doomsday_games::table
+            .filter(doomsday_games::game_id.eq(game_data.game_id))
+            .first::<DoomsdayGame>(connection)
+            .ok();
+
+        let edit_doomsday = if existing_dd.is_some() {
+            Confirm::new()
+                .with_prompt("Edit doomsday-specific fields?")
+                .default(false)
+                .interact()
+                .unwrap_or(false)
+        } else {
+            Confirm::new()
+                .with_prompt("Add doomsday-specific data for this game?")
+                .default(false)
+                .interact()
+                .unwrap_or(false)
+        };
+
+        if edit_doomsday {
+            let arch = match_data
+                .as_ref()
+                .and_then(|m| load_archetype_data(&m.deck_name));
+
+            println!("\n--- G{} Doomsday Details ---", game_number);
+
+            // Get current values or defaults
+            let current_resolved = existing_dd.as_ref().and_then(|d| d.doomsday).unwrap_or(false);
+            let current_pile_type = existing_dd.as_ref().and_then(|d| d.pile_type.clone());
+            let current_better_pile = existing_dd.as_ref().and_then(|d| d.better_pile).map(|b| b != 0);
+            let current_no_dd_reason = existing_dd.as_ref().and_then(|d| d.no_doomsday_reason.clone());
+            let current_sb_juke = existing_dd.as_ref().and_then(|d| d.sb_juke_plan.clone());
+
+            // Edit doomsday resolved
+            let doomsday_resolved = Confirm::new()
+                .with_prompt(&format!("Did Doomsday resolve? [{}]", if current_resolved { "yes" } else { "no" }))
+                .default(current_resolved)
+                .interact()
+                .unwrap_or(current_resolved);
+
+            // Edit pile type (if doomsday resolved)
+            let pile_type = if doomsday_resolved {
+                let pile_types = arch.as_ref()
+                    .map(|a| a.common_pile_types.clone())
+                    .unwrap_or_default();
+                let current_display = current_pile_type.as_deref().unwrap_or("none");
+                println!("Current pile type: {}", current_display);
+                if !pile_types.is_empty() {
+                    fuzzy_select("Pile type (or Enter to keep current)", &pile_types)
+                        .or(current_pile_type)
+                } else {
+                    let new_type: String = Input::new()
+                        .with_prompt(&format!("Pile type [{}]", current_display))
+                        .allow_empty(true)
+                        .interact_text()
+                        .unwrap_or_default();
+                    if new_type.is_empty() { current_pile_type } else { Some(new_type) }
+                }
+            } else {
+                None
+            };
+
+            // Edit better_pile (only if lost and doomsday resolved)
+            let better_pile = if game_data.game_winner == "opponent" && doomsday_resolved {
+                let current_display = current_better_pile.map(|b| if b { "yes" } else { "no" }).unwrap_or("not set");
+                Some(Confirm::new()
+                    .with_prompt(&format!("Could you have won with a better pile/play? [{}]", current_display))
+                    .default(current_better_pile.unwrap_or(false))
+                    .interact()
+                    .unwrap_or(false))
+            } else {
+                None
+            };
+
+            // Edit no_doomsday_reason (only if doomsday didn't resolve)
+            let no_doomsday_reason = if !doomsday_resolved {
+                let no_dd_reasons = arch.as_ref()
+                    .map(|a| a.no_doomsday_reasons.clone())
+                    .unwrap_or_default();
+                let current_display = current_no_dd_reason.as_deref().unwrap_or("none");
+                println!("Current reason: {}", current_display);
+                if !no_dd_reasons.is_empty() {
+                    fuzzy_select("Why didn't Doomsday resolve? (or Enter to keep)", &no_dd_reasons)
+                        .or(current_no_dd_reason)
+                } else {
+                    let new_reason: String = Input::new()
+                        .with_prompt(&format!("Why didn't Doomsday resolve? [{}]", current_display))
+                        .allow_empty(true)
+                        .interact_text()
+                        .unwrap_or_default();
+                    if new_reason.is_empty() { current_no_dd_reason } else { Some(new_reason) }
+                }
+            } else {
+                None
+            };
+
+            // Edit sb_juke_plan (for games 2-3)
+            let sb_juke_plan = if game_number > 1 {
+                let juke_options = vec!["full juke".to_string(), "partial juke".to_string(), "no juke".to_string()];
+                let current_display = current_sb_juke.as_deref().unwrap_or("none");
+                println!("Current sideboard plan for G{}: {}", game_number, current_display);
+                fuzzy_select(&format!("Sideboard plan for G{} (or Enter to keep)", game_number), &juke_options)
+                    .or(current_sb_juke)
+            } else {
+                current_sb_juke
+            };
+
+            // Save doomsday data
+            if existing_dd.is_some() {
+                diesel::update(doomsday_games::table.filter(doomsday_games::game_id.eq(game_data.game_id)))
+                    .set((
+                        doomsday_games::doomsday.eq(Some(doomsday_resolved)),
+                        doomsday_games::pile_type.eq(&pile_type),
+                        doomsday_games::better_pile.eq(better_pile.map(|b| if b { 1 } else { 0 })),
+                        doomsday_games::no_doomsday_reason.eq(&no_doomsday_reason),
+                        doomsday_games::sb_juke_plan.eq(&sb_juke_plan),
+                    ))
+                    .execute(connection)
+                    .expect("Error updating doomsday data");
+            } else {
+                let new_dd = NewDoomsdayGame {
+                    game_id: game_data.game_id,
+                    doomsday: Some(doomsday_resolved),
+                    pile_cards: None,
+                    pile_plan: None,
+                    juke: None,
+                    pile_type,
+                    better_pile: better_pile.map(|b| if b { 1 } else { 0 }),
+                    no_doomsday_reason,
+                    sb_juke_plan,
+                };
+                diesel::insert_into(doomsday_games::table)
+                    .values(&new_dd)
+                    .execute(connection)
+                    .expect("Error saving doomsday data");
+            }
+            println!("Doomsday data updated!");
+        }
+    }
+
     // Save changes
     diesel::update(games::table
         .filter(games::match_id.eq(match_id))
