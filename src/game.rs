@@ -40,6 +40,44 @@ struct CollectedDoomsdayData {
 
 
 /// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
+/// Handle skim output, with disambiguation when query differs from selection
+fn handle_skim_output(output: skim::prelude::SkimOutput, options: &[String]) -> Option<String> {
+    if output.selected_items.is_empty() {
+        // No selection - use the query as the value
+        let query = output.query.trim().to_string();
+        if query.is_empty() { None } else { Some(query) }
+    } else {
+        let selected = output.selected_items[0].output().to_string();
+        let query = output.query.trim().to_string();
+
+        // Check if query differs from selection and no exact match exists
+        if !query.is_empty()
+            && !query.eq_ignore_ascii_case(&selected)
+            && !options.iter().any(|o| o.eq_ignore_ascii_case(&query))
+        {
+            // Ask user to disambiguate
+            let choices = vec![
+                format!("Use '{}'", selected),
+                format!("Add new: '{}'", query),
+            ];
+            let choice_idx = dialoguer::Select::new()
+                .with_prompt("Which did you mean?")
+                .items(&choices)
+                .default(0)
+                .interact()
+                .ok()?;
+
+            if choice_idx == 1 {
+                Some(query)
+            } else {
+                Some(selected)
+            }
+        } else {
+            Some(selected)
+        }
+    }
+}
+
 fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
     if options.is_empty() {
         // No options - fall back to text input
@@ -62,15 +100,7 @@ fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
     let items = item_reader.of_bufread(Cursor::new(input));
 
     match Skim::run_with(&skim_options, Some(items)) {
-        Some(output) if !output.is_abort => {
-            if output.selected_items.is_empty() {
-                // No selection - use the query as the value
-                let query = output.query.trim().to_string();
-                if query.is_empty() { None } else { Some(query) }
-            } else {
-                Some(output.selected_items[0].output().to_string())
-            }
-        }
+        Some(output) if !output.is_abort => handle_skim_output(output, options),
         _ => None, // Aborted
     }
 }
@@ -98,14 +128,7 @@ fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) ->
     let items = item_reader.of_bufread(Cursor::new(input));
 
     match Skim::run_with(&skim_options, Some(items)) {
-        Some(output) if !output.is_abort => {
-            if output.selected_items.is_empty() {
-                let query = output.query.trim().to_string();
-                if query.is_empty() { None } else { Some(query) }
-            } else {
-                Some(output.selected_items[0].output().to_string())
-            }
-        }
+        Some(output) if !output.is_abort => handle_skim_output(output, options),
         _ => None,
     }
 }
@@ -2034,18 +2057,20 @@ fn update_league_after_match(connection: &mut SqliteConnection, league_id: i32, 
         Winner::Opponent => (league.wins, league.losses + 1),
     };
 
-    // Check for league completion (5 matches total, or 3 losses for early elimination)
+    // Check for league completion (5 matches total or 5 wins for trophy)
     let total_matches = new_wins + new_losses;
     let (new_status, new_result) = if new_wins >= 5 {
         println!("\nTROPHY! You finished the league 5-{}!", new_losses);
         ("completed".to_string(), Some("trophy".to_string()))
-    } else if new_losses >= 3 {
-        println!("\nLeague complete: {}-3", new_wins);
-        ("completed".to_string(), Some("elimination".to_string()))
     } else if total_matches >= 5 {
-        // Completed 5 matches without trophy or elimination (4-1, 3-2, etc.)
+        // Completed 5 matches - determine result based on record
+        let result = if new_losses >= 4 {
+            "elimination"  // 0-5, 1-4 (no prizes)
+        } else {
+            "completed"    // 4-1, 3-2, 2-3 (prizes)
+        };
         println!("\nLeague complete: {}-{}", new_wins, new_losses);
-        ("completed".to_string(), Some("completed".to_string()))
+        ("completed".to_string(), Some(result.to_string()))
     } else {
         println!("\nLeague record: {}-{}", new_wins, new_losses);
         ("in_progress".to_string(), Some("pending".to_string()))
