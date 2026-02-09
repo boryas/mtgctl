@@ -40,42 +40,33 @@ struct CollectedDoomsdayData {
 
 
 /// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
-/// Handle skim output, with disambiguation when query differs from selection
-fn handle_skim_output(output: skim::prelude::SkimOutput, options: &[String]) -> Option<String> {
-    if output.selected_items.is_empty() {
-        // No selection - use the query as the value
-        let query = output.query.trim().to_string();
-        if query.is_empty() { None } else { Some(query) }
-    } else {
-        let selected = output.selected_items[0].output().to_string();
-        let query = output.query.trim().to_string();
+/// Pure decision logic for fuzzy select - testable without skim dependencies
+/// Returns: the value to use based on query, selection, and whether Tab was pressed
+fn fuzzy_select_decision(query: &str, selected: Option<&str>, tab_pressed: bool) -> Option<String> {
+    let query = query.trim();
 
-        // Check if query differs from selection and no exact match exists
-        if !query.is_empty()
-            && !query.eq_ignore_ascii_case(&selected)
-            && !options.iter().any(|o| o.eq_ignore_ascii_case(&query))
-        {
-            // Ask user to disambiguate
-            let choices = vec![
-                format!("Use '{}'", selected),
-                format!("Add new: '{}'", query),
-            ];
-            let choice_idx = dialoguer::Select::new()
-                .with_prompt("Which did you mean?")
-                .items(&choices)
-                .default(0)
-                .interact()
-                .ok()?;
+    // Tab pressed = use query as new entry
+    if tab_pressed {
+        return if query.is_empty() { None } else { Some(query.to_string()) };
+    }
 
-            if choice_idx == 1 {
-                Some(query)
-            } else {
-                Some(selected)
-            }
-        } else {
-            Some(selected)
+    match selected {
+        Some(sel) => Some(sel.to_string()),
+        None => {
+            // No selection - use the query as the value
+            if query.is_empty() { None } else { Some(query.to_string()) }
         }
     }
+}
+
+/// Handle skim output - Tab uses query as-is, Enter uses selection
+fn handle_skim_output(output: skim::prelude::SkimOutput) -> Option<String> {
+    let query = output.query.as_str();
+    let selected = output.selected_items.first().map(|item| item.output());
+    let tab_pressed = output.final_key == skim::prelude::Key::Tab
+        || output.final_key == skim::prelude::Key::BackTab;
+
+    fuzzy_select_decision(query, selected.as_ref().map(|s| s.as_ref()), tab_pressed)
 }
 
 fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
@@ -89,9 +80,10 @@ fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
         return if result.is_empty() { None } else { Some(result) };
     }
 
-    let prompt_str = format!("{}: ", prompt);
+    let prompt_str = format!("{} (Tab=new): ", prompt);
     let skim_options = SkimOptionsBuilder::default()
         .prompt(Some(&prompt_str))
+        .expect(Some("tab,btab".to_owned()))
         .build()
         .unwrap();
 
@@ -100,7 +92,7 @@ fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
     let items = item_reader.of_bufread(Cursor::new(input));
 
     match Skim::run_with(&skim_options, Some(items)) {
-        Some(output) if !output.is_abort => handle_skim_output(output, options),
+        Some(output) if !output.is_abort => handle_skim_output(output),
         _ => None, // Aborted
     }
 }
@@ -116,10 +108,11 @@ fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) ->
         return if result.is_empty() { None } else { Some(result) };
     }
 
-    let prompt_str = format!("{}: ", prompt);
+    let prompt_str = format!("{} (Tab=new): ", prompt);
     let skim_options = SkimOptionsBuilder::default()
         .prompt(Some(&prompt_str))
         .query(Some(default))
+        .expect(Some("tab,btab".to_owned()))
         .build()
         .unwrap();
 
@@ -128,7 +121,7 @@ fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) ->
     let items = item_reader.of_bufread(Cursor::new(input));
 
     match Skim::run_with(&skim_options, Some(items)) {
-        Some(output) if !output.is_abort => handle_skim_output(output, options),
+        Some(output) if !output.is_abort => handle_skim_output(output),
         _ => None,
     }
 }
@@ -4969,7 +4962,7 @@ mod tests {
         // Test that subtypes load correctly for archetypes that have them
         let doomsday_subtypes = load_subtypes("Doomsday");
         assert!(doomsday_subtypes.contains(&"Tempo".to_string()), "Doomsday should have Tempo subtype");
-        assert!(doomsday_subtypes.contains(&"Combo".to_string()), "Doomsday should have Combo subtype");
+        assert!(doomsday_subtypes.contains(&"Turbo".to_string()), "Doomsday should have Turbo subtype");
 
         let storm_subtypes = load_subtypes("Storm");
         assert!(storm_subtypes.contains(&"ANT".to_string()), "Storm should have ANT subtype");
@@ -4977,6 +4970,46 @@ mod tests {
 
         let affinity_subtypes = load_subtypes("Affinity");
         assert!(affinity_subtypes.contains(&"8-Cast".to_string()), "Affinity should have 8-Cast subtype");
+    }
+
+    #[test]
+    fn test_fuzzy_select_decision_tab_uses_query() {
+        // Tab pressed with query -> use query as new entry
+        assert_eq!(
+            fuzzy_select_decision("newplayer", Some("oldplayer"), true),
+            Some("newplayer".to_string())
+        );
+        // Tab with empty query -> None
+        assert_eq!(fuzzy_select_decision("", Some("oldplayer"), true), None);
+        assert_eq!(fuzzy_select_decision("  ", Some("oldplayer"), true), None);
+    }
+
+    #[test]
+    fn test_fuzzy_select_decision_enter_uses_selection() {
+        // Enter with selection -> use selection
+        assert_eq!(
+            fuzzy_select_decision("partial", Some("partially_matched"), false),
+            Some("partially_matched".to_string())
+        );
+        // Enter with no selection but query -> use query
+        assert_eq!(
+            fuzzy_select_decision("newname", None, false),
+            Some("newname".to_string())
+        );
+        // Enter with no selection and no query -> None
+        assert_eq!(fuzzy_select_decision("", None, false), None);
+    }
+
+    #[test]
+    fn test_fuzzy_select_decision_trims_whitespace() {
+        assert_eq!(
+            fuzzy_select_decision("  trimmed  ", None, false),
+            Some("trimmed".to_string())
+        );
+        assert_eq!(
+            fuzzy_select_decision("  tabbed  ", Some("other"), true),
+            Some("tabbed".to_string())
+        );
     }
 }
 
