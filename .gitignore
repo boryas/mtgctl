@@ -1,0 +1,5 @@
+target/
+mtgctl.db
+*.py
+*.html
+definitions_old/
