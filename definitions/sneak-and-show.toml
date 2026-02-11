@@ -1,9 +1,0 @@
-# Sneak and Show archetype
-name = "Sneak and Show"
-category = "Combo"
-
-game_plans = ["combo"]
-win_conditions = ["creatures"]
-
-[board_plan]
-description = "Force backup, counter combo pieces, maintain clock"

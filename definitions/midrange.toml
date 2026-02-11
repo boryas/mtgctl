@@ -1,0 +1,15 @@
+# Blue midrange soup archetype
+name = "Midrange"
+category = "Blue"
+
+game_plans = ["creatures", "tempo", "control"]
+win_conditions = ["creatures"]
+
+[subtypes.Phelia]
+win_conditions = ["creatures"]
+
+[subtypes.Plagon]
+win_conditions = ["creatures"]
+
+[subtypes.Stoneforge]
+win_conditions = ["creatures"]

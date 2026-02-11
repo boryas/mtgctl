@@ -1,6 +1,0 @@
-# Necrodominance archetype
-name = "Necrodominance"
-category = "Combo"
-
-game_plans = ["combo", "card-draw"]
-win_conditions = ["combo"]

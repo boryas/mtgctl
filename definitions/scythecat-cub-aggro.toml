@@ -1,6 +1,0 @@
-# Scythecat Cub Aggro archetype
-name = "Scythecat Cub Aggro"
-category = "Non-Blue"
-
-game_plans = ["creatures", "aggro"]
-win_conditions = ["creatures"]

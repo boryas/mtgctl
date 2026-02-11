@@ -6,12 +6,13 @@ category = "Combo"
 common_pile_types = [
     "Cyclers",
     "Fetch+Cyclers",
-    "Brainstorm LED",
+    "Brainstorm+LED",
     "Multiple Passes",
     "Chumps",
     "Removal",
-    "Jace LED",
-    "Consign Unearth",
+    "Jace+LED",
+    "Consider+Unearth",
+    "Force+Cyclers",
     "Other",
 ]
 
@@ -43,7 +44,7 @@ loss_reasons = ["bad-pile", "pre-pile-pressure", "mana", "pile-disruption", "com
 "turbo-doomsday-1.0" = "https://moxfield.com/decks/-8yQN7Uc9ka_u3J8dJcKBg"
 
 [subtypes.Tempo]
-game_plans = ["doomsday", "tamiyo", "cantrips", "control", "creatures"]
+game_plans = ["combo", "tamiyo", "cantrips", "control", "creatures"]
 win_conditions = ["doomsday", "creatures", "tamiyo-ult", "concede"]
 loss_reasons = ["bad-pile", "pre-pile-pressure", "grind", "mana", "pile-disruption", "combo"]
 

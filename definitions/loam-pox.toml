@@ -1,6 +1,0 @@
-# Loam Pox archetype
-name = "Loam Pox"
-category = "Non-Blue"
-
-game_plans = ["graveyard", "mana denial", "control"]
-win_conditions = ["creatures", "lock-pieces"]

@@ -1,6 +1,0 @@
-# Mardu Energy archetype
-name = "Mardu Energy"
-category = "Non-Blue"
-
-game_plans = ["creatures", "value"]
-win_conditions = ["creatures"]

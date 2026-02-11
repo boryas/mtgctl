@@ -1,9 +1,0 @@
-# Omni-tell archetype
-name = "Omni-tell"
-category = "Combo"
-
-game_plans = ["combo"]
-win_conditions = ["combo"]
-
-[board_plan]
-description = "Force backup, counter Show and Tell, clock pressure"

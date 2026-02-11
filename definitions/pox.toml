@@ -1,0 +1,12 @@
+# Pox archetype
+name = "Pox"
+category = "Non-Blue"
+
+game_plans = ["graveyard", "mana denial", "control"]
+win_conditions = ["creatures", "lock-pieces"]
+
+[subtypes.Loam]
+win_conditions = ["creatures", "lock-pieces"]
+
+[subtypes.MonoBlack]
+win_conditions = ["creatures", "lock-pieces"]

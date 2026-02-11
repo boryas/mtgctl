@@ -1,0 +1,12 @@
+# Energy archetype
+name = "Energy"
+category = "Non-Blue"
+
+game_plans = ["creatures", "value"]
+win_conditions = ["creatures"]
+
+[subtypes.Mardu]
+win_conditions = ["creatures"]
+
+[subtypes.Boros]
+win_conditions = ["creatures"]

@@ -22,3 +22,6 @@ win_conditions = ["combo"]
 
 [subtypes.TES.board_plan]
 description = "Force backup, counter ritual effects, surgical key pieces"
+
+[subtypes.Necrodominance]
+win_conditions = ["combo"]
