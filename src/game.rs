@@ -1440,6 +1440,24 @@ fn add_match_interactive(date_arg: Option<String>) {
 
     println!("Selected deck: {}", deck_name);
 
+    // Get event type (before opponent info since it's usually the same as last time)
+    let event_types: Vec<String> = EVENT_TYPES.iter().map(|s| s.to_string()).collect();
+    let last_event_type = {
+        let connection = &mut establish_connection();
+        matches::table
+            .select(matches::event_type)
+            .order(matches::created_at.desc())
+            .first::<String>(connection)
+            .ok()
+    };
+    let Some(event_type) = (match &last_event_type {
+        Some(default) => fuzzy_select_with_default("Event type", &event_types, default),
+        None => fuzzy_select("Event type", &event_types),
+    }) else {
+        println!("\nCancelled.");
+        return;
+    };
+
     // Get opponent name
     let opponents = load_opponent_names();
     let Some(opponent_name) = fuzzy_select("Opponent name", &opponents) else {
@@ -1452,13 +1470,6 @@ fn add_match_interactive(date_arg: Option<String>) {
         let connection = &mut establish_connection();
         show_opponent_history(connection, &opponent_name);
     }
-
-    // Get event type
-    let event_types: Vec<String> = EVENT_TYPES.iter().map(|s| s.to_string()).collect();
-    let Some(event_type) = fuzzy_select("Event type", &event_types) else {
-        println!("\nCancelled.");
-        return;
-    };
 
     // Get die roll winner
     let die_roll_result = Confirm::new()
