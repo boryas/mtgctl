@@ -5,17 +5,17 @@ category = "Non-Blue"
 game_plans = ["combo", "artifacts"]
 win_conditions = ["combo"]
 
-[subtypes.R]
+[subtypes.Mono-Red]
 win_conditions = ["combo"]
 
-[subtypes.R.board_plan]
+[subtypes.Mono-Red.board_plan]
 description = "Counter combo pieces, remove artifacts, pressure"
 
-[subtypes.U]
+[subtypes.Mono-Blue]
 win_conditions = ["combo"]
 
-[subtypes.U.board_plan]
+[subtypes.Mono-Blue.board_plan]
 description = "Force backup, counter Painter, surgical key pieces"
 
-[subtypes.W]
+[subtypes.Mono-White]
 win_conditions = ["combo"]

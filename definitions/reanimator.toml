@@ -5,20 +5,20 @@ category = "Combo"
 game_plans = ["combo", "graveyard"]
 win_conditions = ["fatty", "creatures"]
 
-[subtypes.BR]
+[subtypes.Rakdos]
 win_conditions = ["fatty", "creatures"]
 
-[subtypes.BR.board_plan]
+[subtypes.Rakdos.board_plan]
 description = "Force backup, counter reanimation spells, surgical Griselbrand"
 
-[subtypes.UB]
+[subtypes.Dimir]
 win_conditions = ["fatty", "creatures"]
 
-[subtypes.UB.board_plan]
+[subtypes.Dimir.board_plan]
 description = "Force backup, counter reanimation spells, pressure with creatures"
 
 [subtypes.Grixis]
 win_conditions = ["fatty", "creatures"]
 
-[subtypes.BG]
+[subtypes.Golgari]
 win_conditions = ["fatty", "witherbloom"]

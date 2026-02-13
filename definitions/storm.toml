@@ -25,3 +25,9 @@ description = "Force backup, counter ritual effects, surgical key pieces"
 
 [subtypes.Necrodominance]
 win_conditions = ["combo"]
+
+[subtypes."Creative Technique"]
+win_conditions = ["combo"]
+
+[subtypes."High Tide"]
+win_conditions = ["combo"]

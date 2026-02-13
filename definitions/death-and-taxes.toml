@@ -5,10 +5,10 @@ category = "Non-Blue"
 game_plans = ["creatures", "mana denial", "hate"]
 win_conditions = ["creatures", "lock-pieces"]
 
-[subtypes.BW]
+[subtypes.Orzhov]
 win_conditions = ["creatures", "lock-pieces"]
 
-[subtypes.W]
+[subtypes.Mono-White]
 win_conditions = ["creatures", "lock-pieces"]
 
 [subtypes.Yorion]

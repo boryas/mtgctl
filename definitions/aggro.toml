@@ -13,3 +13,7 @@ win_conditions = ["creatures"]
 [subtypes.Cub]
 game_plans = ["creatures", "control"]
 win_conditions = ["creatures"]
+
+[subtypes.Burn]
+game_plans = ["creatures"]
+win_conditions = ["creatures"]

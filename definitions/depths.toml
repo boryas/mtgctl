@@ -5,8 +5,11 @@ category = "Non-Blue"
 game_plans = ["combo", "mana denial"]
 win_conditions = ["marit lage", "creatures"]
 
-[subtypes.GB]
+[subtypes.Golgari]
 win_conditions = ["marit lage", "creatures"]
 
-[subtypes.GW]
+[subtypes.Selesnya]
+win_conditions = ["marit lage", "creatures"]
+
+[subtypes.Sultai]
 win_conditions = ["marit lage", "creatures"]

@@ -14,11 +14,11 @@ loss_reasons = ["wasteland", "lage-answered", "sweeper", "gy-hate", "combo", "cr
 game_plans = ["combo", "saga", "mana denial", "hate", "value"]
 win_conditions = ["marit lage", "constructs", "concede"]
 
-[subtypes."RG"]
+[subtypes.Gruul]
 game_plans = ["combo", "saga", "mana denial", "hate", "value"]
 win_conditions = ["marit lage", "constructs", "concede"]
 
-[subtypes."RuG"]
+[subtypes.Temur]
 game_plans = ["combo", "saga", "mana denial", "hate", "value"]
 win_conditions = ["marit lage", "constructs", "concede"]
 

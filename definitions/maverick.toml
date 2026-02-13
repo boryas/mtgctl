@@ -5,5 +5,5 @@ category = "Non-Blue"
 game_plans = ["creatures", "hate", "toolbox"]
 win_conditions = ["creatures"]
 
-[subtypes.GW]
+[subtypes.Selesnya]
 win_conditions = ["creatures"]
