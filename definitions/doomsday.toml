@@ -23,8 +23,7 @@ no_doomsday_reasons = [
     "No Doomsday",
     "Life Total",
     "Combo Killed",
-    "Tempo Gameplan",
-    "Sideboarded",
+    "Gameplan",
 ]
 
 non_doomsday_wincons = [

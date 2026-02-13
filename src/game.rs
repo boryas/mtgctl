@@ -3807,9 +3807,9 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
         let mut dd_stats: HashMap<String, Vec<&Game>> = HashMap::new();
         for game in all_games {
             let label = if let Some(dd) = dd_map.get(&game.game_id) {
-                if dd.doomsday.unwrap_or(false) { "Cast Doomsday" } else { "No Doomsday" }
+                if dd.doomsday.unwrap_or(false) { "Resolved Doomsday" } else { "No Doomsday" }
             } else {
-                "No Data"
+                continue;
             };
             dd_stats.entry(label.to_string()).or_default().push(game);
         }
@@ -3819,7 +3819,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
             .filter(|row| row.game_count >= min_games as usize)
             .collect();
 
-        let order = ["Cast Doomsday", "No Doomsday", "No Data"];
+        let order = ["Resolved Doomsday", "No Doomsday"];
         rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
         display_stats_table(&rows, selected_stats, title, true);
         return;
@@ -3839,11 +3839,12 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
             }
             let label = if let Some(dd) = dd_map.get(&game.game_id) {
                 // Try new sb_juke_plan first, fall back to old juke column
-                dd.sb_juke_plan.as_deref()
-                    .or(dd.juke.as_deref())
-                    .unwrap_or("No Data")
+                match dd.sb_juke_plan.as_deref().or(dd.juke.as_deref()) {
+                    Some(label) => label,
+                    None => continue,
+                }
             } else {
-                "No Data"
+                continue;
             };
             juke_stats.entry(label.to_string()).or_default().push(game);
         }
@@ -3853,7 +3854,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
             .filter(|row| row.game_count >= min_games as usize)
             .collect();
 
-        let order = ["none", "partial", "full", "No Data"];
+        let order = ["none", "partial", "full"];
         rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
         display_stats_table(&rows, selected_stats, title, true);
         return;
@@ -3868,7 +3869,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
         for game in all_games {
             let label = if let Some(dd) = dd_map.get(&game.game_id) {
                 if dd.doomsday.unwrap_or(false) {
-                    dd.pile_type.as_deref().unwrap_or("No Data")
+                    match dd.pile_type.as_deref() {
+                        Some(label) => label,
+                        None => continue,
+                    }
                 } else {
                     continue; // Skip games without doomsday for pile-type stats
                 }
@@ -3897,7 +3901,10 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
         for game in all_games {
             let label = if let Some(dd) = dd_map.get(&game.game_id) {
                 if !dd.doomsday.unwrap_or(false) {
-                    dd.no_doomsday_reason.as_deref().unwrap_or("No Data")
+                    match dd.no_doomsday_reason.as_deref() {
+                        Some(label) => label,
+                        None => continue,
+                    }
                 } else {
                     continue; // Skip games where doomsday was cast
                 }
