@@ -324,5 +324,15 @@ fn add_doomsday_games_v2_columns_if_missing(connection: &mut SqliteConnection) -
             .execute(connection)?;
     }
 
+    // Add pile_disruption column (disruption faced when doomsday resolved)
+    let pile_disruption_exists = diesel::sql_query("SELECT pile_disruption FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+
+    if !pile_disruption_exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN pile_disruption TEXT")
+            .execute(connection)?;
+    }
+
     Ok(())
 }

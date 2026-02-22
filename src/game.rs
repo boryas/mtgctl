@@ -36,6 +36,7 @@ struct CollectedDoomsdayData {
     sb_juke_plan: Option<String>,
     // If set, overrides the game's win_condition
     win_condition_override: Option<String>,
+    pile_disruption: Option<String>,
 }
 
 
@@ -147,6 +148,8 @@ struct UnifiedArchetypeDefinition {
     no_doomsday_reasons: Vec<String>,
     #[serde(default)]
     non_doomsday_wincons: Vec<String>,
+    #[serde(default)]
+    pile_disruption: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -674,6 +677,7 @@ const GROUPBY_LEVELS: &[(usize, &str, StatsLevel)] = &[
     (17, "sb-juke-plan", StatsLevel::Game),
     (18, "pile-type", StatsLevel::Game),
     (19, "no-doomsday-reason", StatsLevel::Game),
+    (20, "pile-disruption", StatsLevel::Game),
 ];
 
 /// Statistic indices and their levels
@@ -712,6 +716,7 @@ struct ArchetypeData {
     common_pile_types: Vec<String>,
     no_doomsday_reasons: Vec<String>,
     non_doomsday_wincons: Vec<String>,
+    pile_disruption: Vec<String>,
     is_doomsday: bool,
 }
 
@@ -776,6 +781,7 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
                 common_pile_types: unified.common_pile_types.clone(),
                 no_doomsday_reasons: unified.no_doomsday_reasons.clone(),
                 non_doomsday_wincons: unified.non_doomsday_wincons.clone(),
+                pile_disruption: unified.pile_disruption.clone(),
                 is_doomsday,
             });
         }
@@ -812,6 +818,7 @@ fn load_archetype_data(deck_name: &str) -> Option<ArchetypeData> {
         common_pile_types: unified.common_pile_types.clone(),
         no_doomsday_reasons: unified.no_doomsday_reasons.clone(),
         non_doomsday_wincons: unified.non_doomsday_wincons.clone(),
+        pile_disruption: unified.pile_disruption.clone(),
         is_doomsday,
     })
 }
@@ -1582,6 +1589,7 @@ fn add_match_interactive(date_arg: Option<String>) {
                 better_pile: dd.better_pile.map(|b| if b { 1 } else { 0 }),
                 no_doomsday_reason: dd.no_doomsday_reason.clone(),
                 sb_juke_plan: dd.sb_juke_plan.clone(),
+                pile_disruption: dd.pile_disruption.clone(),
             };
 
             diesel::insert_into(doomsday_games::table)
@@ -1828,7 +1836,7 @@ fn collect_doomsday_data_only(
 
     let you_won = matches!(game_winner, Winner::Me);
 
-    let (pile_type, better_pile, no_doomsday_reason, win_condition_override) = if you_won {
+    let (pile_type, pile_disruption, better_pile, no_doomsday_reason, win_condition_override) = if you_won {
         // WIN path
         if doomsday_resolved {
             // Won with doomsday - ask pile type, set win_condition to "doomsday"
@@ -1839,7 +1847,9 @@ fn collect_doomsday_data_only(
                 "common_pile_types",
             );
 
-            (pile_type, None, None, Some("doomsday".to_string()))
+            let pile_disruption = collect_pile_disruption(arch);
+
+            (pile_type, pile_disruption, None, None, Some("doomsday".to_string()))
         } else {
             // Won without doomsday - ask how (goes into win_condition)
             let wincon = fuzzy_select_with_auto_add(
@@ -1848,7 +1858,7 @@ fn collect_doomsday_data_only(
                 "definitions/doomsday.toml",
                 "non_doomsday_wincons",
             );
-            (None, None, None, wincon)
+            (None, None, None, None, wincon)
         }
     } else {
         // LOSE path - no win_condition_override needed
@@ -1861,6 +1871,8 @@ fn collect_doomsday_data_only(
                 "common_pile_types",
             );
 
+            let pile_disruption = collect_pile_disruption(arch);
+
             let better_pile = match Confirm::new()
                 .with_prompt("Could you have won with a better pile/play?")
                 .default(false)
@@ -1870,7 +1882,7 @@ fn collect_doomsday_data_only(
                 Err(_) => None,
             };
 
-            (pile_type, better_pile, None, None)
+            (pile_type, pile_disruption, better_pile, None, None)
         } else {
             // Lost without casting doomsday
             let reason = fuzzy_select_with_auto_add(
@@ -1879,18 +1891,58 @@ fn collect_doomsday_data_only(
                 "definitions/doomsday.toml",
                 "no_doomsday_reasons",
             );
-            (None, None, reason, None)
+            (None, None, None, reason, None)
         }
     };
 
     Some(Some(CollectedDoomsdayData {
         doomsday_resolved,
         pile_type,
+        pile_disruption,
         better_pile,
         no_doomsday_reason,
         sb_juke_plan,
         win_condition_override,
     }))
+}
+
+/// Collect multiple disruption cards via repeated fuzzy select. Returns comma-separated string or None.
+fn collect_pile_disruption(arch: &ArchetypeData) -> Option<String> {
+    let mut selected: Vec<String> = Vec::new();
+    let done_sentinel = "(done)".to_string();
+    loop {
+        let prompt = if selected.is_empty() {
+            "Disruption faced".to_string()
+        } else {
+            format!("Disruption faced [{}]", selected.join(", "))
+        };
+        // Build options with done sentinel first, then remaining cards
+        let mut options = vec![done_sentinel.clone()];
+        for card in &arch.pile_disruption {
+            if !selected.contains(card) {
+                options.push(card.clone());
+            }
+        }
+        match fuzzy_select_with_auto_add(
+            &prompt,
+            &options,
+            "definitions/doomsday.toml",
+            "pile_disruption",
+        ) {
+            Some(ref card) if card == &done_sentinel => break,
+            Some(card) => {
+                if !selected.contains(&card) {
+                    selected.push(card);
+                }
+            }
+            None => break, // Escape/abort
+        }
+    }
+    if selected.is_empty() {
+        None
+    } else {
+        Some(selected.join(","))
+    }
 }
 
 /// Fuzzy select that auto-adds new values to a TOML file if the user enters something new
@@ -3198,6 +3250,7 @@ fn show_stats_interactive(use_defaults: bool) {
                 "sb-juke-plan" if is_doomsday_filter => defaults.push(17),
                 "pile-type" if is_doomsday_filter => defaults.push(18),
                 "no-doomsday-reason" if is_doomsday_filter => defaults.push(19),
+                "pile-disruption" if is_doomsday_filter => defaults.push(20),
                 _ => {}
             }
         }
@@ -3228,6 +3281,7 @@ fn show_stats_interactive(use_defaults: bool) {
             groupby_options.push("Sideboard Juke Plan");
             groupby_options.push("Pile Type");
             groupby_options.push("No-Doomsday Reason");
+            groupby_options.push("Pile Disruption");
         }
 
         // Pre-select group-bys based on config
@@ -3256,6 +3310,7 @@ fn show_stats_interactive(use_defaults: bool) {
             groupby_defaults.push(config.stats.default_groupbys.contains(&"sb-juke-plan".to_string()));
             groupby_defaults.push(config.stats.default_groupbys.contains(&"pile-type".to_string()));
             groupby_defaults.push(config.stats.default_groupbys.contains(&"no-doomsday-reason".to_string()));
+            groupby_defaults.push(config.stats.default_groupbys.contains(&"pile-disruption".to_string()));
         }
 
         MultiSelect::new()
@@ -3924,6 +3979,44 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
         return;
     }
 
+    if slice_type == "pile-disruption" {
+        let dd_map: HashMap<i32, &DoomsdayGame> = doomsday_games.iter()
+            .map(|dd| (dd.game_id, dd))
+            .collect();
+
+        let mut disruption_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            if let Some(dd) = dd_map.get(&game.game_id) {
+                if dd.doomsday.unwrap_or(false) {
+                    if let Some(disruption) = dd.pile_disruption.as_deref() {
+                        // Split comma-separated values so each card is counted independently
+                        for card in disruption.split(',') {
+                            let card = card.trim();
+                            if !card.is_empty() {
+                                disruption_stats.entry(card.to_string()).or_default().push(game);
+                            }
+                        }
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        }
+
+        let mut rows: Vec<StatsRow> = disruption_stats.into_iter()
+            .map(|(label, games)| calculate_stats_from_games(label, games, all_matches))
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        rows.sort_by(|a, b| b.game_count.cmp(&a.game_count));
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
     // Standard match-based grouping
     let mut grouped_stats: HashMap<String, Vec<&Match>> = HashMap::new();
     for m in all_matches {
@@ -4553,6 +4646,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
             let current_better_pile = existing_dd.as_ref().and_then(|d| d.better_pile).map(|b| b != 0);
             let current_no_dd_reason = existing_dd.as_ref().and_then(|d| d.no_doomsday_reason.clone());
             let current_sb_juke = existing_dd.as_ref().and_then(|d| d.sb_juke_plan.clone());
+            let current_pile_disruption = existing_dd.as_ref().and_then(|d| d.pile_disruption.clone());
 
             // Edit doomsday resolved
             let doomsday_resolved = Confirm::new()
@@ -4578,6 +4672,19 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
                         .interact_text()
                         .unwrap_or_default();
                     if new_type.is_empty() { current_pile_type } else { Some(new_type) }
+                }
+            } else {
+                None
+            };
+
+            // Edit pile_disruption (if doomsday resolved)
+            let pile_disruption = if doomsday_resolved {
+                let current_display = current_pile_disruption.as_deref().unwrap_or("none");
+                println!("Current disruption: {}", current_display);
+                if let Some(a) = arch.as_ref() {
+                    collect_pile_disruption(a).or(current_pile_disruption)
+                } else {
+                    current_pile_disruption
                 }
             } else {
                 None
@@ -4637,6 +4744,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
                         doomsday_games::better_pile.eq(better_pile.map(|b| if b { 1 } else { 0 })),
                         doomsday_games::no_doomsday_reason.eq(&no_doomsday_reason),
                         doomsday_games::sb_juke_plan.eq(&sb_juke_plan),
+                        doomsday_games::pile_disruption.eq(&pile_disruption),
                     ))
                     .execute(connection)
                     .expect("Error updating doomsday data");
@@ -4651,6 +4759,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
                     better_pile: better_pile.map(|b| if b { 1 } else { 0 }),
                     no_doomsday_reason,
                     sb_juke_plan,
+                    pile_disruption,
                 };
                 diesel::insert_into(doomsday_games::table)
                     .values(&new_dd)

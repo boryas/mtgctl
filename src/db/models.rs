@@ -263,6 +263,7 @@ pub struct DoomsdayGame {
     pub better_pile: Option<i32>,  // SQLite stores booleans as integers
     pub no_doomsday_reason: Option<String>,
     pub sb_juke_plan: Option<String>,
+    pub pile_disruption: Option<String>,
 }
 
 #[derive(Insertable)]
@@ -278,4 +279,5 @@ pub struct NewDoomsdayGame {
     pub better_pile: Option<i32>,
     pub no_doomsday_reason: Option<String>,
     pub sb_juke_plan: Option<String>,
+    pub pile_disruption: Option<String>,
 }
