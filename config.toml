@@ -37,8 +37,21 @@ default_filters = ["era-latest", "my-archetype"]
 #          "game-length", "win-conditions", "loss-conditions"
 default_statistics = ["win-rate", "proportion"]
 
+# Minimum game count to include a row in grouped stats tables (0 = show all)
+# min_games = 0
+
+# Bucket size for win-rate charts (stats and graph commands)
+chart_bucket_size = 5
+
+# Moving average smoothing window (1 = no smoothing)
+chart_smoothing = 10
+
 # Default filters to apply
 # Available filter types: "era", "my-deck", "opponent", "opponent-deck", "event-type"
 [stats.filters]
 # Filter by specific era (use integer)
 # era = 2
+# my_deck = "Doomsday"
+# opponent = "Alice"
+# opponent_deck = "Delver"
+# event_type = "league"

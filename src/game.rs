@@ -2,14 +2,14 @@ use clap::{Args, Subcommand};
 use dialoguer::{Input, Confirm, MultiSelect};
 use skim::prelude::*;
 use std::io::Cursor;
-use chrono::{Datelike, Local, NaiveDate};
+use chrono::{Local, NaiveDate};
 use diesel::prelude::*;
 use std::fs;
 use std::collections::HashMap;
 use std::path::Path;
 use serde::Deserialize;
 use comfy_table::{Table, Cell, Attribute, ContentArrangement};
-use textplots::{Chart, Plot, Shape};
+use textplots::{Chart, LabelBuilder, LabelFormat, Plot, Shape, TickDisplay, TickDisplayBuilder};
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games, doomsday_games, leagues};
@@ -200,7 +200,14 @@ struct StatsConfig {
     default_groupbys: Vec<String>,
     #[serde(default)]
     default_statistics: Vec<String>,
+    #[serde(default = "default_chart_bucket_size")]
+    chart_bucket_size: usize,
+    #[serde(default = "default_chart_smoothing")]
+    chart_smoothing: usize,
 }
+
+fn default_chart_bucket_size() -> usize { 10 }
+fn default_chart_smoothing() -> usize { 5 }
 
 #[derive(Debug, Deserialize, Default)]
 struct StatsFilters {
@@ -1337,16 +1344,14 @@ enum GameCommands {
         list: bool,
     },
     Graph {
-        #[arg(long, default_value = "win-rate", help = "Metric to graph: win-rate, mulligans, game-length, matches-played")]
+        #[arg(long, default_value = "win-rate", help = "Metric to graph: win-rate, game-win-rate, mulligans, game-length, matches-played")]
         metric: String,
-        #[arg(long, default_value = "week", help = "Time grouping: day, week, month, era")]
-        by: String,
-        #[arg(long, default_value = "20", help = "Number of periods to show")]
-        periods: usize,
+        #[arg(long, help = "Number of matches per bucket (default: config or 10)")]
+        bucket_size: Option<usize>,
         #[arg(long, help = "Output HTML file instead of ASCII")]
         html: Option<String>,
-        #[arg(long, default_value = "5", help = "Moving average window size for smoothing (1 = no smoothing)")]
-        smoothing: usize,
+        #[arg(long, help = "Moving average window size for smoothing, 1 = none (default: config or 5)")]
+        smoothing: Option<usize>,
     },
 }
 
@@ -1362,8 +1367,11 @@ pub fn run(args: GameArgs) {
         GameCommands::RemoveMatch { match_id } => remove_match_interactive(match_id),
         GameCommands::Stats { defaults } => show_stats_interactive(defaults),
         GameCommands::LeagueStats { deck, list } => show_league_stats(deck, list),
-        GameCommands::Graph { metric, by, periods, html, smoothing } => {
-            show_graph(&metric, &by, periods, html, smoothing)
+        GameCommands::Graph { metric, bucket_size, html, smoothing } => {
+            let config = load_config();
+            let bucket_size = bucket_size.unwrap_or(config.stats.chart_bucket_size);
+            let smoothing = smoothing.unwrap_or(config.stats.chart_smoothing);
+            show_graph(&metric, bucket_size, html, smoothing)
         },
         GameCommands::HtmlStats { output, era, my_deck, opponent, opponent_deck, event_type } => {
             crate::html_stats::generate_html_stats(&output, era, my_deck, opponent, opponent_deck, event_type)
@@ -2243,11 +2251,84 @@ fn show_league_stats(deck_filter: Option<String>, show_list: bool) {
     }
 }
 
+/// Bucket matches/games chronologically and compute a metric per bucket
+fn bucket_metric(matches: &[Match], games: &[Game], bucket_size: usize, metric: &str) -> Vec<f64> {
+    let bucket_size = bucket_size.max(1);
+
+    // Sort matches chronologically
+    let mut sorted_matches: Vec<&Match> = matches.iter().collect();
+    sorted_matches.sort_by(|a, b| a.date.cmp(&b.date).then(a.match_id.cmp(&b.match_id)));
+
+    match metric {
+        "win-rate" => {
+            sorted_matches.chunks(bucket_size).map(|chunk| {
+                let wins = chunk.iter().filter(|m| m.match_winner == "me").count();
+                wins as f64 / chunk.len() as f64 * 100.0
+            }).collect()
+        }
+        "game-win-rate" => {
+            // Sort games chronologically via match date lookup
+            let match_dates: std::collections::HashMap<i32, (&str, i32)> = matches.iter()
+                .map(|m| (m.match_id, (m.date.as_str(), m.match_id)))
+                .collect();
+            let mut sorted_games: Vec<&Game> = games.iter().collect();
+            sorted_games.sort_by(|a, b| {
+                let a_info = match_dates.get(&a.match_id).unwrap_or(&("", 0));
+                let b_info = match_dates.get(&b.match_id).unwrap_or(&("", 0));
+                a_info.cmp(b_info).then(a.game_number.cmp(&b.game_number))
+            });
+            sorted_games.chunks(bucket_size).map(|chunk| {
+                let wins = chunk.iter().filter(|g| g.game_winner == "me").count();
+                wins as f64 / chunk.len() as f64 * 100.0
+            }).collect()
+        }
+        "mulligans" => {
+            // Sort games chronologically via match date lookup
+            let match_dates: std::collections::HashMap<i32, (&str, i32)> = matches.iter()
+                .map(|m| (m.match_id, (m.date.as_str(), m.match_id)))
+                .collect();
+            let mut sorted_games: Vec<&Game> = games.iter().collect();
+            sorted_games.sort_by(|a, b| {
+                let a_info = match_dates.get(&a.match_id).unwrap_or(&("", 0));
+                let b_info = match_dates.get(&b.match_id).unwrap_or(&("", 0));
+                a_info.cmp(b_info).then(a.game_number.cmp(&b.game_number))
+            });
+            sorted_games.chunks(bucket_size).map(|chunk| {
+                let total: i32 = chunk.iter().map(|g| g.mulligans).sum();
+                total as f64 / chunk.len() as f64
+            }).collect()
+        }
+        "game-length" => {
+            let match_dates: std::collections::HashMap<i32, (&str, i32)> = matches.iter()
+                .map(|m| (m.match_id, (m.date.as_str(), m.match_id)))
+                .collect();
+            let mut sorted_games: Vec<&Game> = games.iter().collect();
+            sorted_games.sort_by(|a, b| {
+                let a_info = match_dates.get(&a.match_id).unwrap_or(&("", 0));
+                let b_info = match_dates.get(&b.match_id).unwrap_or(&("", 0));
+                a_info.cmp(b_info).then(a.game_number.cmp(&b.game_number))
+            });
+            sorted_games.chunks(bucket_size).map(|chunk| {
+                let with_turns: Vec<_> = chunk.iter().filter(|g| g.turns.is_some()).collect();
+                if with_turns.is_empty() {
+                    0.0
+                } else {
+                    let total: i32 = with_turns.iter().map(|g| g.turns.unwrap()).sum();
+                    total as f64 / with_turns.len() as f64
+                }
+            }).collect()
+        }
+        "matches-played" => {
+            sorted_matches.chunks(bucket_size).map(|chunk| chunk.len() as f64).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Show graph of statistics over time
 fn show_graph(
     metric: &str,
-    by: &str,
-    periods: usize,
+    bucket_size: usize,
     html_output: Option<String>,
     smoothing: usize,
 ) {
@@ -2270,199 +2351,193 @@ fn show_graph(
         println!("Filters: {}\n", active_filters.join(" | "));
     }
 
-    // Group by time period
-    let grouped = group_by_period(&all_matches, &all_games, by);
-
-    if grouped.is_empty() {
-        println!("No data to graph");
-        return;
-    }
-
-    // Calculate metric for each period
-    let data_points: Vec<(String, f64)> = grouped.iter()
-        .map(|(period, matches, games)| {
-            let value = match metric {
-                "win-rate" => {
-                    let wins = matches.iter().filter(|m| m.match_winner == "me").count();
-                    if matches.is_empty() { 0.0 } else { (wins as f64 / matches.len() as f64) * 100.0 }
-                },
-                "mulligans" => {
-                    let total: i32 = games.iter().map(|g| g.mulligans).sum();
-                    if games.is_empty() { 0.0 } else { total as f64 / games.len() as f64 }
-                },
-                "game-length" => {
-                    let with_turns: Vec<_> = games.iter().filter(|g| g.turns.is_some()).collect();
-                    if with_turns.is_empty() {
-                        0.0
-                    } else {
-                        let total: i32 = with_turns.iter().map(|g| g.turns.unwrap()).sum();
-                        total as f64 / with_turns.len() as f64
-                    }
-                },
-                "matches-played" => matches.len() as f64,
-                _ => 0.0,
-            };
-            (period.clone(), value)
-        })
-        .collect();
-
-    // Apply moving average smoothing
-    let smoothing = smoothing.max(1); // Ensure at least 1
-    let smoothed_data: Vec<(String, f64)> = if smoothing > 1 {
-        data_points.iter().enumerate().map(|(i, (period, _))| {
-            let start = i.saturating_sub(smoothing - 1);
-            let window: Vec<f64> = data_points[start..=i].iter().map(|(_, v)| *v).collect();
-            let avg = window.iter().sum::<f64>() / window.len() as f64;
-            (period.clone(), avg)
-        }).collect()
-    } else {
-        data_points
-    };
-
-    // Take last N periods
-    let data_points: Vec<_> = smoothed_data.into_iter().rev().take(periods).rev().collect();
-
-    if data_points.is_empty() {
-        println!("No data points to graph");
-        return;
-    }
-
-    // Output
-    if let Some(path) = html_output {
-        generate_graph_html(&path, metric, by, &data_points);
-    } else {
-        // ASCII graph
-        print_ascii_graph(metric, by, &data_points, smoothing);
+    if let Some((title, labels, x_explanation, y_axis, smoothed)) =
+        render_bucket_chart_data(&all_matches, &all_games, bucket_size, metric, smoothing)
+    {
+        if let Some(path) = html_output {
+            generate_graph_html(&path, &title, &labels, &smoothed);
+        } else {
+            print_ascii_chart(&title, &smoothed, y_axis, Some(&labels), Some(&x_explanation));
+        }
     }
 }
 
-/// Group matches by time period
-fn group_by_period<'a>(
-    matches: &'a [Match],
-    games: &'a [Game],
-    by: &str,
-) -> Vec<(String, Vec<&'a Match>, Vec<&'a Game>)> {
-    let mut groups: HashMap<String, (Vec<&'a Match>, Vec<&'a Game>)> = HashMap::new();
+/// Chart y-axis configuration
+enum ChartYAxis {
+    /// Auto-range from 0 to max with padding, default labels
+    Auto,
+    /// Fixed 0-100% range with percentage labels and 10% steps (height=80)
+    Percentage,
+}
 
-    for m in matches {
-        let period = match by {
-            "day" => m.date.clone(),
-            "week" => {
-                if let Ok(date) = NaiveDate::parse_from_str(&m.date, "%Y-%m-%d") {
-                    let iso_week = date.iso_week();
-                    format!("{}-W{:02}", iso_week.year(), iso_week.week())
-                } else {
-                    m.date.clone()
-                }
-            },
-            "month" => {
-                if m.date.len() >= 7 {
-                    m.date[..7].to_string()
-                } else {
-                    m.date.clone()
-                }
-            },
-            "era" => {
-                m.era.map(|e| format!("Era {}", e)).unwrap_or_else(|| "No Era".to_string())
-            },
-            _ => m.date.clone(),
-        };
+/// Render an ASCII line chart using textplots
+fn print_ascii_chart(
+    title: &str,
+    values: &[f64],
+    y_axis: ChartYAxis,
+    x_labels: Option<&[String]>,
+    x_explanation: Option<&str>,
+) {
+    println!("\n=== {} ===\n", title);
 
-        let entry = groups.entry(period).or_insert((Vec::new(), Vec::new()));
-        entry.0.push(m);
+    if values.len() < 2 {
+        println!("Not enough data to graph");
+        return;
+    }
 
-        // Add games for this match
-        for g in games.iter().filter(|g| g.match_id == m.match_id) {
-            entry.1.push(g);
+    let points: Vec<(f32, f32)> = values.iter().enumerate()
+        .map(|(i, &v)| (i as f32, v as f32))
+        .collect();
+
+    let n = values.len();
+    let xmax = (n - 1) as f32;
+    let chart_width: u32 = 100;
+
+    let (chart_height, y_min, y_max): (u32, f32, f32) = match y_axis {
+        ChartYAxis::Auto => {
+            let max_val = values.iter().cloned().fold(0.0_f64, f64::max) as f32;
+            (30, 0.0, max_val + max_val * 0.1)
+        }
+        ChartYAxis::Percentage => (80, 0.0, 100.0),
+    };
+
+    let shape = Shape::Lines(&points);
+    let mut chart = Chart::new_with_y_range(chart_width, chart_height, 0.0, xmax, y_min, y_max);
+    match y_axis {
+        ChartYAxis::Auto => {
+            chart
+                .x_label_format(LabelFormat::None)
+                .y_tick_display(TickDisplay::Dense)
+                .lineplot(&shape)
+                .display();
+        }
+        ChartYAxis::Percentage => {
+            chart
+                .y_tick_display(TickDisplay::Dense)
+                .y_label_format(LabelFormat::Custom(Box::new(|v| format!("{:.0}%", v))))
+                .x_label_format(LabelFormat::None)
+                .lineplot(&shape)
+                .display();
         }
     }
 
-    // Sort by period
-    let mut sorted: Vec<_> = groups.into_iter()
-        .map(|(period, (matches, games))| (period, matches, games))
+    // Print custom x-axis labels
+    let body_width = (chart_width / 2) as usize;
+    let num_ticks = 8.min(n);
+    let mut positions: Vec<usize> = (0..num_ticks)
+        .map(|i| if num_ticks > 1 { i * (n - 1) / (num_ticks - 1) } else { 0 })
         .collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(&last) = positions.last() {
+        if last != n - 1 {
+            positions.push(n - 1);
+        }
+    }
 
-    sorted
+    let mut label_chars = vec![' '; body_width + 10];
+    for &idx in &positions {
+        let char_pos = if n > 1 { idx * (body_width - 1) / (n - 1) } else { 0 };
+        let label = if let Some(labels) = x_labels {
+            labels[idx].clone()
+        } else {
+            format!("{}", idx)
+        };
+        let slot_free = label.chars().enumerate()
+            .all(|(j, _)| char_pos + j < label_chars.len() && label_chars[char_pos + j] == ' ');
+        if slot_free {
+            for (j, c) in label.chars().enumerate() {
+                if char_pos + j < label_chars.len() {
+                    label_chars[char_pos + j] = c;
+                }
+            }
+        }
+    }
+    println!("{}", label_chars.iter().collect::<String>().trim_end());
+
+    if let Some(explanation) = x_explanation {
+        println!("  {}", explanation);
+    }
+    println!();
 }
 
-/// Print ASCII line graph using textplots with a legend
-fn print_ascii_graph(metric: &str, by: &str, data: &[(String, f64)], smoothing: usize) {
+/// Print a win rate chart indexed by game/match number with bucketing and smoothing
+fn print_winrate_chart(matches: &[Match], games: &[Game], game_mode: bool, bucket_size: usize, smoothing: usize) {
+    let metric = if game_mode { "game-win-rate" } else { "win-rate" };
+    if let Some((title, labels, x_explanation, y_axis, smoothed)) =
+        render_bucket_chart_data(matches, games, bucket_size, metric, smoothing)
+    {
+        print_ascii_chart(&title, &smoothed, y_axis, Some(&labels), Some(&x_explanation));
+    }
+}
+
+/// Bucket, smooth, and build title/labels for a chart. Returns None if no data.
+fn render_bucket_chart_data(
+    matches: &[Match], games: &[Game], bucket_size: usize, metric: &str, smoothing: usize,
+) -> Option<(String, Vec<String>, String, ChartYAxis, Vec<f64>)> {
+    let bucket_size = bucket_size.max(1);
+    let is_game_metric = matches!(metric, "game-win-rate" | "mulligans" | "game-length");
+    let unit = if is_game_metric { "games" } else { "matches" };
+
+    let buckets = bucket_metric(matches, games, bucket_size, metric);
+    if buckets.is_empty() {
+        println!("No data to graph");
+        return None;
+    }
+
+    let smoothed = apply_smoothing_vec(buckets, smoothing);
+
     let metric_label = match metric {
         "win-rate" => "Win Rate (%)",
+        "game-win-rate" => "Game Win Rate (%)",
         "mulligans" => "Avg Mulligans",
         "game-length" => "Avg Game Length",
         "matches-played" => "Matches Played",
         _ => metric,
     };
-
     let smoothing_label = if smoothing > 1 {
-        format!(" ({}-period moving avg)", smoothing)
+        format!(", smoothing={}", smoothing)
     } else {
         String::new()
     };
-    println!("=== {} by {}{} ===\n", metric_label, by, smoothing_label);
+    let title = format!("{} (bucket={} {}{})", metric_label, bucket_size, unit, smoothing_label);
+    let label_start = if smoothing > 1 { smoothing } else { 1 };
+    let labels: Vec<String> = (label_start..label_start + smoothed.len()).map(|i| format!("{}", i)).collect();
+    let x_explanation = format!("bucket # (each bucket = {} {})", bucket_size, unit);
 
-    if data.is_empty() {
-        println!("No data");
-        return;
+    let y_axis = match metric {
+        "win-rate" | "game-win-rate" => ChartYAxis::Percentage,
+        _ => ChartYAxis::Auto,
+    };
+
+    Some((title, labels, x_explanation, y_axis, smoothed))
+}
+
+/// Apply backward-looking moving average smoothing over raw values,
+/// dropping the first (smoothing - 1) buckets that lack a full window.
+fn apply_smoothing_vec(data: Vec<f64>, smoothing: usize) -> Vec<f64> {
+    let smoothing = smoothing.max(1);
+    if smoothing <= 1 {
+        return data;
     }
-
-    // Convert to (f32, f32) points for textplots
-    let points: Vec<(f32, f32)> = data
-        .iter()
-        .enumerate()
-        .map(|(i, (_, v))| (i as f32, *v as f32))
-        .collect();
-
-    let max_value = data.iter().map(|(_, v)| *v as f32).fold(0.0_f32, f32::max);
-
-    // Y-axis always starts at 0, with padding at top
-    let y_padding = max_value * 0.1;
-    let y_min = 0.0;
-    let y_max = max_value + y_padding;
-
-    // Draw the line chart
-    Chart::new_with_y_range(100, 30, 0.0, (data.len() - 1) as f32, y_min, y_max)
-        .lineplot(&Shape::Lines(&points))
-        .display();
-
-    // Print legend mapping x-axis positions to period labels
-    println!("\nLegend:");
-    let cols = 3; // Number of columns in legend
-    let rows = (data.len() + cols - 1) / cols;
-    for row in 0..rows {
-        for col in 0..cols {
-            let idx = row + col * rows;
-            if idx < data.len() {
-                let (label, value) = &data[idx];
-                print!("  {:>2}. {:12} {:>6.1}", idx, label, value);
-            }
-        }
-        println!();
-    }
-    println!();
+    data.iter().enumerate()
+        .skip(smoothing - 1)
+        .map(|(i, _)| {
+            let start = i + 1 - smoothing;
+            let vals = &data[start..=i];
+            vals.iter().sum::<f64>() / vals.len() as f64
+        }).collect()
 }
 
 /// Generate HTML graph using Chart.js
-fn generate_graph_html(path: &str, metric: &str, by: &str, data: &[(String, f64)]) {
-    let metric_label = match metric {
-        "win-rate" => "Win Rate (%)",
-        "mulligans" => "Average Mulligans",
-        "game-length" => "Average Game Length (turns)",
-        "matches-played" => "Matches Played",
-        _ => metric,
-    };
-
-    let labels: Vec<_> = data.iter().map(|(l, _)| format!("\"{}\"", l)).collect();
-    let values: Vec<_> = data.iter().map(|(_, v)| format!("{:.2}", v)).collect();
+fn generate_graph_html(path: &str, title: &str, labels: &[String], values: &[f64]) {
+    let labels_json: Vec<_> = labels.iter().map(|l| format!("\"{}\"", l)).collect();
+    let values_json: Vec<_> = values.iter().map(|v| format!("{:.2}", v)).collect();
 
     let html = format!(r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{} by {}</title>
+    <title>{title}</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; }}
@@ -2471,16 +2546,16 @@ fn generate_graph_html(path: &str, metric: &str, by: &str, data: &[(String, f64)
     </style>
 </head>
 <body>
-    <h1>{} by {}</h1>
+    <h1>{title}</h1>
     <canvas id="chart"></canvas>
     <script>
         new Chart(document.getElementById('chart'), {{
             type: 'line',
             data: {{
-                labels: [{}],
+                labels: [{labels_csv}],
                 datasets: [{{
-                    label: '{}',
-                    data: [{}],
+                    label: '{title}',
+                    data: [{values_csv}],
                     borderColor: 'rgb(75, 192, 192)',
                     backgroundColor: 'rgba(75, 192, 192, 0.1)',
                     fill: true,
@@ -2490,19 +2565,16 @@ fn generate_graph_html(path: &str, metric: &str, by: &str, data: &[(String, f64)
             options: {{
                 responsive: true,
                 scales: {{
-                    y: {{ beginAtZero: {} }}
+                    y: {{ beginAtZero: true }}
                 }}
             }}
         }});
     </script>
 </body>
 </html>"#,
-        metric_label, by,
-        metric_label, by,
-        labels.join(", "),
-        metric_label,
-        values.join(", "),
-true
+        title = title,
+        labels_csv = labels_json.join(", "),
+        values_csv = values_json.join(", "),
     );
 
     fs::write(path, html).expect("Error writing HTML file");
@@ -3580,7 +3652,7 @@ fn show_stats_interactive(use_defaults: bool) {
 
     // Show overall stats first if no group-bys selected
     if selected_groupbys.is_empty() {
-        show_overall_stats(&all_matches, &all_games, &selected_stats);
+        show_overall_stats(&all_matches, &all_games, &selected_stats, game_mode, config.stats.chart_bucket_size, config.stats.chart_smoothing);
         return;
     }
 
@@ -3615,10 +3687,11 @@ fn show_stats_interactive(use_defaults: bool) {
 }
 
 
-fn show_overall_stats(all_matches: &[Match], all_games: &[Game], selected_stats: &[usize]) {
+fn show_overall_stats(all_matches: &[Match], all_games: &[Game], selected_stats: &[usize], game_mode: bool, bucket_size: usize, chart_smoothing: usize) {
     let match_refs: Vec<&Match> = all_matches.iter().collect();
     let overall_row = calculate_stats("Overall".to_string(), &match_refs, all_games);
     display_stats_table(&[overall_row], selected_stats, "=== Overall Statistics ===", false);
+    print_winrate_chart(all_matches, all_games, game_mode, bucket_size, chart_smoothing);
 }
 
 /// Extract archetype from deck name (ignoring subtype)
