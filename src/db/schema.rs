@@ -34,6 +34,7 @@ diesel::table! {
         no_doomsday_reason -> Nullable<Text>,
         sb_juke_plan -> Nullable<Text>,
         pile_disruption -> Nullable<Text>,
+        dd_intent -> Nullable<Integer>,
     }
 }
 

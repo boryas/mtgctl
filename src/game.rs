@@ -29,6 +29,7 @@ struct CollectedGame {
 
 /// Collected doomsday-specific data before DB insertion
 struct CollectedDoomsdayData {
+    dd_intent: bool,
     doomsday_resolved: bool,
     pile_type: Option<String>,
     better_pile: Option<bool>,
@@ -36,6 +37,8 @@ struct CollectedDoomsdayData {
     sb_juke_plan: Option<String>,
     // If set, overrides the game's win_condition
     win_condition_override: Option<String>,
+    // If set, overrides the game's loss_reason
+    loss_reason_override: Option<String>,
     pile_disruption: Option<String>,
 }
 
@@ -434,53 +437,17 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
         .interact()
         .unwrap();
 
-    // Load available options
-    let all_decks = load_your_deck_names();
-    let all_opponents = load_opponent_names();
-    let all_opponent_decks = load_opponent_deck_names();
-    let event_types: Vec<String> = vec!["League", "Challenge", "Prelim", "Casual"].iter().map(|s| s.to_string()).collect();
+    // Fallback option lists from definitions (used when partial data has no entries)
     let mut all_loss_reasons = load_loss_reasons();
     let mut all_win_conditions = load_win_conditions();
     let mut all_game_plans = load_game_plans();
-
-    // Extract unique archetypes, subtypes, and lists
-    let mut archetypes = std::collections::HashSet::new();
-    let mut subtypes = std::collections::HashSet::new();
-    let mut lists = std::collections::HashSet::new();
-
-    for deck in &all_decks {
-        let (archetype, subtype) = parse_deck_name(deck);
-        archetypes.insert(archetype.to_string());
-        if let Some(st) = subtype {
-            subtypes.insert(st.to_string());
-        }
-        if let Some(list_start) = deck.find(" (") {
-            if let Some(list_end) = deck.rfind(')') {
-                let list = &deck[list_start + 2..list_end];
-                lists.insert(list.to_string());
-            }
-        }
-    }
-
-    let archetype_list: Vec<String> = archetypes.into_iter().collect();
-    let subtype_list: Vec<String> = subtypes.into_iter().collect();
-    let list_list: Vec<String> = lists.into_iter().collect();
-
-    // Extract opponent deck archetypes and categories
-    let mut opponent_archetypes: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut opponent_categories: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for deck in &all_opponent_decks {
-        let (archetype, _) = parse_deck_name(deck);
-        opponent_archetypes.insert(archetype.to_string());
-        opponent_categories.insert(categorize_deck(deck).to_string().to_string());
-    }
-    let opponent_archetype_list: Vec<String> = opponent_archetypes.into_iter().collect();
-    let opponent_category_list: Vec<String> = opponent_categories.into_iter().collect();
 
     // Build FilterSelection based on user choices
     let mut filters = FilterSelection::default();
 
     for &filter_idx in &selected_filters {
+        // Load the dataset reflecting filters applied so far, for cumulative option narrowing
+        let (partial_matches, partial_games) = filters.load_filtered_data(connection);
         match filter_idx {
             0 => {
                 // Era (latest only)
@@ -494,6 +461,13 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
             }
             2 => {
                 // My Archetype
+                let mut archetypes = std::collections::HashSet::new();
+                for m in &partial_matches {
+                    let (archetype, _) = parse_deck_name(&m.deck_name);
+                    archetypes.insert(archetype.to_string());
+                }
+                let mut archetype_list: Vec<String> = archetypes.into_iter().collect();
+                archetype_list.sort();
                 let default_deck = config.stats.filters.my_deck.as_deref().unwrap_or("");
                 if let Some(selected_archetype) = fuzzy_select_with_default("Select archetype to filter by", &archetype_list, default_deck) {
                     filters.deck_name = Some(selected_archetype.clone());
@@ -507,50 +481,119 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
             }
             3 => {
                 // My Subtype
+                let mut subtypes = std::collections::HashSet::new();
+                for m in &partial_matches {
+                    let (_, subtype) = parse_deck_name(&m.deck_name);
+                    if let Some(st) = subtype {
+                        subtypes.insert(st.to_string());
+                    }
+                }
+                let mut subtype_list: Vec<String> = subtypes.into_iter().collect();
+                subtype_list.sort();
                 if let Some(subtype) = fuzzy_select("Select subtype to filter by", &subtype_list) {
                     filters.deck_name = Some(format!(": {}", subtype));
                 }
             }
             4 => {
                 // My List
+                let mut lists = std::collections::HashSet::new();
+                for m in &partial_matches {
+                    let deck = &m.deck_name;
+                    if let Some(list_start) = deck.find(" (") {
+                        if let Some(list_end) = deck.rfind(')') {
+                            lists.insert(deck[list_start + 2..list_end].to_string());
+                        }
+                    }
+                }
+                let mut list_list: Vec<String> = lists.into_iter().collect();
+                list_list.sort();
                 if let Some(list) = fuzzy_select("Select list to filter by", &list_list) {
                     filters.deck_name = Some(format!("({})", list));
                 }
             }
             5 => {
                 // Opponent
+                let opp_set: std::collections::HashSet<String> = partial_matches.iter().map(|m| m.opponent_name.clone()).collect();
+                let mut opp_list: Vec<String> = opp_set.into_iter().collect();
+                opp_list.sort();
                 let default_opp = config.stats.filters.opponent.as_deref().unwrap_or("");
-                filters.opponent_name = fuzzy_select_with_default("Select opponent to filter by", &all_opponents, default_opp);
+                filters.opponent_name = fuzzy_select_with_default("Select opponent to filter by", &opp_list, default_opp);
             }
             6 => {
                 // Opponent Deck
+                let deck_set: std::collections::HashSet<String> = partial_matches.iter()
+                    .filter(|m| m.opponent_deck != "unknown")
+                    .map(|m| m.opponent_deck.clone())
+                    .collect();
+                let mut deck_list: Vec<String> = deck_set.into_iter().collect();
+                deck_list.sort();
                 let default_deck = config.stats.filters.opponent_deck.as_deref().unwrap_or("");
-                filters.opponent_deck = fuzzy_select_with_default("Select opponent deck to filter by", &all_opponent_decks, default_deck);
+                filters.opponent_deck = fuzzy_select_with_default("Select opponent deck to filter by", &deck_list, default_deck);
             }
             7 => {
                 // Opponent Deck Archetype
-                filters.opponent_deck_archetype = fuzzy_select("Select opponent deck archetype to filter by", &opponent_archetype_list);
+                let mut arch_set = std::collections::HashSet::new();
+                for m in &partial_matches {
+                    let (archetype, _) = parse_deck_name(&m.opponent_deck);
+                    arch_set.insert(archetype.to_string());
+                }
+                let mut arch_list: Vec<String> = arch_set.into_iter().collect();
+                arch_list.sort();
+                filters.opponent_deck_archetype = fuzzy_select("Select opponent deck archetype to filter by", &arch_list);
             }
             8 => {
                 // Opponent Deck Category
-                filters.opponent_deck_category = fuzzy_select("Select opponent deck category to filter by", &opponent_category_list);
+                let cat_set: std::collections::HashSet<String> = partial_matches.iter()
+                    .map(|m| categorize_deck(&m.opponent_deck).to_string().to_string())
+                    .collect();
+                let mut cat_list: Vec<String> = cat_set.into_iter().collect();
+                cat_list.sort();
+                filters.opponent_deck_category = fuzzy_select("Select opponent deck category to filter by", &cat_list);
             }
             9 => {
-                // Event Type
+                // Event Type — show only types present in the partial dataset, in canonical order
+                let event_set: std::collections::HashSet<String> = partial_matches.iter()
+                    .map(|m| m.event_type.clone())
+                    .collect();
+                let available_event_types: Vec<String> = EVENT_TYPES.iter()
+                    .filter(|t| event_set.contains(t.to_string().as_str()))
+                    .map(|t| t.to_string())
+                    .collect();
                 let default_event = config.stats.filters.event_type.as_deref().unwrap_or("");
-                filters.event_type = fuzzy_select_with_default("Select event type to filter by", &event_types, default_event);
+                filters.event_type = fuzzy_select_with_default("Select event type to filter by", &available_event_types, default_event);
             }
             10 => {
                 // Loss Reason
-                filters.loss_reason = fuzzy_select("Select loss reason to filter by", &all_loss_reasons);
+                let reason_set: std::collections::HashSet<String> = partial_games.iter()
+                    .filter_map(|g| g.loss_reason.as_ref())
+                    .cloned()
+                    .collect();
+                let mut reason_list: Vec<String> = reason_set.into_iter().collect();
+                reason_list.sort();
+                if reason_list.is_empty() { reason_list = all_loss_reasons.clone(); }
+                filters.loss_reason = fuzzy_select("Select loss reason to filter by", &reason_list);
             }
             11 => {
                 // Win Condition
-                filters.win_condition = fuzzy_select("Select win condition to filter by", &all_win_conditions);
+                let cond_set: std::collections::HashSet<String> = partial_games.iter()
+                    .filter_map(|g| g.win_condition.as_ref())
+                    .cloned()
+                    .collect();
+                let mut cond_list: Vec<String> = cond_set.into_iter().collect();
+                cond_list.sort();
+                if cond_list.is_empty() { cond_list = all_win_conditions.clone(); }
+                filters.win_condition = fuzzy_select("Select win condition to filter by", &cond_list);
             }
             12 => {
                 // Game Plan
-                filters.game_plan = fuzzy_select("Select game plan to filter by", &all_game_plans);
+                let plan_set: std::collections::HashSet<String> = partial_games.iter()
+                    .filter_map(|g| g.opening_hand_plan.as_ref())
+                    .cloned()
+                    .collect();
+                let mut plan_list: Vec<String> = plan_set.into_iter().collect();
+                plan_list.sort();
+                if plan_list.is_empty() { plan_list = all_game_plans.clone(); }
+                filters.game_plan = fuzzy_select("Select game plan to filter by", &plan_list);
             }
             13 => {
                 // Mulligan Count
@@ -638,27 +681,6 @@ enum StatsLevel {
     Game,
 }
 
-/// Filter indices and their levels
-/// Indices correspond to the filter_options vec in show_stats_interactive
-const FILTER_LEVELS: &[(usize, &str, StatsLevel)] = &[
-    (0, "era-latest", StatsLevel::Match),
-    (1, "era-all", StatsLevel::Match),
-    (2, "my-archetype", StatsLevel::Match),
-    (3, "my-subtype", StatsLevel::Match),
-    (4, "my-list", StatsLevel::Match),
-    (5, "opponent", StatsLevel::Match),
-    (6, "opponent-deck", StatsLevel::Match),
-    (7, "opponent-deck-archetype", StatsLevel::Match),
-    (8, "opponent-deck-category", StatsLevel::Match),
-    (9, "event-type", StatsLevel::Match),
-    (10, "loss-reason", StatsLevel::Game),
-    (11, "win-condition", StatsLevel::Game),
-    (12, "game-plan", StatsLevel::Game),
-    (13, "mulligan-count", StatsLevel::Game),
-    (14, "game-length", StatsLevel::Game),
-    (15, "game-number", StatsLevel::Game),
-    (16, "play-draw", StatsLevel::Game),
-];
 
 /// Group-by indices and their levels
 /// Indices correspond to the groupby_options vec in show_stats_interactive
@@ -1106,42 +1128,6 @@ fn load_win_conditions() -> Vec<String> {
     }
 }
 
-fn load_your_deck_names() -> Vec<String> {
-    let connection = &mut establish_connection();
-    
-    // Get deck names from match history
-    let historical_names: Result<Vec<String>, _> = matches::table
-        .select(matches::deck_name)
-        .distinct()
-        .order(matches::deck_name.asc())
-        .load(connection);
-    
-    // Get deck names from imported decks
-    let imported_names: Result<Vec<String>, _> = crate::db::schema::decks::table
-        .select(crate::db::schema::decks::name)
-        .order(crate::db::schema::decks::name.asc())
-        .load(connection);
-    
-    let mut all_names = Vec::new();
-    
-    // Add historical names
-    if let Ok(names) = historical_names {
-        all_names.extend(names);
-    }
-    
-    // Add imported names (if not already present)
-    if let Ok(names) = imported_names {
-        for name in names {
-            if !all_names.contains(&name) {
-                all_names.push(name);
-            }
-        }
-    }
-    
-    // Sort the combined list
-    all_names.sort();
-    all_names
-}
 
 fn load_opponent_names() -> Vec<String> {
     let connection = &mut establish_connection();
@@ -1207,22 +1193,6 @@ fn show_opponent_history(connection: &mut SqliteConnection, opponent_name: &str)
         .unwrap_or_default();
 }
 
-fn load_opponent_deck_names() -> Vec<String> {
-    let connection = &mut establish_connection();
-
-    // Load all unique opponent deck names ordered by most recent match
-    let opponent_decks: Result<Vec<String>, _> = matches::table
-        .select(matches::opponent_deck)
-        .filter(matches::opponent_deck.ne("unknown"))
-        .distinct()
-        .order(matches::created_at.desc())
-        .load(connection);
-
-    match opponent_decks {
-        Ok(decks) => decks,
-        Err(_) => vec![], // Return empty vec if query fails
-    }
-}
 
 fn load_loss_reasons() -> Vec<String> {
     let connection = &mut establish_connection();
@@ -1380,52 +1350,58 @@ pub fn run(args: GameArgs) {
     }
 }
 
-/// Three-step deck selection: Archetype -> Subtype -> List
-fn select_deck_three_step(config: &Config) -> String {
+/// Three-step deck selection: Archetype -> Subtype -> List.
+/// Pass `current` to pre-select the existing deck (for editing); pass `None` to use config defaults (for adding).
+fn select_deck_three_step(config: &Config, current: Option<&str>) -> String {
+    // Derive per-step defaults: from the current deck name when editing, from config when adding
+    let (default_archetype, default_subtype, default_list): (String, String, String) =
+        if let Some(current_deck) = current {
+            let (arch, sub) = parse_deck_name(current_deck);
+            let list = if let (Some(ls), Some(le)) = (current_deck.find(" ("), current_deck.rfind(')')) {
+                current_deck[ls + 2..le].to_string()
+            } else {
+                String::new()
+            };
+            (arch.to_string(), sub.unwrap_or("").to_string(), list)
+        } else {
+            (
+                config.game_entry.default_archetype.as_deref().unwrap_or("").to_string(),
+                config.game_entry.default_subtype.as_deref().unwrap_or("").to_string(),
+                config.game_entry.default_list.as_deref().unwrap_or("").to_string(),
+            )
+        };
+
     // Step 1: Select Archetype
     let archetypes = load_archetypes();
 
     if archetypes.is_empty() {
-        // No archetypes found, fall back to text input
         return fuzzy_select("Your deck name", &[])
             .unwrap_or_else(|| "Unknown".to_string());
     }
 
-    // Get default archetype from config
-    let default_archetype = config.game_entry.default_archetype.as_deref().unwrap_or("");
-
-    let selected_archetype = fuzzy_select_with_default("Select archetype", &archetypes, default_archetype)
+    let selected_archetype = fuzzy_select_with_default("Select archetype", &archetypes, &default_archetype)
         .unwrap_or_else(|| archetypes.first().cloned().unwrap_or_default());
 
     // Step 2: Select Subtype
     let subtypes = load_subtypes(&selected_archetype);
 
     if subtypes.is_empty() {
-        // No subtypes, return just the archetype name
         return selected_archetype;
     }
 
-    // Get default subtype from config
-    let default_subtype = config.game_entry.default_subtype.as_deref().unwrap_or("");
-
-    let selected_subtype = fuzzy_select_with_default("Select subtype", &subtypes, default_subtype)
+    let selected_subtype = fuzzy_select_with_default("Select subtype", &subtypes, &default_subtype)
         .unwrap_or_else(|| subtypes.first().cloned().unwrap_or_default());
 
     // Step 3: Select List
     let lists = load_lists(&selected_archetype, &selected_subtype);
 
     if lists.is_empty() {
-        // No lists defined, return archetype: subtype format
         return format!("{}: {}", selected_archetype, selected_subtype);
     }
 
-    // Get default list from config
-    let default_list = config.game_entry.default_list.as_deref().unwrap_or("");
-
-    let selected_list = fuzzy_select_with_default("Select list", &lists, default_list)
+    let selected_list = fuzzy_select_with_default("Select list", &lists, &default_list)
         .unwrap_or_else(|| lists.first().cloned().unwrap_or_default());
 
-    // Return the full deck name: "archetype: subtype (list)"
     format!("{}: {} ({})", selected_archetype, selected_subtype, selected_list)
 }
 
@@ -1451,7 +1427,7 @@ fn add_match_interactive(date_arg: Option<String>) {
     println!("Date: {}", date);
 
     // Three-step deck selection: Archetype -> Subtype -> List
-    let deck_name = select_deck_three_step(&config);
+    let deck_name = select_deck_three_step(&config, None);
 
     println!("Selected deck: {}", deck_name);
 
@@ -1598,6 +1574,7 @@ fn add_match_interactive(date_arg: Option<String>) {
                 no_doomsday_reason: dd.no_doomsday_reason.clone(),
                 sb_juke_plan: dd.sb_juke_plan.clone(),
                 pile_disruption: dd.pile_disruption.clone(),
+                dd_intent: Some(dd.dd_intent as i32),
             };
 
             diesel::insert_into(doomsday_games::table)
@@ -1763,6 +1740,13 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
             win_condition
         };
 
+        // Apply doomsday loss_reason_override if present
+        let final_loss_reason = if let Some(ref dd) = doomsday_data {
+            dd.loss_reason_override.clone().or(loss_reason)
+        } else {
+            loss_reason
+        };
+
         games.push(CollectedGame {
             game_number: game_num,
             play_draw: play_draw.to_string(),
@@ -1770,7 +1754,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
             opening_hand_plan,
             game_winner: game_winner.to_string(),
             win_condition: final_win_condition,
-            loss_reason,
+            loss_reason: final_loss_reason,
             turns,
             doomsday_data,
         });
@@ -1833,6 +1817,44 @@ fn collect_doomsday_data_only(
 ) -> Option<Option<CollectedDoomsdayData>> {
     println!("\n--- G{} Doomsday Details ---", game_number);
 
+    let dd_intent = match Confirm::new()
+        .with_prompt("Did you plan to cast Doomsday this game?")
+        .default(true)
+        .interact()
+    {
+        Ok(d) => d,
+        Err(_) => return None,
+    };
+
+    let you_won = matches!(game_winner, Winner::Me);
+
+    // Early return for no-intent games
+    if !dd_intent {
+        let (win_condition_override, loss_reason_override) = if you_won {
+            let wincon = fuzzy_select_with_auto_add(
+                "Win condition",
+                &arch.non_doomsday_wincons,
+                "definitions/doomsday.toml",
+                "non_doomsday_wincons",
+            );
+            (wincon, None)
+        } else {
+            let reason = fuzzy_select("Why did you lose?", &arch.loss_reasons);
+            (None, reason)
+        };
+        return Some(Some(CollectedDoomsdayData {
+            dd_intent: false,
+            doomsday_resolved: false,
+            pile_type: None,
+            pile_disruption: None,
+            better_pile: None,
+            no_doomsday_reason: None,
+            sb_juke_plan,
+            win_condition_override,
+            loss_reason_override,
+        }));
+    }
+
     let doomsday_resolved = match Confirm::new()
         .with_prompt("Did you resolve Doomsday?")
         .default(false)
@@ -1841,8 +1863,6 @@ fn collect_doomsday_data_only(
         Ok(d) => d,
         Err(_) => return None,
     };
-
-    let you_won = matches!(game_winner, Winner::Me);
 
     let (pile_type, pile_disruption, better_pile, no_doomsday_reason, win_condition_override) = if you_won {
         // WIN path
@@ -1892,10 +1912,14 @@ fn collect_doomsday_data_only(
 
             (pile_type, pile_disruption, better_pile, None, None)
         } else {
-            // Lost without casting doomsday
+            // Lost without casting doomsday - filter out "Gameplan" since dd_intent handles that now
+            let reasons: Vec<String> = arch.no_doomsday_reasons.iter()
+                .filter(|r| r.as_str() != "Gameplan")
+                .cloned()
+                .collect();
             let reason = fuzzy_select_with_auto_add(
                 "Why didn't you cast Doomsday?",
-                &arch.no_doomsday_reasons,
+                &reasons,
                 "definitions/doomsday.toml",
                 "no_doomsday_reasons",
             );
@@ -1904,6 +1928,7 @@ fn collect_doomsday_data_only(
     };
 
     Some(Some(CollectedDoomsdayData {
+        dd_intent: true,
         doomsday_resolved,
         pile_type,
         pile_disruption,
@@ -1911,6 +1936,7 @@ fn collect_doomsday_data_only(
         no_doomsday_reason,
         sb_juke_plan,
         win_condition_override,
+        loss_reason_override: None,
     }))
 }
 
@@ -2996,7 +3022,6 @@ fn show_stats_interactive(use_defaults: bool) {
     let mut game_length_filter: Option<(i32, i32)> = None; // (min, max)
     let mut game_number_filter: Option<Vec<i32>> = None;
     let mut play_draw_filter: Option<String> = None;
-    let mut selected_filter_indices: Vec<usize> = Vec::new();
 
     if use_defaults {
         // Use config defaults for filters
@@ -3018,272 +3043,37 @@ fn show_stats_interactive(use_defaults: bool) {
         opponent_deck_filter = config.stats.filters.opponent_deck.clone();
         event_type_filter = config.stats.filters.event_type.clone();
     } else {
-        // Interactive filter selection
-        let filter_options = vec![
-            "Era (latest only)",
-            "Era (all)",
-            "My Archetype",
-            "My Subtype",
-            "My List",
-            "Opponent",
-            "Opponent Deck",
-            "Opponent Deck Archetype",
-            "Opponent Deck Category",
-            "Event Type",
-            "Loss Reason",
-            "Win Condition",
-            "Game Plan",
-            "Mulligan Count",
-            "Game Length",
-            "Game Number",
-            "Play/Draw",
-        ];
+        // Interactive filter selection — delegates to shared function with cumulative narrowing
+        let fs = select_filters_interactive(connection);
+        era_values = fs.era_values;
+        deck_name_filter = fs.deck_name;
+        opponent_name_filter = fs.opponent_name;
+        opponent_deck_filter = fs.opponent_deck;
+        opponent_deck_archetype_filter = fs.opponent_deck_archetype;
+        opponent_deck_category_filter = fs.opponent_deck_category;
+        event_type_filter = fs.event_type;
+        loss_reason_filter = fs.loss_reason;
+        win_condition_filter = fs.win_condition;
+        game_plan_filter = fs.game_plan;
+        mulligan_count_filter = fs.mulligan_count;
+        game_length_filter = fs.game_length;
+        game_number_filter = fs.game_number;
+        play_draw_filter = fs.play_draw;
 
-        // Pre-select filters based on config (either explicit values or default_filters list)
-        let df = &config.stats.default_filters;
-        let filter_defaults = vec![
-            config.stats.filters.era.is_some() || df.contains(&"era-latest".to_string()),
-            df.contains(&"era-all".to_string()),
-            config.stats.filters.my_deck.is_some() || df.contains(&"my-archetype".to_string()),
-            df.contains(&"my-subtype".to_string()),
-            df.contains(&"my-list".to_string()),
-            config.stats.filters.opponent.is_some() || df.contains(&"opponent".to_string()),
-            config.stats.filters.opponent_deck.is_some() || df.contains(&"opponent-deck".to_string()),
-            df.contains(&"opponent-deck-archetype".to_string()),
-            df.contains(&"opponent-deck-category".to_string()),
-            config.stats.filters.event_type.is_some() || df.contains(&"event-type".to_string()),
-            df.contains(&"loss-reason".to_string()),
-            df.contains(&"win-condition".to_string()),
-            df.contains(&"game-plan".to_string()),
-            df.contains(&"mulligan-count".to_string()),
-            df.contains(&"game-length".to_string()),
-            df.contains(&"game-number".to_string()),
-            df.contains(&"play-draw".to_string()),
-        ];
-
-        let selected_filters = MultiSelect::new()
-            .with_prompt("Select filters (space to select, enter to continue)")
-            .items(&filter_options)
-            .defaults(&filter_defaults)
-            .interact()
-            .unwrap();
-
-        // Save filter indices for later use in stat selection
-        selected_filter_indices = selected_filters.clone();
-
-        // Get all available options for fuzzy selection
-        let all_decks = load_your_deck_names();
-        let all_opponents = load_opponent_names();
-        let all_opponent_decks = load_opponent_deck_names();
-        let event_types: Vec<String> = vec!["League", "Challenge", "Prelim", "Casual"].iter().map(|s| s.to_string()).collect();
-        // These will be reloaded based on selected deck
-        let mut all_loss_reasons = load_loss_reasons();
-        let mut all_win_conditions = load_win_conditions();
-        let mut all_game_plans = load_game_plans();
-
-        // Extract unique archetypes, subtypes, and lists from deck names
-        let mut archetypes = std::collections::HashSet::new();
-        let mut subtypes = std::collections::HashSet::new();
-        let mut lists = std::collections::HashSet::new();
-
-        for deck in &all_decks {
-            let (archetype, subtype) = parse_deck_name(deck);
-            archetypes.insert(archetype.to_string());
-            if let Some(st) = subtype {
-                subtypes.insert(st.to_string());
-            }
-            // Extract list name if present (format: "Arch: Sub (list)")
-            if let Some(list_start) = deck.find(" (") {
-                if let Some(list_end) = deck.rfind(')') {
-                    let list = &deck[list_start + 2..list_end];
-                    lists.insert(list.to_string());
+        // Infer archetype for Doomsday-specific group-by options.
+        // Works when the user filtered by archetype directly; subtype/list filters
+        // don't set this (existing limitation).
+        if let Some(ref filter) = deck_name_filter {
+            if !filter.starts_with(": ") && !filter.starts_with('(') {
+                let (arch, _) = parse_deck_name(filter);
+                if !arch.is_empty() {
+                    selected_archetype = Some(arch.to_string());
                 }
             }
         }
 
-        let archetype_list: Vec<String> = archetypes.into_iter().collect();
-        let subtype_list: Vec<String> = subtypes.into_iter().collect();
-        let list_list: Vec<String> = lists.into_iter().collect();
-
-        // Extract opponent deck archetypes and categories
-        let mut opponent_archetypes: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut opponent_categories: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for deck in &all_opponent_decks {
-            let (archetype, _) = parse_deck_name(deck);
-            opponent_archetypes.insert(archetype.to_string());
-            opponent_categories.insert(categorize_deck(deck).to_string().to_string());
-        }
-        let opponent_archetype_list: Vec<String> = opponent_archetypes.into_iter().collect();
-        let opponent_category_list: Vec<String> = opponent_categories.into_iter().collect();
-
-        // Sort filters: match-level first, then game-level
-        let mut sorted_filters = selected_filters.clone();
-        sorted_filters.sort_by_key(|&idx| {
-            if get_level(idx, FILTER_LEVELS) == Some(StatsLevel::Game) { 1 } else { 0 }
-        });
-
-        for &filter_idx in &sorted_filters {
-            match filter_idx {
-                0 => {
-                    // Era (latest only)
-                    match get_default_era_filter(connection) {
-                        EraFilter::Eras(eras) => era_values = Some(eras),
-                        EraFilter::All => {}
-                    }
-                }
-                1 => {
-                    // Era (all) - no filter
-                }
-                2 => {
-                    // My Archetype - fuzzy select
-                    let default_deck = config.stats.filters.my_deck.as_deref().unwrap_or("");
-                    if let Some(arch) = fuzzy_select_with_default("Select archetype to filter by", &archetype_list, default_deck) {
-                        // Filter by archetype (partial match on deck name)
-                        deck_name_filter = Some(arch.clone());
-                        selected_archetype = Some(arch.clone());
-
-                        // Reload deck-specific options
-                        if let Some(data) = load_archetype_data(&arch) {
-                            if !data.win_conditions.is_empty() {
-                                all_win_conditions = data.win_conditions;
-                            }
-                            if !data.loss_reasons.is_empty() {
-                                all_loss_reasons = data.loss_reasons;
-                            }
-                            if !data.game_plans.is_empty() {
-                                all_game_plans = data.game_plans;
-                            }
-                        }
-                    }
-                }
-                3 => {
-                    // My Subtype - fuzzy select
-                    if let Some(subtype) = fuzzy_select("Select subtype to filter by", &subtype_list) {
-                        // Filter by subtype (will match "Archetype: Subtype")
-                        deck_name_filter = Some(format!(": {}", subtype));
-                        // If archetype already selected, keep it; otherwise try to find which archetype has this subtype
-                        if selected_archetype.is_none() {
-                            // Check which archetype this subtype belongs to
-                            for arch in &archetype_list {
-                                let subtypes = load_subtypes(arch);
-                                if subtypes.contains(&subtype) {
-                                    selected_archetype = Some(arch.clone());
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                4 => {
-                    // My List - fuzzy select
-                    if let Some(list) = fuzzy_select("Select list to filter by", &list_list) {
-                        // Filter by list name (will match "(list)")
-                        deck_name_filter = Some(format!("({})", list));
-                        // If archetype already selected, keep it; otherwise try to find which archetype has this list
-                        if selected_archetype.is_none() {
-                            for arch in &archetype_list {
-                                for subtype in load_subtypes(arch) {
-                                    let lists = load_lists(arch, &subtype);
-                                    if lists.contains(&list) {
-                                        selected_archetype = Some(arch.clone());
-                                        break;
-                                    }
-                                }
-                                if selected_archetype.is_some() {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                5 => {
-                    // Opponent - fuzzy select
-                    let default_opp = config.stats.filters.opponent.as_deref().unwrap_or("");
-                    opponent_name_filter = fuzzy_select_with_default("Select opponent to filter by", &all_opponents, default_opp);
-                }
-                6 => {
-                    // Opponent Deck - fuzzy select
-                    let default_deck = config.stats.filters.opponent_deck.as_deref().unwrap_or("");
-                    opponent_deck_filter = fuzzy_select_with_default("Select opponent deck to filter by", &all_opponent_decks, default_deck);
-                }
-                7 => {
-                    // Opponent Deck Archetype - fuzzy select
-                    opponent_deck_archetype_filter = fuzzy_select("Select opponent deck archetype to filter by", &opponent_archetype_list);
-                }
-                8 => {
-                    // Opponent Deck Category - fuzzy select
-                    opponent_deck_category_filter = fuzzy_select("Select opponent deck category to filter by", &opponent_category_list);
-                }
-                9 => {
-                    // Event Type - fuzzy select
-                    let default_event = config.stats.filters.event_type.as_deref().unwrap_or("");
-                    event_type_filter = fuzzy_select_with_default("Select event type to filter by", &event_types, default_event);
-                }
-                10 => {
-                    // Loss Reason - fuzzy select
-                    loss_reason_filter = fuzzy_select("Select loss reason to filter by", &all_loss_reasons);
-                }
-                11 => {
-                    // Win Condition - fuzzy select
-                    win_condition_filter = fuzzy_select("Select win condition to filter by", &all_win_conditions);
-                }
-                12 => {
-                    // Game Plan - fuzzy select
-                    game_plan_filter = fuzzy_select("Select game plan to filter by", &all_game_plans);
-                }
-                13 => {
-                    // Mulligan Count - number input
-                    let mulligan_options: Vec<String> = vec!["0", "1", "2", "3", "4+"].iter().map(|s| s.to_string()).collect();
-                    if let Some(selected) = fuzzy_select("Select mulligan count to filter by", &mulligan_options) {
-                        let idx = mulligan_options.iter().position(|o| o == &selected).unwrap_or(0);
-                        mulligan_count_filter = Some(idx as i32);
-                    }
-                }
-                14 => {
-                    // Game Length - turn range select
-                    let length_options: Vec<String> = vec![
-                        "Very Short (1-3 turns)",
-                        "Short (4-6 turns)",
-                        "Medium (7-9 turns)",
-                        "Long (10-12 turns)",
-                        "Very Long (13+ turns)",
-                    ].iter().map(|s| s.to_string()).collect();
-                    if let Some(selected) = fuzzy_select("Select game length to filter by", &length_options) {
-                        let idx = length_options.iter().position(|o| o == &selected).unwrap_or(0);
-                        game_length_filter = Some(match idx {
-                            0 => (1, 3),
-                            1 => (4, 6),
-                            2 => (7, 9),
-                            3 => (10, 12),
-                            4 => (13, 999),
-                            _ => (1, 999),
-                        });
-                    }
-                }
-                15 => {
-                    // Game Number - game 1, 2, 3, or post-board (2+3)
-                    let game_options: Vec<String> = vec!["Game 1", "Game 2", "Game 3", "Post-board (2+3)"].iter().map(|s| s.to_string()).collect();
-                    if let Some(selected) = fuzzy_select("Select game number to filter by", &game_options) {
-                        game_number_filter = Some(match selected.as_str() {
-                            "Game 1" => vec![1],
-                            "Game 2" => vec![2],
-                            "Game 3" => vec![3],
-                            "Post-board (2+3)" => vec![2, 3],
-                            _ => vec![1],
-                        });
-                    }
-                }
-                16 => {
-                    // Play/Draw
-                    let play_draw_options: Vec<String> = vec!["On the Play", "On the Draw"].iter().map(|s| s.to_string()).collect();
-                    if let Some(selected) = fuzzy_select("Select play/draw to filter by", &play_draw_options) {
-                        play_draw_filter = Some(if selected == "On the Play" { "play".to_string() } else { "draw".to_string() });
-                    }
-                }
-                _ => {}
-            }
-        }
     }
+
 
     // Detect if filtering for Doomsday decks (check both archetype and filter string)
     let is_doomsday_filter = selected_archetype
@@ -3323,6 +3113,7 @@ fn show_stats_interactive(use_defaults: bool) {
                 "pile-type" if is_doomsday_filter => defaults.push(18),
                 "no-doomsday-reason" if is_doomsday_filter => defaults.push(19),
                 "pile-disruption" if is_doomsday_filter => defaults.push(20),
+                "dd-intent" if is_doomsday_filter => defaults.push(21),
                 _ => {}
             }
         }
@@ -3354,6 +3145,7 @@ fn show_stats_interactive(use_defaults: bool) {
             groupby_options.push("Pile Type");
             groupby_options.push("No-Doomsday Reason");
             groupby_options.push("Pile Disruption");
+            groupby_options.push("DD Intent");
         }
 
         // Pre-select group-bys based on config
@@ -3383,6 +3175,7 @@ fn show_stats_interactive(use_defaults: bool) {
             groupby_defaults.push(config.stats.default_groupbys.contains(&"pile-type".to_string()));
             groupby_defaults.push(config.stats.default_groupbys.contains(&"no-doomsday-reason".to_string()));
             groupby_defaults.push(config.stats.default_groupbys.contains(&"pile-disruption".to_string()));
+            groupby_defaults.push(config.stats.default_groupbys.contains(&"dd-intent".to_string()));
         }
 
         MultiSelect::new()
@@ -3426,7 +3219,10 @@ fn show_stats_interactive(use_defaults: bool) {
         ];
 
         // Determine if game mode based on selected filters and group-bys
-        let picker_game_mode = has_game_level(&selected_filter_indices, FILTER_LEVELS)
+        let picker_game_mode = (loss_reason_filter.is_some() || win_condition_filter.is_some()
+            || game_plan_filter.is_some() || mulligan_count_filter.is_some()
+            || game_length_filter.is_some() || game_number_filter.is_some()
+            || play_draw_filter.is_some())
             || has_game_level(&selected_groupbys, GROUPBY_LEVELS);
 
         // Pre-select statistics based on config, with appropriate win rate auto-selected
@@ -3679,6 +3475,8 @@ fn show_stats_interactive(use_defaults: bool) {
             17 => "sb-juke-plan",
             18 => "pile-type",
             19 => "no-doomsday-reason",
+            20 => "pile-disruption",
+            21 => "dd-intent",
             _ => continue,
         };
 
@@ -3742,6 +3540,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
         "sb-juke-plan" => ("=== Statistics by Sideboard Juke Plan ===", Box::new(|_m: &Match| String::new())),
         "pile-type" => ("=== Statistics by Pile Type ===", Box::new(|_m: &Match| String::new())),
         "no-doomsday-reason" => ("=== Statistics by No-Doomsday Reason ===", Box::new(|_m: &Match| String::new())),
+        "dd-intent" => ("=== Statistics by DD Intent ===", Box::new(|_m: &Match| String::new())),
         _ => return,
     };
 
@@ -4090,6 +3889,36 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
         return;
     }
 
+    if slice_type == "dd-intent" {
+        let dd_map: HashMap<i32, &DoomsdayGame> = doomsday_games.iter()
+            .map(|dd| (dd.game_id, dd))
+            .collect();
+
+        let mut intent_stats: HashMap<String, Vec<&Game>> = HashMap::new();
+        for game in all_games {
+            let label = if let Some(dd) = dd_map.get(&game.game_id) {
+                match dd.dd_intent {
+                    Some(1) => "DD Intent",
+                    Some(0) => "No DD Intent",
+                    _ => continue, // Skip games with NULL dd_intent
+                }
+            } else {
+                continue;
+            };
+            intent_stats.entry(label.to_string()).or_default().push(game);
+        }
+
+        let mut rows: Vec<StatsRow> = intent_stats.into_iter()
+            .map(|(label, games)| calculate_stats_from_games(label, games, all_matches))
+            .filter(|row| row.game_count >= min_games as usize)
+            .collect();
+
+        let order = ["DD Intent", "No DD Intent"];
+        rows.sort_by_key(|row| order.iter().position(|&s| s == row.label).unwrap_or(999));
+        display_stats_table(&rows, selected_stats, title, true);
+        return;
+    }
+
     // Standard match-based grouping
     let mut grouped_stats: HashMap<String, Vec<&Match>> = HashMap::new();
     for m in all_matches {
@@ -4383,6 +4212,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 
 fn edit_match_interactive(match_id: i32) {
     let connection = &mut establish_connection();
+    let config = load_config();
     
     // Load the existing match
     let match_result = matches::table
@@ -4421,10 +4251,7 @@ fn edit_match_interactive(match_id: i32) {
         .unwrap();
         
     if change_deck {
-        let your_decks = load_your_deck_names();
-        if let Some(new_deck) = fuzzy_select_with_default("Your deck name", &your_decks, &match_data.deck_name) {
-            match_data.deck_name = new_deck;
-        }
+        match_data.deck_name = select_deck_three_step(&config, Some(&match_data.deck_name.clone()));
     }
     
     // Edit opponent name
@@ -4552,13 +4379,22 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
     println!("=== Editing Game {} in Match {} ===", game_number, match_id);
     println!("Current values shown in [brackets]. Press Enter to keep current value.");
     println!();
-    
+
+    // Load archetype data up front so all prompts can use the same option lists as game entry
+    let match_data = matches::table.find(match_id).first::<Match>(connection).ok();
+    let archetype = match_data.as_ref().and_then(|m| load_archetype_data(&m.deck_name));
+    let is_doomsday_deck = archetype.as_ref().map_or(false, |a| a.is_doomsday);
+
+    let game_plans = archetype.as_ref().map_or_else(load_game_plans, |a| a.game_plans.clone());
+    let win_conditions = archetype.as_ref().map_or_else(load_win_conditions, |a| a.win_conditions.clone());
+    let loss_reasons = archetype.as_ref().map_or_else(Vec::new, |a| a.loss_reasons.clone());
+
     // Edit play/draw
     let change_play_draw = Confirm::new()
         .with_prompt(&format!("Change play/draw from '{}'?", game_data.play_draw))
         .interact()
         .unwrap();
-        
+
     if change_play_draw {
         let play_draw = if Confirm::new()
             .with_prompt("Did you play first? (no = draw)")
@@ -4571,7 +4407,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
         };
         game_data.play_draw = play_draw.to_string();
     }
-    
+
     // Edit mulligans
     let new_mulligans: String = Input::new()
         .with_prompt(&format!("Number of mulligans [{}]", game_data.mulligans))
@@ -4589,24 +4425,19 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
             println!("Invalid number, keeping current value");
         }
     }
-    
+
     // Edit opening hand plan
     let current_plan = game_data.opening_hand_plan.as_deref().unwrap_or("");
-    let new_plan: String = Input::new()
-        .with_prompt(&format!("Opening hand plan [{}]", current_plan))
-        .allow_empty(true)
-        .interact_text()
-        .unwrap();
-    if !new_plan.is_empty() {
+    if let Some(new_plan) = fuzzy_select_with_default("Opening hand plan", &game_plans, current_plan) {
         game_data.opening_hand_plan = Some(new_plan);
     }
-    
+
     // Edit game winner
     let change_winner = Confirm::new()
         .with_prompt(&format!("Change game winner from '{}'?", game_data.game_winner))
         .interact()
         .unwrap();
-        
+
     if change_winner {
         let game_winner = if Confirm::new()
             .with_prompt("Did you win this game?")
@@ -4619,30 +4450,18 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
         };
         game_data.game_winner = game_winner.to_string();
     }
-    
-    // Edit win condition (only if you won)
-    if game_data.game_winner == "me" {
+
+    // Edit win condition / loss reason — use same option lists as game entry
+    if game_data.game_winner == "me" && !is_doomsday_deck {
         let current_condition = game_data.win_condition.as_deref().unwrap_or("");
-        let new_condition: String = Input::new()
-            .with_prompt(&format!("What did you win with? [{}]", current_condition))
-            .allow_empty(true)
-            .interact_text()
-            .unwrap();
-        if !new_condition.is_empty() {
+        if let Some(new_condition) = fuzzy_select_with_default("What did you win with?", &win_conditions, current_condition) {
             game_data.win_condition = Some(new_condition);
         }
         game_data.loss_reason = None;
-    } else {
+    } else if game_data.game_winner != "me" && !is_doomsday_deck {
         game_data.win_condition = None;
-
-        // Edit loss reason (only if you lost)
         let current_reason = game_data.loss_reason.as_deref().unwrap_or("");
-        let new_reason: String = Input::new()
-            .with_prompt(&format!("Why did you lose? [{}]", current_reason))
-            .allow_empty(true)
-            .interact_text()
-            .unwrap();
-        if !new_reason.is_empty() {
+        if let Some(new_reason) = fuzzy_select_with_default("Why did you lose?", &loss_reasons, current_reason) {
             game_data.loss_reason = Some(new_reason);
         }
     }
@@ -4672,19 +4491,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
         game_data.turns = None;
     }
 
-    // Check if this is a doomsday deck and handle doomsday-specific fields
-    let match_data = matches::table
-        .find(match_id)
-        .first::<Match>(connection)
-        .ok();
-
-    let is_doomsday_deck = match_data
-        .as_ref()
-        .map(|m| load_archetype_data(&m.deck_name))
-        .flatten()
-        .map(|a| a.is_doomsday)
-        .unwrap_or(false);
-
+    // Doomsday-specific fields
     if is_doomsday_deck {
         // Load existing doomsday data or create new
         let existing_dd = doomsday_games::table
@@ -4707,19 +4514,25 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
         };
 
         if edit_doomsday {
-            let arch = match_data
-                .as_ref()
-                .and_then(|m| load_archetype_data(&m.deck_name));
+            let arch = archetype.as_ref();
 
             println!("\n--- G{} Doomsday Details ---", game_number);
 
             // Get current values or defaults
+            let current_dd_intent = existing_dd.as_ref().and_then(|d| d.dd_intent).map(|v| v != 0).unwrap_or(true);
             let current_resolved = existing_dd.as_ref().and_then(|d| d.doomsday).unwrap_or(false);
             let current_pile_type = existing_dd.as_ref().and_then(|d| d.pile_type.clone());
             let current_better_pile = existing_dd.as_ref().and_then(|d| d.better_pile).map(|b| b != 0);
             let current_no_dd_reason = existing_dd.as_ref().and_then(|d| d.no_doomsday_reason.clone());
             let current_sb_juke = existing_dd.as_ref().and_then(|d| d.sb_juke_plan.clone());
             let current_pile_disruption = existing_dd.as_ref().and_then(|d| d.pile_disruption.clone());
+
+            // Edit dd_intent
+            let dd_intent = Confirm::new()
+                .with_prompt(&format!("Did you plan to cast Doomsday? [{}]", if current_dd_intent { "yes" } else { "no" }))
+                .default(current_dd_intent)
+                .interact()
+                .unwrap_or(current_dd_intent);
 
             // Edit doomsday resolved
             let doomsday_resolved = Confirm::new()
@@ -4812,6 +4625,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
             if existing_dd.is_some() {
                 diesel::update(doomsday_games::table.filter(doomsday_games::game_id.eq(game_data.game_id)))
                     .set((
+                        doomsday_games::dd_intent.eq(Some(dd_intent as i32)),
                         doomsday_games::doomsday.eq(Some(doomsday_resolved)),
                         doomsday_games::pile_type.eq(&pile_type),
                         doomsday_games::better_pile.eq(better_pile.map(|b| if b { 1 } else { 0 })),
@@ -4833,6 +4647,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
                     no_doomsday_reason,
                     sb_juke_plan,
                     pile_disruption,
+                    dd_intent: Some(dd_intent as i32),
                 };
                 diesel::insert_into(doomsday_games::table)
                     .values(&new_dd)

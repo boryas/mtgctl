@@ -264,6 +264,7 @@ pub struct DoomsdayGame {
     pub no_doomsday_reason: Option<String>,
     pub sb_juke_plan: Option<String>,
     pub pile_disruption: Option<String>,
+    pub dd_intent: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -280,4 +281,5 @@ pub struct NewDoomsdayGame {
     pub no_doomsday_reason: Option<String>,
     pub sb_juke_plan: Option<String>,
     pub pile_disruption: Option<String>,
+    pub dd_intent: Option<i32>,
 }

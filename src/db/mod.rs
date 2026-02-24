@@ -130,6 +130,9 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
     // Add new doomsday tracking columns (v2)
     add_doomsday_games_v2_columns_if_missing(connection)?;
 
+    // Add dd_intent column to doomsday_games table
+    add_dd_intent_column_if_missing(connection)?;
+
     // Add league_id column to matches table if it doesn't exist
     add_league_id_column_if_missing(connection)?;
 
@@ -263,6 +266,46 @@ fn add_doomsday_games_columns_if_missing(connection: &mut SqliteConnection) -> R
             .execute(connection)?;
     }
 
+    Ok(())
+}
+
+fn add_dd_intent_column_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    let exists = diesel::sql_query("SELECT dd_intent FROM doomsday_games LIMIT 0")
+        .execute(connection)
+        .is_ok();
+    if !exists {
+        diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN dd_intent INTEGER")
+            .execute(connection)?;
+
+        // Backfill existing rows
+        // Resolved DD → clearly intended
+        diesel::sql_query("UPDATE doomsday_games SET dd_intent = 1 WHERE doomsday = 1")
+            .execute(connection)?;
+
+        // Won via non-DD wincon → no intent
+        diesel::sql_query(
+            "UPDATE doomsday_games SET dd_intent = 0
+             WHERE dd_intent IS NULL AND game_id IN (
+               SELECT dg.game_id FROM doomsday_games dg
+               JOIN games g ON dg.game_id = g.game_id
+               WHERE dg.doomsday = 0
+                 AND g.game_winner = 'me'
+                 AND g.win_condition IN ('creatures', 'tamiyo-ult', 'concede', 'other')
+             )"
+        ).execute(connection)?;
+
+        // Explicit pivot loss → no intent
+        diesel::sql_query(
+            "UPDATE doomsday_games SET dd_intent = 0
+             WHERE dd_intent IS NULL AND no_doomsday_reason = 'Gameplan'"
+        ).execute(connection)?;
+
+        // All other loss reasons → intended
+        diesel::sql_query(
+            "UPDATE doomsday_games SET dd_intent = 1
+             WHERE dd_intent IS NULL AND no_doomsday_reason IS NOT NULL"
+        ).execute(connection)?;
+    }
     Ok(())
 }
 
