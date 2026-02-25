@@ -17,7 +17,7 @@ common_pile_types = [
     "Cavern+Cyclers",
     "Disruption+Cyclers",
     "Other",
-]
+    "Thoughtseize+Cavern"]
 
 no_doomsday_reasons = [
     "Mana",
@@ -79,7 +79,8 @@ pile_disruption = [
     "Clarion Conqueror",
     "Snuff Out",
     "Abrupt Decay",
-    "Hexing Squelcher"]
+    "Hexing Squelcher",
+    "Flusterstorm"]
 
 [subtypes.Turbo]
 game_plans = ["combo", "cantrips", "control", "creatures"]
