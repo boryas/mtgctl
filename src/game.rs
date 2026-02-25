@@ -277,7 +277,9 @@ struct StatsFilters {
 struct FilterSelection {
     // Match-level filters
     era_values: Option<Vec<i32>>,
-    deck_name: Option<Vec<String>>,
+    deck_archetype: Option<Vec<String>>,  // e.g. ["Doomsday", "Storm"]
+    deck_subtype: Option<Vec<String>>,    // e.g. ["Tempo"]  (bare, no ": " prefix)
+    deck_list: Option<Vec<String>>,       // e.g. ["aug24"]  (bare, no "()" wrapper)
     opponent_name: Option<Vec<String>>,
     opponent_deck: Option<Vec<String>>,
     opponent_deck_archetype: Option<Vec<String>>,
@@ -303,8 +305,14 @@ impl FilterSelection {
             let era_str = eras.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
             filters.push(format!("Era: {}", era_str));
         }
-        if let Some(ref decks) = self.deck_name {
-            filters.push(format!("Deck: {}", decks.join(", ")));
+        if let Some(ref archs) = self.deck_archetype {
+            filters.push(format!("Deck: {}", archs.join(", ")));
+        }
+        if let Some(ref subs) = self.deck_subtype {
+            filters.push(format!("Subtype: {}", subs.join(", ")));
+        }
+        if let Some(ref lists) = self.deck_list {
+            filters.push(format!("List: {}", lists.join(", ")));
         }
         if let Some(ref opps) = self.opponent_name {
             filters.push(format!("Opponent: {}", opps.join(", ")));
@@ -337,8 +345,14 @@ impl FilterSelection {
             filters.push(format!("Turns: {}-{}", min, max));
         }
         if let Some(ref nums) = self.game_number {
-            let nums_str = nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
-            filters.push(format!("Game: {}", nums_str));
+            let label = match nums.as_slice() {
+                [1] => "Game 1".to_string(),
+                [2] => "Game 2".to_string(),
+                [3] => "Game 3".to_string(),
+                [2, 3] => "Post-board (2+3)".to_string(),
+                _ => format!("Game: {}", nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")),
+            };
+            filters.push(label);
         }
         if let Some(ref pd) = self.play_draw {
             filters.push(format!("Play/Draw: {}", pd));
@@ -365,9 +379,15 @@ impl FilterSelection {
 
         let mut all_matches: Vec<Match> = query.load(connection).expect("Error loading matches");
 
-        // Post-load: LIKE-pattern filters (multi-value OR)
-        if let Some(ref patterns) = self.deck_name {
-            all_matches.retain(|m| patterns.iter().any(|p| m.deck_name.contains(p.as_str())));
+        // Post-load: deck filters (exact parsed archetype / subtype / list)
+        if let Some(ref archs) = self.deck_archetype {
+            all_matches.retain(|m| archs.iter().any(|a| parse_deck_name(&m.deck_name).0 == a.as_str()));
+        }
+        if let Some(ref subs) = self.deck_subtype {
+            all_matches.retain(|m| subs.iter().any(|st| parse_deck_name(&m.deck_name).1 == Some(st.as_str())));
+        }
+        if let Some(ref lists) = self.deck_list {
+            all_matches.retain(|m| lists.iter().any(|lst| m.deck_name.contains(&format!("({})", lst))));
         }
         if let Some(ref names) = self.opponent_name {
             all_matches.retain(|m| names.iter().any(|n| m.opponent_name.contains(n.as_str())));
@@ -451,53 +471,51 @@ impl FilterSelection {
     }
 }
 
+/// Identifies which filter to configure — drives declarative filter menu
+#[derive(Clone, Copy)]
+enum FilterKind {
+    EraLatest, EraAll,
+    DeckArchetype, DeckSubtype, DeckList,
+    Opponent, OpponentDeck, OpponentArchetype, OpponentCategory,
+    EventType,
+    LossReason, WinCondition, GamePlan,
+    MulliganCount, GameLength, GameNumber, PlayDraw,
+    LastNMatches,
+}
+
+/// Returns (label, kind, is_default) for every filter option.
+/// The order determines display order and must stay in sync only here.
+fn filter_definitions(config: &Config) -> Vec<(&'static str, FilterKind, bool)> {
+    let df = &config.stats.default_filters;
+    vec![
+        ("Era (latest only)",      FilterKind::EraLatest,        config.stats.filters.era.is_some() || df.contains(&"era-latest".to_string())),
+        ("Era (all)",              FilterKind::EraAll,           df.contains(&"era-all".to_string())),
+        ("My Archetype",           FilterKind::DeckArchetype,    config.stats.filters.my_deck.is_some() || df.contains(&"my-archetype".to_string())),
+        ("My Subtype",             FilterKind::DeckSubtype,      df.contains(&"my-subtype".to_string())),
+        ("My List",                FilterKind::DeckList,         df.contains(&"my-list".to_string())),
+        ("Opponent",               FilterKind::Opponent,         config.stats.filters.opponent.is_some() || df.contains(&"opponent".to_string())),
+        ("Opponent Deck",          FilterKind::OpponentDeck,     config.stats.filters.opponent_deck.is_some() || df.contains(&"opponent-deck".to_string())),
+        ("Opponent Deck Archetype",FilterKind::OpponentArchetype,df.contains(&"opponent-deck-archetype".to_string())),
+        ("Opponent Deck Category", FilterKind::OpponentCategory, df.contains(&"opponent-deck-category".to_string())),
+        ("Event Type",             FilterKind::EventType,        config.stats.filters.event_type.is_some() || df.contains(&"event-type".to_string())),
+        ("Loss Reason",            FilterKind::LossReason,       df.contains(&"loss-reason".to_string())),
+        ("Win Condition",          FilterKind::WinCondition,     df.contains(&"win-condition".to_string())),
+        ("Game Plan",              FilterKind::GamePlan,         df.contains(&"game-plan".to_string())),
+        ("Mulligan Count",         FilterKind::MulliganCount,    df.contains(&"mulligan-count".to_string())),
+        ("Game Length",            FilterKind::GameLength,       df.contains(&"game-length".to_string())),
+        ("Game Number",            FilterKind::GameNumber,       df.contains(&"game-number".to_string())),
+        ("Play/Draw",              FilterKind::PlayDraw,         df.contains(&"play-draw".to_string())),
+        ("Last N Matches",         FilterKind::LastNMatches,     false),
+    ]
+}
+
 /// Interactive filter selection - shared by stats and graph commands
 fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection) -> FilterSelection {
     let config = load_config();
 
-    let filter_options = vec![
-        "Era (latest only)",
-        "Era (all)",
-        "My Archetype",
-        "My Subtype",
-        "My List",
-        "Opponent",
-        "Opponent Deck",
-        "Opponent Deck Archetype",
-        "Opponent Deck Category",
-        "Event Type",
-        "Loss Reason",
-        "Win Condition",
-        "Game Plan",
-        "Mulligan Count",
-        "Game Length",
-        "Game Number",
-        "Play/Draw",
-        "Last N Matches",
-    ];
-
-    // Pre-select filters based on config
-    let df = &config.stats.default_filters;
-    let filter_defaults = vec![
-        config.stats.filters.era.is_some() || df.contains(&"era-latest".to_string()),
-        df.contains(&"era-all".to_string()),
-        config.stats.filters.my_deck.is_some() || df.contains(&"my-archetype".to_string()),
-        df.contains(&"my-subtype".to_string()),
-        df.contains(&"my-list".to_string()),
-        config.stats.filters.opponent.is_some() || df.contains(&"opponent".to_string()),
-        config.stats.filters.opponent_deck.is_some() || df.contains(&"opponent-deck".to_string()),
-        df.contains(&"opponent-deck-archetype".to_string()),
-        df.contains(&"opponent-deck-category".to_string()),
-        config.stats.filters.event_type.is_some() || df.contains(&"event-type".to_string()),
-        df.contains(&"loss-reason".to_string()),
-        df.contains(&"win-condition".to_string()),
-        df.contains(&"game-plan".to_string()),
-        df.contains(&"mulligan-count".to_string()),
-        df.contains(&"game-length".to_string()),
-        df.contains(&"game-number".to_string()),
-        df.contains(&"play-draw".to_string()),
-        false, // Last N Matches - never pre-selected
-    ];
+    let defs = filter_definitions(&config);
+    let filter_options: Vec<&str> = defs.iter().map(|(l, _, _)| *l).collect();
+    let filter_defaults: Vec<bool> = defs.iter().map(|(_, _, d)| *d).collect();
 
     let selected_filters = MultiSelect::new()
         .with_prompt("Select filters (space to select, enter to continue)")
@@ -517,19 +535,17 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
     for &filter_idx in &selected_filters {
         // Load the dataset reflecting filters applied so far, for cumulative option narrowing
         let (partial_matches, partial_games) = filters.load_filtered_data(connection);
-        match filter_idx {
-            0 => {
-                // Era (latest only)
+        match defs[filter_idx].1 {
+            FilterKind::EraLatest => {
                 match get_default_era_filter(connection) {
                     EraFilter::Eras(eras) => filters.era_values = Some(eras),
                     EraFilter::All => {}
                 }
             }
-            1 => {
-                // Era (all) - no filter
+            FilterKind::EraAll => {
+                // no filter — all eras
             }
-            2 => {
-                // My Archetype
+            FilterKind::DeckArchetype => {
                 let mut archetypes = std::collections::HashSet::new();
                 for m in &partial_matches {
                     let (archetype, _) = parse_deck_name(&m.deck_name);
@@ -548,11 +564,10 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                             if !data.game_plans.is_empty() { all_game_plans = data.game_plans; }
                         }
                     }
-                    filters.deck_name = Some(selected);
+                    filters.deck_archetype = Some(selected);
                 }
             }
-            3 => {
-                // My Subtype
+            FilterKind::DeckSubtype => {
                 let mut subtypes = std::collections::HashSet::new();
                 for m in &partial_matches {
                     let (_, subtype) = parse_deck_name(&m.deck_name);
@@ -563,12 +578,9 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut subtype_list: Vec<String> = subtypes.into_iter().collect();
                 subtype_list.sort();
                 let selected = fuzzy_multi_select("Select subtype(s) to filter by", &subtype_list);
-                if !selected.is_empty() {
-                    filters.deck_name = Some(selected.iter().map(|s| format!(": {}", s)).collect());
-                }
+                if !selected.is_empty() { filters.deck_subtype = Some(selected); }
             }
-            4 => {
-                // My List
+            FilterKind::DeckList => {
                 let mut lists = std::collections::HashSet::new();
                 for m in &partial_matches {
                     let deck = &m.deck_name;
@@ -581,12 +593,9 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut list_list: Vec<String> = lists.into_iter().collect();
                 list_list.sort();
                 let selected = fuzzy_multi_select("Select list(s) to filter by", &list_list);
-                if !selected.is_empty() {
-                    filters.deck_name = Some(selected.iter().map(|s| format!("({})", s)).collect());
-                }
+                if !selected.is_empty() { filters.deck_list = Some(selected); }
             }
-            5 => {
-                // Opponent
+            FilterKind::Opponent => {
                 let opp_set: std::collections::HashSet<String> = partial_matches.iter().map(|m| m.opponent_name.clone()).collect();
                 let mut opp_list: Vec<String> = opp_set.into_iter().collect();
                 opp_list.sort();
@@ -594,8 +603,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select_with_default("Select opponent(s) to filter by", &opp_list, default_opp);
                 if !selected.is_empty() { filters.opponent_name = Some(selected); }
             }
-            6 => {
-                // Opponent Deck
+            FilterKind::OpponentDeck => {
                 let deck_set: std::collections::HashSet<String> = partial_matches.iter()
                     .filter(|m| m.opponent_deck != "unknown")
                     .map(|m| m.opponent_deck.clone())
@@ -606,8 +614,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select_with_default("Select opponent deck(s) to filter by", &deck_list, default_deck);
                 if !selected.is_empty() { filters.opponent_deck = Some(selected); }
             }
-            7 => {
-                // Opponent Deck Archetype
+            FilterKind::OpponentArchetype => {
                 let mut arch_set = std::collections::HashSet::new();
                 for m in &partial_matches {
                     let (archetype, _) = parse_deck_name(&m.opponent_deck);
@@ -618,8 +625,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select("Select opponent deck archetype(s) to filter by", &arch_list);
                 if !selected.is_empty() { filters.opponent_deck_archetype = Some(selected); }
             }
-            8 => {
-                // Opponent Deck Category
+            FilterKind::OpponentCategory => {
                 let cat_set: std::collections::HashSet<String> = partial_matches.iter()
                     .map(|m| categorize_deck(&m.opponent_deck).to_string().to_owned())
                     .collect();
@@ -628,8 +634,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select("Select opponent deck category(s) to filter by", &cat_list);
                 if !selected.is_empty() { filters.opponent_deck_category = Some(selected); }
             }
-            9 => {
-                // Event Type — show only types present in the partial dataset, in canonical order
+            FilterKind::EventType => {
                 let event_set: std::collections::HashSet<String> = partial_matches.iter()
                     .map(|m| m.event_type.clone())
                     .collect();
@@ -641,8 +646,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select_with_default("Select event type(s) to filter by", &available_event_types, default_event);
                 if !selected.is_empty() { filters.event_type = Some(selected); }
             }
-            10 => {
-                // Loss Reason
+            FilterKind::LossReason => {
                 let reason_set: std::collections::HashSet<String> = partial_games.iter()
                     .filter_map(|g| g.loss_reason.as_ref())
                     .cloned()
@@ -653,8 +657,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select("Select loss reason(s) to filter by", &reason_list);
                 if !selected.is_empty() { filters.loss_reason = Some(selected); }
             }
-            11 => {
-                // Win Condition
+            FilterKind::WinCondition => {
                 let cond_set: std::collections::HashSet<String> = partial_games.iter()
                     .filter_map(|g| g.win_condition.as_ref())
                     .cloned()
@@ -665,8 +668,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select("Select win condition(s) to filter by", &cond_list);
                 if !selected.is_empty() { filters.win_condition = Some(selected); }
             }
-            12 => {
-                // Game Plan
+            FilterKind::GamePlan => {
                 let plan_set: std::collections::HashSet<String> = partial_games.iter()
                     .filter_map(|g| g.opening_hand_plan.as_ref())
                     .cloned()
@@ -677,16 +679,14 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let selected = fuzzy_multi_select("Select game plan(s) to filter by", &plan_list);
                 if !selected.is_empty() { filters.game_plan = Some(selected); }
             }
-            13 => {
-                // Mulligan Count
+            FilterKind::MulliganCount => {
                 let mulligan_options: Vec<String> = vec!["0", "1", "2", "3", "4+"].iter().map(|s| s.to_string()).collect();
                 if let Some(selected) = fuzzy_select("Select mulligan count to filter by", &mulligan_options) {
                     let idx = mulligan_options.iter().position(|o| o == &selected).unwrap_or(0);
                     filters.mulligan_count = Some(idx as i32);
                 }
             }
-            14 => {
-                // Game Length
+            FilterKind::GameLength => {
                 let length_options: Vec<String> = vec![
                     "Very Short (1-3 turns)",
                     "Short (4-6 turns)",
@@ -706,8 +706,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                     });
                 }
             }
-            15 => {
-                // Game Number
+            FilterKind::GameNumber => {
                 let game_options: Vec<String> = vec!["Game 1", "Game 2", "Game 3", "Post-board (2+3)"].iter().map(|s| s.to_string()).collect();
                 if let Some(selected) = fuzzy_select("Select game number to filter by", &game_options) {
                     filters.game_number = Some(match selected.as_str() {
@@ -719,15 +718,13 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                     });
                 }
             }
-            16 => {
-                // Play/Draw
+            FilterKind::PlayDraw => {
                 let play_draw_options: Vec<String> = vec!["On the Play", "On the Draw"].iter().map(|s| s.to_string()).collect();
                 if let Some(selected) = fuzzy_select("Select play/draw to filter by", &play_draw_options) {
                     filters.play_draw = Some(if selected == "On the Play" { "play".to_string() } else { "draw".to_string() });
                 }
             }
-            17 => {
-                // Last N Matches
+            FilterKind::LastNMatches => {
                 let n_str: String = Input::new()
                     .with_prompt("Show last N matches")
                     .allow_empty(true)
@@ -739,7 +736,6 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -3102,89 +3098,22 @@ fn show_stats_interactive(use_defaults: bool) {
     println!("=== Match Statistics ===\n");
 
     // Apply filters from config or prompt interactively
-    let deck_name_filter: Option<Vec<String>>;
-    let mut selected_archetype: Option<String> = None;  // Track archetype even when filtering by subtype/list
-    let opponent_name_filter: Option<Vec<String>>;
-    let opponent_deck_filter: Option<Vec<String>>;
-    let mut opponent_deck_archetype_filter: Option<Vec<String>> = None;
-    let mut opponent_deck_category_filter: Option<Vec<String>> = None;
-    let event_type_filter: Option<Vec<String>>;
-    let mut era_values: Option<Vec<i32>> = None;
-    let mut loss_reason_filter: Option<Vec<String>> = None;
-    let mut win_condition_filter: Option<Vec<String>> = None;
-    let mut game_plan_filter: Option<Vec<String>> = None;
-    let mut mulligan_count_filter: Option<i32> = None;
-    let mut game_length_filter: Option<(i32, i32)> = None; // (min, max)
-    let mut game_number_filter: Option<Vec<i32>> = None;
-    let mut play_draw_filter: Option<String> = None;
-    let mut last_n_matches_filter: Option<usize> = None;
-
-    if use_defaults {
-        // Use config defaults for filters
-        if let Some(era) = config.stats.filters.era {
-            era_values = Some(vec![era]);
+    let filter_sel: FilterSelection = if use_defaults {
+        FilterSelection {
+            era_values: config.stats.filters.era.map(|e| vec![e]),
+            deck_archetype: config.stats.filters.my_deck.clone().map(|d| vec![d]),
+            opponent_name: config.stats.filters.opponent.clone().map(|o| vec![o]),
+            opponent_deck: config.stats.filters.opponent_deck.clone().map(|d| vec![d]),
+            event_type: config.stats.filters.event_type.clone().map(|e| vec![e]),
+            ..Default::default()
         }
-        deck_name_filter = config.stats.filters.my_deck.clone().map(|d| vec![d]);
-        // Try to extract archetype from config filter (e.g., "Doomsday" or "Doomsday: Tempo")
-        if let Some(ref filters) = deck_name_filter {
-            if let Some(filter) = filters.first() {
-                let (arch, _) = parse_deck_name(filter);
-                if !arch.is_empty() && arch != filter.as_str() {
-                    selected_archetype = Some(arch.to_string());
-                } else {
-                    selected_archetype = Some(filter.clone());
-                }
-            }
-        }
-        opponent_name_filter = config.stats.filters.opponent.clone().map(|o| vec![o]);
-        opponent_deck_filter = config.stats.filters.opponent_deck.clone().map(|d| vec![d]);
-        event_type_filter = config.stats.filters.event_type.clone().map(|e| vec![e]);
     } else {
-        // Interactive filter selection — delegates to shared function with cumulative narrowing
-        let fs = select_filters_interactive(connection);
-        era_values = fs.era_values;
-        deck_name_filter = fs.deck_name;
-        opponent_name_filter = fs.opponent_name;
-        opponent_deck_filter = fs.opponent_deck;
-        opponent_deck_archetype_filter = fs.opponent_deck_archetype;
-        opponent_deck_category_filter = fs.opponent_deck_category;
-        event_type_filter = fs.event_type;
-        loss_reason_filter = fs.loss_reason;
-        win_condition_filter = fs.win_condition;
-        game_plan_filter = fs.game_plan;
-        mulligan_count_filter = fs.mulligan_count;
-        game_length_filter = fs.game_length;
-        game_number_filter = fs.game_number;
-        play_draw_filter = fs.play_draw;
-        last_n_matches_filter = fs.last_n_matches;
+        select_filters_interactive(connection)
+    };
 
-        // Infer archetype for Doomsday-specific group-by options.
-        // Works when the user filtered by archetype directly; subtype/list filters
-        // don't set this (existing limitation).
-        if let Some(ref filters) = deck_name_filter {
-            for filter in filters {
-                if !filter.starts_with(": ") && !filter.starts_with('(') {
-                    let (arch, _) = parse_deck_name(filter);
-                    if !arch.is_empty() {
-                        selected_archetype = Some(arch.to_string());
-                        break;
-                    }
-                }
-            }
-        }
-
-    }
-
-
-    // Detect if filtering for Doomsday decks (check both archetype and filter string)
-    let is_doomsday_filter = selected_archetype
-        .as_ref()
-        .map(|a| a.to_lowercase() == "doomsday")
-        .unwrap_or(false)
-        || deck_name_filter
-            .as_ref()
-            .map(|fs| fs.iter().any(|f| f.to_lowercase().contains("doomsday")))
-            .unwrap_or(false);
+    let is_doomsday_filter = filter_sel.deck_archetype.as_ref()
+        .map(|archs| archs.iter().any(|a| a.to_lowercase().contains("doomsday")))
+        .unwrap_or(false);
 
     // Step 2: Select Group-bys
     let selected_groupbys = if use_defaults {
@@ -3320,10 +3249,10 @@ fn show_stats_interactive(use_defaults: bool) {
         ];
 
         // Determine if game mode based on selected filters and group-bys
-        let picker_game_mode = (loss_reason_filter.is_some() || win_condition_filter.is_some()
-            || game_plan_filter.is_some() || mulligan_count_filter.is_some()
-            || game_length_filter.is_some() || game_number_filter.is_some()
-            || play_draw_filter.is_some())
+        let picker_game_mode = (filter_sel.loss_reason.is_some() || filter_sel.win_condition.is_some()
+            || filter_sel.game_plan.is_some() || filter_sel.mulligan_count.is_some()
+            || filter_sel.game_length.is_some() || filter_sel.game_number.is_some()
+            || filter_sel.play_draw.is_some())
             || has_game_level(&selected_groupbys, GROUPBY_LEVELS);
 
         // Pre-select statistics based on config, with appropriate win rate auto-selected
@@ -3347,93 +3276,10 @@ fn show_stats_interactive(use_defaults: bool) {
             .unwrap()
     };
 
-    // Now build and execute query
-    let mut query = matches::table.order(matches::date.asc()).into_boxed();
-
-    if let Some(ref eras) = era_values {
-        query = query.filter(matches::era.eq_any(eras));
-    }
-    if let Some(ref types) = event_type_filter {
-        query = query.filter(matches::event_type.eq_any(types));
-    }
-
-    let mut all_matches = query.load::<Match>(connection)
-        .expect("Error loading matches");
-
-    // Post-load: LIKE-pattern filters (multi-value OR)
-    if let Some(ref patterns) = deck_name_filter {
-        all_matches.retain(|m| patterns.iter().any(|p| m.deck_name.contains(p.as_str())));
-    }
-    if let Some(ref names) = opponent_name_filter {
-        all_matches.retain(|m| names.iter().any(|n| m.opponent_name.contains(n.as_str())));
-    }
-    if let Some(ref decks) = opponent_deck_filter {
-        all_matches.retain(|m| decks.iter().any(|d| m.opponent_deck.contains(d.as_str())));
-    }
-
-    // Post-load: computed fields
-    if let Some(ref archs) = opponent_deck_archetype_filter {
-        all_matches.retain(|m| {
-            let (archetype, _) = parse_deck_name(&m.opponent_deck);
-            archs.contains(&archetype.to_string())
-        });
-    }
-    if let Some(ref cats) = opponent_deck_category_filter {
-        all_matches.retain(|m| {
-            let cat = categorize_deck(&m.opponent_deck).to_string().to_owned();
-            cats.iter().any(|c| c == &cat)
-        });
-    }
-
-    // Post-load: last N matches
-    if let Some(n) = last_n_matches_filter {
-        if all_matches.len() > n {
-            let keep_from = all_matches.len() - n;
-            all_matches.drain(0..keep_from);
-        }
-    }
-
+    let (all_matches, all_games) = filter_sel.load_filtered_data(connection);
     if all_matches.is_empty() {
         println!("No matches found with selected filters");
         return;
-    }
-
-    // Get all games for these matches and apply game-specific filters
-    let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
-    let game_query = games::table.filter(games::match_id.eq_any(&match_ids));
-
-    let mut all_games = game_query.load::<Game>(connection)
-        .expect("Error loading games");
-
-    let has_game_filters = loss_reason_filter.is_some()
-        || win_condition_filter.is_some()
-        || game_plan_filter.is_some()
-        || mulligan_count_filter.is_some()
-        || game_length_filter.is_some()
-        || game_number_filter.is_some()
-        || play_draw_filter.is_some();
-
-    // Post-load: game-level filters
-    if let Some(ref reasons) = loss_reason_filter {
-        all_games.retain(|g| g.loss_reason.as_ref().map(|r| reasons.contains(r)).unwrap_or(false));
-    }
-    if let Some(ref conditions) = win_condition_filter {
-        all_games.retain(|g| g.win_condition.as_ref().map(|c| conditions.contains(c)).unwrap_or(false));
-    }
-    if let Some(ref plans) = game_plan_filter {
-        all_games.retain(|g| g.opening_hand_plan.as_ref().map(|p| plans.contains(p)).unwrap_or(false));
-    }
-    if let Some(count) = mulligan_count_filter {
-        all_games.retain(|g| g.mulligans == count);
-    }
-    if let Some((min_turns, max_turns)) = game_length_filter {
-        all_games.retain(|g| g.turns.map_or(false, |t| t >= min_turns && t <= max_turns));
-    }
-    if let Some(ref game_nums) = game_number_filter {
-        all_games.retain(|g| game_nums.contains(&g.game_number));
-    }
-    if let Some(ref play_draw) = play_draw_filter {
-        all_games.retain(|g| &g.play_draw == play_draw);
     }
 
     // Load doomsday games data if filtering for doomsday
@@ -3448,81 +3294,20 @@ fn show_stats_interactive(use_defaults: bool) {
         Vec::new()
     };
 
-    // If game-specific filters were applied, filter matches to only those with matching games
-    if has_game_filters {
-        let filtered_match_ids: std::collections::HashSet<i32> = all_games.iter()
-            .map(|g| g.match_id)
-            .collect();
-        all_matches.retain(|m| filtered_match_ids.contains(&m.match_id));
-
-        if all_matches.is_empty() {
-            println!("No matches found with selected filters");
-            return;
-        }
-    }
-
-    // Display active filters prominently
-    let mut active_filters: Vec<String> = Vec::new();
-    if let Some(ref eras) = era_values {
-        let era_str = eras.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
-        active_filters.push(format!("Era: {}", era_str));
-    }
-    if let Some(ref decks) = deck_name_filter {
-        active_filters.push(format!("My Deck: {}", decks.join(", ")));
-    }
-    if let Some(ref opps) = opponent_name_filter {
-        active_filters.push(format!("Opponent: {}", opps.join(", ")));
-    }
-    if let Some(ref opp_decks) = opponent_deck_filter {
-        active_filters.push(format!("Opponent Deck: {}", opp_decks.join(", ")));
-    }
-    if let Some(ref opp_archs) = opponent_deck_archetype_filter {
-        active_filters.push(format!("Opponent Archetype: {}", opp_archs.join(", ")));
-    }
-    if let Some(ref opp_cats) = opponent_deck_category_filter {
-        active_filters.push(format!("Opponent Category: {}", opp_cats.join(", ")));
-    }
-    if let Some(ref events) = event_type_filter {
-        active_filters.push(format!("Event: {}", events.join(", ")));
-    }
-    if let Some(ref reasons) = loss_reason_filter {
-        active_filters.push(format!("Loss Reason: {}", reasons.join(", ")));
-    }
-    if let Some(ref conds) = win_condition_filter {
-        active_filters.push(format!("Win Condition: {}", conds.join(", ")));
-    }
-    if let Some(ref plans) = game_plan_filter {
-        active_filters.push(format!("Game Plan: {}", plans.join(", ")));
-    }
-    if let Some(count) = mulligan_count_filter {
-        active_filters.push(format!("Mulligans: {}", count));
-    }
-    if let Some((min, max)) = game_length_filter {
-        active_filters.push(format!("Game Length: {}-{} turns", min, max));
-    }
-    if let Some(ref nums) = game_number_filter {
-        let label = match nums.as_slice() {
-            [1] => "Game 1".to_string(),
-            [2] => "Game 2".to_string(),
-            [3] => "Game 3".to_string(),
-            [2, 3] => "Post-board (2+3)".to_string(),
-            _ => format!("Games {:?}", nums),
-        };
-        active_filters.push(label);
-    }
-    if let Some(ref pd) = play_draw_filter {
-        active_filters.push(format!("Play/Draw: {}", pd));
-    }
-    if let Some(n) = last_n_matches_filter {
-        active_filters.push(format!("Last {} matches", n));
-    }
-
+    let active_filters = filter_sel.active_filter_descriptions();
     if !active_filters.is_empty() {
         println!("\nFilters: {}", active_filters.join(" | "));
     }
     println!("Found {} matches with {} total games\n", all_matches.len(), all_games.len());
 
     // Determine if we're in "game mode" (game-level filters or group-bys applied)
+    let has_game_filters = filter_sel.loss_reason.is_some()
+        || filter_sel.win_condition.is_some()
+        || filter_sel.game_plan.is_some()
+        || filter_sel.mulligan_count.is_some()
+        || filter_sel.game_length.is_some()
+        || filter_sel.game_number.is_some()
+        || filter_sel.play_draw.is_some();
     let has_game_groupbys = has_game_level(&selected_groupbys, GROUPBY_LEVELS);
     let game_mode = has_game_filters || has_game_groupbys;
 
@@ -5130,6 +4915,374 @@ mod tests {
             fuzzy_select_decision("  tabbed  ", Some("other"), true),
             Some("tabbed".to_string())
         );
+    }
+
+    // ── Test infrastructure for load_filtered_data() ─────────────────────────
+
+    fn make_test_db() -> SqliteConnection {
+        let mut conn = SqliteConnection::establish(":memory:").unwrap();
+        diesel::sql_query("CREATE TABLE matches (
+            match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            deck_name TEXT NOT NULL,
+            opponent_name TEXT NOT NULL,
+            opponent_deck TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            die_roll_winner TEXT NOT NULL,
+            match_winner TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            era INTEGER,
+            league_id INTEGER
+        )").execute(&mut conn).unwrap();
+        diesel::sql_query("CREATE TABLE games (
+            game_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            match_id INTEGER NOT NULL,
+            game_number INTEGER NOT NULL,
+            play_draw TEXT NOT NULL,
+            mulligans INTEGER NOT NULL,
+            opening_hand_plan TEXT,
+            game_winner TEXT NOT NULL,
+            win_condition TEXT,
+            loss_reason TEXT,
+            turns INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )").execute(&mut conn).unwrap();
+        conn
+    }
+
+    fn ins_match(conn: &mut SqliteConnection, date: &str, deck: &str, opp: &str,
+                 opp_deck: &str, event: &str, era: Option<i32>) -> i32 {
+        diesel::insert_into(matches::table)
+            .values(NewMatch {
+                date: date.to_string(),
+                deck_name: deck.to_string(),
+                opponent_name: opp.to_string(),
+                opponent_deck: opp_deck.to_string(),
+                event_type: event.to_string(),
+                die_roll_winner: "me".to_string(),
+                match_winner: "me".to_string(),
+                era,
+                league_id: None,
+            })
+            .execute(conn)
+            .unwrap();
+        diesel::select(diesel::dsl::sql::<diesel::sql_types::Integer>("last_insert_rowid()"))
+            .get_result(conn)
+            .unwrap()
+    }
+
+    fn ins_game(conn: &mut SqliteConnection, match_id: i32, game_number: i32,
+                plan: Option<&str>, win_con: Option<&str>, loss: Option<&str>,
+                mulligans: i32, turns: Option<i32>, play_draw: &str) {
+        diesel::insert_into(games::table)
+            .values(NewGame {
+                match_id,
+                game_number,
+                play_draw: play_draw.to_string(),
+                mulligans,
+                opening_hand_plan: plan.map(str::to_string),
+                game_winner: "me".to_string(),
+                win_condition: win_con.map(str::to_string),
+                loss_reason: loss.map(str::to_string),
+                turns,
+            })
+            .execute(conn)
+            .unwrap();
+    }
+
+    // ── Tests 1–20: load_filtered_data() ─────────────────────────────────────
+
+    #[test]
+    fn no_filters_returns_all() {
+        let mut conn = make_test_db();
+        let m1 = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "Delver", "League", Some(1));
+        let m2 = ins_match(&mut conn, "2024-01-02", "Storm", "bob", "Reanimator", "Challenge", Some(1));
+        let m3 = ins_match(&mut conn, "2024-01-03", "Depths", "charlie", "Tempo", "Casual", Some(2));
+        ins_game(&mut conn, m1, 1, None, None, None, 0, None, "play");
+        ins_game(&mut conn, m2, 1, None, None, None, 0, None, "draw");
+        ins_game(&mut conn, m3, 1, None, None, None, 0, None, "play");
+        let (m, g) = FilterSelection::default().load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 3);
+        assert_eq!(g.len(), 3);
+    }
+
+    #[test]
+    fn era_single_value() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "Delver", "League", Some(3));
+        ins_match(&mut conn, "2024-01-02", "Storm", "bob", "Storm", "League", Some(4));
+        let filter = FilterSelection { era_values: Some(vec![3]), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].deck_name, "Doomsday");
+    }
+
+    #[test]
+    fn era_multi_value_or() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "A", "alice", "D", "League", Some(3));
+        ins_match(&mut conn, "2024-01-02", "B", "bob", "D", "League", Some(4));
+        ins_match(&mut conn, "2024-01-03", "C", "charlie", "D", "League", Some(5));
+        let filter = FilterSelection { era_values: Some(vec![3, 5]), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 2);
+        let decks: Vec<&str> = m.iter().map(|x| x.deck_name.as_str()).collect();
+        assert!(decks.contains(&"A"));
+        assert!(decks.contains(&"C"));
+        assert!(!decks.contains(&"B"));
+    }
+
+    #[test]
+    fn deck_archetype_exact_match() {
+        // deck_archetype uses exact parsed-archetype match (not substring)
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday: Tempo (aug24)", "alice", "D", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Pseudo-Doomsday", "bob", "D", "League", None);
+        ins_match(&mut conn, "2024-01-03", "Storm", "charlie", "D", "League", None);
+        // "Doomsday" should match "Doomsday: Tempo (aug24)" (archetype=Doomsday) but NOT "Pseudo-Doomsday"
+        let filter = FilterSelection { deck_archetype: Some(vec!["Doomsday".to_string()]), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].deck_name.contains("Doomsday: Tempo"));
+    }
+
+    #[test]
+    fn deck_subtype_filter() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday: Tempo", "alice", "D", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Doomsday: Turbo", "bob", "D", "League", None);
+        // bare subtype "Tempo" (no ": " prefix needed)
+        let filter = FilterSelection { deck_subtype: Some(vec!["Tempo".to_string()]), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].deck_name, "Doomsday: Tempo");
+    }
+
+    #[test]
+    fn deck_list_filter() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday: Tempo (aug24)", "alice", "D", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Doomsday: Tempo (sep24)", "bob", "D", "League", None);
+        // bare list name "aug24" (no "()" wrapper needed)
+        let filter = FilterSelection { deck_list: Some(vec!["aug24".to_string()]), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert!(m[0].deck_name.contains("aug24"));
+    }
+
+    #[test]
+    fn deck_archetype_multi_value_or() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday: Tempo", "alice", "D", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Storm", "bob", "D", "League", None);
+        ins_match(&mut conn, "2024-01-03", "Delver", "charlie", "D", "League", None);
+        let filter = FilterSelection {
+            deck_archetype: Some(vec!["Doomsday".to_string(), "Storm".to_string()]),
+            ..Default::default()
+        };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 2);
+        let decks: Vec<&str> = m.iter().map(|x| x.deck_name.as_str()).collect();
+        assert!(decks.contains(&"Doomsday: Tempo"));
+        assert!(decks.contains(&"Storm"));
+        assert!(!decks.contains(&"Delver"));
+    }
+
+    #[test]
+    fn opponent_name_substring() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday", "bobsmith", "D", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Doomsday", "alice", "D", "League", None);
+        let filter = FilterSelection { opponent_name: Some(vec!["bob".to_string()]), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].opponent_name, "bobsmith");
+    }
+
+    #[test]
+    fn opponent_deck_substring() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "Jeskai Delver", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Doomsday", "bob", "Storm", "League", None);
+        let filter = FilterSelection { opponent_deck: Some(vec!["Delver".to_string()]), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].opponent_deck, "Jeskai Delver");
+    }
+
+    #[test]
+    fn opponent_deck_archetype_computed() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "Doomsday: Tempo (aug24)", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Doomsday", "bob", "Storm", "League", None);
+        ins_match(&mut conn, "2024-01-03", "Doomsday", "charlie", "Delver: Tempo", "League", None);
+        // Filter by archetype ["Doomsday", "Storm"] should match first two
+        let filter = FilterSelection {
+            opponent_deck_archetype: Some(vec!["Doomsday".to_string(), "Storm".to_string()]),
+            ..Default::default()
+        };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 2);
+        let opps: Vec<&str> = m.iter().map(|x| x.opponent_name.as_str()).collect();
+        assert!(opps.contains(&"alice"));
+        assert!(opps.contains(&"bob"));
+        assert!(!opps.contains(&"charlie"));
+    }
+
+    #[test]
+    fn opponent_deck_category_computed() {
+        // Uses real definition files: "Doomsday: Tempo"=Combo, "Cloudpost"=Non-Blue
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "Doomsday: Tempo", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Doomsday", "bob", "Cloudpost", "League", None);
+        let filter = FilterSelection {
+            opponent_deck_category: Some(vec!["Combo".to_string()]),
+            ..Default::default()
+        };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].opponent_name, "alice");
+    }
+
+    #[test]
+    fn event_type_sql_filter() {
+        let mut conn = make_test_db();
+        ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", None);
+        ins_match(&mut conn, "2024-01-02", "Doomsday", "bob", "D", "Challenge", None);
+        ins_match(&mut conn, "2024-01-03", "Doomsday", "charlie", "D", "Casual", None);
+        let filter = FilterSelection {
+            event_type: Some(vec!["League".to_string()]),
+            ..Default::default()
+        };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].opponent_name, "alice");
+    }
+
+    #[test]
+    fn last_n_matches_truncation() {
+        let mut conn = make_test_db();
+        for i in 1..=5 {
+            ins_match(&mut conn, &format!("2024-01-0{}", i), "Doomsday", "alice", "D", "League", None);
+        }
+        let filter = FilterSelection { last_n_matches: Some(3), ..Default::default() };
+        let (m, _) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m[0].date, "2024-01-03");
+        assert_eq!(m[2].date, "2024-01-05");
+    }
+
+    #[test]
+    fn loss_reason_single() {
+        let mut conn = make_test_db();
+        let m1 = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", None);
+        let m2 = ins_match(&mut conn, "2024-01-02", "Doomsday", "bob", "D", "League", None);
+        ins_game(&mut conn, m1, 1, None, None, Some("counterspell"), 0, Some(5), "play");
+        ins_game(&mut conn, m2, 1, None, None, Some("discard"), 0, Some(5), "play");
+        let filter = FilterSelection {
+            loss_reason: Some(vec!["counterspell".to_string()]),
+            ..Default::default()
+        };
+        let (m, g) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(g.len(), 1);
+        assert_eq!(m[0].match_id, m1);
+    }
+
+    #[test]
+    fn win_condition_multi_value() {
+        let mut conn = make_test_db();
+        let mid = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", None);
+        ins_game(&mut conn, mid, 1, None, Some("doomsday-pile"), None, 0, Some(5), "play");
+        ins_game(&mut conn, mid, 2, None, Some("laboratory-maniac"), None, 0, Some(6), "draw");
+        ins_game(&mut conn, mid, 3, None, Some("creatures"), None, 0, Some(7), "play");
+        let filter = FilterSelection {
+            win_condition: Some(vec!["doomsday-pile".to_string(), "laboratory-maniac".to_string()]),
+            ..Default::default()
+        };
+        let (m, g) = filter.load_filtered_data(&mut conn);
+        assert_eq!(g.len(), 2);
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn game_plan_filter() {
+        let mut conn = make_test_db();
+        let m1 = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", None);
+        let m2 = ins_match(&mut conn, "2024-01-02", "Doomsday", "bob", "D", "League", None);
+        ins_game(&mut conn, m1, 1, Some("Doomsday Fast"), None, None, 0, Some(3), "play");
+        ins_game(&mut conn, m2, 1, Some("Doomsday Slow"), None, None, 0, Some(8), "play");
+        let filter = FilterSelection {
+            game_plan: Some(vec!["Doomsday Fast".to_string()]),
+            ..Default::default()
+        };
+        let (m, g) = filter.load_filtered_data(&mut conn);
+        assert_eq!(g.len(), 1);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].match_id, m1);
+    }
+
+    #[test]
+    fn game_length_range() {
+        let mut conn = make_test_db();
+        let mid = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", None);
+        ins_game(&mut conn, mid, 1, None, None, None, 0, Some(3), "play");
+        ins_game(&mut conn, mid, 2, None, None, None, 0, Some(7), "draw");
+        ins_game(&mut conn, mid, 3, None, None, None, 0, Some(15), "play");
+        let filter = FilterSelection { game_length: Some((5, 10)), ..Default::default() };
+        let (m, g) = filter.load_filtered_data(&mut conn);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].turns, Some(7));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn game_number_multi() {
+        let mut conn = make_test_db();
+        let mid = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", None);
+        ins_game(&mut conn, mid, 1, None, None, None, 0, None, "play");
+        ins_game(&mut conn, mid, 2, None, None, None, 0, None, "play");
+        ins_game(&mut conn, mid, 3, None, None, None, 0, None, "draw");
+        let filter = FilterSelection { game_number: Some(vec![2, 3]), ..Default::default() };
+        let (m, g) = filter.load_filtered_data(&mut conn);
+        assert_eq!(g.len(), 2);
+        assert_eq!(m.len(), 1);
+        let gnums: Vec<i32> = g.iter().map(|x| x.game_number).collect();
+        assert!(gnums.contains(&2));
+        assert!(gnums.contains(&3));
+        assert!(!gnums.contains(&1));
+    }
+
+    #[test]
+    fn play_draw_filter() {
+        let mut conn = make_test_db();
+        let mid = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", None);
+        ins_game(&mut conn, mid, 1, None, None, None, 0, None, "play");
+        ins_game(&mut conn, mid, 2, None, None, None, 0, None, "draw");
+        ins_game(&mut conn, mid, 3, None, None, None, 0, None, "play");
+        let filter = FilterSelection { play_draw: Some("play".to_string()), ..Default::default() };
+        let (m, g) = filter.load_filtered_data(&mut conn);
+        assert_eq!(g.len(), 2);
+        assert!(g.iter().all(|x| x.play_draw == "play"));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn game_filter_prunes_matches() {
+        let mut conn = make_test_db();
+        let m1 = ins_match(&mut conn, "2024-01-01", "Doomsday", "alice", "D", "League", Some(1));
+        let m2 = ins_match(&mut conn, "2024-01-02", "Doomsday", "bob", "D", "League", Some(1));
+        ins_game(&mut conn, m1, 1, None, Some("doomsday-pile"), None, 0, None, "play");
+        ins_game(&mut conn, m2, 1, None, Some("creatures"), None, 0, None, "play");
+        let filter = FilterSelection {
+            era_values: Some(vec![1]),
+            win_condition: Some(vec!["doomsday-pile".to_string()]),
+            ..Default::default()
+        };
+        let (m, g) = filter.load_filtered_data(&mut conn);
+        assert_eq!(m.len(), 1);
+        assert_eq!(g.len(), 1);
+        assert_eq!(m[0].match_id, m1);
     }
 }
 
