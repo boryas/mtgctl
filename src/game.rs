@@ -3007,13 +3007,13 @@ fn show_stats_interactive(use_defaults: bool) {
     println!("=== Match Statistics ===\n");
 
     // Apply filters from config or prompt interactively
-    let mut deck_name_filter: Option<String> = None;
+    let deck_name_filter: Option<String>;
     let mut selected_archetype: Option<String> = None;  // Track archetype even when filtering by subtype/list
-    let mut opponent_name_filter: Option<String> = None;
-    let mut opponent_deck_filter: Option<String> = None;
+    let opponent_name_filter: Option<String>;
+    let opponent_deck_filter: Option<String>;
     let mut opponent_deck_archetype_filter: Option<String> = None;
     let mut opponent_deck_category_filter: Option<String> = None;
-    let mut event_type_filter: Option<String> = None;
+    let event_type_filter: Option<String>;
     let mut era_values: Option<Vec<i32>> = None;
     let mut loss_reason_filter: Option<String> = None;
     let mut win_condition_filter: Option<String> = None;
