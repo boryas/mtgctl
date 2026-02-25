@@ -130,6 +130,57 @@ fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) ->
     }
 }
 
+/// Fuzzy multi-select: Tab marks items, Enter confirms all marked (or current if none marked)
+fn fuzzy_multi_select(prompt: &str, options: &[String]) -> Vec<String> {
+    if options.is_empty() {
+        return vec![];
+    }
+    let prompt_str = format!("{} (Space to mark, Enter to confirm): ", prompt);
+    let skim_options = SkimOptionsBuilder::default()
+        .prompt(Some(&prompt_str))
+        .multi(true)
+        .bind(vec!["space:toggle+down"])
+        .build()
+        .unwrap();
+    let input = options.join("\n");
+    let item_reader = SkimItemReader::default();
+    let items = item_reader.of_bufread(Cursor::new(input));
+    match Skim::run_with(&skim_options, Some(items)) {
+        Some(output) if !output.is_abort => output
+            .selected_items
+            .iter()
+            .map(|item| item.output().to_string())
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Fuzzy multi-select with a default query pre-filled
+fn fuzzy_multi_select_with_default(prompt: &str, options: &[String], default: &str) -> Vec<String> {
+    if options.is_empty() {
+        return vec![];
+    }
+    let prompt_str = format!("{} (Space to mark, Enter to confirm): ", prompt);
+    let skim_options = SkimOptionsBuilder::default()
+        .prompt(Some(&prompt_str))
+        .query(Some(default))
+        .multi(true)
+        .bind(vec!["space:toggle+down"])
+        .build()
+        .unwrap();
+    let input = options.join("\n");
+    let item_reader = SkimItemReader::default();
+    let items = item_reader.of_bufread(Cursor::new(input));
+    match Skim::run_with(&skim_options, Some(items)) {
+        Some(output) if !output.is_abort => output
+            .selected_items
+            .iter()
+            .map(|item| item.output().to_string())
+            .collect(),
+        _ => vec![],
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct UnifiedArchetypeDefinition {
     name: String,
@@ -226,20 +277,22 @@ struct StatsFilters {
 struct FilterSelection {
     // Match-level filters
     era_values: Option<Vec<i32>>,
-    deck_name: Option<String>,
-    opponent_name: Option<String>,
-    opponent_deck: Option<String>,
-    opponent_deck_archetype: Option<String>,
-    opponent_deck_category: Option<String>,
-    event_type: Option<String>,
+    deck_name: Option<Vec<String>>,
+    opponent_name: Option<Vec<String>>,
+    opponent_deck: Option<Vec<String>>,
+    opponent_deck_archetype: Option<Vec<String>>,
+    opponent_deck_category: Option<Vec<String>>,
+    event_type: Option<Vec<String>>,
     // Game-level filters
-    loss_reason: Option<String>,
-    win_condition: Option<String>,
-    game_plan: Option<String>,
+    loss_reason: Option<Vec<String>>,
+    win_condition: Option<Vec<String>>,
+    game_plan: Option<Vec<String>>,
     mulligan_count: Option<i32>,
     game_length: Option<(i32, i32)>,
     game_number: Option<Vec<i32>>,
     play_draw: Option<String>,
+    // Post-filter truncation
+    last_n_matches: Option<usize>,
 }
 
 impl FilterSelection {
@@ -250,32 +303,32 @@ impl FilterSelection {
             let era_str = eras.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
             filters.push(format!("Era: {}", era_str));
         }
-        if let Some(ref deck) = self.deck_name {
-            filters.push(format!("Deck: {}", deck));
+        if let Some(ref decks) = self.deck_name {
+            filters.push(format!("Deck: {}", decks.join(", ")));
         }
-        if let Some(ref opp) = self.opponent_name {
-            filters.push(format!("Opponent: {}", opp));
+        if let Some(ref opps) = self.opponent_name {
+            filters.push(format!("Opponent: {}", opps.join(", ")));
         }
-        if let Some(ref opp_deck) = self.opponent_deck {
-            filters.push(format!("Vs Deck: {}", opp_deck));
+        if let Some(ref opp_decks) = self.opponent_deck {
+            filters.push(format!("Vs Deck: {}", opp_decks.join(", ")));
         }
-        if let Some(ref opp_arch) = self.opponent_deck_archetype {
-            filters.push(format!("Vs Archetype: {}", opp_arch));
+        if let Some(ref opp_archs) = self.opponent_deck_archetype {
+            filters.push(format!("Vs Archetype: {}", opp_archs.join(", ")));
         }
-        if let Some(ref opp_cat) = self.opponent_deck_category {
-            filters.push(format!("Vs Category: {}", opp_cat));
+        if let Some(ref opp_cats) = self.opponent_deck_category {
+            filters.push(format!("Vs Category: {}", opp_cats.join(", ")));
         }
-        if let Some(ref ev_type) = self.event_type {
-            filters.push(format!("Event: {}", ev_type));
+        if let Some(ref ev_types) = self.event_type {
+            filters.push(format!("Event: {}", ev_types.join(", ")));
         }
-        if let Some(ref reason) = self.loss_reason {
-            filters.push(format!("Loss Reason: {}", reason));
+        if let Some(ref reasons) = self.loss_reason {
+            filters.push(format!("Loss Reason: {}", reasons.join(", ")));
         }
-        if let Some(ref condition) = self.win_condition {
-            filters.push(format!("Win Condition: {}", condition));
+        if let Some(ref conditions) = self.win_condition {
+            filters.push(format!("Win Condition: {}", conditions.join(", ")));
         }
-        if let Some(ref plan) = self.game_plan {
-            filters.push(format!("Game Plan: {}", plan));
+        if let Some(ref plans) = self.game_plan {
+            filters.push(format!("Game Plan: {}", plans.join(", ")));
         }
         if let Some(count) = self.mulligan_count {
             filters.push(format!("Mulligans: {}", count));
@@ -290,6 +343,9 @@ impl FilterSelection {
         if let Some(ref pd) = self.play_draw {
             filters.push(format!("Play/Draw: {}", pd));
         }
+        if let Some(n) = self.last_n_matches {
+            filters.push(format!("Last {} matches", n));
+        }
         filters
     }
 
@@ -297,38 +353,49 @@ impl FilterSelection {
     fn load_filtered_data(&self, connection: &mut diesel::sqlite::SqliteConnection) -> (Vec<Match>, Vec<Game>) {
         use diesel::prelude::*;
 
-        // Build match query with filters
+        // Build match query with SQL-level filters (exact match / eq_any)
         let mut query = matches::table.order(matches::date.asc()).into_boxed();
 
         if let Some(ref eras) = self.era_values {
             query = query.filter(matches::era.eq_any(eras));
         }
-        if let Some(ref deck) = self.deck_name {
-            query = query.filter(matches::deck_name.like(format!("%{}%", deck)));
-        }
-        if let Some(ref opp) = self.opponent_name {
-            query = query.filter(matches::opponent_name.like(format!("%{}%", opp)));
-        }
-        if let Some(ref opp_deck) = self.opponent_deck {
-            query = query.filter(matches::opponent_deck.like(format!("%{}%", opp_deck)));
-        }
-        if let Some(ref ev_type) = self.event_type {
-            query = query.filter(matches::event_type.like(format!("%{}%", ev_type)));
+        if let Some(ref types) = self.event_type {
+            query = query.filter(matches::event_type.eq_any(types));
         }
 
         let mut all_matches: Vec<Match> = query.load(connection).expect("Error loading matches");
 
-        // Apply post-load filters for computed fields
-        if let Some(ref arch_filter) = self.opponent_deck_archetype {
+        // Post-load: LIKE-pattern filters (multi-value OR)
+        if let Some(ref patterns) = self.deck_name {
+            all_matches.retain(|m| patterns.iter().any(|p| m.deck_name.contains(p.as_str())));
+        }
+        if let Some(ref names) = self.opponent_name {
+            all_matches.retain(|m| names.iter().any(|n| m.opponent_name.contains(n.as_str())));
+        }
+        if let Some(ref decks) = self.opponent_deck {
+            all_matches.retain(|m| decks.iter().any(|d| m.opponent_deck.contains(d.as_str())));
+        }
+
+        // Post-load: computed fields
+        if let Some(ref archs) = self.opponent_deck_archetype {
             all_matches.retain(|m| {
                 let (archetype, _) = parse_deck_name(&m.opponent_deck);
-                archetype == arch_filter
+                archs.contains(&archetype.to_string())
             });
         }
-        if let Some(ref cat_filter) = self.opponent_deck_category {
+        if let Some(ref cats) = self.opponent_deck_category {
             all_matches.retain(|m| {
-                categorize_deck(&m.opponent_deck).to_string() == cat_filter
+                let cat = categorize_deck(&m.opponent_deck).to_string().to_owned();
+                cats.iter().any(|c| c == &cat)
             });
+        }
+
+        // Post-load: last N matches (applied before loading games)
+        if let Some(n) = self.last_n_matches {
+            if all_matches.len() > n {
+                let keep_from = all_matches.len() - n;
+                all_matches.drain(0..keep_from);
+            }
         }
 
         if all_matches.is_empty() {
@@ -337,32 +404,32 @@ impl FilterSelection {
 
         // Load games for these matches
         let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
-        let mut game_query = games::table.filter(games::match_id.eq_any(&match_ids)).into_boxed();
+        let game_query = games::table.filter(games::match_id.eq_any(&match_ids));
 
-        // Apply game-level filters
-        if let Some(ref reason) = self.loss_reason {
-            game_query = game_query.filter(games::loss_reason.eq(reason));
+        let mut all_games: Vec<Game> = game_query.load(connection).expect("Error loading games");
+
+        // Post-load: game-level filters
+        if let Some(ref reasons) = self.loss_reason {
+            all_games.retain(|g| g.loss_reason.as_ref().map(|r| reasons.contains(r)).unwrap_or(false));
         }
-        if let Some(ref condition) = self.win_condition {
-            game_query = game_query.filter(games::win_condition.eq(condition));
+        if let Some(ref conditions) = self.win_condition {
+            all_games.retain(|g| g.win_condition.as_ref().map(|c| conditions.contains(c)).unwrap_or(false));
         }
-        if let Some(ref plan) = self.game_plan {
-            game_query = game_query.filter(games::opening_hand_plan.eq(plan));
+        if let Some(ref plans) = self.game_plan {
+            all_games.retain(|g| g.opening_hand_plan.as_ref().map(|p| plans.contains(p)).unwrap_or(false));
         }
         if let Some(count) = self.mulligan_count {
-            game_query = game_query.filter(games::mulligans.eq(count));
+            all_games.retain(|g| g.mulligans == count);
         }
         if let Some((min_turns, max_turns)) = self.game_length {
-            game_query = game_query.filter(games::turns.ge(min_turns).and(games::turns.le(max_turns)));
+            all_games.retain(|g| g.turns.map_or(false, |t| t >= min_turns && t <= max_turns));
         }
         if let Some(ref nums) = self.game_number {
-            game_query = game_query.filter(games::game_number.eq_any(nums));
+            all_games.retain(|g| nums.contains(&g.game_number));
         }
         if let Some(ref pd) = self.play_draw {
-            game_query = game_query.filter(games::play_draw.eq(pd));
+            all_games.retain(|g| &g.play_draw == pd);
         }
-
-        let all_games: Vec<Game> = game_query.load(connection).expect("Error loading games");
 
         // If game-level filters applied, also filter matches to only those with matching games
         let has_game_filters = self.loss_reason.is_some()
@@ -406,6 +473,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
         "Game Length",
         "Game Number",
         "Play/Draw",
+        "Last N Matches",
     ];
 
     // Pre-select filters based on config
@@ -428,6 +496,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
         df.contains(&"game-length".to_string()),
         df.contains(&"game-number".to_string()),
         df.contains(&"play-draw".to_string()),
+        false, // Last N Matches - never pre-selected
     ];
 
     let selected_filters = MultiSelect::new()
@@ -469,14 +538,17 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut archetype_list: Vec<String> = archetypes.into_iter().collect();
                 archetype_list.sort();
                 let default_deck = config.stats.filters.my_deck.as_deref().unwrap_or("");
-                if let Some(selected_archetype) = fuzzy_select_with_default("Select archetype to filter by", &archetype_list, default_deck) {
-                    filters.deck_name = Some(selected_archetype.clone());
-                    // Reload deck-specific options
-                    if let Some(data) = load_archetype_data(&selected_archetype) {
-                        if !data.win_conditions.is_empty() { all_win_conditions = data.win_conditions; }
-                        if !data.loss_reasons.is_empty() { all_loss_reasons = data.loss_reasons; }
-                        if !data.game_plans.is_empty() { all_game_plans = data.game_plans; }
+                let selected = fuzzy_multi_select_with_default("Select archetype(s) to filter by", &archetype_list, default_deck);
+                if !selected.is_empty() {
+                    // Reload deck-specific options when a single archetype is selected
+                    if selected.len() == 1 {
+                        if let Some(data) = load_archetype_data(&selected[0]) {
+                            if !data.win_conditions.is_empty() { all_win_conditions = data.win_conditions; }
+                            if !data.loss_reasons.is_empty() { all_loss_reasons = data.loss_reasons; }
+                            if !data.game_plans.is_empty() { all_game_plans = data.game_plans; }
+                        }
                     }
+                    filters.deck_name = Some(selected);
                 }
             }
             3 => {
@@ -490,8 +562,9 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 }
                 let mut subtype_list: Vec<String> = subtypes.into_iter().collect();
                 subtype_list.sort();
-                if let Some(subtype) = fuzzy_select("Select subtype to filter by", &subtype_list) {
-                    filters.deck_name = Some(format!(": {}", subtype));
+                let selected = fuzzy_multi_select("Select subtype(s) to filter by", &subtype_list);
+                if !selected.is_empty() {
+                    filters.deck_name = Some(selected.iter().map(|s| format!(": {}", s)).collect());
                 }
             }
             4 => {
@@ -507,8 +580,9 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 }
                 let mut list_list: Vec<String> = lists.into_iter().collect();
                 list_list.sort();
-                if let Some(list) = fuzzy_select("Select list to filter by", &list_list) {
-                    filters.deck_name = Some(format!("({})", list));
+                let selected = fuzzy_multi_select("Select list(s) to filter by", &list_list);
+                if !selected.is_empty() {
+                    filters.deck_name = Some(selected.iter().map(|s| format!("({})", s)).collect());
                 }
             }
             5 => {
@@ -517,7 +591,8 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut opp_list: Vec<String> = opp_set.into_iter().collect();
                 opp_list.sort();
                 let default_opp = config.stats.filters.opponent.as_deref().unwrap_or("");
-                filters.opponent_name = fuzzy_select_with_default("Select opponent to filter by", &opp_list, default_opp);
+                let selected = fuzzy_multi_select_with_default("Select opponent(s) to filter by", &opp_list, default_opp);
+                if !selected.is_empty() { filters.opponent_name = Some(selected); }
             }
             6 => {
                 // Opponent Deck
@@ -528,7 +603,8 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut deck_list: Vec<String> = deck_set.into_iter().collect();
                 deck_list.sort();
                 let default_deck = config.stats.filters.opponent_deck.as_deref().unwrap_or("");
-                filters.opponent_deck = fuzzy_select_with_default("Select opponent deck to filter by", &deck_list, default_deck);
+                let selected = fuzzy_multi_select_with_default("Select opponent deck(s) to filter by", &deck_list, default_deck);
+                if !selected.is_empty() { filters.opponent_deck = Some(selected); }
             }
             7 => {
                 // Opponent Deck Archetype
@@ -539,16 +615,18 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 }
                 let mut arch_list: Vec<String> = arch_set.into_iter().collect();
                 arch_list.sort();
-                filters.opponent_deck_archetype = fuzzy_select("Select opponent deck archetype to filter by", &arch_list);
+                let selected = fuzzy_multi_select("Select opponent deck archetype(s) to filter by", &arch_list);
+                if !selected.is_empty() { filters.opponent_deck_archetype = Some(selected); }
             }
             8 => {
                 // Opponent Deck Category
                 let cat_set: std::collections::HashSet<String> = partial_matches.iter()
-                    .map(|m| categorize_deck(&m.opponent_deck).to_string().to_string())
+                    .map(|m| categorize_deck(&m.opponent_deck).to_string().to_owned())
                     .collect();
                 let mut cat_list: Vec<String> = cat_set.into_iter().collect();
                 cat_list.sort();
-                filters.opponent_deck_category = fuzzy_select("Select opponent deck category to filter by", &cat_list);
+                let selected = fuzzy_multi_select("Select opponent deck category(s) to filter by", &cat_list);
+                if !selected.is_empty() { filters.opponent_deck_category = Some(selected); }
             }
             9 => {
                 // Event Type — show only types present in the partial dataset, in canonical order
@@ -560,7 +638,8 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                     .map(|t| t.to_string())
                     .collect();
                 let default_event = config.stats.filters.event_type.as_deref().unwrap_or("");
-                filters.event_type = fuzzy_select_with_default("Select event type to filter by", &available_event_types, default_event);
+                let selected = fuzzy_multi_select_with_default("Select event type(s) to filter by", &available_event_types, default_event);
+                if !selected.is_empty() { filters.event_type = Some(selected); }
             }
             10 => {
                 // Loss Reason
@@ -571,7 +650,8 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut reason_list: Vec<String> = reason_set.into_iter().collect();
                 reason_list.sort();
                 if reason_list.is_empty() { reason_list = all_loss_reasons.clone(); }
-                filters.loss_reason = fuzzy_select("Select loss reason to filter by", &reason_list);
+                let selected = fuzzy_multi_select("Select loss reason(s) to filter by", &reason_list);
+                if !selected.is_empty() { filters.loss_reason = Some(selected); }
             }
             11 => {
                 // Win Condition
@@ -582,7 +662,8 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut cond_list: Vec<String> = cond_set.into_iter().collect();
                 cond_list.sort();
                 if cond_list.is_empty() { cond_list = all_win_conditions.clone(); }
-                filters.win_condition = fuzzy_select("Select win condition to filter by", &cond_list);
+                let selected = fuzzy_multi_select("Select win condition(s) to filter by", &cond_list);
+                if !selected.is_empty() { filters.win_condition = Some(selected); }
             }
             12 => {
                 // Game Plan
@@ -593,7 +674,8 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let mut plan_list: Vec<String> = plan_set.into_iter().collect();
                 plan_list.sort();
                 if plan_list.is_empty() { plan_list = all_game_plans.clone(); }
-                filters.game_plan = fuzzy_select("Select game plan to filter by", &plan_list);
+                let selected = fuzzy_multi_select("Select game plan(s) to filter by", &plan_list);
+                if !selected.is_empty() { filters.game_plan = Some(selected); }
             }
             13 => {
                 // Mulligan Count
@@ -642,6 +724,19 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                 let play_draw_options: Vec<String> = vec!["On the Play", "On the Draw"].iter().map(|s| s.to_string()).collect();
                 if let Some(selected) = fuzzy_select("Select play/draw to filter by", &play_draw_options) {
                     filters.play_draw = Some(if selected == "On the Play" { "play".to_string() } else { "draw".to_string() });
+                }
+            }
+            17 => {
+                // Last N Matches
+                let n_str: String = Input::new()
+                    .with_prompt("Show last N matches")
+                    .allow_empty(true)
+                    .interact_text()
+                    .unwrap_or_default();
+                if let Ok(n) = n_str.trim().parse::<usize>() {
+                    if n > 0 {
+                        filters.last_n_matches = Some(n);
+                    }
                 }
             }
             _ => {}
@@ -3007,41 +3102,43 @@ fn show_stats_interactive(use_defaults: bool) {
     println!("=== Match Statistics ===\n");
 
     // Apply filters from config or prompt interactively
-    let deck_name_filter: Option<String>;
+    let deck_name_filter: Option<Vec<String>>;
     let mut selected_archetype: Option<String> = None;  // Track archetype even when filtering by subtype/list
-    let opponent_name_filter: Option<String>;
-    let opponent_deck_filter: Option<String>;
-    let mut opponent_deck_archetype_filter: Option<String> = None;
-    let mut opponent_deck_category_filter: Option<String> = None;
-    let event_type_filter: Option<String>;
+    let opponent_name_filter: Option<Vec<String>>;
+    let opponent_deck_filter: Option<Vec<String>>;
+    let mut opponent_deck_archetype_filter: Option<Vec<String>> = None;
+    let mut opponent_deck_category_filter: Option<Vec<String>> = None;
+    let event_type_filter: Option<Vec<String>>;
     let mut era_values: Option<Vec<i32>> = None;
-    let mut loss_reason_filter: Option<String> = None;
-    let mut win_condition_filter: Option<String> = None;
-    let mut game_plan_filter: Option<String> = None;
+    let mut loss_reason_filter: Option<Vec<String>> = None;
+    let mut win_condition_filter: Option<Vec<String>> = None;
+    let mut game_plan_filter: Option<Vec<String>> = None;
     let mut mulligan_count_filter: Option<i32> = None;
     let mut game_length_filter: Option<(i32, i32)> = None; // (min, max)
     let mut game_number_filter: Option<Vec<i32>> = None;
     let mut play_draw_filter: Option<String> = None;
+    let mut last_n_matches_filter: Option<usize> = None;
 
     if use_defaults {
         // Use config defaults for filters
         if let Some(era) = config.stats.filters.era {
             era_values = Some(vec![era]);
         }
-        deck_name_filter = config.stats.filters.my_deck.clone();
+        deck_name_filter = config.stats.filters.my_deck.clone().map(|d| vec![d]);
         // Try to extract archetype from config filter (e.g., "Doomsday" or "Doomsday: Tempo")
-        if let Some(ref filter) = deck_name_filter {
-            let (arch, _) = parse_deck_name(filter);
-            if !arch.is_empty() && arch != filter {
-                selected_archetype = Some(arch.to_string());
-            } else {
-                // Filter might just be the archetype name
-                selected_archetype = Some(filter.clone());
+        if let Some(ref filters) = deck_name_filter {
+            if let Some(filter) = filters.first() {
+                let (arch, _) = parse_deck_name(filter);
+                if !arch.is_empty() && arch != filter.as_str() {
+                    selected_archetype = Some(arch.to_string());
+                } else {
+                    selected_archetype = Some(filter.clone());
+                }
             }
         }
-        opponent_name_filter = config.stats.filters.opponent.clone();
-        opponent_deck_filter = config.stats.filters.opponent_deck.clone();
-        event_type_filter = config.stats.filters.event_type.clone();
+        opponent_name_filter = config.stats.filters.opponent.clone().map(|o| vec![o]);
+        opponent_deck_filter = config.stats.filters.opponent_deck.clone().map(|d| vec![d]);
+        event_type_filter = config.stats.filters.event_type.clone().map(|e| vec![e]);
     } else {
         // Interactive filter selection — delegates to shared function with cumulative narrowing
         let fs = select_filters_interactive(connection);
@@ -3059,15 +3156,19 @@ fn show_stats_interactive(use_defaults: bool) {
         game_length_filter = fs.game_length;
         game_number_filter = fs.game_number;
         play_draw_filter = fs.play_draw;
+        last_n_matches_filter = fs.last_n_matches;
 
         // Infer archetype for Doomsday-specific group-by options.
         // Works when the user filtered by archetype directly; subtype/list filters
         // don't set this (existing limitation).
-        if let Some(ref filter) = deck_name_filter {
-            if !filter.starts_with(": ") && !filter.starts_with('(') {
-                let (arch, _) = parse_deck_name(filter);
-                if !arch.is_empty() {
-                    selected_archetype = Some(arch.to_string());
+        if let Some(ref filters) = deck_name_filter {
+            for filter in filters {
+                if !filter.starts_with(": ") && !filter.starts_with('(') {
+                    let (arch, _) = parse_deck_name(filter);
+                    if !arch.is_empty() {
+                        selected_archetype = Some(arch.to_string());
+                        break;
+                    }
                 }
             }
         }
@@ -3082,7 +3183,7 @@ fn show_stats_interactive(use_defaults: bool) {
         .unwrap_or(false)
         || deck_name_filter
             .as_ref()
-            .map(|f| f.to_lowercase().contains("doomsday"))
+            .map(|fs| fs.iter().any(|f| f.to_lowercase().contains("doomsday")))
             .unwrap_or(false);
 
     // Step 2: Select Group-bys
@@ -3247,43 +3348,49 @@ fn show_stats_interactive(use_defaults: bool) {
     };
 
     // Now build and execute query
-    let mut query = matches::table.into_boxed();
+    let mut query = matches::table.order(matches::date.asc()).into_boxed();
 
     if let Some(ref eras) = era_values {
         query = query.filter(matches::era.eq_any(eras));
     }
-
-    if let Some(ref deck_name) = deck_name_filter {
-        query = query.filter(matches::deck_name.like(format!("%{}%", deck_name)));
-    }
-
-    if let Some(ref opponent_name) = opponent_name_filter {
-        query = query.filter(matches::opponent_name.like(format!("%{}%", opponent_name)));
-    }
-
-    if let Some(ref opponent_deck) = opponent_deck_filter {
-        query = query.filter(matches::opponent_deck.like(format!("%{}%", opponent_deck)));
-    }
-
-    if let Some(ref event_type) = event_type_filter {
-        query = query.filter(matches::event_type.like(format!("%{}%", event_type)));
+    if let Some(ref types) = event_type_filter {
+        query = query.filter(matches::event_type.eq_any(types));
     }
 
     let mut all_matches = query.load::<Match>(connection)
         .expect("Error loading matches");
 
-    // Apply post-load filters for computed fields
-    if let Some(ref arch_filter) = opponent_deck_archetype_filter {
+    // Post-load: LIKE-pattern filters (multi-value OR)
+    if let Some(ref patterns) = deck_name_filter {
+        all_matches.retain(|m| patterns.iter().any(|p| m.deck_name.contains(p.as_str())));
+    }
+    if let Some(ref names) = opponent_name_filter {
+        all_matches.retain(|m| names.iter().any(|n| m.opponent_name.contains(n.as_str())));
+    }
+    if let Some(ref decks) = opponent_deck_filter {
+        all_matches.retain(|m| decks.iter().any(|d| m.opponent_deck.contains(d.as_str())));
+    }
+
+    // Post-load: computed fields
+    if let Some(ref archs) = opponent_deck_archetype_filter {
         all_matches.retain(|m| {
             let (archetype, _) = parse_deck_name(&m.opponent_deck);
-            archetype == arch_filter
+            archs.contains(&archetype.to_string())
+        });
+    }
+    if let Some(ref cats) = opponent_deck_category_filter {
+        all_matches.retain(|m| {
+            let cat = categorize_deck(&m.opponent_deck).to_string().to_owned();
+            cats.iter().any(|c| c == &cat)
         });
     }
 
-    if let Some(ref cat_filter) = opponent_deck_category_filter {
-        all_matches.retain(|m| {
-            categorize_deck(&m.opponent_deck).to_string() == cat_filter
-        });
+    // Post-load: last N matches
+    if let Some(n) = last_n_matches_filter {
+        if all_matches.len() > n {
+            let keep_from = all_matches.len() - n;
+            all_matches.drain(0..keep_from);
+        }
     }
 
     if all_matches.is_empty() {
@@ -3293,7 +3400,10 @@ fn show_stats_interactive(use_defaults: bool) {
 
     // Get all games for these matches and apply game-specific filters
     let match_ids: Vec<i32> = all_matches.iter().map(|m| m.match_id).collect();
-    let mut game_query = games::table.filter(games::match_id.eq_any(&match_ids)).into_boxed();
+    let game_query = games::table.filter(games::match_id.eq_any(&match_ids));
+
+    let mut all_games = game_query.load::<Game>(connection)
+        .expect("Error loading games");
 
     let has_game_filters = loss_reason_filter.is_some()
         || win_condition_filter.is_some()
@@ -3303,36 +3413,28 @@ fn show_stats_interactive(use_defaults: bool) {
         || game_number_filter.is_some()
         || play_draw_filter.is_some();
 
-    if let Some(ref reason) = loss_reason_filter {
-        game_query = game_query.filter(games::loss_reason.eq(reason));
+    // Post-load: game-level filters
+    if let Some(ref reasons) = loss_reason_filter {
+        all_games.retain(|g| g.loss_reason.as_ref().map(|r| reasons.contains(r)).unwrap_or(false));
     }
-
-    if let Some(ref condition) = win_condition_filter {
-        game_query = game_query.filter(games::win_condition.eq(condition));
+    if let Some(ref conditions) = win_condition_filter {
+        all_games.retain(|g| g.win_condition.as_ref().map(|c| conditions.contains(c)).unwrap_or(false));
     }
-
-    if let Some(ref plan) = game_plan_filter {
-        game_query = game_query.filter(games::opening_hand_plan.eq(plan));
+    if let Some(ref plans) = game_plan_filter {
+        all_games.retain(|g| g.opening_hand_plan.as_ref().map(|p| plans.contains(p)).unwrap_or(false));
     }
-
     if let Some(count) = mulligan_count_filter {
-        game_query = game_query.filter(games::mulligans.eq(count));
+        all_games.retain(|g| g.mulligans == count);
     }
-
     if let Some((min_turns, max_turns)) = game_length_filter {
-        game_query = game_query.filter(games::turns.ge(min_turns).and(games::turns.le(max_turns)));
+        all_games.retain(|g| g.turns.map_or(false, |t| t >= min_turns && t <= max_turns));
     }
-
     if let Some(ref game_nums) = game_number_filter {
-        game_query = game_query.filter(games::game_number.eq_any(game_nums));
+        all_games.retain(|g| game_nums.contains(&g.game_number));
     }
-
     if let Some(ref play_draw) = play_draw_filter {
-        game_query = game_query.filter(games::play_draw.eq(play_draw));
+        all_games.retain(|g| &g.play_draw == play_draw);
     }
-
-    let all_games = game_query.load::<Game>(connection)
-        .expect("Error loading games");
 
     // Load doomsday games data if filtering for doomsday
     let doomsday_games_data: Vec<DoomsdayGame> = if is_doomsday_filter {
@@ -3365,32 +3467,32 @@ fn show_stats_interactive(use_defaults: bool) {
         let era_str = eras.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(", ");
         active_filters.push(format!("Era: {}", era_str));
     }
-    if let Some(ref deck) = deck_name_filter {
-        active_filters.push(format!("My Deck: {}", deck));
+    if let Some(ref decks) = deck_name_filter {
+        active_filters.push(format!("My Deck: {}", decks.join(", ")));
     }
-    if let Some(ref opp) = opponent_name_filter {
-        active_filters.push(format!("Opponent: {}", opp));
+    if let Some(ref opps) = opponent_name_filter {
+        active_filters.push(format!("Opponent: {}", opps.join(", ")));
     }
-    if let Some(ref opp_deck) = opponent_deck_filter {
-        active_filters.push(format!("Opponent Deck: {}", opp_deck));
+    if let Some(ref opp_decks) = opponent_deck_filter {
+        active_filters.push(format!("Opponent Deck: {}", opp_decks.join(", ")));
     }
-    if let Some(ref opp_arch) = opponent_deck_archetype_filter {
-        active_filters.push(format!("Opponent Archetype: {}", opp_arch));
+    if let Some(ref opp_archs) = opponent_deck_archetype_filter {
+        active_filters.push(format!("Opponent Archetype: {}", opp_archs.join(", ")));
     }
-    if let Some(ref opp_cat) = opponent_deck_category_filter {
-        active_filters.push(format!("Opponent Category: {}", opp_cat));
+    if let Some(ref opp_cats) = opponent_deck_category_filter {
+        active_filters.push(format!("Opponent Category: {}", opp_cats.join(", ")));
     }
-    if let Some(ref event) = event_type_filter {
-        active_filters.push(format!("Event: {}", event));
+    if let Some(ref events) = event_type_filter {
+        active_filters.push(format!("Event: {}", events.join(", ")));
     }
-    if let Some(ref reason) = loss_reason_filter {
-        active_filters.push(format!("Loss Reason: {}", reason));
+    if let Some(ref reasons) = loss_reason_filter {
+        active_filters.push(format!("Loss Reason: {}", reasons.join(", ")));
     }
-    if let Some(ref cond) = win_condition_filter {
-        active_filters.push(format!("Win Condition: {}", cond));
+    if let Some(ref conds) = win_condition_filter {
+        active_filters.push(format!("Win Condition: {}", conds.join(", ")));
     }
-    if let Some(ref plan) = game_plan_filter {
-        active_filters.push(format!("Game Plan: {}", plan));
+    if let Some(ref plans) = game_plan_filter {
+        active_filters.push(format!("Game Plan: {}", plans.join(", ")));
     }
     if let Some(count) = mulligan_count_filter {
         active_filters.push(format!("Mulligans: {}", count));
@@ -3410,6 +3512,9 @@ fn show_stats_interactive(use_defaults: bool) {
     }
     if let Some(ref pd) = play_draw_filter {
         active_filters.push(format!("Play/Draw: {}", pd));
+    }
+    if let Some(n) = last_n_matches_filter {
+        active_filters.push(format!("Last {} matches", n));
     }
 
     if !active_filters.is_empty() {
@@ -3523,7 +3628,7 @@ fn show_sliced_stats(all_matches: &[Match], all_games: &[Game], doomsday_games: 
             extract_archetype(&m.opponent_deck)
         })),
         "deck-category" => ("=== Statistics by Opponent Deck Category ===", Box::new(|m: &Match| {
-            categorize_deck(&m.opponent_deck).to_string().to_string()
+            categorize_deck(&m.opponent_deck).to_string().to_owned().to_string()
         })),
         "era" => ("=== Statistics by Era ===", Box::new(|m: &Match| {
             m.era.map(|e| format!("Era {}", e)).unwrap_or_else(|| "No Era".to_string())
