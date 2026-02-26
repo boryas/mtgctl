@@ -136,6 +136,10 @@ fn add_missing_tables(connection: &mut SqliteConnection) -> Result<(), Box<dyn s
     // Add league_id column to matches table if it doesn't exist
     add_league_id_column_if_missing(connection)?;
 
+    // Add deck_types table and FK columns
+    add_deck_types_table_if_missing(connection)?;
+    add_deck_fk_columns_if_missing(connection)?;
+
     Ok(())
 }
 
@@ -374,6 +378,60 @@ fn add_doomsday_games_v2_columns_if_missing(connection: &mut SqliteConnection) -
 
     if !pile_disruption_exists {
         diesel::sql_query("ALTER TABLE doomsday_games ADD COLUMN pile_disruption TEXT")
+            .execute(connection)?;
+    }
+
+    Ok(())
+}
+
+fn add_deck_types_table_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    diesel::sql_query(
+        "CREATE TABLE IF NOT EXISTS deck_types (
+            type_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            category  TEXT NOT NULL,
+            archetype TEXT NOT NULL,
+            subtype   TEXT,
+            flow_type TEXT,
+            UNIQUE(archetype, subtype)
+        )"
+    ).execute(connection)?;
+    Ok(())
+}
+
+fn add_deck_fk_columns_if_missing(connection: &mut SqliteConnection) -> Result<(), Box<dyn std::error::Error>> {
+    // Rename decks.name → decks.list_name (SQLite 3.25+)
+    let list_name_exists = diesel::sql_query("SELECT list_name FROM decks LIMIT 0")
+        .execute(connection)
+        .is_ok();
+    if !list_name_exists {
+        diesel::sql_query("ALTER TABLE decks RENAME COLUMN name TO list_name")
+            .execute(connection)?;
+    }
+
+    // Add type_id FK to decks
+    let decks_type_id_exists = diesel::sql_query("SELECT type_id FROM decks LIMIT 0")
+        .execute(connection)
+        .is_ok();
+    if !decks_type_id_exists {
+        diesel::sql_query("ALTER TABLE decks ADD COLUMN type_id INTEGER REFERENCES deck_types(type_id)")
+            .execute(connection)?;
+    }
+
+    // Add my_deck_id FK to matches
+    let my_deck_id_exists = diesel::sql_query("SELECT my_deck_id FROM matches LIMIT 0")
+        .execute(connection)
+        .is_ok();
+    if !my_deck_id_exists {
+        diesel::sql_query("ALTER TABLE matches ADD COLUMN my_deck_id INTEGER REFERENCES decks(deck_id)")
+            .execute(connection)?;
+    }
+
+    // Add opponent_type_id FK to matches
+    let opponent_type_id_exists = diesel::sql_query("SELECT opponent_type_id FROM matches LIMIT 0")
+        .execute(connection)
+        .is_ok();
+    if !opponent_type_id_exists {
+        diesel::sql_query("ALTER TABLE matches ADD COLUMN opponent_type_id INTEGER REFERENCES deck_types(type_id)")
             .execute(connection)?;
     }
 

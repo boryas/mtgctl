@@ -1,9 +1,0 @@
-# Other archetype
-name = "Other"
-category = "No Category"
-
-game_plans = ["unknown"]
-win_conditions = ["creatures", "combo", "other"]
-
-[board_plan]
-description = "Assess gameplan, adapt sideboard accordingly"

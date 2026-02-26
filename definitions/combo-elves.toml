@@ -1,9 +1,0 @@
-# Combo Elves archetype
-name = "Combo Elves"
-category = "Combo"
-
-game_plans = ["combo", "creatures"]
-win_conditions = ["combo", "creatures"]
-
-[board_plan]
-description = "Board wipes, counter key elves, pressure quickly"

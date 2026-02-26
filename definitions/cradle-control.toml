@@ -1,6 +1,0 @@
-# Cradle Control archetype
-name = "Cradle Control"
-category = "Non-Blue"
-
-game_plans = ["value", "creatures", "ramp"]
-win_conditions = ["creatures", "planeswalkers"]

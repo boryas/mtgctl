@@ -1,6 +1,0 @@
-# Nic-Fit archetype
-name = "Nic-Fit"
-category = "Non-Blue"
-
-game_plans = ["ramp", "value", "creatures"]
-win_conditions = ["creatures", "planeswalkers"]

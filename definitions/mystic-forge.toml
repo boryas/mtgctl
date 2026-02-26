@@ -1,9 +1,0 @@
-# Mystic Forge archetype
-name = "Mystic Forge"
-category = "Combo"
-
-game_plans = ["combo", "artifacts"]
-win_conditions = ["combo"]
-
-[board_plan]
-description = "Remove artifacts, counter key pieces, maintain pressure"

@@ -1,6 +1,0 @@
-# Landstill archetype
-name = "Landstill"
-category = "Blue"
-
-game_plans = ["control", "manlands"]
-win_conditions = ["creatures", "concede"]

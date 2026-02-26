@@ -1,6 +1,0 @@
-# Cloudpost archetype
-name = "Cloudpost"
-category = "Non-Blue"
-
-game_plans = ["ramp", "big-mana"]
-win_conditions = ["creatures", "planeswalkers"]

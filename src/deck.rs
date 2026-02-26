@@ -84,7 +84,7 @@ fn import_deck(name: &str, moxfield_url: Option<String>) {
     
     // Check if deck name already exists
     let existing: Result<Deck, _> = decks::table
-        .filter(decks::name.eq(name))
+        .filter(decks::list_name.eq(name))
         .first(connection);
         
     if existing.is_ok() {
@@ -186,9 +186,10 @@ fn import_deck(name: &str, moxfield_url: Option<String>) {
 
     // Create deck in database
     let new_deck = NewDeck {
-        name: name.to_string(),
+        list_name: name.to_string(),
         moxfield_url,
         era,
+        type_id: None,
     };
     
     diesel::insert_into(decks::table)
@@ -199,7 +200,7 @@ fn import_deck(name: &str, moxfield_url: Option<String>) {
     // Get the deck ID
     let deck_id: i32 = decks::table
         .select(decks::deck_id)
-        .filter(decks::name.eq(name))
+        .filter(decks::list_name.eq(name))
         .first(connection)
         .expect("Error getting deck ID");
     
@@ -308,7 +309,7 @@ fn list_decks() {
                     
                 println!("{:<4} {:<30} {:<20} {}", 
                          deck.deck_id, 
-                         truncate(&deck.name, 30),
+                         truncate(&deck.list_name, 30),
                          truncate(created, 20),
                          truncate(url_display, 30));
             }
@@ -327,7 +328,7 @@ fn view_deck(deck_identifier: &str) {
         decks::table.find(deck_id).first(connection)
     } else {
         decks::table
-            .filter(decks::name.eq(deck_identifier))
+            .filter(decks::list_name.eq(deck_identifier))
             .first(connection)
     };
     
@@ -353,7 +354,7 @@ fn view_deck(deck_identifier: &str) {
         }
     };
     
-    println!("=== {} ===", deck.name);
+    println!("=== {} ===", deck.list_name);
     if let Some(url) = &deck.moxfield_url {
         println!("Moxfield URL: {}", url);
     }
@@ -411,7 +412,7 @@ fn select_deck() -> Option<String> {
     }
     
     let deck_options: Vec<String> = decks_vec.iter()
-        .map(|deck| deck.name.clone())
+        .map(|deck| deck.list_name.clone())
         .collect();
 
     fuzzy_select("Select a deck", &deck_options)
@@ -449,7 +450,7 @@ fn delete_deck(deck_identifier: &str) {
         decks::table.find(deck_id).first(connection)
     } else {
         decks::table
-            .filter(decks::name.eq(deck_identifier))
+            .filter(decks::list_name.eq(deck_identifier))
             .first(connection)
     };
     
@@ -461,13 +462,13 @@ fn delete_deck(deck_identifier: &str) {
         }
     };
     
-    println!("=== Delete Deck: {} ===", deck.name);
+    println!("=== Delete Deck: {} ===", deck.list_name);
     if let Some(url) = &deck.moxfield_url {
         println!("URL: {}", url);
     }
     
     let confirm = Confirm::new()
-        .with_prompt(&format!("Are you sure you want to delete deck '{}'? This cannot be undone.", deck.name))
+        .with_prompt(&format!("Are you sure you want to delete deck '{}'? This cannot be undone.", deck.list_name))
         .default(false)
         .interact()
         .unwrap();
@@ -487,7 +488,7 @@ fn delete_deck(deck_identifier: &str) {
         .execute(connection)
         .expect("Error deleting deck");
     
-    println!("Deck '{}' deleted successfully", deck.name);
+    println!("Deck '{}' deleted successfully", deck.list_name);
 }
 
 
@@ -499,7 +500,7 @@ fn calculate_probability(deck_identifier: &str) {
         decks::table.find(deck_id).first(connection)
     } else {
         decks::table
-            .filter(decks::name.eq(deck_identifier))
+            .filter(decks::list_name.eq(deck_identifier))
             .first(connection)
     };
     
@@ -527,11 +528,11 @@ fn calculate_probability(deck_identifier: &str) {
     };
     
     if deck_cards.is_empty() {
-        println!("No cards found in deck '{}'", deck.name);
+        println!("No cards found in deck '{}'", deck.list_name);
         return;
     }
     
-    println!("=== Probability Calculator: {} (Mainboard Only) ===", deck.name);
+    println!("=== Probability Calculator: {} (Mainboard Only) ===", deck.list_name);
     println!();
     
     // Step 1: Select eliminated cards
@@ -632,7 +633,7 @@ fn sequential_probability(deck_identifier: &str) {
         decks::table.find(deck_id).first(connection)
     } else {
         decks::table
-            .filter(decks::name.eq(deck_identifier))
+            .filter(decks::list_name.eq(deck_identifier))
             .first(connection)
     };
     
@@ -660,11 +661,11 @@ fn sequential_probability(deck_identifier: &str) {
     };
     
     if deck_cards.is_empty() {
-        println!("No cards found in deck '{}'", deck.name);
+        println!("No cards found in deck '{}'", deck.list_name);
         return;
     }
     
-    println!("=== Sequential Probability Calculator: {} ===", deck.name);
+    println!("=== Sequential Probability Calculator: {} ===", deck.list_name);
     println!("Track probability changes as you eliminate cards throughout the game");
     println!();
     
@@ -784,7 +785,7 @@ fn sequential_probability(deck_identifier: &str) {
                 // Show current state
                 println!();
                 println!("=== Current State ===");
-                println!("Deck: {}", deck.name);
+                println!("Deck: {}", deck.list_name);
                 println!("Remaining cards: {}", total_remaining);
 
                 if !eliminated_total.is_empty() {
@@ -1270,15 +1271,15 @@ fn backfill_eras() {
     let mut decks_updated = 0;
     for deck in all_decks {
         if deck.era.is_none() {
-            if let Some(parsed_era) = parse_era_from_name(&deck.name) {
+            if let Some(parsed_era) = parse_era_from_name(&deck.list_name) {
                 diesel::update(decks::table.find(deck.deck_id))
                     .set(decks::era.eq(parsed_era))
                     .execute(connection)
                     .expect("Error updating deck era");
-                println!("Updated deck '{}' with era {}", deck.name, parsed_era);
+                println!("Updated deck '{}' with era {}", deck.list_name, parsed_era);
                 decks_updated += 1;
             } else {
-                println!("Warning: Could not parse era from deck name '{}'", deck.name);
+                println!("Warning: Could not parse era from deck name '{}'", deck.list_name);
             }
         }
     }
@@ -1295,7 +1296,7 @@ fn backfill_eras() {
         if m.era.is_none() {
             // First try to get era from decks table
             let deck_era: Option<Option<i32>> = decks::table
-                .filter(decks::name.eq(&m.deck_name))
+                .filter(decks::list_name.eq(&m.deck_name))
                 .select(decks::era)
                 .first(connection)
                 .ok();

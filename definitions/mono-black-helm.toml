@@ -1,6 +1,0 @@
-# Mono Black Helm archetype
-name = "Mono Black Helm"
-category = "Combo"
-
-game_plans = ["combo", "control"]
-win_conditions = ["combo", "creatures"]

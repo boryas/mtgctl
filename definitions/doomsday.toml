@@ -87,29 +87,12 @@ game_plans = ["combo", "cantrips", "control", "creatures"]
 win_conditions = ["doomsday", "other", "creatures"]
 loss_reasons = ["bad-pile", "pre-pile-pressure", "mana", "pile-disruption", "combo", "grind"]
 
-[subtypes.Turbo.lists]
-# Add your Turbo doomsday lists here
-# "combo-doomsday-1.0" = "https://moxfield.com/..."
-"turbo-doomsday-1.0" = "https://moxfield.com/decks/-8yQN7Uc9ka_u3J8dJcKBg"
-"turbo-doomsday-spoils" = "https://moxfield.com/decks/Qdsy__M9qU6r2-8F2XxgqQ"
-
 [subtypes.Tempo]
 game_plans = ["combo", "tamiyo", "cantrips", "control", "creatures"]
 win_conditions = ["doomsday", "creatures", "tamiyo-ult", "concede"]
 loss_reasons = ["bad-pile", "pre-pile-pressure", "grind", "mana", "pile-disruption", "combo"]
 
-[subtypes.Tempo.lists]
-"tempo-doomsday-wasteland-1.0" = "https://moxfield.com/decks/XQ8cIaH-Q0-yjdNzdN3JkQ"
-"tempo-doomsday-wasteland-1.1" = "https://moxfield.com/decks/KVLDeRmO2USc5k-Dp5CO1g"
-"tempo-doomsday-wasteland-1.2" = "https://moxfield.com/decks/dvIaku_xakGg_Hw0of4IOw"
-"tempo-doomsday-wasteland-1.3" = "https://moxfield.com/decks/4LDvJou49k-XpRlKWwXxlg"
-"tempo-doomsday-wasteland-1.4" = "https://moxfield.com/decks/r7wdBHrff0W7sb2NYL8UeA"
-"tempo-doomsday-wasteland-1.5" = "https://moxfield.com/decks/mPT2ooY42kG_QiIx9lPQcQ"
-
 [subtypes.Tempo-Sultai]
 game_plans = ["combo", "tamiyo", "cantrips", "control", "creatures"]
 win_conditions = ["doomsday", "creatures", "tamiyo-ult", "concede"]
 loss_reasons = ["bad-pile", "pre-pile-pressure", "grind", "mana", "pile-disruption", "combo"]
-
-[subtypes.Tempo-Sultai.lists]
-"tempo-doomsday-bug-1.0" = "https://moxfield.com/decks/Hp5JdlOWYUKqlxjwSS6Ndg"

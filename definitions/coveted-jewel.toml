@@ -1,6 +1,0 @@
-# Coveted Jewel archetype
-name = "Coveted Jewel"
-category = "Combo"
-
-game_plans = ["combo", "ramp"]
-win_conditions = ["combo"]

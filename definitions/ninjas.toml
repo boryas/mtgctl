@@ -1,6 +1,0 @@
-# Ninjas archetype
-name = "Ninjas"
-category = "Blue"
-
-game_plans = ["creatures", "tempo"]
-win_conditions = ["creatures"]

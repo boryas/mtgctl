@@ -64,6 +64,8 @@ pub struct Match {
     pub created_at: Option<String>,
     pub era: Option<i32>,
     pub league_id: Option<i32>,
+    pub my_deck_id: Option<i32>,
+    pub opponent_type_id: Option<i32>,
 }
 
 #[derive(Insertable)]
@@ -78,6 +80,8 @@ pub struct NewMatch {
     pub match_winner: String,
     pub era: Option<i32>,
     pub league_id: Option<i32>,
+    pub my_deck_id: Option<i32>,
+    pub opponent_type_id: Option<i32>,
 }
 
 #[derive(Queryable, Selectable, Debug)]
@@ -116,18 +120,20 @@ pub struct NewGame {
 #[diesel(check_for_backend(diesel::sqlite::Sqlite))]
 pub struct Deck {
     pub deck_id: i32,
-    pub name: String,
+    pub list_name: String,
     pub moxfield_url: Option<String>,
     pub created_at: Option<String>,
     pub era: Option<i32>,
+    pub type_id: Option<i32>,
 }
 
 #[derive(Insertable)]
 #[diesel(table_name = crate::db::schema::decks)]
 pub struct NewDeck {
-    pub name: String,
+    pub list_name: String,
     pub moxfield_url: Option<String>,
     pub era: Option<i32>,
+    pub type_id: Option<i32>,
 }
 
 #[derive(Queryable, Selectable, Debug)]
@@ -148,6 +154,36 @@ pub struct NewCard {
     pub card_name: String,
     pub quantity: i32,
     pub board: String,
+}
+
+// DeckType — one row per (archetype, subtype) combination; NULL subtype = archetype-only row
+#[derive(Queryable, Selectable, Debug, Clone)]
+#[diesel(table_name = crate::db::schema::deck_types)]
+#[diesel(check_for_backend(diesel::sqlite::Sqlite))]
+pub struct DeckType {
+    pub type_id: i32,
+    pub category: String,
+    pub archetype: String,
+    pub subtype: Option<String>,
+    pub flow_type: Option<String>,
+}
+
+impl DeckType {
+    pub fn display(&self) -> String {
+        match &self.subtype {
+            Some(st) => format!("{}: {}", self.archetype, st),
+            None => self.archetype.clone(),
+        }
+    }
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = crate::db::schema::deck_types)]
+pub struct NewDeckType {
+    pub category: String,
+    pub archetype: String,
+    pub subtype: Option<String>,
+    pub flow_type: Option<String>,
 }
 
 // League status enum

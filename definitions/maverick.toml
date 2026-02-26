@@ -1,9 +1,0 @@
-# Maverick archetype
-name = "Maverick"
-category = "Non-Blue"
-
-game_plans = ["creatures", "hate", "toolbox"]
-win_conditions = ["creatures"]
-
-[subtypes.Selesnya]
-win_conditions = ["creatures"]

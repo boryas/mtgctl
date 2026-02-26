@@ -1,6 +1,0 @@
-# Stoneblade archetype
-name = "Stoneblade"
-category = "Blue"
-
-game_plans = ["creatures", "control", "equipment"]
-win_conditions = ["creatures"]

@@ -1,9 +1,0 @@
-# Cephalid Breakfast archetype
-name = "Cephalid Breakfast"
-category = "Combo"
-
-game_plans = ["combo", "graveyard"]
-win_conditions = ["combo"]
-
-[board_plan]
-description = "Force backup, counter combo pieces, graveyard hate"

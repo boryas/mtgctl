@@ -11,12 +11,23 @@ diesel::table! {
 }
 
 diesel::table! {
+    deck_types (type_id) {
+        type_id -> Integer,
+        category -> Text,
+        archetype -> Text,
+        subtype -> Nullable<Text>,
+        flow_type -> Nullable<Text>,
+    }
+}
+
+diesel::table! {
     decks (deck_id) {
         deck_id -> Integer,
-        name -> Text,
+        list_name -> Text,
         moxfield_url -> Nullable<Text>,
         created_at -> Nullable<Text>,
         era -> Nullable<Integer>,
+        type_id -> Nullable<Integer>,
     }
 }
 
@@ -81,16 +92,20 @@ diesel::table! {
         created_at -> Nullable<Text>,
         era -> Nullable<Integer>,
         league_id -> Nullable<Integer>,
+        my_deck_id -> Nullable<Integer>,
+        opponent_type_id -> Nullable<Integer>,
     }
 }
 
 diesel::joinable!(cards -> decks (deck_id));
+diesel::joinable!(decks -> deck_types (type_id));
 diesel::joinable!(doomsday_games -> games (game_id));
 diesel::joinable!(games -> matches (match_id));
 diesel::joinable!(matches -> leagues (league_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     cards,
+    deck_types,
     decks,
     doomsday_games,
     games,

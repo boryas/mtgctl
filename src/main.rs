@@ -31,6 +31,10 @@ fn main() {
         std::process::exit(1);
     }
 
+    // One-time backfill: populate deck_types from toml files
+    let connection = &mut db::establish_connection();
+    game::backfill_deck_types(connection);
+
     let cli = Cli::parse();
 
     match cli.command {

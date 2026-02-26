@@ -1,6 +1,0 @@
-# Stiflenaught archetype
-name = "Stiflenaught"
-category = "Blue"
-
-game_plans = ["combo", "tempo"]
-win_conditions = ["creatures"]

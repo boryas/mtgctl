@@ -1,6 +1,0 @@
-# Merfolk archetype
-name = "Merfolk"
-category = "Blue"
-
-game_plans = ["creatures", "tempo"]
-win_conditions = ["creatures"]

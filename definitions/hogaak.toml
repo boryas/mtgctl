@@ -1,6 +1,0 @@
-# Hogaak archetype
-name = "Hogaak"
-category = "Non-Blue"
-
-game_plans = ["graveyard", "creatures"]
-win_conditions = ["creatures"]

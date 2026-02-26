@@ -1,9 +1,0 @@
-# Goblins archetype
-name = "Goblins"
-category = "Non-Blue"
-
-game_plans = ["creatures", "combo"]
-win_conditions = ["creatures", "combo"]
-
-[board_plan]
-description = "Board wipes, remove key threats, stabilize"

@@ -1,6 +1,0 @@
-# Infect archetype
-name = "Infect"
-category = "Combo"
-
-game_plans = ["combo", "creatures"]
-win_conditions = ["poison"]

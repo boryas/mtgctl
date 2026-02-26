@@ -12,7 +12,7 @@ use comfy_table::{Table, Cell, Attribute, ContentArrangement};
 use textplots::{Chart, LabelBuilder, LabelFormat, Plot, Shape, TickDisplay, TickDisplayBuilder};
 
 use crate::db::{establish_connection, models::*};
-use crate::db::schema::{matches, games, doomsday_games, leagues};
+use crate::db::schema::{matches, games, doomsday_games, leagues, deck_types, decks};
 
 /// Collected game data before DB insertion
 struct CollectedGame {
@@ -984,239 +984,327 @@ fn sort_with_other_last(items: &mut Vec<String>) {
     }
 }
 
-/// Generate all deck names from a definition (handles subtypes)
-fn deck_names_from_definition(def: &UnifiedArchetypeDefinition) -> Vec<String> {
-    if !def.subtypes.is_empty() {
-        def.subtypes.keys()
-            .map(|subtype| format!("{}: {}", def.name, subtype))
-            .collect()
-    } else {
-        vec![def.name.clone()]
-    }
-}
-
 fn load_archetypes() -> Vec<String> {
-    let mut archetypes: Vec<String> = load_all_definitions()
-        .into_iter()
-        .map(|def| def.name)
-        .collect();
-
+    let conn = &mut establish_connection();
+    let mut archetypes: Vec<String> = deck_types::table
+        .filter(deck_types::subtype.is_null())
+        .select(deck_types::archetype)
+        .order(deck_types::archetype.asc())
+        .load(conn)
+        .unwrap_or_default();
     sort_with_other_last(&mut archetypes);
     archetypes
 }
 
 /// Load subtypes for a given archetype
 fn load_subtypes(archetype: &str) -> Vec<String> {
-    if let Some(def) = load_definition(archetype) {
-        let mut subtypes: Vec<String> = def.subtypes.keys().cloned().collect();
-        subtypes.sort();
-        return subtypes;
-    }
-    Vec::new()
+    let conn = &mut establish_connection();
+    let mut subtypes: Vec<String> = deck_types::table
+        .filter(deck_types::archetype.eq(archetype))
+        .filter(deck_types::subtype.is_not_null())
+        .select(deck_types::subtype)
+        .order(deck_types::subtype.asc())
+        .load::<Option<String>>(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect();
+    subtypes.sort();
+    subtypes
 }
 
 /// Load lists for a given archetype and subtype
 fn load_lists(archetype: &str, subtype: &str) -> Vec<String> {
-    if let Some(def) = load_definition(archetype) {
-        if let Some(subtype_def) = def.subtypes.get(subtype) {
-            let mut lists: Vec<String> = subtype_def.lists.keys().cloned().collect();
-            lists.sort();
-            return lists;
-        }
-    }
-    Vec::new()
+    let conn = &mut establish_connection();
+    let type_id: Option<i32> = deck_types::table
+        .filter(deck_types::archetype.eq(archetype))
+        .filter(deck_types::subtype.eq(subtype))
+        .select(deck_types::type_id)
+        .first(conn)
+        .ok();
+    let Some(tid) = type_id else { return Vec::new(); };
+    let mut lists: Vec<String> = decks::table
+        .filter(decks::type_id.eq(tid))
+        .select(decks::list_name)
+        .order(decks::list_name.asc())
+        .load(conn)
+        .unwrap_or_default();
+    lists.sort();
+    lists
 }
 
-/// Load all deck names from definitions
+/// Load all deck names from the DB taxonomy
 fn load_deck_names() -> Vec<String> {
+    let conn = &mut establish_connection();
+    // All (archetype, subtype) pairs that have a non-null subtype
+    let with_subtypes: Vec<(String, Option<String>)> = deck_types::table
+        .filter(deck_types::subtype.is_not_null())
+        .select((deck_types::archetype, deck_types::subtype))
+        .load(conn)
+        .unwrap_or_default();
+    let has_subtypes: std::collections::HashSet<String> =
+        with_subtypes.iter().map(|(a, _)| a.clone()).collect();
+    // Bare archetype names for archetypes that have NO subtypes
+    let bare: Vec<String> = deck_types::table
+        .filter(deck_types::subtype.is_null())
+        .select(deck_types::archetype)
+        .load(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| !has_subtypes.contains(a))
+        .collect();
+    let mut names: Vec<String> = with_subtypes
+        .into_iter()
+        .map(|(arch, sub)| format!("{}: {}", arch, sub.unwrap()))
+        .chain(bare)
+        .collect();
+    sort_with_other_last(&mut names);
+    names
+}
+
+// ---------------------------------------------------------------------------
+// Deck taxonomy backfill
+// ---------------------------------------------------------------------------
+
+/// One-time migration: populate `deck_types` + `decks` from toml files and
+/// link existing `matches` rows via `my_deck_id` / `opponent_type_id`.
+/// Safe to call repeatedly — taxonomy population skips if already done, but
+/// FK backfill always fills in any remaining NULLs.
+pub fn backfill_deck_types(connection: &mut SqliteConnection) {
+    let count: i64 = deck_types::table
+        .count()
+        .get_result(connection)
+        .unwrap_or(0);
+    let taxonomy_populated = count > 0;
+
     let definitions = load_all_definitions();
 
-    let mut deck_names: Vec<String> = if !definitions.is_empty() {
-        definitions.iter()
-            .flat_map(deck_names_from_definition)
-            .collect()
-    } else {
-        // Fall back to definitions.md if no TOML files found
-        load_deck_names_from_md()
+    if !taxonomy_populated {
+        // 1. Populate deck_types -------------------------------------------------
+        for def in &definitions {
+            let flow = if def.name == "Doomsday" { Some("doomsday".to_string()) } else { None };
+
+            // Archetype-only row (NULL subtype) — used when subtype is unknown
+            diesel::insert_into(deck_types::table)
+                .values(NewDeckType {
+                    category: def.category.clone(),
+                    archetype: def.name.clone(),
+                    subtype: None,
+                    flow_type: flow.clone(),
+                })
+                .on_conflict_do_nothing()
+                .execute(connection)
+                .ok();
+
+            for subtype_name in def.subtypes.keys() {
+                diesel::insert_into(deck_types::table)
+                    .values(NewDeckType {
+                        category: def.category.clone(),
+                        archetype: def.name.clone(),
+                        subtype: Some(subtype_name.clone()),
+                        flow_type: flow.clone(),
+                    })
+                    .on_conflict_do_nothing()
+                    .execute(connection)
+                    .ok();
+            }
+        }
+
+    // Helper: look up type_id for (archetype, subtype)
+    let lookup_type_id = |conn: &mut SqliteConnection, arch: &str, sub: Option<&str>| -> Option<i32> {
+        match sub {
+            Some(st) => deck_types::table
+                .filter(deck_types::archetype.eq(arch))
+                .filter(deck_types::subtype.eq(st))
+                .select(deck_types::type_id)
+                .first(conn)
+                .ok(),
+            None => deck_types::table
+                .filter(deck_types::archetype.eq(arch))
+                .filter(deck_types::subtype.is_null())
+                .select(deck_types::type_id)
+                .first(conn)
+                .ok(),
+        }
     };
 
-    sort_with_other_last(&mut deck_names);
-    deck_names
-}
-
-/// Fallback: load deck names from definitions.md
-fn load_deck_names_from_md() -> Vec<String> {
-    match fs::read_to_string("definitions.md") {
-        Ok(content) => {
-            let mut in_decks_section = false;
-            content.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-
-                    if line.starts_with("## Decks") {
-                        in_decks_section = true;
-                        return None;
-                    }
-
-                    if line.starts_with("##") && !line.starts_with("## Decks") {
-                        in_decks_section = false;
-                        return None;
-                    }
-
-                    if !in_decks_section || line.is_empty() {
-                        return None;
-                    }
-
-                    if let Some((deck_name, _category)) = line.split_once(';') {
-                        Some(deck_name.trim().to_string())
-                    } else {
-                        Some(line.to_string())
-                    }
-                })
-                .collect()
-        },
-        Err(_) => Vec::new()
-    }
-}
-
-fn load_deck_categories() -> HashMap<String, DeckCategory> {
-    let definitions = load_all_definitions();
-
-    if !definitions.is_empty() {
-        let mut categories = HashMap::new();
-        for def in definitions {
-            let category = match def.category.as_str() {
-                "Blue" => DeckCategory::Blue,
-                "Combo" => DeckCategory::Combo,
-                "Non-Blue" => DeckCategory::NonBlue,
-                _ => DeckCategory::Other,
-            };
-
-            for deck_name in deck_names_from_definition(&def) {
-                categories.insert(deck_name, category.clone());
+    // 2. Normalize existing decks rows and populate from toml list entries ---
+    //    Old format: "Lands: Mono Green (sprouts-1.1)" → slug "sprouts-1.1"
+    let all_decks: Vec<Deck> = decks::table.load(connection).unwrap_or_default();
+    for d in all_decks {
+        if d.list_name.contains(" (") {
+            // Old format — extract the slug from inside the parentheses
+            if let (Some(start), Some(end)) = (d.list_name.rfind('('), d.list_name.rfind(')')) {
+                let slug = d.list_name[start + 1..end].to_string();
+                let (arch, sub) = parse_deck_name(&d.list_name);
+                let type_id = lookup_type_id(connection, arch, sub);
+                diesel::update(decks::table.find(d.deck_id))
+                    .set((decks::list_name.eq(&slug), decks::type_id.eq(type_id)))
+                    .execute(connection)
+                    .ok();
             }
         }
-        categories
-    } else {
-        // Fall back to definitions.md
-        load_deck_categories_from_md()
     }
-}
 
-/// Fallback: load deck categories from definitions.md
-fn load_deck_categories_from_md() -> HashMap<String, DeckCategory> {
-    let mut categories = HashMap::new();
-
-    if let Ok(content) = fs::read_to_string("definitions.md") {
-        let mut in_decks_section = false;
-        for line in content.lines() {
-            let line = line.trim();
-
-            if line.starts_with("## Decks") {
-                in_decks_section = true;
-                continue;
-            }
-
-            if line.starts_with("##") && !line.starts_with("## Decks") {
-                in_decks_section = false;
-                continue;
-            }
-
-            if !in_decks_section || line.is_empty() {
-                continue;
-            }
-
-            if let Some((deck_name, category_str)) = line.split_once(';') {
-                let deck_name = deck_name.trim().to_string();
-                let category_str = category_str.trim();
-
-                let category = match category_str {
-                    "Blue" => DeckCategory::Blue,
-                    "Combo" => DeckCategory::Combo,
-                    "Non-Blue" => DeckCategory::NonBlue,
-                    _ => DeckCategory::Other,
+    // Insert decks rows for every list entry in every toml file
+    for def in &definitions {
+        let flow = if def.name == "Doomsday" { Some("doomsday".to_string()) } else { None };
+        let _ = flow; // used via lookup_type_id
+        for (subtype_name, subtype_def) in &def.subtypes {
+            let type_id = lookup_type_id(connection, &def.name, Some(subtype_name));
+            for (list_name, url) in &subtype_def.lists {
+                // Skip placeholder URLs
+                let moxfield_url = if url.contains("moxfield.com/...") {
+                    None
+                } else {
+                    Some(url.clone())
                 };
-
-                categories.insert(deck_name, category);
+                // Insert only if a row with this list_name doesn't exist yet
+                let exists: bool = decks::table
+                    .filter(decks::list_name.eq(list_name))
+                    .count()
+                    .get_result::<i64>(connection)
+                    .unwrap_or(0) > 0;
+                if !exists {
+                    diesel::insert_into(decks::table)
+                        .values(NewDeck {
+                            list_name: list_name.clone(),
+                            moxfield_url,
+                            era: None,
+                            type_id,
+                        })
+                        .execute(connection)
+                        .ok();
+                } else {
+                    // Ensure type_id is set
+                    diesel::update(decks::table.filter(decks::list_name.eq(list_name)))
+                        .set(decks::type_id.eq(type_id))
+                        .execute(connection)
+                        .ok();
+                }
             }
         }
     }
 
-    categories
+    // 2b. Create decks rows for list slugs found in match history but not in toml
+    let all_matches: Vec<Match> = matches::table.load(connection).unwrap_or_default();
+    for m in &all_matches {
+        if let (Some(s), Some(e)) = (m.deck_name.rfind('('), m.deck_name.rfind(')')) {
+            let slug = &m.deck_name[s + 1..e];
+            let already: bool = decks::table
+                .filter(decks::list_name.eq(slug))
+                .count()
+                .get_result::<i64>(connection)
+                .unwrap_or(0) > 0;
+            if !already {
+                let (arch, sub) = parse_deck_name(&m.deck_name);
+                let type_id = lookup_type_id(connection, arch, sub)
+                    .or_else(|| lookup_type_id(connection, arch, None));
+                diesel::insert_into(decks::table)
+                    .values(NewDeck {
+                        list_name: slug.to_string(),
+                        moxfield_url: None,
+                        era: None,
+                        type_id,
+                    })
+                    .execute(connection)
+                    .ok();
+            }
+        }
+    }
+
+    } // end if !taxonomy_populated
+
+    // Helper: look up type_id for (archetype, subtype) — used in steps 3 & 4
+    let lookup_type_id_outer = |conn: &mut SqliteConnection, arch: &str, sub: Option<&str>| -> Option<i32> {
+        match sub {
+            Some(st) => deck_types::table
+                .filter(deck_types::archetype.eq(arch))
+                .filter(deck_types::subtype.eq(st))
+                .select(deck_types::type_id)
+                .first(conn)
+                .ok(),
+            None => deck_types::table
+                .filter(deck_types::archetype.eq(arch))
+                .filter(deck_types::subtype.is_null())
+                .select(deck_types::type_id)
+                .first(conn)
+                .ok(),
+        }
+    };
+
+    // 3. Backfill matches.my_deck_id -----------------------------------------
+    //    Extract list slug from deck_name, look up in decks table
+    let all_matches: Vec<Match> = matches::table.load(connection).unwrap_or_default();
+    for m in &all_matches {
+        if m.my_deck_id.is_some() { continue; }
+        // Extract slug from "Archetype: Subtype (slug)" — everything inside last parens
+        let slug = if let (Some(s), Some(e)) = (m.deck_name.rfind('('), m.deck_name.rfind(')')) {
+            Some(m.deck_name[s + 1..e].to_string())
+        } else {
+            None
+        };
+        if let Some(slug) = slug {
+            let deck_id: Option<i32> = decks::table
+                .filter(decks::list_name.eq(&slug))
+                .select(decks::deck_id)
+                .first(connection)
+                .ok();
+            if deck_id.is_some() {
+                diesel::update(matches::table.find(m.match_id))
+                    .set(matches::my_deck_id.eq(deck_id))
+                    .execute(connection)
+                    .ok();
+            }
+        }
+    }
+
+    // 4. Backfill matches.opponent_type_id -----------------------------------
+    for m in &all_matches {
+        if m.opponent_type_id.is_some() { continue; }
+        let (arch, sub) = parse_deck_name(&m.opponent_deck);
+        // Try exact (archetype, subtype) first, fall back to archetype-only row
+        let type_id = lookup_type_id_outer(connection, arch, sub)
+            .or_else(|| lookup_type_id_outer(connection, arch, None));
+        if type_id.is_some() {
+            diesel::update(matches::table.find(m.match_id))
+                .set(matches::opponent_type_id.eq(type_id))
+                .execute(connection)
+                .ok();
+        }
+    }
 }
+
+
 
 fn load_game_plans() -> Vec<String> {
-    match fs::read_to_string("definitions.md") {
-        Ok(content) => {
-            let mut in_game_plans_section = false;
-            content.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    
-                    if line.starts_with("## Game Plans") {
-                        in_game_plans_section = true;
-                        return None;
-                    }
-                    
-                    if line.starts_with("##") && !line.starts_with("## Game Plans") {
-                        in_game_plans_section = false;
-                        return None;
-                    }
-                    
-                    if !in_game_plans_section || line.is_empty() {
-                        return None;
-                    }
-                    
-                    Some(line.to_string())
-                })
-                .collect()
-        },
-        Err(_) => {
-            vec![
-                "combo".to_string(),
-                "aggro".to_string(),
-                "control".to_string(),
-                "midrange".to_string(),
-            ]
-        }
-    }
+    let connection = &mut establish_connection();
+    let mut plans: Vec<String> = games::table
+        .select(games::opening_hand_plan)
+        .filter(games::opening_hand_plan.is_not_null())
+        .distinct()
+        .load::<Option<String>>(connection)
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect();
+    plans.sort();
+    plans
 }
 
 fn load_win_conditions() -> Vec<String> {
-    match fs::read_to_string("definitions.md") {
-        Ok(content) => {
-            let mut in_win_cons_section = false;
-            content.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    
-                    if line.starts_with("## Win Cons") {
-                        in_win_cons_section = true;
-                        return None;
-                    }
-                    
-                    if line.starts_with("##") && !line.starts_with("## Win Cons") {
-                        in_win_cons_section = false;
-                        return None;
-                    }
-                    
-                    if !in_win_cons_section || line.is_empty() {
-                        return None;
-                    }
-                    
-                    Some(line.to_string())
-                })
-                .collect()
-        },
-        Err(_) => {
-            vec![
-                "damage".to_string(),
-                "combo".to_string(),
-                "mill".to_string(),
-                "concede".to_string(),
-            ]
-        }
-    }
+    let connection = &mut establish_connection();
+    let mut conds: Vec<String> = games::table
+        .select(games::win_condition)
+        .filter(games::win_condition.is_not_null())
+        .distinct()
+        .load::<Option<String>>(connection)
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect();
+    conds.sort();
+    conds
 }
 
 
@@ -1324,14 +1412,28 @@ impl DeckCategory {
 }
 
 pub fn categorize_deck(deck_name: &str) -> DeckCategory {
-    let categories = load_deck_categories();
-
-    // First try to get from file
-    if let Some(category) = categories.get(deck_name) {
-        return category.clone();
+    let conn = &mut establish_connection();
+    let (arch, sub) = parse_deck_name(deck_name);
+    let category: Option<String> = match sub {
+        Some(st) => deck_types::table
+            .filter(deck_types::archetype.eq(arch))
+            .filter(deck_types::subtype.eq(st))
+            .select(deck_types::category)
+            .first(conn)
+            .ok(),
+        None => deck_types::table
+            .filter(deck_types::archetype.eq(arch))
+            .filter(deck_types::subtype.is_null())
+            .select(deck_types::category)
+            .first(conn)
+            .ok(),
+    };
+    match category.as_deref() {
+        Some("Combo") => DeckCategory::Combo,
+        Some("Blue") => DeckCategory::Blue,
+        Some("Non-Blue") => DeckCategory::NonBlue,
+        _ => DeckCategory::Other,
     }
-
-    DeckCategory::Other
 }
 
 #[derive(Args)]
@@ -1592,6 +1694,10 @@ fn add_match_interactive(date_arg: Option<String>) {
     // === ALL DATA COLLECTED - NOW COMMIT TO DATABASE ===
     let connection = &mut establish_connection();
 
+    // Resolve FK ids
+    let my_deck_id = lookup_my_deck_id(connection, &deck_name);
+    let opponent_type_id = lookup_or_create_opponent_type_id(connection, &opponent_deck);
+
     // Get current era
     let era = config.game_entry.default_era
         .or_else(|| get_current_era(connection));
@@ -1614,6 +1720,8 @@ fn add_match_interactive(date_arg: Option<String>) {
         match_winner: collected.match_winner.clone(),
         era,
         league_id,
+        my_deck_id,
+        opponent_type_id,
     };
 
     diesel::insert_into(matches::table)
@@ -2134,6 +2242,83 @@ fn append_to_toml_list(toml_path: &str, list_name: &str, new_value: &str) {
                 println!("Added '{}' to {}", new_value, list_name);
             }
         }
+    }
+}
+
+/// Look up deck_id from the list slug embedded in a full deck name.
+/// e.g. "Doomsday: Tempo (tempo-doomsday-wasteland-1.5)" -> deck_id for that list.
+fn lookup_my_deck_id(connection: &mut SqliteConnection, deck_name: &str) -> Option<i32> {
+    if let (Some(s), Some(e)) = (deck_name.rfind('('), deck_name.rfind(')')) {
+        let slug = &deck_name[s + 1..e];
+        decks::table
+            .filter(decks::list_name.eq(slug))
+            .select(decks::deck_id)
+            .first(connection)
+            .ok()
+    } else {
+        None
+    }
+}
+
+/// Look up opponent_type_id for a given deck name string.
+/// If not found in deck_types, prompts to add it (in-situ creation).
+fn lookup_or_create_opponent_type_id(connection: &mut SqliteConnection, deck_name: &str) -> Option<i32> {
+    if deck_name.eq_ignore_ascii_case("unknown") || deck_name.is_empty() {
+        return None;
+    }
+    let (arch, sub) = parse_deck_name(deck_name);
+    // Try exact (archetype, subtype) match
+    let type_id: Option<i32> = match sub {
+        Some(st) => deck_types::table
+            .filter(deck_types::archetype.eq(arch))
+            .filter(deck_types::subtype.eq(st))
+            .select(deck_types::type_id)
+            .first(connection)
+            .ok(),
+        None => deck_types::table
+            .filter(deck_types::archetype.eq(arch))
+            .filter(deck_types::subtype.is_null())
+            .select(deck_types::type_id)
+            .first(connection)
+            .ok(),
+    };
+    if type_id.is_some() {
+        return type_id;
+    }
+    // Not in DB — offer to add
+    let add = Confirm::new()
+        .with_prompt(format!("'{}' is not in the deck database. Add it?", deck_name))
+        .default(true)
+        .interact()
+        .unwrap_or(false);
+    if !add {
+        return None;
+    }
+    let category_options: Vec<String> = vec!["Blue".into(), "Combo".into(), "Non-Blue".into(), "Other".into()];
+    let category = fuzzy_select("Category", &category_options)?;
+    diesel::insert_into(deck_types::table)
+        .values(NewDeckType {
+            category,
+            archetype: arch.to_string(),
+            subtype: sub.map(|s| s.to_string()),
+            flow_type: None,
+        })
+        .on_conflict_do_nothing()
+        .execute(connection)
+        .ok();
+    match sub {
+        Some(st) => deck_types::table
+            .filter(deck_types::archetype.eq(arch))
+            .filter(deck_types::subtype.eq(st))
+            .select(deck_types::type_id)
+            .first(connection)
+            .ok(),
+        None => deck_types::table
+            .filter(deck_types::archetype.eq(arch))
+            .filter(deck_types::subtype.is_null())
+            .select(deck_types::type_id)
+            .first(connection)
+            .ok(),
     }
 }
 
@@ -4142,6 +4327,7 @@ fn edit_match_interactive(match_id: i32) {
         
     if change_deck {
         match_data.deck_name = select_deck_three_step(&config, Some(&match_data.deck_name.clone()));
+        match_data.my_deck_id = lookup_my_deck_id(connection, &match_data.deck_name);
     }
     
     // Edit opponent name
@@ -4167,6 +4353,7 @@ fn edit_match_interactive(match_id: i32) {
         let deck_names = load_deck_names();
         if let Some(new_deck) = fuzzy_select_with_default("Opponent's deck", &deck_names, &match_data.opponent_deck) {
             match_data.opponent_deck = new_deck;
+            match_data.opponent_type_id = lookup_or_create_opponent_type_id(connection, &match_data.opponent_deck);
         }
     }
     
@@ -4231,6 +4418,8 @@ fn edit_match_interactive(match_id: i32) {
             matches::event_type.eq(&match_data.event_type),
             matches::die_roll_winner.eq(&match_data.die_roll_winner),
             matches::match_winner.eq(&match_data.match_winner),
+            matches::my_deck_id.eq(match_data.my_deck_id),
+            matches::opponent_type_id.eq(match_data.opponent_type_id),
         ))
         .execute(connection)
         .expect("Error updating match");
@@ -4570,102 +4759,40 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
 fn add_deck_to_list(deck_name: Option<String>) {
     let deck_name = match deck_name {
         Some(name) => name,
-        None => {
-            // Interactive mode
-            Input::new()
-                .with_prompt("Enter deck name to add")
-                .interact_text()
-                .unwrap()
-        }
+        None => Input::new()
+            .with_prompt("Enter deck name (e.g. 'Storm: ANT' or 'Cloudpost')")
+            .interact_text()
+            .unwrap(),
     };
-    
+
     if deck_name.trim().is_empty() {
         println!("Deck name cannot be empty");
         return;
     }
-    
-    // Load existing deck names
-    let existing_deck_names = load_deck_names();
-    
-    // Check if deck already exists
-    if existing_deck_names.contains(&deck_name) {
-        println!("Deck '{}' already exists in the list", deck_name);
+
+    let connection = &mut establish_connection();
+    let existing = load_deck_names();
+    if existing.contains(&deck_name) {
+        println!("'{}' already exists in the deck database", deck_name);
         return;
     }
-    
-    // Ask for category
-    let category_options: Vec<String> = vec!["Blue", "Combo", "Non-Blue", "Stompy"].iter().map(|s| s.to_string()).collect();
-    let category = fuzzy_select("Select deck category", &category_options)
-        .unwrap_or_else(|| "Blue".to_string());
-    
-    // Read the existing definitions.md file
-    let content = match fs::read_to_string("definitions.md") {
-        Ok(content) => content,
-        Err(_) => {
-            // Create a new file if it doesn't exist
-            "## Decks\n\n## Game Plans\n\n## Win Cons\n".to_string()
-        }
-    };
-    
-    // Find the Decks section and add the new deck
-    let lines: Vec<&str> = content.lines().collect();
-    let mut new_lines = Vec::new();
-    let mut in_decks_section = false;
-    let mut deck_lines = Vec::new();
-    
-    for line in lines {
-        if line.starts_with("## Decks") {
-            in_decks_section = true;
-            new_lines.push(line.to_string());
-            continue;
-        }
-        
-        if line.starts_with("##") && !line.starts_with("## Decks") {
-            if in_decks_section {
-                // Add the new deck before ending the section
-                deck_lines.push(format!("{}; {}", deck_name, category));
-                deck_lines.sort();
-                // Keep "Other" at the end
-                if let Some(pos) = deck_lines.iter().position(|l| l.starts_with("Other;")) {
-                    let other = deck_lines.remove(pos);
-                    deck_lines.push(other);
-                }
-                for deck_line in &deck_lines {
-                    new_lines.push(deck_line.clone());
-                }
-                deck_lines.clear();
-                in_decks_section = false;
-            }
-            new_lines.push(line.to_string());
-            continue;
-        }
-        
-        if in_decks_section && !line.trim().is_empty() {
-            deck_lines.push(line.to_string());
-        } else {
-            new_lines.push(line.to_string());
-        }
-    }
-    
-    // If we're still in decks section at the end of file
-    if in_decks_section {
-        deck_lines.push(format!("{}; {}", deck_name, category));
-        deck_lines.sort();
-        if let Some(pos) = deck_lines.iter().position(|l| l.starts_with("Other;")) {
-            let other = deck_lines.remove(pos);
-            deck_lines.push(other);
-        }
-        for deck_line in &deck_lines {
-            new_lines.push(deck_line.clone());
-        }
-    }
-    
-    // Write back to file
-    let new_content = new_lines.join("\n");
-    match fs::write("definitions.md", new_content) {
-        Ok(_) => println!("Added '{}' with category '{}' to deck list", deck_name, category),
-        Err(e) => println!("Error writing to definitions.md: {}", e),
-    }
+
+    let (arch, sub) = parse_deck_name(&deck_name);
+    let category_options: Vec<String> = vec!["Blue".into(), "Combo".into(), "Non-Blue".into(), "Other".into()];
+    let Some(category) = fuzzy_select("Category", &category_options) else { return; };
+
+    diesel::insert_into(deck_types::table)
+        .values(NewDeckType {
+            category: category.clone(),
+            archetype: arch.to_string(),
+            subtype: sub.map(|s| s.to_string()),
+            flow_type: None,
+        })
+        .on_conflict_do_nothing()
+        .execute(connection)
+        .expect("Error inserting deck type");
+
+    println!("Added '{}' (category: {}) to deck database", deck_name, category);
 }
 
 fn load_board_plans() -> HashMap<String, String> {
@@ -4839,8 +4966,9 @@ mod tests {
             panic!("Failed to parse definition files:\n{}", errors.join("\n"));
         }
 
-        // Verify we loaded a reasonable number of archetypes
-        assert!(parsed.len() >= 30, "Expected at least 30 archetypes, got {}", parsed.len());
+        // Verify the two flow-option toml files parse correctly
+        assert!(parsed.contains(&"Doomsday".to_string()), "doomsday.toml should parse");
+        assert!(parsed.contains(&"Lands".to_string()), "lands.toml should parse");
     }
 
     #[test]
@@ -4932,7 +5060,9 @@ mod tests {
             match_winner TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             era INTEGER,
-            league_id INTEGER
+            league_id INTEGER,
+            my_deck_id INTEGER,
+            opponent_type_id INTEGER
         )").execute(&mut conn).unwrap();
         diesel::sql_query("CREATE TABLE games (
             game_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4963,6 +5093,8 @@ mod tests {
                 match_winner: "me".to_string(),
                 era,
                 league_id: None,
+                my_deck_id: None,
+                opponent_type_id: None,
             })
             .execute(conn)
             .unwrap();

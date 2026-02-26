@@ -1,9 +1,0 @@
-# Oops! All Spells archetype
-name = "Oops! All Spells"
-category = "Combo"
-
-game_plans = ["combo", "graveyard"]
-win_conditions = ["combo"]
-
-[board_plan]
-description = "Force backup, surgical key pieces, mulligan aggressively for Force"

@@ -1,9 +1,0 @@
-# Dredge archetype
-name = "Dredge"
-category = "Combo"
-
-game_plans = ["graveyard", "combo"]
-win_conditions = ["creatures"]
-
-[board_plan]
-description = "Graveyard hate, counter Bridge, pressure life total"
