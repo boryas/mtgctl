@@ -2563,7 +2563,8 @@ fn bucket_metric(matches: &[Match], games: &[Game], bucket_size: usize, metric: 
 
     match metric {
         "win-rate" => {
-            sorted_matches.chunks(bucket_size).map(|chunk| {
+            let trim = sorted_matches.len() % bucket_size;
+            sorted_matches[trim..].chunks(bucket_size).map(|chunk| {
                 let wins = chunk.iter().filter(|m| m.match_winner == "me").count();
                 wins as f64 / chunk.len() as f64 * 100.0
             }).collect()
@@ -2579,7 +2580,8 @@ fn bucket_metric(matches: &[Match], games: &[Game], bucket_size: usize, metric: 
                 let b_info = match_dates.get(&b.match_id).unwrap_or(&("", 0));
                 a_info.cmp(b_info).then(a.game_number.cmp(&b.game_number))
             });
-            sorted_games.chunks(bucket_size).map(|chunk| {
+            let trim = sorted_games.len() % bucket_size;
+            sorted_games[trim..].chunks(bucket_size).map(|chunk| {
                 let wins = chunk.iter().filter(|g| g.game_winner == "me").count();
                 wins as f64 / chunk.len() as f64 * 100.0
             }).collect()
@@ -2595,7 +2597,8 @@ fn bucket_metric(matches: &[Match], games: &[Game], bucket_size: usize, metric: 
                 let b_info = match_dates.get(&b.match_id).unwrap_or(&("", 0));
                 a_info.cmp(b_info).then(a.game_number.cmp(&b.game_number))
             });
-            sorted_games.chunks(bucket_size).map(|chunk| {
+            let trim = sorted_games.len() % bucket_size;
+            sorted_games[trim..].chunks(bucket_size).map(|chunk| {
                 let total: i32 = chunk.iter().map(|g| g.mulligans).sum();
                 total as f64 / chunk.len() as f64
             }).collect()
@@ -2610,7 +2613,8 @@ fn bucket_metric(matches: &[Match], games: &[Game], bucket_size: usize, metric: 
                 let b_info = match_dates.get(&b.match_id).unwrap_or(&("", 0));
                 a_info.cmp(b_info).then(a.game_number.cmp(&b.game_number))
             });
-            sorted_games.chunks(bucket_size).map(|chunk| {
+            let trim = sorted_games.len() % bucket_size;
+            sorted_games[trim..].chunks(bucket_size).map(|chunk| {
                 let with_turns: Vec<_> = chunk.iter().filter(|g| g.turns.is_some()).collect();
                 if with_turns.is_empty() {
                     0.0
@@ -2621,7 +2625,8 @@ fn bucket_metric(matches: &[Match], games: &[Game], bucket_size: usize, metric: 
             }).collect()
         }
         "matches-played" => {
-            sorted_matches.chunks(bucket_size).map(|chunk| chunk.len() as f64).collect()
+            let trim = sorted_matches.len() % bucket_size;
+            sorted_matches[trim..].chunks(bucket_size).map(|chunk| chunk.len() as f64).collect()
         }
         _ => Vec::new(),
     }

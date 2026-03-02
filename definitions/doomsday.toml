@@ -17,7 +17,8 @@ common_pile_types = [
     "Cavern+Cyclers",
     "Disruption+Cyclers",
     "Other",
-    "Thoughtseize+Cavern"]
+    "Thoughtseize+Cavern",
+    "Cavern+Force"]
 
 no_doomsday_reasons = [
     "Mana",
@@ -80,7 +81,12 @@ pile_disruption = [
     "Snuff Out",
     "Abrupt Decay",
     "Hexing Squelcher",
-    "Flusterstorm"]
+    "Flusterstorm",
+    "Thalia, Guardian of Thraben",
+    "Mindbreak Trap",
+    "Daze",
+    "Goblin Bombardment",
+    "Ajani, Nacatl Pariah"]
 
 [subtypes.Turbo]
 game_plans = ["combo", "cantrips", "control", "creatures"]
