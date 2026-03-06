@@ -3,11 +3,13 @@ mod game;
 mod db;
 mod deck;
 mod html_stats;
+mod pilegen;
 
 use clap::{Parser, Subcommand};
 use league::LeagueArgs;
 use game::GameArgs;
 use deck::DeckArgs;
+use pilegen::PilegenArgs;
 
 #[derive(Parser)]
 #[command(name = "mtgctl")]
@@ -22,6 +24,8 @@ enum Commands {
     League(LeagueArgs),
     Game(GameArgs),
     Deck(DeckArgs),
+    /// Generate Doomsday pile scenarios for practice
+    Pilegen(PilegenArgs),
 }
 
 fn main() {
@@ -41,5 +45,6 @@ fn main() {
         Commands::League(args) => league::run(args),
         Commands::Game(args) => game::run(args),
         Commands::Deck(args) => deck::run(args),
+        Commands::Pilegen(args) => pilegen::run(args),
     }
 }

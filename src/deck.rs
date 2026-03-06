@@ -9,7 +9,7 @@ use std::env;
 use std::collections::HashMap;
 
 use crate::db::{establish_connection, models::*};
-use crate::db::schema::{decks, cards};
+use crate::db::schema::{cards, deck_types, decks};
 
 /// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
 fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
@@ -54,8 +54,6 @@ pub struct DeckArgs {
 #[derive(Subcommand)]
 enum DeckCommands {
     Import {
-        #[arg(help = "Name for the deck")]
-        name: String,
         #[arg(long, help = "Moxfield URL for reference")]
         url: Option<String>,
     },
@@ -69,7 +67,7 @@ enum DeckCommands {
 
 pub fn run(args: DeckArgs) {
     match args.command {
-        DeckCommands::Import { name, url } => import_deck(&name, url),
+        DeckCommands::Import { url } => import_deck(url),
         DeckCommands::List => list_decks(),
         DeckCommands::View => view_deck_interactive(),
         DeckCommands::Delete => delete_deck_interactive(),
@@ -79,159 +77,157 @@ pub fn run(args: DeckArgs) {
     }
 }
 
-fn import_deck(name: &str, moxfield_url: Option<String>) {
+fn import_deck(moxfield_url: Option<String>) {
     let connection = &mut establish_connection();
-    
-    // Check if deck name already exists
-    let existing: Result<Deck, _> = decks::table
-        .filter(decks::list_name.eq(name))
-        .first(connection);
-        
-    if existing.is_ok() {
-        println!("Deck '{}' already exists. Use a different name.", name);
+
+    // Load all decks with type context for display
+    let all_decks: Vec<Deck> = decks::table
+        .order(decks::list_name.asc())
+        .load(connection)
+        .unwrap_or_default();
+
+    if all_decks.is_empty() {
+        println!("No decks found. Record a match first to register a deck in the system.");
         return;
     }
-    
-    println!("=== Importing Deck: {} ===", name);
-    println!("You will now open an editor to paste your deck list.");
-    println!("Format: Each line should be: [quantity] [card name]");
-    println!("Use a blank line to separate mainboard from sideboard.");
-    println!("Example:");
-    println!("4 Lightning Bolt");
-    println!("2 Counterspell");
-    println!();
-    println!("1 Pyroblast");
-    println!("2 Red Elemental Blast");
-    
+
+    let type_map: HashMap<i32, DeckType> = deck_types::table
+        .load::<DeckType>(connection)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|dt| (dt.type_id, dt))
+        .collect();
+
+    let display_options: Vec<String> = all_decks
+        .iter()
+        .map(|d| match d.type_id.and_then(|tid| type_map.get(&tid)) {
+            Some(dt) => format!("{} ({})", d.list_name, dt.display()),
+            None => d.list_name.clone(),
+        })
+        .collect();
+
+    let selected = match fuzzy_select("Select deck to import cards for", &display_options) {
+        Some(s) => s,
+        None => return,
+    };
+
+    let idx = match display_options.iter().position(|d| d == &selected) {
+        Some(i) => i,
+        None => {
+            println!("Selection not found.");
+            return;
+        }
+    };
+    let deck = &all_decks[idx];
+
+    // Warn if cards already exist
+    let existing_count: i64 = cards::table
+        .filter(cards::deck_id.eq(deck.deck_id))
+        .count()
+        .get_result(connection)
+        .unwrap_or(0);
+
+    if existing_count > 0 {
+        println!("'{}' already has {} cards.", deck.list_name, existing_count);
+        if !Confirm::new()
+            .with_prompt("Replace existing card list?")
+            .default(false)
+            .interact()
+            .unwrap_or(false)
+        {
+            println!("Import cancelled.");
+            return;
+        }
+    }
+
+    println!("=== Importing cards for: {} ===", deck.list_name);
+
     if !Confirm::new()
-        .with_prompt("Ready to open editor?")
+        .with_prompt("Open editor to paste deck list?")
         .default(true)
         .interact()
         .unwrap()
     {
-        println!("Import cancelled");
+        println!("Import cancelled.");
         return;
     }
-    
-    // Create temporary file
-    let temp_file = format!("/tmp/mtgctl_deck_{}.txt", name.replace(' ', "_"));
-    
-    // Create initial content
-    let initial_content = format!(
-        "# Deck: {}\n# Paste your deck list below\n# Format: [quantity] [card name]\n# Separate mainboard and sideboard with a blank line\n\n# Mainboard\n\n\n# Sideboard\n\n",
-        name
-    );
-    
+
+    let temp_file = format!("/tmp/mtgctl_deck_{}.txt", deck.list_name.replace(' ', "_"));
+    let initial_content = "# Paste your deck list below\n# Format: [quantity] [card name]\n# Separate mainboard and sideboard with a blank line\n\n# Mainboard\n\n\n# Sideboard\n\n".to_string();
     fs::write(&temp_file, initial_content).expect("Failed to create temp file");
-    
-    // Open editor
+
     let editor = env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
     let status = Command::new(&editor)
         .arg(&temp_file)
         .status()
         .expect("Failed to start editor");
-    
+
     if !status.success() {
-        println!("Editor exited with error");
+        println!("Editor exited with error.");
         fs::remove_file(&temp_file).ok();
         return;
     }
-    
-    // Read the edited content
+
     let content = match fs::read_to_string(&temp_file) {
-        Ok(content) => content,
+        Ok(c) => c,
         Err(_) => {
-            println!("Failed to read temp file");
+            println!("Failed to read temp file.");
             fs::remove_file(&temp_file).ok();
             return;
         }
     };
-    
-    // Clean up temp file
     fs::remove_file(&temp_file).ok();
-    
-    // Parse the deck list
+
     let (mainboard, sideboard) = parse_deck_content(&content);
-    
+
     if mainboard.is_empty() && sideboard.is_empty() {
-        println!("No cards found in deck list");
+        println!("No cards found in deck list.");
         return;
     }
-    
-    println!("Parsed {} mainboard cards, {} sideboard cards", 
-             mainboard.len(), sideboard.len());
-    
-    // Confirm import
+
+    println!(
+        "Parsed {} mainboard cards, {} sideboard cards.",
+        mainboard.len(),
+        sideboard.len()
+    );
+
     if !Confirm::new()
-        .with_prompt("Import this deck?")
+        .with_prompt("Save this card list?")
         .default(true)
         .interact()
         .unwrap()
     {
-        println!("Import cancelled");
+        println!("Import cancelled.");
         return;
     }
 
-    // Parse era from deck name (pattern: name-X.Y -> era = X)
-    let default_era = parse_era_from_name(name);
-
-    // Prompt for era
-    let era_input: String = Input::new()
-        .with_prompt("What era is this deck from?")
-        .default(default_era.map(|e| e.to_string()).unwrap_or_else(|| "1".to_string()))
-        .interact_text()
-        .unwrap();
-
-    let era = era_input.parse::<i32>().ok();
-
-    // Create deck in database
-    let new_deck = NewDeck {
-        list_name: name.to_string(),
-        moxfield_url,
-        era,
-        type_id: None,
-    };
-    
-    diesel::insert_into(decks::table)
-        .values(&new_deck)
+    // Clear existing cards, then insert
+    diesel::delete(cards::table.filter(cards::deck_id.eq(deck.deck_id)))
         .execute(connection)
-        .expect("Error saving deck");
-    
-    // Get the deck ID
-    let deck_id: i32 = decks::table
-        .select(decks::deck_id)
-        .filter(decks::list_name.eq(name))
-        .first(connection)
-        .expect("Error getting deck ID");
-    
-    // Insert cards
-    let mut new_cards = Vec::new();
-    
+        .expect("Error clearing existing cards");
+
+    // Update moxfield_url if provided
+    if let Some(ref url) = moxfield_url {
+        diesel::update(decks::table.find(deck.deck_id))
+            .set(decks::moxfield_url.eq(url))
+            .execute(connection)
+            .ok();
+    }
+
+    let mut new_cards: Vec<NewCard> = Vec::new();
     for (card_name, quantity) in mainboard {
-        new_cards.push(NewCard {
-            deck_id,
-            card_name,
-            quantity,
-            board: "main".to_string(),
-        });
+        new_cards.push(NewCard { deck_id: deck.deck_id, card_name, quantity, board: "main".to_string() });
     }
-    
     for (card_name, quantity) in sideboard {
-        new_cards.push(NewCard {
-            deck_id,
-            card_name,
-            quantity,
-            board: "side".to_string(),
-        });
+        new_cards.push(NewCard { deck_id: deck.deck_id, card_name, quantity, board: "side".to_string() });
     }
-    
+
     diesel::insert_into(cards::table)
         .values(&new_cards)
         .execute(connection)
         .expect("Error saving cards");
-    
-    println!("Successfully imported deck '{}'!", name);
-    println!("This deck is now available when adding matches.");
+
+    println!("Cards imported for '{}'.", deck.list_name);
 }
 
 fn parse_deck_content(content: &str) -> (Vec<(String, i32)>, Vec<(String, i32)>) {

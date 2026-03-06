@@ -1,0 +1,274 @@
+# Doomsday pile scenario generator — card catalog and opponent archetypes
+#
+# [[cards]] entries define every card the generator needs to reason about.
+# Cards not in the catalog are treated as generic non-land spells: hand-eligible,
+# not permanent candidates, not exileable.
+#
+# card_type: "land" | "creature" | "planeswalker" | "artifact" | "instant" |
+#            "sorcery" | "enchantment"
+#
+# Land-specific fields:
+#   is_fetch          — fetchlands are always untapped when in play
+#   produces_black    — land can tap for black mana
+#   annotation_options — one option is picked at random (e.g. Cavern creature type)
+#
+# DFC fields (for cards with two faces):
+#   flipped_name       — display name of the back face
+#   flipped_card_type  — card type of the back face
+#   flipped_loyalty    — loyalty of the back face (if planeswalker)
+#
+# Planeswalker field:
+#   loyalty            — starting loyalty
+#
+# Exile rules:
+#   exileable          — can appear in exile zone (blue cards pitched to Force of Will)
+#
+# Play weight:
+#   play_weight        — relative likelihood of appearing as a permanent in play.
+#                        Default 100. Lower = rarer (e.g. 1 = ~1% chance, 25 = ~25%).
+
+# ── Lands ────────────────────────────────────────────────────────────────────
+
+[[cards]]
+name = "Underground Sea"
+card_type = "land"
+produces_black = true
+
+[[cards]]
+name = "Swamp"
+card_type = "land"
+produces_black = true
+play_weight = 25  # basic, uncommon in this list
+
+[[cards]]
+name = "Island"
+card_type = "land"
+play_weight = 25  # basic, uncommon in this list
+
+[[cards]]
+name = "Undercity Sewers"
+card_type = "land"
+produces_black = true
+
+[[cards]]
+name = "Wasteland"
+card_type = "land"
+
+[[cards]]
+name = "Polluted Delta"
+card_type = "land"
+is_fetch = true
+play_weight = 25  # likely cracked already
+
+[[cards]]
+name = "Flooded Strand"
+card_type = "land"
+is_fetch = true
+play_weight = 25  # likely cracked already
+
+[[cards]]
+name = "Misty Rainforest"
+card_type = "land"
+is_fetch = true
+play_weight = 25  # likely cracked already
+
+[[cards]]
+name = "Scalding Tarn"
+card_type = "land"
+is_fetch = true
+play_weight = 25  # likely cracked already
+
+[[cards]]
+name = "Marsh Flats"
+card_type = "land"
+is_fetch = true
+play_weight = 25  # likely cracked already
+
+# ── Creatures ────────────────────────────────────────────────────────────────
+
+[[cards]]
+name = "Tamiyo, Inquisitive Student"
+card_type = "creature"
+flipped_name = "Tamiyo, Seasoned Scholar"
+flipped_card_type = "planeswalker"
+flipped_loyalty = 4
+
+[[cards]]
+name = "Orcish Bowmasters"
+card_type = "creature"
+
+[[cards]]
+name = "Murktide Regent"
+card_type = "creature"
+play_weight = 25
+
+[[cards]]
+name = "Thassa's Oracle"
+card_type = "creature"
+exileable = true
+play_weight = 1  # almost never played out — it's the kill card
+
+[[cards]]
+name = "Street Wraith"
+card_type = "creature"
+play_weight = 1  # almost always cycled, rarely cast
+
+# ── Artifacts ─────────────────────────────────────────────────────────────────
+
+[[cards]]
+name = "Lotus Petal"
+card_type = "artifact"
+play_weight = 25
+
+[[cards]]
+name = "Lion's Eye Diamond"
+card_type = "artifact"
+play_weight = 10
+
+# ── Spells ────────────────────────────────────────────────────────────────────
+
+[[cards]]
+name = "Doomsday"
+card_type = "sorcery"
+
+[[cards]]
+name = "Brainstorm"
+card_type = "instant"
+exileable = true
+
+[[cards]]
+name = "Ponder"
+card_type = "sorcery"
+exileable = true
+
+[[cards]]
+name = "Consider"
+card_type = "instant"
+exileable = true
+
+[[cards]]
+name = "Daze"
+card_type = "instant"
+exileable = true
+
+[[cards]]
+name = "Force of Will"
+card_type = "instant"
+
+[[cards]]
+name = "Dark Ritual"
+card_type = "instant"
+
+[[cards]]
+name = "Thoughtseize"
+card_type = "sorcery"
+
+[[cards]]
+name = "Unearth"
+card_type = "sorcery"
+
+[[cards]]
+name = "Edge of Autumn"
+card_type = "sorcery"
+
+# ── Opponent archetype threat libraries ───────────────────────────────────────
+
+[archetypes."Tempo: Dimir"]
+hand_threats = ["Daze", "Force of Will", "Stifle", "Force of Negation", "Brainstorm", "Ponder"]
+perm_threats = ["Wasteland"]
+used_threats = ["Daze", "Stifle", "Force of Will", "Wasteland", "Lightning Bolt"]
+
+[archetypes."Tempo: UR"]
+hand_threats = ["Daze", "Force of Will", "Pyroblast", "Red Elemental Blast", "Lightning Bolt", "Brainstorm"]
+perm_threats = []
+used_threats = ["Daze", "Force of Will", "Lightning Bolt", "Pyroblast"]
+
+[archetypes."Tempo: Grixis"]
+hand_threats = ["Daze", "Force of Will", "Thoughtseize", "Pyroblast", "Red Elemental Blast", "Lightning Bolt"]
+perm_threats = []
+used_threats = ["Thoughtseize", "Force of Will", "Daze", "Lightning Bolt"]
+
+[archetypes."Control: Miracles"]
+hand_threats = ["Force of Will", "Counterspell", "Force of Negation", "Swords to Plowshares", "Brainstorm"]
+perm_threats = ["Counterbalance", "Monastery Mentor"]
+used_threats = ["Force of Will", "Counterspell", "Terminus", "Swords to Plowshares"]
+
+[archetypes."Control: Jeskai"]
+hand_threats = ["Force of Will", "Counterspell", "Swords to Plowshares", "Pyroblast"]
+perm_threats = ["Counterbalance"]
+used_threats = ["Force of Will", "Counterspell", "Swords to Plowshares"]
+
+[archetypes."Control: Bant"]
+hand_threats = ["Force of Will", "Swords to Plowshares", "Force of Negation", "Brainstorm"]
+perm_threats = ["Uro, Titan of Nature's Wrath", "Monastery Mentor"]
+used_threats = ["Force of Will", "Swords to Plowshares"]
+
+[archetypes."Death and Taxes"]
+hand_threats = ["Swords to Plowshares", "Flickerwisp", "Mother of Runes", "Aether Vial"]
+perm_threats = ["Thalia, Guardian of Thraben", "Wasteland", "Aether Vial", "Phyrexian Revoker"]
+used_threats = ["Wasteland", "Swords to Plowshares", "Aether Vial"]
+
+[archetypes."Initiative"]
+hand_threats = ["Swords to Plowshares", "Aether Vial", "Force of Will"]
+perm_threats = ["White Plume Adventurer", "Seasoned Dungeoneer", "Aether Vial", "Wasteland"]
+used_threats = ["Wasteland", "Swords to Plowshares"]
+
+[archetypes."Reanimator: BR"]
+hand_threats = ["Unmask", "Thoughtseize", "Reanimate", "Grief"]
+perm_threats = ["Griselbrand", "Archon of Cruelty"]
+used_threats = ["Entomb", "Reanimate", "Thoughtseize", "Exhume", "Unmask"]
+
+[archetypes."Reanimator: UB"]
+hand_threats = ["Force of Will", "Thoughtseize", "Reanimate"]
+perm_threats = ["Griselbrand", "Archon of Cruelty"]
+used_threats = ["Entomb", "Reanimate", "Show and Tell", "Thoughtseize"]
+
+[archetypes."Lands"]
+hand_threats = ["Force of Will", "Crop Rotation", "Life from the Loam", "Punishing Fire"]
+perm_threats = ["Maze of Ith", "The Tabernacle at Pendrell Vale", "Dark Depths", "Thespian's Stage"]
+used_threats = ["Life from the Loam", "Punishing Fire", "Wasteland", "Crop Rotation"]
+
+[archetypes."Painter"]
+hand_threats = ["Pyroblast", "Red Elemental Blast", "Force of Will", "Brainstorm"]
+perm_threats = ["Painter's Servant", "Grindstone", "Imperial Recruiter"]
+used_threats = ["Pyroblast", "Red Elemental Blast", "Brainstorm"]
+
+[archetypes."Elves"]
+hand_threats = ["Force of Will", "Thoughtseize", "Natural Order", "Green Sun's Zenith"]
+perm_threats = ["Gaea's Cradle", "Quirion Ranger", "Wirewood Symbiote"]
+used_threats = ["Natural Order", "Glimpse of Nature"]
+
+[archetypes."Sneak and Show"]
+hand_threats = ["Force of Will", "Show and Tell", "Cunning Wish", "Brainstorm"]
+perm_threats = ["Emrakul, the Aeons Torn", "Griselbrand", "Sneak Attack"]
+used_threats = ["Show and Tell", "Sneak Attack", "Force of Will"]
+
+[archetypes."Storm: TES"]
+hand_threats = ["Duress", "Wishclaw Talisman", "Echo of Eons"]
+perm_threats = []
+used_threats = ["Rite of Flame", "Dark Ritual", "Duress"]
+
+[archetypes."Storm: ANT"]
+hand_threats = ["Duress", "Force of Will", "Thoughtseize", "Brainstorm"]
+perm_threats = []
+used_threats = ["Dark Ritual", "Cabal Ritual", "Duress"]
+
+[archetypes."Doomsday"]
+hand_threats = ["Force of Will", "Daze", "Thoughtseize", "Brainstorm"]
+perm_threats = []
+used_threats = ["Force of Will", "Thoughtseize", "Daze"]
+
+[archetypes."Stompy: Eldrazi"]
+hand_threats = ["Chalice of the Void", "Trinisphere", "Dismember"]
+perm_threats = ["Chalice of the Void", "Trinisphere", "Thought-Knot Seer", "Reality Smasher"]
+used_threats = ["Chalice of the Void", "Trinisphere", "Wasteland"]
+
+[archetypes."Stompy: Moon"]
+hand_threats = ["Blood Moon", "Chalice of the Void", "Lightning Bolt", "Magus of the Moon"]
+perm_threats = ["Blood Moon", "Chalice of the Void", "Magus of the Moon"]
+used_threats = ["Blood Moon", "Chalice of the Void", "Wasteland"]
+
+[archetypes."Infect"]
+hand_threats = ["Force of Will", "Daze", "Vines of Vastwood", "Blossoming Defense"]
+perm_threats = ["Glistener Elf", "Inkmoth Nexus"]
+used_threats = ["Force of Will", "Daze", "Berserk"]
