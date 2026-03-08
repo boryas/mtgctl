@@ -33,90 +33,112 @@
 name = "Underground Sea"
 card_type = "land"
 produces_black = true
+produces_blue = true
 
 [[cards]]
 name = "Swamp"
 card_type = "land"
 produces_black = true
+basic_land = true
 play_weight = 25  # basic, uncommon in this list
 
 [[cards]]
 name = "Island"
 card_type = "land"
+produces_blue = true
+basic_land = true
 play_weight = 25  # basic, uncommon in this list
 
 [[cards]]
 name = "Undercity Sewers"
 card_type = "land"
 produces_black = true
+produces_blue = true
+enters_tapped = true
 
 [[cards]]
 name = "Wasteland"
 card_type = "land"
 cracked_land = true  # usually spent before Doomsday — stage-filtered
+abilities = [{tap_self = true, sacrifice_self = true, target = "opp:nonbasic_land", effect = "destroy"}]
 
 [[cards]]
 name = "Polluted Delta"
 card_type = "land"
 is_fetch = true
 play_weight = 25  # likely cracked already
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-ub:play"}]
 
 [[cards]]
 name = "Flooded Strand"
 card_type = "land"
 is_fetch = true
 play_weight = 25  # likely cracked already
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-u:play"}]
 
 [[cards]]
 name = "Misty Rainforest"
 card_type = "land"
 is_fetch = true
 play_weight = 25  # likely cracked already
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-u:play"}]
 
 [[cards]]
 name = "Scalding Tarn"
 card_type = "land"
 is_fetch = true
 play_weight = 25  # likely cracked already
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-u:play"}]
 
 [[cards]]
 name = "Marsh Flats"
 card_type = "land"
 is_fetch = true
 play_weight = 25  # likely cracked already
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-b:play"}]
 
 # ── Creatures ────────────────────────────────────────────────────────────────
 
 [[cards]]
 name = "Tamiyo, Inquisitive Student"
 card_type = "creature"
+legendary = true
 flipped_name = "Tamiyo, Seasoned Scholar"
 flipped_card_type = "planeswalker"
 flipped_loyalty = 4
 generates_clues = true
+mana_cost = "1U"
+power = 1
+effects = ["permanent"]
 
 [[cards]]
 name = "Orcish Bowmasters"
 card_type = "creature"
-entry_token = "Orc Army (1/1)"
-entry_token_prob = 62
+mana_cost = "1B"
+black = true
+power = 1
+effects = ["permanent"]
 
 [[cards]]
 name = "Murktide Regent"
 card_type = "creature"
 play_weight = 25
 annotation_options = ["3/3", "4/4", "5/5", "6/6", "7/7", "8/8"]
+mana_cost = "5UU"  # delve makes it cheaper in practice
+power = 5
 
 [[cards]]
 name = "Thassa's Oracle"
 card_type = "creature"
 exileable = true
 play_weight = 1  # almost never played out — it's the kill card
+mana_cost = "UU"
 
 [[cards]]
 name = "Street Wraith"
 card_type = "creature"
 play_weight = 1  # almost always cycled, rarely cast
+power = 2
 
 # ── Artifacts ─────────────────────────────────────────────────────────────────
 
@@ -124,187 +146,116 @@ play_weight = 1  # almost always cycled, rarely cast
 name = "Lotus Petal"
 card_type = "artifact"
 play_weight = 25
+# no mana cost (free) — produces any color when sacrificed
 
 [[cards]]
 name = "Lion's Eye Diamond"
 card_type = "artifact"
 play_weight = 10
+# no mana cost (free) — produces BBB when sacrificed with spell on stack
 
 # ── Spells ────────────────────────────────────────────────────────────────────
 
 [[cards]]
 name = "Doomsday"
 card_type = "sorcery"
+mana_cost = "BBB"  # handled specially in sim_cast_doomsday
 
 [[cards]]
 name = "Brainstorm"
 card_type = "instant"
 exileable = true
+mana_cost = "U"
+effects = ["cantrip"]
 
 [[cards]]
 name = "Ponder"
 card_type = "sorcery"
 exileable = true
+mana_cost = "U"
+effects = ["cantrip"]
 
 [[cards]]
 name = "Consider"
 card_type = "instant"
 exileable = true
+mana_cost = "U"
+effects = ["cantrip"]
 
 [[cards]]
 name = "Daze"
 card_type = "instant"
 exileable = true
+blue = true
+counter_target = "any"
+alternate_costs = [
+  { bounce_island = true, hand_min = 1 },
+  { mana_cost = "1U", hand_min = 1, prob = 0.2 },
+]
 
 [[cards]]
 name = "Force of Will"
 card_type = "instant"
+blue = true
+counter_target = "any"
+alternate_costs = [
+  { exile_blue_from_hand = true, life_cost = 1, hand_min = 2 },
+  { mana_cost = "3UU", hand_min = 1 },
+]
 
 [[cards]]
 name = "Dark Ritual"
 card_type = "instant"
+mana_cost = "B"  # produces BBB (net +BB)
+
+[[cards]]
+name = "Fatal Push"
+card_type = "instant"
+mana_cost = "B"
+target = "opp:creature_mv_lt4"
+effects = ["destroy"]
+
+[[cards]]
+name = "Snuff Out"
+card_type = "instant"
+mana_cost = "3BB"
+black = true
+target = "opp:creature_nonblack"
+effects = ["destroy"]
+alternate_costs = [
+  { life_cost = 4 },
+]
+
+[[cards]]
+name = "Barrowgoyf"
+card_type = "creature"
+mana_cost = "2B"
+black = true
+power = 2
+effects = ["permanent"]
 
 [[cards]]
 name = "Thoughtseize"
 card_type = "sorcery"
+mana_cost = "B"
+requires = ["opp_hand_nonempty"]
+effects = ["discard:opp:1", "life_loss:2"]
 
 [[cards]]
 name = "Unearth"
 card_type = "sorcery"
+mana_cost = "B"
+
+[[cards]]
+name = "Hymn to Tourach"
+card_type = "sorcery"
+mana_cost = "BB"
+requires = ["opp_hand_nonempty"]
+effects = ["discard:opp:2"]
 
 [[cards]]
 name = "Edge of Autumn"
 card_type = "sorcery"
+mana_cost = "GW"  # cycle cost; rarely cast directly
 
-# ── Opponent archetypes ───────────────────────────────────────────────────────
-#
-# hand          — cards that may be in their hand (one revealed 15% of the time by default)
-# pressure      — permanents that attack or threaten lethal
-# disruption    — permanents that interfere with our plan
-# other         — utility permanents (vials, mana sources, etc.)
-# used          — spells/abilities already expended this game
-#
-# Optional per-archetype distribution overrides (index = count, value = weight):
-#   pressure_weights, disruption_weights, other_weights, used_weights
-# Optional:
-#   lands_delta       — offset from our land count (default 0)
-#   known_hand_prob   — percent chance of revealing a hand card (default 15)
-#
-# Archetype names must match the DB display format: "Archetype" or "Archetype: Subtype".
 
-[archetypes."Tempo: Dimir"]
-lands = ["Underground Sea", "Underground Sea", "Underground Sea", "Polluted Delta", "Polluted Delta", "Polluted Delta", "Flooded Strand", "Misty Rainforest", "Island", "Swamp", "Wasteland", "Wasteland", "Wasteland"]
-hand = ["Daze", "Force of Will", "Fatal Push", "Brainstorm", "Ponder", "Thoughtseize"]
-pressure = ["Murktide Regent", "Orcish Bowmasters", "Tamiyo, Inquisitive Student"]
-used = ["Daze", "Stifle", "Force of Will", "Wasteland", "Thoughtseize"]
-pressure_weights = [20, 45, 35]
-
-[archetypes."Energy: Boros"]
-lands = ["Plateau", "Plateau", "Sacred Foundry", "Arid Mesa", "Arid Mesa", "Arid Mesa", "Windswept Heath", "Windswept Heath", "Plains", "Mountain"]
-hand = ["Swords to Plowshares", "Galvanic Discharge", "Ajani, Ocelot Pride", "Broadside Bombardiers"]
-pressure = ["Ajani, Ocelot Pride", "Amped Raptor", "Laelia, the Blade Reforged", "Broadside Bombardiers"]
-used = ["Swords to Plowshares", "Galvanic Discharge"]
-pressure_weights = [15, 40, 35, 10]
-lands_delta = -1
-
-[archetypes."Energy: Mardu"]
-lands = ["Badlands", "Plateau", "Scrubland", "Bloodstained Mire", "Bloodstained Mire", "Arid Mesa", "Arid Mesa", "Plains", "Mountain", "Swamp"]
-hand = ["Thoughtseize", "Swords to Plowshares", "Galvanic Discharge", "Ajani, Ocelot Pride"]
-pressure = ["Ajani, Ocelot Pride", "Amped Raptor", "Laelia, the Blade Reforged"]
-used = ["Thoughtseize", "Swords to Plowshares", "Galvanic Discharge"]
-pressure_weights = [15, 40, 35, 10]
-lands_delta = -1
-
-[archetypes."Tempo: Izzet"]
-lands = ["Volcanic Island", "Volcanic Island", "Volcanic Island", "Scalding Tarn", "Scalding Tarn", "Scalding Tarn", "Flooded Strand", "Misty Rainforest", "Island"]
-hand = ["Daze", "Force of Will", "Pyroblast", "Lightning Bolt", "Brainstorm"]
-pressure = ["Murktide Regent", "Dragon's Rage Channeler", "Delver of Secrets"]
-used = ["Daze", "Force of Will", "Lightning Bolt", "Pyroblast"]
-pressure_weights = [25, 50, 25]
-
-[archetypes."Oops! All Spells"]
-lands = []  # No lands in the deck
-hand = ["Balustrade Spy", "Undercity Informer", "Cabal Ritual", "Dark Ritual", "Lotus Petal"]
-used = ["Lotus Petal", "Dark Ritual", "Chrome Mox", "Elvish Spirit Guide"]
-pressure_weights = [100]
-disruption_weights = [100]
-lands_delta = -3
-known_hand_prob = 5
-
-[archetypes."Show and Tell: Sneak"]
-lands = ["Volcanic Island", "Volcanic Island", "Island", "Island", "Island", "Ancient Tomb", "Ancient Tomb", "City of Traitors", "Flooded Strand", "Scalding Tarn"]
-hand = ["Force of Will", "Show and Tell", "Cunning Wish", "Brainstorm"]
-pressure = ["Emrakul, the Aeons Torn", "Griselbrand"]
-other = ["Sneak Attack"]
-used = ["Show and Tell", "Sneak Attack", "Force of Will"]
-pressure_weights = [45, 50, 5]
-
-[archetypes."Stompy: Eldrazi"]
-lands = ["Eldrazi Temple", "Eldrazi Temple", "Ancient Tomb", "Ancient Tomb", "City of Traitors", "City of Traitors", "Cavern of Souls", "Wasteland", "Wasteland"]
-hand = ["Chalice of the Void", "Trinisphere", "Dismember", "Thought-Knot Seer"]
-pressure = ["Thought-Knot Seer", "Reality Smasher", "Eldrazi Obligator"]
-disruption = ["Chalice of the Void", "Trinisphere"]
-used = ["Chalice of the Void", "Trinisphere", "Wasteland"]
-pressure_weights = [30, 50, 20]
-disruption_weights = [10, 50, 40]
-
-[archetypes."Lands"]
-lands = ["Bayou", "Tropical Island", "Taiga", "Dark Depths", "Thespian's Stage", "Maze of Ith", "Wasteland", "Wasteland", "Wasteland", "Forest", "Glacial Chasm", "The Tabernacle at Pendrell Vale"]
-hand = ["Force of Will", "Crop Rotation", "Life from the Loam", "Punishing Fire"]
-pressure = ["Dark Depths", "Thespian's Stage"]
-disruption = ["Maze of Ith", "The Tabernacle at Pendrell Vale"]
-used = ["Life from the Loam", "Punishing Fire", "Wasteland", "Crop Rotation"]
-lands_delta = 2
-disruption_weights = [10, 50, 40]
-
-[archetypes."Beanstalk"]
-lands = ["Tropical Island", "Tropical Island", "Underground Sea", "Underground Sea", "Tundra", "Tundra", "Flooded Strand", "Flooded Strand", "Misty Rainforest", "Misty Rainforest", "Windswept Heath", "Island", "Forest"]
-hand = ["Force of Will", "Brainstorm", "Swords to Plowshares", "Force of Negation", "Counterspell"]
-pressure = ["Uro, Titan of Nature's Wrath", "Murktide Regent"]
-other = ["Up the Beanstalk"]
-used = ["Force of Will", "Swords to Plowshares", "Counterspell"]
-other_weights = [40, 50, 10]
-
-[archetypes."Stompy: Moon"]
-lands = ["Ancient Tomb", "Ancient Tomb", "Ancient Tomb", "City of Traitors", "City of Traitors", "Mountain", "Mountain", "Bloodstained Mire", "Wooded Foothills"]
-hand = ["Blood Moon", "Chalice of the Void", "Lightning Bolt", "Magus of the Moon", "Fury"]
-pressure = ["Magus of the Moon", "Goblin Rabblemaster"]
-disruption = ["Blood Moon", "Chalice of the Void"]
-used = ["Blood Moon", "Chalice of the Void", "Wasteland"]
-disruption_weights = [10, 55, 35]
-pressure_weights = [40, 45, 15]
-
-[archetypes."Doomsday: Tempo"]
-lands = ["Underground Sea", "Underground Sea", "Underground Sea", "Polluted Delta", "Polluted Delta", "Polluted Delta", "Flooded Strand", "Misty Rainforest", "Island", "Swamp", "Wasteland", "Wasteland", "Wasteland"]
-hand = ["Force of Will", "Daze", "Thoughtseize", "Brainstorm", "Dark Ritual"]
-pressure = ["Murktide Regent", "Orcish Bowmasters", "Tamiyo, Inquisitive Student"]
-used = ["Force of Will", "Daze", "Thoughtseize"]
-pressure_weights = [55, 35, 10]
-
-[archetypes."Affinity"]
-lands = ["Seat of the Synod", "Seat of the Synod", "Seat of the Synod", "Vault of Whispers", "Vault of Whispers", "Great Furnace", "Great Furnace", "Glimmervoid", "Glimmervoid", "Urza's Saga"]
-hand = ["Thoughtcast", "Galvanic Blast", "Mox Opal", "Springleaf Drum"]
-pressure = ["Thought Monitor", "Nettlecyst", "Urza's Saga Construct"]
-disruption = ["Chalice of the Void"]
-other = ["Mox Opal", "Springleaf Drum"]
-used = ["Mox Opal", "Springleaf Drum", "Galvanic Blast"]
-pressure_weights = [15, 40, 35, 10]
-other_weights = [20, 50, 30]
-
-[archetypes."Cradle Control"]
-lands = ["Tropical Island", "Tropical Island", "Bayou", "Bayou", "Savannah", "Gaea's Cradle", "Misty Rainforest", "Misty Rainforest", "Windswept Heath", "Windswept Heath", "Forest"]
-hand = ["Force of Will", "Brainstorm", "Natural Order", "Green Sun's Zenith", "Leovold, Emissary of Trest"]
-pressure = ["Uro, Titan of Nature's Wrath", "Leovold, Emissary of Trest"]
-other = ["Gaea's Cradle"]
-used = ["Natural Order", "Green Sun's Zenith", "Force of Will"]
-other_weights = [30, 55, 15]
-lands_delta = 1
-
-[archetypes."Storm: TES"]
-lands = ["Badlands", "Underground Sea", "Volcanic Island", "Bloodstained Mire", "Polluted Delta"]
-hand = ["Duress", "Wishclaw Talisman", "Echo of Eons", "Brainstorm", "Burning Wish"]
-used = ["Rite of Flame", "Dark Ritual", "Duress", "Galvanic Relay"]
-pressure_weights = [100]
-disruption_weights = [100]
-lands_delta = -1
-known_hand_prob = 5

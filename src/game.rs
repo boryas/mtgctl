@@ -13,6 +13,7 @@ use textplots::{Chart, LabelBuilder, LabelFormat, Plot, Shape, TickDisplay, Tick
 
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{matches, games, doomsday_games, leagues, deck_types, decks};
+use crate::deck;
 
 /// Collected game data before DB insertion
 struct CollectedGame {
@@ -43,92 +44,6 @@ struct CollectedDoomsdayData {
 }
 
 
-/// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
-/// Pure decision logic for fuzzy select - testable without skim dependencies
-/// Returns: the value to use based on query, selection, and whether Tab was pressed
-fn fuzzy_select_decision(query: &str, selected: Option<&str>, tab_pressed: bool) -> Option<String> {
-    let query = query.trim();
-
-    // Tab pressed = use query as new entry
-    if tab_pressed {
-        return if query.is_empty() { None } else { Some(query.to_string()) };
-    }
-
-    match selected {
-        Some(sel) => Some(sel.to_string()),
-        None => {
-            // No selection - use the query as the value
-            if query.is_empty() { None } else { Some(query.to_string()) }
-        }
-    }
-}
-
-/// Handle skim output - Tab uses query as-is, Enter uses selection
-fn handle_skim_output(output: skim::prelude::SkimOutput) -> Option<String> {
-    let query = output.query.as_str();
-    let selected = output.selected_items.first().map(|item| item.output());
-    let tab_pressed = output.final_key == skim::prelude::Key::Tab
-        || output.final_key == skim::prelude::Key::BackTab;
-
-    fuzzy_select_decision(query, selected.as_ref().map(|s| s.as_ref()), tab_pressed)
-}
-
-fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
-    if options.is_empty() {
-        // No options - fall back to text input
-        let result: String = Input::new()
-            .with_prompt(prompt)
-            .allow_empty(true)
-            .interact_text()
-            .ok()?;
-        return if result.is_empty() { None } else { Some(result) };
-    }
-
-    let prompt_str = format!("{} (Tab=new): ", prompt);
-    let skim_options = SkimOptionsBuilder::default()
-        .prompt(Some(&prompt_str))
-        .expect(Some("tab,btab".to_owned()))
-        .build()
-        .unwrap();
-
-    let input = options.join("\n");
-    let item_reader = SkimItemReader::default();
-    let items = item_reader.of_bufread(Cursor::new(input));
-
-    match Skim::run_with(&skim_options, Some(items)) {
-        Some(output) if !output.is_abort => handle_skim_output(output),
-        _ => None, // Aborted
-    }
-}
-
-/// Fuzzy select with a default value pre-filled in the query
-fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) -> Option<String> {
-    if options.is_empty() {
-        let result: String = Input::new()
-            .with_prompt(prompt)
-            .default(default.to_string())
-            .interact_text()
-            .ok()?;
-        return if result.is_empty() { None } else { Some(result) };
-    }
-
-    let prompt_str = format!("{} (Tab=new): ", prompt);
-    let skim_options = SkimOptionsBuilder::default()
-        .prompt(Some(&prompt_str))
-        .query(Some(default))
-        .expect(Some("tab,btab".to_owned()))
-        .build()
-        .unwrap();
-
-    let input = options.join("\n");
-    let item_reader = SkimItemReader::default();
-    let items = item_reader.of_bufread(Cursor::new(input));
-
-    match Skim::run_with(&skim_options, Some(items)) {
-        Some(output) if !output.is_abort => handle_skim_output(output),
-        _ => None,
-    }
-}
 
 /// Fuzzy multi-select: Tab marks items, Enter confirms all marked (or current if none marked)
 fn fuzzy_multi_select(prompt: &str, options: &[String]) -> Vec<String> {
@@ -681,7 +596,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
             }
             FilterKind::MulliganCount => {
                 let mulligan_options: Vec<String> = vec!["0", "1", "2", "3", "4+"].iter().map(|s| s.to_string()).collect();
-                if let Some(selected) = fuzzy_select("Select mulligan count to filter by", &mulligan_options) {
+                if let Some(selected) = deck::fuzzy_select("Select mulligan count to filter by", &mulligan_options) {
                     let idx = mulligan_options.iter().position(|o| o == &selected).unwrap_or(0);
                     filters.mulligan_count = Some(idx as i32);
                 }
@@ -694,7 +609,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
                     "Long (10-12 turns)",
                     "Very Long (13+ turns)",
                 ].iter().map(|s| s.to_string()).collect();
-                if let Some(selected) = fuzzy_select("Select game length to filter by", &length_options) {
+                if let Some(selected) = deck::fuzzy_select("Select game length to filter by", &length_options) {
                     let idx = length_options.iter().position(|o| o == &selected).unwrap_or(0);
                     filters.game_length = Some(match idx {
                         0 => (1, 3),
@@ -708,7 +623,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
             }
             FilterKind::GameNumber => {
                 let game_options: Vec<String> = vec!["Game 1", "Game 2", "Game 3", "Post-board (2+3)"].iter().map(|s| s.to_string()).collect();
-                if let Some(selected) = fuzzy_select("Select game number to filter by", &game_options) {
+                if let Some(selected) = deck::fuzzy_select("Select game number to filter by", &game_options) {
                     filters.game_number = Some(match selected.as_str() {
                         "Game 1" => vec![1],
                         "Game 2" => vec![2],
@@ -720,7 +635,7 @@ fn select_filters_interactive(connection: &mut diesel::sqlite::SqliteConnection)
             }
             FilterKind::PlayDraw => {
                 let play_draw_options: Vec<String> = vec!["On the Play", "On the Draw"].iter().map(|s| s.to_string()).collect();
-                if let Some(selected) = fuzzy_select("Select play/draw to filter by", &play_draw_options) {
+                if let Some(selected) = deck::fuzzy_select("Select play/draw to filter by", &play_draw_options) {
                     filters.play_draw = Some(if selected == "On the Play" { "play".to_string() } else { "draw".to_string() });
                 }
             }
@@ -984,54 +899,6 @@ fn sort_with_other_last(items: &mut Vec<String>) {
     }
 }
 
-fn load_archetypes() -> Vec<String> {
-    let conn = &mut establish_connection();
-    let mut archetypes: Vec<String> = deck_types::table
-        .filter(deck_types::subtype.is_null())
-        .select(deck_types::archetype)
-        .order(deck_types::archetype.asc())
-        .load(conn)
-        .unwrap_or_default();
-    sort_with_other_last(&mut archetypes);
-    archetypes
-}
-
-/// Load subtypes for a given archetype
-fn load_subtypes(archetype: &str) -> Vec<String> {
-    let conn = &mut establish_connection();
-    let mut subtypes: Vec<String> = deck_types::table
-        .filter(deck_types::archetype.eq(archetype))
-        .filter(deck_types::subtype.is_not_null())
-        .select(deck_types::subtype)
-        .order(deck_types::subtype.asc())
-        .load::<Option<String>>(conn)
-        .unwrap_or_default()
-        .into_iter()
-        .flatten()
-        .collect();
-    subtypes.sort();
-    subtypes
-}
-
-/// Load lists for a given archetype and subtype
-fn load_lists(archetype: &str, subtype: &str) -> Vec<String> {
-    let conn = &mut establish_connection();
-    let type_id: Option<i32> = deck_types::table
-        .filter(deck_types::archetype.eq(archetype))
-        .filter(deck_types::subtype.eq(subtype))
-        .select(deck_types::type_id)
-        .first(conn)
-        .ok();
-    let Some(tid) = type_id else { return Vec::new(); };
-    let mut lists: Vec<String> = decks::table
-        .filter(decks::type_id.eq(tid))
-        .select(decks::list_name)
-        .order(decks::list_name.asc())
-        .load(conn)
-        .unwrap_or_default();
-    lists.sort();
-    lists
-}
 
 /// Load all deck names from the DB taxonomy
 fn load_deck_names() -> Vec<String> {
@@ -1543,60 +1410,6 @@ pub fn run(args: GameArgs) {
     }
 }
 
-/// Three-step deck selection: Archetype -> Subtype -> List.
-/// Pass `current` to pre-select the existing deck (for editing); pass `None` to use config defaults (for adding).
-fn select_deck_three_step(config: &Config, current: Option<&str>) -> String {
-    // Derive per-step defaults: from the current deck name when editing, from config when adding
-    let (default_archetype, default_subtype, default_list): (String, String, String) =
-        if let Some(current_deck) = current {
-            let (arch, sub) = parse_deck_name(current_deck);
-            let list = if let (Some(ls), Some(le)) = (current_deck.find(" ("), current_deck.rfind(')')) {
-                current_deck[ls + 2..le].to_string()
-            } else {
-                String::new()
-            };
-            (arch.to_string(), sub.unwrap_or("").to_string(), list)
-        } else {
-            (
-                config.game_entry.default_archetype.as_deref().unwrap_or("").to_string(),
-                config.game_entry.default_subtype.as_deref().unwrap_or("").to_string(),
-                config.game_entry.default_list.as_deref().unwrap_or("").to_string(),
-            )
-        };
-
-    // Step 1: Select Archetype
-    let archetypes = load_archetypes();
-
-    if archetypes.is_empty() {
-        return fuzzy_select("Your deck name", &[])
-            .unwrap_or_else(|| "Unknown".to_string());
-    }
-
-    let selected_archetype = fuzzy_select_with_default("Select archetype", &archetypes, &default_archetype)
-        .unwrap_or_else(|| archetypes.first().cloned().unwrap_or_default());
-
-    // Step 2: Select Subtype
-    let subtypes = load_subtypes(&selected_archetype);
-
-    if subtypes.is_empty() {
-        return selected_archetype;
-    }
-
-    let selected_subtype = fuzzy_select_with_default("Select subtype", &subtypes, &default_subtype)
-        .unwrap_or_else(|| subtypes.first().cloned().unwrap_or_default());
-
-    // Step 3: Select List
-    let lists = load_lists(&selected_archetype, &selected_subtype);
-
-    if lists.is_empty() {
-        return format!("{}: {}", selected_archetype, selected_subtype);
-    }
-
-    let selected_list = fuzzy_select_with_default("Select list", &lists, &default_list)
-        .unwrap_or_else(|| lists.first().cloned().unwrap_or_default());
-
-    format!("{}: {} ({})", selected_archetype, selected_subtype, selected_list)
-}
 
 fn add_match_interactive(date_arg: Option<String>) {
     println!("=== Adding New Match ===");
@@ -1620,7 +1433,26 @@ fn add_match_interactive(date_arg: Option<String>) {
     println!("Date: {}", date);
 
     // Three-step deck selection: Archetype -> Subtype -> List
-    let deck_name = select_deck_three_step(&config, None);
+    let deck_name = {
+        let da = config.game_entry.default_archetype.as_deref().unwrap_or("");
+        let ds = config.game_entry.default_subtype.as_deref().unwrap_or("");
+        let dl = config.game_entry.default_list.as_deref().unwrap_or("");
+        match deck::select_deck_three_step(da, ds, dl) {
+            Some((arch, sub, list)) => {
+                if !list.is_empty() {
+                    format!("{}: {} ({})", arch, sub, list)
+                } else if !sub.is_empty() {
+                    format!("{}: {}", arch, sub)
+                } else {
+                    arch
+                }
+            }
+            None => {
+                println!("\nCancelled.");
+                return;
+            }
+        }
+    };
 
     println!("Selected deck: {}", deck_name);
 
@@ -1635,8 +1467,8 @@ fn add_match_interactive(date_arg: Option<String>) {
             .ok()
     };
     let Some(event_type) = (match &last_event_type {
-        Some(default) => fuzzy_select_with_default("Event type", &event_types, default),
-        None => fuzzy_select("Event type", &event_types),
+        Some(default) => deck::fuzzy_select_with_default("Event type", &event_types, default),
+        None => deck::fuzzy_select("Event type", &event_types),
     }) else {
         println!("\nCancelled.");
         return;
@@ -1644,7 +1476,7 @@ fn add_match_interactive(date_arg: Option<String>) {
 
     // Get opponent name
     let opponents = load_opponent_names();
-    let Some(opponent_name) = fuzzy_select("Opponent name", &opponents) else {
+    let Some(opponent_name) = deck::fuzzy_select("Opponent name", &opponents) else {
         println!("\nCancelled.");
         return;
     };
@@ -1685,7 +1517,7 @@ fn add_match_interactive(date_arg: Option<String>) {
     let opponent_deck = if collected.opponent_deck == "unknown" {
         println!("\n=== Match Complete ===");
         let deck_names = load_deck_names();
-        fuzzy_select("What deck was your opponent playing?", &deck_names)
+        deck::fuzzy_select("What deck was your opponent playing?", &deck_names)
             .unwrap_or_else(|| "Unknown".to_string())
     } else {
         collected.opponent_deck
@@ -1808,7 +1640,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
             if let Some(ref arch) = archetype {
                 if arch.is_doomsday {
                     let juke_options = vec!["none".to_string(), "partial".to_string(), "full".to_string()];
-                    fuzzy_select(&format!("Sideboard plan for G{}", game_num), &juke_options)
+                    deck::fuzzy_select(&format!("Sideboard plan for G{}", game_num), &juke_options)
                 } else {
                     None
                 }
@@ -1863,7 +1695,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
         } else {
             load_game_plans()
         };
-        let opening_hand_plan = fuzzy_select("Opening hand plan", &game_plans);
+        let opening_hand_plan = deck::fuzzy_select("Opening hand plan", &game_plans);
 
         // Game winner
         let game_winner = match Confirm::new()
@@ -1890,7 +1722,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
             } else {
                 load_win_conditions()
             };
-            fuzzy_select("What did you win with?", &win_cons)
+            deck::fuzzy_select("What did you win with?", &win_cons)
         } else {
             None
         };
@@ -1898,7 +1730,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
         // Loss reason (only if you lost, and not a doomsday deck - doomsday handles this itself)
         let loss_reason = if matches!(game_winner, Winner::Opponent) && !is_doomsday_deck {
             if let Some(ref arch) = archetype {
-                fuzzy_select("Why did you lose?", &arch.loss_reasons)
+                deck::fuzzy_select("Why did you lose?", &arch.loss_reasons)
             } else {
                 None
             }
@@ -1973,7 +1805,7 @@ fn collect_games_data(die_roll_winner: &Winner, archetype: &Option<ArchetypeData
 
             if knows_deck {
                 let deck_names = load_deck_names();
-                if let Some(deck) = fuzzy_select("What deck is your opponent playing?", &deck_names) {
+                if let Some(deck) = deck::fuzzy_select("What deck is your opponent playing?", &deck_names) {
                     opponent_deck = deck;
                     println!("Opponent deck: {}", opponent_deck);
                 }
@@ -2038,7 +1870,7 @@ fn collect_doomsday_data_only(
             );
             (wincon, None)
         } else {
-            let reason = fuzzy_select("Why did you lose?", &arch.loss_reasons);
+            let reason = deck::fuzzy_select("Why did you lose?", &arch.loss_reasons);
             (None, reason)
         };
         return Some(Some(CollectedDoomsdayData {
@@ -2185,7 +2017,7 @@ fn fuzzy_select_with_auto_add(
     toml_path: &str,
     list_name: &str,
 ) -> Option<String> {
-    let result = fuzzy_select(prompt, options)?;
+    let result = deck::fuzzy_select(prompt, options)?;
 
     // Check if this is a new value not in the options
     if !options.iter().any(|o| o == &result) {
@@ -2267,8 +2099,8 @@ fn lookup_or_create_opponent_type_id(connection: &mut SqliteConnection, deck_nam
         return None;
     }
     let (arch, sub) = parse_deck_name(deck_name);
-    // Try exact (archetype, subtype) match
-    let type_id: Option<i32> = match sub {
+    // Not in DB — offer to add
+    let existing: Option<i32> = match sub {
         Some(st) => deck_types::table
             .filter(deck_types::archetype.eq(arch))
             .filter(deck_types::subtype.eq(st))
@@ -2282,10 +2114,9 @@ fn lookup_or_create_opponent_type_id(connection: &mut SqliteConnection, deck_nam
             .first(connection)
             .ok(),
     };
-    if type_id.is_some() {
-        return type_id;
+    if existing.is_some() {
+        return existing;
     }
-    // Not in DB — offer to add
     let add = Confirm::new()
         .with_prompt(format!("'{}' is not in the deck database. Add it?", deck_name))
         .default(true)
@@ -2294,32 +2125,7 @@ fn lookup_or_create_opponent_type_id(connection: &mut SqliteConnection, deck_nam
     if !add {
         return None;
     }
-    let category_options: Vec<String> = vec!["Blue".into(), "Combo".into(), "Non-Blue".into(), "Other".into()];
-    let category = fuzzy_select("Category", &category_options)?;
-    diesel::insert_into(deck_types::table)
-        .values(NewDeckType {
-            category,
-            archetype: arch.to_string(),
-            subtype: sub.map(|s| s.to_string()),
-            flow_type: None,
-        })
-        .on_conflict_do_nothing()
-        .execute(connection)
-        .ok();
-    match sub {
-        Some(st) => deck_types::table
-            .filter(deck_types::archetype.eq(arch))
-            .filter(deck_types::subtype.eq(st))
-            .select(deck_types::type_id)
-            .first(connection)
-            .ok(),
-        None => deck_types::table
-            .filter(deck_types::archetype.eq(arch))
-            .filter(deck_types::subtype.is_null())
-            .select(deck_types::type_id)
-            .first(connection)
-            .ok(),
-    }
+    deck::lookup_or_create_type_id(connection, arch, sub.map(|s| s))
 }
 
 /// Find an active league for the given deck, or prompt to create a new one
@@ -4331,7 +4137,22 @@ fn edit_match_interactive(match_id: i32) {
         .unwrap();
         
     if change_deck {
-        match_data.deck_name = select_deck_three_step(&config, Some(&match_data.deck_name.clone()));
+        let current = match_data.deck_name.clone();
+        let (da, ds) = parse_deck_name(&current);
+        let dl = if let (Some(ls), Some(le)) = (current.find(" ("), current.rfind(')')) {
+            current[ls + 2..le].to_string()
+        } else {
+            String::new()
+        };
+        if let Some((arch, sub, list)) = deck::select_deck_three_step(da, ds.unwrap_or(""), &dl) {
+            match_data.deck_name = if !list.is_empty() {
+                format!("{}: {} ({})", arch, sub, list)
+            } else if !sub.is_empty() {
+                format!("{}: {}", arch, sub)
+            } else {
+                arch
+            };
+        }
         match_data.my_deck_id = lookup_my_deck_id(connection, &match_data.deck_name);
     }
     
@@ -4343,7 +4164,7 @@ fn edit_match_interactive(match_id: i32) {
         
     if change_opponent {
         let opponents = load_opponent_names();
-        if let Some(new_opponent) = fuzzy_select_with_default("Opponent name", &opponents, &match_data.opponent_name) {
+        if let Some(new_opponent) = deck::fuzzy_select_with_default("Opponent name", &opponents, &match_data.opponent_name) {
             match_data.opponent_name = new_opponent;
         }
     }
@@ -4356,7 +4177,7 @@ fn edit_match_interactive(match_id: i32) {
 
     if change_deck {
         let deck_names = load_deck_names();
-        if let Some(new_deck) = fuzzy_select_with_default("Opponent's deck", &deck_names, &match_data.opponent_deck) {
+        if let Some(new_deck) = deck::fuzzy_select_with_default("Opponent's deck", &deck_names, &match_data.opponent_deck) {
             match_data.opponent_deck = new_deck;
             match_data.opponent_type_id = lookup_or_create_opponent_type_id(connection, &match_data.opponent_deck);
         }
@@ -4370,7 +4191,7 @@ fn edit_match_interactive(match_id: i32) {
 
     if change_event {
         let event_types: Vec<String> = EVENT_TYPES.iter().map(|s| s.to_string()).collect();
-        if let Some(new_event) = fuzzy_select_with_default("Event type", &event_types, &match_data.event_type) {
+        if let Some(new_event) = deck::fuzzy_select_with_default("Event type", &event_types, &match_data.event_type) {
             match_data.event_type = new_event;
         }
     }
@@ -4512,7 +4333,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
 
     // Edit opening hand plan
     let current_plan = game_data.opening_hand_plan.as_deref().unwrap_or("");
-    if let Some(new_plan) = fuzzy_select_with_default("Opening hand plan", &game_plans, current_plan) {
+    if let Some(new_plan) = deck::fuzzy_select_with_default("Opening hand plan", &game_plans, current_plan) {
         game_data.opening_hand_plan = Some(new_plan);
     }
 
@@ -4538,14 +4359,14 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
     // Edit win condition / loss reason — use same option lists as game entry
     if game_data.game_winner == "me" && !is_doomsday_deck {
         let current_condition = game_data.win_condition.as_deref().unwrap_or("");
-        if let Some(new_condition) = fuzzy_select_with_default("What did you win with?", &win_conditions, current_condition) {
+        if let Some(new_condition) = deck::fuzzy_select_with_default("What did you win with?", &win_conditions, current_condition) {
             game_data.win_condition = Some(new_condition);
         }
         game_data.loss_reason = None;
     } else if game_data.game_winner != "me" && !is_doomsday_deck {
         game_data.win_condition = None;
         let current_reason = game_data.loss_reason.as_deref().unwrap_or("");
-        if let Some(new_reason) = fuzzy_select_with_default("Why did you lose?", &loss_reasons, current_reason) {
+        if let Some(new_reason) = deck::fuzzy_select_with_default("Why did you lose?", &loss_reasons, current_reason) {
             game_data.loss_reason = Some(new_reason);
         }
     }
@@ -4633,7 +4454,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
                 let current_display = current_pile_type.as_deref().unwrap_or("none");
                 println!("Current pile type: {}", current_display);
                 if !pile_types.is_empty() {
-                    fuzzy_select("Pile type (or Enter to keep current)", &pile_types)
+                    deck::fuzzy_select("Pile type (or Enter to keep current)", &pile_types)
                         .or(current_pile_type)
                 } else {
                     let new_type: String = Input::new()
@@ -4680,7 +4501,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
                 let current_display = current_no_dd_reason.as_deref().unwrap_or("none");
                 println!("Current reason: {}", current_display);
                 if !no_dd_reasons.is_empty() {
-                    fuzzy_select("Why didn't Doomsday resolve? (or Enter to keep)", &no_dd_reasons)
+                    deck::fuzzy_select("Why didn't Doomsday resolve? (or Enter to keep)", &no_dd_reasons)
                         .or(current_no_dd_reason)
                 } else {
                     let new_reason: String = Input::new()
@@ -4699,7 +4520,7 @@ fn edit_game_interactive(match_id: i32, game_number: i32) {
                 let juke_options = vec!["full juke".to_string(), "partial juke".to_string(), "no juke".to_string()];
                 let current_display = current_sb_juke.as_deref().unwrap_or("none");
                 println!("Current sideboard plan for G{}: {}", game_number, current_display);
-                fuzzy_select(&format!("Sideboard plan for G{} (or Enter to keep)", game_number), &juke_options)
+                deck::fuzzy_select(&format!("Sideboard plan for G{} (or Enter to keep)", game_number), &juke_options)
                     .or(current_sb_juke)
             } else {
                 current_sb_juke
@@ -4784,7 +4605,7 @@ fn add_deck_to_list(deck_name: Option<String>) {
 
     let (arch, sub) = parse_deck_name(&deck_name);
     let category_options: Vec<String> = vec!["Blue".into(), "Combo".into(), "Non-Blue".into(), "Other".into()];
-    let Some(category) = fuzzy_select("Category", &category_options) else { return; };
+    let Some(category) = deck::fuzzy_select("Category", &category_options) else { return; };
 
     diesel::insert_into(deck_types::table)
         .values(NewDeckType {
@@ -4825,7 +4646,7 @@ fn show_board_plan(deck_name: Option<String>) {
         None => {
             // Interactive mode - select from available decks
             let deck_names = load_deck_names();
-            fuzzy_select("Select opponent deck to see board plan", &deck_names)
+            deck::fuzzy_select("Select opponent deck to see board plan", &deck_names)
                 .unwrap_or_else(|| "Unknown".to_string())
         }
     };
@@ -4938,6 +4759,7 @@ fn get_current_era(connection: &mut SqliteConnection) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deck::fuzzy_select_decision;
 
     #[test]
     fn test_all_definition_files_parse() {
@@ -4978,7 +4800,7 @@ mod tests {
 
     #[test]
     fn test_load_archetypes_returns_all() {
-        let archetypes = load_archetypes();
+        let archetypes = deck::load_archetypes();
 
         // Verify key archetypes are present
         let expected = vec![
@@ -4998,15 +4820,15 @@ mod tests {
     #[test]
     fn test_load_subtypes() {
         // Test that subtypes load correctly for archetypes that have them
-        let doomsday_subtypes = load_subtypes("Doomsday");
+        let doomsday_subtypes = deck::load_subtypes("Doomsday");
         assert!(doomsday_subtypes.contains(&"Tempo".to_string()), "Doomsday should have Tempo subtype");
         assert!(doomsday_subtypes.contains(&"Turbo".to_string()), "Doomsday should have Turbo subtype");
 
-        let storm_subtypes = load_subtypes("Storm");
+        let storm_subtypes = deck::load_subtypes("Storm");
         assert!(storm_subtypes.contains(&"ANT".to_string()), "Storm should have ANT subtype");
         assert!(storm_subtypes.contains(&"TES".to_string()), "Storm should have TES subtype");
 
-        let affinity_subtypes = load_subtypes("Affinity");
+        let affinity_subtypes = deck::load_subtypes("Affinity");
         assert!(affinity_subtypes.contains(&"8-Cast".to_string()), "Affinity should have 8-Cast subtype");
     }
 

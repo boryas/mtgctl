@@ -11,9 +11,154 @@ use std::collections::HashMap;
 use crate::db::{establish_connection, models::*};
 use crate::db::schema::{cards, deck_types, decks};
 
-/// Fuzzy select helper using skim - returns selected item or typed query, None if aborted
-fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
+// ---------------------------------------------------------------------------
+// Public helpers — authoritative deck selection/creation logic
+// ---------------------------------------------------------------------------
+
+fn sort_with_other_last(items: &mut Vec<String>) {
+    items.sort();
+    if let Some(pos) = items.iter().position(|name| name == "Other") {
+        let other = items.remove(pos);
+        items.push(other);
+    }
+}
+
+pub fn load_archetypes() -> Vec<String> {
+    let conn = &mut establish_connection();
+    let mut archetypes: Vec<String> = deck_types::table
+        .filter(deck_types::subtype.is_null())
+        .select(deck_types::archetype)
+        .order(deck_types::archetype.asc())
+        .load(conn)
+        .unwrap_or_default();
+    sort_with_other_last(&mut archetypes);
+    archetypes
+}
+
+pub fn load_subtypes(archetype: &str) -> Vec<String> {
+    let conn = &mut establish_connection();
+    let mut subtypes: Vec<String> = deck_types::table
+        .filter(deck_types::archetype.eq(archetype))
+        .filter(deck_types::subtype.is_not_null())
+        .select(deck_types::subtype)
+        .order(deck_types::subtype.asc())
+        .load::<Option<String>>(conn)
+        .unwrap_or_default()
+        .into_iter()
+        .flatten()
+        .collect();
+    subtypes.sort();
+    subtypes
+}
+
+pub fn load_lists(archetype: &str, subtype: &str) -> Vec<String> {
+    let conn = &mut establish_connection();
+    let type_id: Option<i32> = deck_types::table
+        .filter(deck_types::archetype.eq(archetype))
+        .filter(deck_types::subtype.eq(subtype))
+        .select(deck_types::type_id)
+        .first(conn)
+        .ok();
+    let Some(tid) = type_id else { return Vec::new(); };
+    let mut lists: Vec<String> = decks::table
+        .filter(decks::type_id.eq(tid))
+        .select(decks::list_name)
+        .order(decks::list_name.asc())
+        .load(conn)
+        .unwrap_or_default();
+    lists.sort();
+    lists
+}
+
+/// Look up or create a deck_type row for (archetype, subtype).
+/// Prompts for category if not found, then inserts. Returns the type_id.
+pub fn lookup_or_create_type_id(conn: &mut SqliteConnection, archetype: &str, subtype: Option<&str>) -> Option<i32> {
+    // Try exact match first
+    let existing: Option<i32> = match subtype {
+        Some(st) => deck_types::table
+            .filter(deck_types::archetype.eq(archetype))
+            .filter(deck_types::subtype.eq(st))
+            .select(deck_types::type_id)
+            .first(conn)
+            .ok(),
+        None => deck_types::table
+            .filter(deck_types::archetype.eq(archetype))
+            .filter(deck_types::subtype.is_null())
+            .select(deck_types::type_id)
+            .first(conn)
+            .ok(),
+    };
+    if existing.is_some() {
+        return existing;
+    }
+    // Prompt for category
+    let category_options: Vec<String> = vec!["Blue".into(), "Combo".into(), "Non-Blue".into(), "Other".into()];
+    let category = fuzzy_select("Category", &category_options)?;
+    diesel::insert_into(deck_types::table)
+        .values(NewDeckType {
+            category,
+            archetype: archetype.to_string(),
+            subtype: subtype.map(|s| s.to_string()),
+            flow_type: None,
+        })
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .ok();
+    match subtype {
+        Some(st) => deck_types::table
+            .filter(deck_types::archetype.eq(archetype))
+            .filter(deck_types::subtype.eq(st))
+            .select(deck_types::type_id)
+            .first(conn)
+            .ok(),
+        None => deck_types::table
+            .filter(deck_types::archetype.eq(archetype))
+            .filter(deck_types::subtype.is_null())
+            .select(deck_types::type_id)
+            .first(conn)
+            .ok(),
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Fuzzy select helpers (authoritative — game.rs delegates to these)
+// ---------------------------------------------------------------------------
+
+/// Pure decision logic for fuzzy select - testable without skim dependencies.
+/// Returns: the value to use based on query, selection, and whether Tab was pressed.
+pub fn fuzzy_select_decision(query: &str, selected: Option<&str>, tab_pressed: bool) -> Option<String> {
+    let query = query.trim();
+
+    // Tab pressed = use query as new entry
+    if tab_pressed {
+        return if query.is_empty() { None } else { Some(query.to_string()) };
+    }
+
+    match selected {
+        Some(sel) => Some(sel.to_string()),
+        None => {
+            // No selection - use the query as the value
+            if query.is_empty() { None } else { Some(query.to_string()) }
+        }
+    }
+}
+
+/// Handle skim output - Tab uses query as-is, Enter uses selection.
+pub fn handle_skim_output(output: SkimOutput) -> Option<String> {
+    let query = output.query.as_str();
+    let selected = output.selected_items.first().map(|item| item.output());
+    let tab_pressed = output.final_key == Key::Tab
+        || output.final_key == Key::BackTab;
+
+    fuzzy_select_decision(query, selected.as_ref().map(|s| s.as_ref()), tab_pressed)
+}
+
+/// Fuzzy select helper using skim - returns selected item or typed query, None if aborted.
+/// Supports Tab=new to enter a value not in the list.
+pub fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
     if options.is_empty() {
+        // No options - fall back to text input
         let result: String = Input::new()
             .with_prompt(prompt)
             .allow_empty(true)
@@ -22,9 +167,10 @@ fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
         return if result.is_empty() { None } else { Some(result) };
     }
 
-    let prompt_str = format!("{}: ", prompt);
+    let prompt_str = format!("{} (Tab=new): ", prompt);
     let skim_options = SkimOptionsBuilder::default()
         .prompt(Some(&prompt_str))
+        .expect(Some("tab,btab".to_owned()))
         .build()
         .unwrap();
 
@@ -33,16 +179,79 @@ fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
     let items = item_reader.of_bufread(Cursor::new(input));
 
     match Skim::run_with(&skim_options, Some(items)) {
-        Some(output) if !output.is_abort => {
-            if output.selected_items.is_empty() {
-                let query = output.query.trim().to_string();
-                if query.is_empty() { None } else { Some(query) }
-            } else {
-                Some(output.selected_items[0].output().to_string())
-            }
-        }
+        Some(output) if !output.is_abort => handle_skim_output(output),
+        _ => None, // Aborted
+    }
+}
+
+/// Fuzzy select with a default value pre-filled in the query.
+pub fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) -> Option<String> {
+    if options.is_empty() {
+        let result: String = Input::new()
+            .with_prompt(prompt)
+            .default(default.to_string())
+            .interact_text()
+            .ok()?;
+        return if result.is_empty() { None } else { Some(result) };
+    }
+
+    let prompt_str = format!("{} (Tab=new): ", prompt);
+    let skim_options = SkimOptionsBuilder::default()
+        .prompt(Some(&prompt_str))
+        .query(Some(default))
+        .expect(Some("tab,btab".to_owned()))
+        .build()
+        .unwrap();
+
+    let input = options.join("\n");
+    let item_reader = SkimItemReader::default();
+    let items = item_reader.of_bufread(Cursor::new(input));
+
+    match Skim::run_with(&skim_options, Some(items)) {
+        Some(output) if !output.is_abort => handle_skim_output(output),
         _ => None,
     }
+}
+
+/// Three-step deck selection: Archetype -> Subtype -> List.
+/// Returns Some((archetype, subtype, list_name)) or None if the user aborts at any step.
+/// At step 3, if no lists exist or the user types a value not in the list, it is accepted as-is.
+pub fn select_deck_three_step(
+    default_archetype: &str,
+    default_subtype: &str,
+    default_list: &str,
+) -> Option<(String, String, String)> {
+    // Step 1: Select Archetype
+    let archetypes = load_archetypes();
+
+    let selected_archetype = if archetypes.is_empty() {
+        fuzzy_select("Your deck archetype", &[])?
+    } else {
+        fuzzy_select_with_default("Select archetype", &archetypes, default_archetype)?
+    };
+
+    // Step 2: Select Subtype
+    let subtypes = load_subtypes(&selected_archetype);
+
+    if subtypes.is_empty() {
+        return Some((selected_archetype, String::new(), String::new()));
+    }
+
+    let selected_subtype = fuzzy_select_with_default("Select subtype", &subtypes, default_subtype)?;
+
+    // Step 3: Select List (accept typed value if not in list or list is empty)
+    let lists = load_lists(&selected_archetype, &selected_subtype);
+
+    let selected_list = if lists.is_empty() {
+        // No lists exist — accept any typed value (may be empty)
+        fuzzy_select_with_default("List name (slug)", &[], default_list)
+            .unwrap_or_default()
+    } else {
+        let result = fuzzy_select_with_default("Select list", &lists, default_list)?;
+        result
+    };
+
+    Some((selected_archetype, selected_subtype, selected_list))
 }
 
 #[derive(Args)]
@@ -78,47 +287,42 @@ pub fn run(args: DeckArgs) {
 }
 
 fn import_deck(moxfield_url: Option<String>) {
-    let connection = &mut establish_connection();
-
-    // Load all decks with type context for display
-    let all_decks: Vec<Deck> = decks::table
-        .order(decks::list_name.asc())
-        .load(connection)
-        .unwrap_or_default();
-
-    if all_decks.is_empty() {
-        println!("No decks found. Record a match first to register a deck in the system.");
-        return;
-    }
-
-    let type_map: HashMap<i32, DeckType> = deck_types::table
-        .load::<DeckType>(connection)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|dt| (dt.type_id, dt))
-        .collect();
-
-    let display_options: Vec<String> = all_decks
-        .iter()
-        .map(|d| match d.type_id.and_then(|tid| type_map.get(&tid)) {
-            Some(dt) => format!("{} ({})", d.list_name, dt.display()),
-            None => d.list_name.clone(),
-        })
-        .collect();
-
-    let selected = match fuzzy_select("Select deck to import cards for", &display_options) {
-        Some(s) => s,
+    let (archetype, subtype, list_name) = match select_deck_three_step("", "", "") {
+        Some(t) => t,
         None => return,
     };
 
-    let idx = match display_options.iter().position(|d| d == &selected) {
-        Some(i) => i,
-        None => {
-            println!("Selection not found.");
-            return;
-        }
+    let conn = &mut establish_connection();
+
+    // Ensure deck_type exists
+    let sub_opt = if subtype.is_empty() { None } else { Some(subtype.as_str()) };
+    let type_id = lookup_or_create_type_id(conn, &archetype, sub_opt);
+
+    // Ensure deck entry exists
+    let existing_deck: Option<Deck> = decks::table
+        .filter(decks::list_name.eq(&list_name))
+        .first(conn)
+        .ok();
+
+    let deck = if let Some(d) = existing_deck {
+        d
+    } else {
+        diesel::insert_into(decks::table)
+            .values(NewDeck {
+                list_name: list_name.clone(),
+                moxfield_url: None,
+                era: None,
+                type_id,
+            })
+            .execute(conn)
+            .ok();
+        decks::table
+            .filter(decks::list_name.eq(&list_name))
+            .first(conn)
+            .expect("Deck should exist after insert")
     };
-    let deck = &all_decks[idx];
+
+    let connection = &mut establish_connection();
 
     // Warn if cards already exist
     let existing_count: i64 = cards::table
