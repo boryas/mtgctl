@@ -107,8 +107,9 @@ flipped_name = "Tamiyo, Seasoned Scholar"
 flipped_card_type = "planeswalker"
 flipped_loyalty = 4
 generates_clues = true
-mana_cost = "1U"
-power = 1
+mana_cost = "U"
+power = 0
+toughness = 3
 effects = ["permanent"]
 
 [[cards]]
@@ -117,6 +118,7 @@ card_type = "creature"
 mana_cost = "1B"
 black = true
 power = 1
+toughness = 1
 effects = ["permanent"]
 
 [[cards]]
@@ -125,7 +127,8 @@ card_type = "creature"
 play_weight = 25
 annotation_options = ["3/3", "4/4", "5/5", "6/6", "7/7", "8/8"]
 mana_cost = "5UU"  # delve makes it cheaper in practice
-power = 5
+power = 3
+toughness = 3
 
 [[cards]]
 name = "Thassa's Oracle"
@@ -133,12 +136,16 @@ card_type = "creature"
 exileable = true
 play_weight = 1  # almost never played out — it's the kill card
 mana_cost = "UU"
+power = 1
+toughness = 3
 
 [[cards]]
 name = "Street Wraith"
 card_type = "creature"
 play_weight = 1  # almost always cycled, rarely cast
-power = 2
+mana_cost = "3BB"
+power = 3
+toughness = 4
 
 # ── Artifacts ─────────────────────────────────────────────────────────────────
 
@@ -231,7 +238,8 @@ name = "Barrowgoyf"
 card_type = "creature"
 mana_cost = "2B"
 black = true
-power = 2
+power = 0
+toughness = 1
 effects = ["permanent"]
 
 [[cards]]
