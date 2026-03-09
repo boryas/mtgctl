@@ -460,6 +460,9 @@ struct PlayerState {
     exile: Zone,
     /// Reset to true each Untap step; false once a land has been played or the 85% roll failed.
     land_drop_available: bool,
+    /// Set at the start of the fateful main phase when black mana is unavailable; ensures a
+    /// black-producing land is played this turn (bypasses the probability roll).
+    must_land_drop: bool,
     /// True once Doomsday has been cast this game (prevents double-cast).
     dd_cast: bool,
     /// Number of non-land spells cast this turn; reset each Untap. Used for multi-spell probability.
@@ -480,6 +483,7 @@ impl PlayerState {
             graveyard: Zone { visible: Vec::new(), hidden: 0 },
             exile: Zone { visible: Vec::new(), hidden: 0 },
             land_drop_available: false, // set true by Untap step
+            must_land_drop: false,
             dd_cast: false,
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
@@ -534,6 +538,11 @@ impl PlayerState {
     fn pay_mana(&mut self, black: i32, blue: i32, generic: i32) {
         self.produce_mana(black, blue, generic);
         self.pool.spend(black, blue, generic);
+    }
+
+    /// True if the player can currently produce at least one black mana (pool + untapped lands).
+    fn has_black_mana(&self) -> bool {
+        self.potential_mana().black > 0
     }
 }
 
@@ -866,15 +875,16 @@ fn choose_land_name(
     fateful: bool,
     rng: &mut impl Rng,
 ) -> Option<String> {
-    let has_black = state.player(who).lands.iter().any(|l| !l.is_fetch && l.produces_black);
+    // On the fateful turn, if we can't produce black mana yet, require a black source.
+    let need_black = fateful && !state.player(who).has_black_mana();
     let weighted: Vec<(usize, u32)> = library
         .iter()
         .enumerate()
         .filter_map(|(i, (_, def))| {
             if def.card_type != "land" { return None; }
             if fateful && def.cracked_land { return None; }
-            let w = 1;
-            Some((i, w))
+            if need_black && !def.produces_black { return None; }
+            Some((i, 1))
         })
         .collect();
     if weighted.is_empty() { return None; }
@@ -1209,7 +1219,13 @@ fn apply_ability_effect(
             .collect();
 
         if !candidates.is_empty() {
-            let idx = candidates[rng.gen_range(0..candidates.len())];
+            // Prefer black-producing lands so fetches reliably find a black source.
+            let black_candidates: Vec<usize> = candidates.iter()
+                .copied()
+                .filter(|&i| library[i].1.produces_black)
+                .collect();
+            let pool = if !black_candidates.is_empty() { &black_candidates } else { &candidates };
+            let idx = pool[rng.gen_range(0..pool.len())];
             let land = {
                 let (name, def) = &library[idx];
                 SimLand {
@@ -1494,6 +1510,21 @@ fn apply_spell_effects(
                 state.lose_life(&item.owner, n);
                 secondary_logs.push(format!("→ lose {} life (now {})", n, state.life_of(&item.owner)));
             }
+            ["mana", spec] => {
+                // Parse MTG mana notation: count B's (black), U's (blue), leading digits (generic).
+                let black  = spec.chars().filter(|&c| c == 'B').count() as i32;
+                let blue   = spec.chars().filter(|&c| c == 'U').count() as i32;
+                let generic: i32 = spec.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0);
+                let owner = item.owner.clone();
+                state.player_mut(&owner).pool.black += black;
+                state.player_mut(&owner).pool.blue  += blue;
+                state.player_mut(&owner).pool.total += black + blue + generic;
+                secondary_logs.push(format!("→ add {} to pool", spec));
+            }
             _ => {}
         }
     }
@@ -1643,9 +1674,15 @@ fn respond_with_counter(
 
 /// At the start of the main phase, roll 75% per land/permanent with an available ability
 /// to decide whether it wants to activate this turn.
+///
+/// On the fateful (Doomsday) turn, if we can't produce any black mana, fetches are force-marked
+/// so they'll crack for a black land; if there are no fetches, `must_land_drop` is set so the
+/// land drop is guaranteed.
 fn roll_want_to_activate(
     state: &mut SimState,
+    t: u8,
     ap: &str,
+    dd_turn: u8,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -1679,6 +1716,25 @@ fn roll_want_to_activate(
             } else if let Some(perm) = state.player_mut(ap).permanents.iter_mut().find(|p| p.name == source) {
                 perm.want_to_activate = true;
             }
+        }
+    }
+
+    // Fateful turn: if we can't produce black mana, we must get a black source this turn.
+    if ap == "us" && t == dd_turn && !state.us.has_black_mana() {
+        let fetch_names: Vec<String> = state.us.lands.iter()
+            .filter(|l| l.is_fetch && !l.tapped)
+            .map(|l| l.name.clone())
+            .collect();
+        if !fetch_names.is_empty() {
+            // Force-crack all untapped fetches so they search for a black land.
+            for name in &fetch_names {
+                if let Some(l) = state.us.lands.iter_mut().find(|l| &l.name == name) {
+                    l.want_to_activate = true;
+                }
+            }
+        } else {
+            // No fetch available — ensure the land drop fires.
+            state.us.must_land_drop = true;
         }
     }
 }
@@ -1736,21 +1792,25 @@ fn decide_action(
 
     if stack.is_empty() && state.player(who).land_drop_available {
         let fateful = who == "us" && t == dd_turn;
+        let force = state.player(who).must_land_drop;
         let lib: &Vec<(String, CardDef)> = if who == "us" { us_lib } else { opp_lib };
         let land_count = lib.iter().filter(|(_, d)| d.card_type == "land").count();
         if land_count > 0 {
-            // T1 ≈ 100%, T2 ≈ 80%, T3+ ≈ land density in remaining library.
-            let prob = match t {
+            // T1=100%, T2=90%, T3=80%, T4+=70%; forced to 100% when must_land_drop is set.
+            let prob = if force { 1.0 } else { match t {
                 1 => 1.0,
-                2 => 0.8,
-                _ => land_count as f64 / lib.len() as f64,
-            };
+                2 => 0.9,
+                3 => 0.80,
+                _ => 0.70,
+            }};
             if rng.gen::<f64>() < prob {
                 if let Some(name) = choose_land_name(state, who, lib, fateful, rng) {
+                    state.player_mut(who).must_land_drop = false;
                     return PriorityAction::LandDrop(name);
                 }
             }
         }
+        state.player_mut(who).must_land_drop = false;
         state.player_mut(who).land_drop_available = false;
     }
 
@@ -1771,7 +1831,7 @@ fn decide_action(
 
     // Doomsday turn: cast Doomsday as primary action.
     if who == "us" && t == dd_turn && !state.us.dd_cast {
-        if let Some(item) = sim_cast_doomsday(state, t) {
+        if let Some(item) = sim_cast_doomsday(state, t, us_lib) {
             state.us.dd_cast = true;
             state.us.spells_cast_this_turn += 1;
             return PriorityAction::CastSpell(item);
@@ -2029,7 +2089,7 @@ fn do_phase(
     }
     if phase.is_main_phase() {
         state.current_phase = "Main".to_string();
-        roll_want_to_activate(state, ap, catalog_map, rng);
+        roll_want_to_activate(state, t, ap, dd_turn, catalog_map, rng);
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
         // Mana pool drains at the end of the main phase.
         state.us.pool.drain();
@@ -2070,9 +2130,9 @@ fn sacrifice_petal(ps: &mut PlayerState) {
 
 /// Remove Dark Ritual from the library, add BBB to the pool, send it to graveyard.
 /// The caller is responsible for paying the B cost first (via pay_mana or sacrifice_petal).
-fn resolve_ritual(ps: &mut PlayerState) {
-    if let Some(idx) = ps.library.iter().position(|(n, _)| n == "Dark Ritual") {
-        ps.library.remove(idx);
+fn resolve_ritual(ps: &mut PlayerState, library: &mut Vec<(String, CardDef)>) {
+    if let Some(idx) = library.iter().position(|(n, _)| n == "Dark Ritual") {
+        library.remove(idx);
     }
     ps.hand.hidden -= 1;
     ps.graveyard.visible.push("Dark Ritual".to_string());
@@ -2084,7 +2144,7 @@ fn resolve_ritual(ps: &mut PlayerState) {
 /// Returns the Doomsday StackItem if a payment path was found, None otherwise.
 /// The actual resolution effect (pile construction / life loss) is handled by the caller
 /// via resolve_stack.
-fn sim_cast_doomsday(state: &mut SimState, t: u8) -> Option<StackItem> {
+fn sim_cast_doomsday(state: &mut SimState, t: u8, us_lib: &mut Vec<(String, CardDef)>) -> Option<StackItem> {
     let dd = || StackItem {
         name: "Doomsday".to_string(),
         owner: "us".to_string(),
@@ -2094,7 +2154,7 @@ fn sim_cast_doomsday(state: &mut SimState, t: u8) -> Option<StackItem> {
         permanent_target: None,
     };
     let has_petal  = state.us.permanents.iter().any(|p| p.name == "Lotus Petal");
-    let has_ritual = state.us.library.iter().any(|(n, _)| n == "Dark Ritual");
+    let has_ritual = us_lib.iter().any(|(n, _)| n == "Dark Ritual");
     let potential  = state.us.potential_mana();
 
     // Path 1: BBB directly from lands/pool.
@@ -2117,7 +2177,7 @@ fn sim_cast_doomsday(state: &mut SimState, t: u8) -> Option<StackItem> {
     // Path 3: B from lands → Dark Ritual → BBB → Doomsday.
     if has_ritual && potential.can_pay(1, 0, 0) && state.us.hand.hidden > 1 {
         state.us.pay_mana(1, 0, 0); // pay B for Ritual
-        resolve_ritual(&mut state.us); // adds BBB to pool
+        resolve_ritual(&mut state.us, us_lib); // adds BBB to pool
         state.log(t, "us", "Cast Dark Ritual (B → BBB)");
         state.us.pool.spend(3, 0, 0);
         state.us.hand.hidden -= 1;
@@ -2129,7 +2189,7 @@ fn sim_cast_doomsday(state: &mut SimState, t: u8) -> Option<StackItem> {
         sacrifice_petal(&mut state.us); // adds B to pool
         state.log(t, "us", "Sacrifice Lotus Petal (→ B)");
         state.us.pool.spend(1, 0, 0); // pay B for Ritual
-        resolve_ritual(&mut state.us); // adds BBB to pool
+        resolve_ritual(&mut state.us, us_lib); // adds BBB to pool
         state.log(t, "us", "Cast Dark Ritual (Petal → BBB)");
         state.us.pool.spend(3, 0, 0);
         state.us.hand.hidden -= 1;

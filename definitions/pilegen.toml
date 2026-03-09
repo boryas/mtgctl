@@ -213,7 +213,8 @@ alternate_costs = [
 [[cards]]
 name = "Dark Ritual"
 card_type = "instant"
-mana_cost = "B"  # produces BBB (net +BB)
+mana_cost = "B"
+effects = ["mana:BBB"]  # adds BBB to pool on resolution
 
 [[cards]]
 name = "Fatal Push"
