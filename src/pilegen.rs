@@ -356,6 +356,24 @@ impl ManaPool {
     fn can_pay(&self, black: i32, blue: i32, generic: i32) -> bool {
         self.black >= black && self.blue >= blue && self.total >= black + blue + generic
     }
+
+    fn spend(&mut self, black: i32, blue: i32, generic: i32) {
+        self.black -= black;
+        self.blue  -= blue;
+        self.total -= black + blue + generic;
+        // Generic costs may consume colored mana from the pool; reduce the excess colored
+        // counters (black first, arbitrarily) so the invariant total >= black + blue holds.
+        let excess = (self.black + self.blue).saturating_sub(self.total);
+        if excess > 0 {
+            let from_black = excess.min(self.black);
+            self.black -= from_black;
+            self.blue  -= (excess - from_black).min(self.blue);
+        }
+    }
+
+    fn drain(&mut self) {
+        *self = ManaPool::default();
+    }
 }
 
 // ── Simulation types ──────────────────────────────────────────────────────────
@@ -446,6 +464,8 @@ struct PlayerState {
     dd_cast: bool,
     /// Number of non-land spells cast this turn; reset each Untap. Used for multi-spell probability.
     spells_cast_this_turn: u8,
+    /// Mana produced but not yet spent; drains at end of each step/phase.
+    pool: ManaPool,
 }
 
 impl PlayerState {
@@ -462,49 +482,58 @@ impl PlayerState {
             land_drop_available: false, // set true by Untap step
             dd_cast: false,
             spells_cast_this_turn: 0,
+            pool: ManaPool::default(),
         }
     }
 
-    fn mana(&self) -> ManaPool {
-        let mut p = ManaPool::default();
+    /// Mana accessible right now: pool + what untapped non-fetch lands can still produce.
+    fn potential_mana(&self) -> ManaPool {
+        let mut p = self.pool.clone();
         for l in &self.lands {
-            if l.tapped || l.is_fetch {
-                continue;
-            }
-            if l.produces_black {
-                p.black += 1;
-            }
-            if l.produces_blue {
-                p.blue += 1;
-            }
+            if l.tapped || l.is_fetch { continue; }
+            if l.produces_black { p.black += 1; }
+            if l.produces_blue  { p.blue  += 1; }
             p.total += 1;
         }
         p
     }
 
-    /// Tap lands: black sources first, then blue, then any. Fetches are never tapped for mana.
-    fn tap(&mut self, black: i32, blue: i32, generic: i32) {
+    /// Tap lands to add mana to the pool. Black sources first, then blue, then any.
+    /// For generic costs only `pool.total` is incremented (color is not committed).
+    /// Fetches are never tapped for mana.
+    fn produce_mana(&mut self, black: i32, blue: i32, generic: i32) {
         let mut b = black;
-        let mut u = blue;
-        let mut g = generic;
         for l in &mut self.lands {
             if !l.tapped && !l.is_fetch && b > 0 && l.produces_black {
                 l.tapped = true;
+                self.pool.black += 1;
+                self.pool.total += 1;
                 b -= 1;
             }
         }
+        let mut u = blue;
         for l in &mut self.lands {
             if !l.tapped && !l.is_fetch && u > 0 && l.produces_blue {
                 l.tapped = true;
+                self.pool.blue  += 1;
+                self.pool.total += 1;
                 u -= 1;
             }
         }
+        let mut g = generic;
         for l in &mut self.lands {
             if !l.tapped && !l.is_fetch && g > 0 {
                 l.tapped = true;
+                self.pool.total += 1; // color not committed for generic
                 g -= 1;
             }
         }
+    }
+
+    /// Produce mana from lands and immediately spend it (the common pay-a-cost pattern).
+    fn pay_mana(&mut self, black: i32, blue: i32, generic: i32) {
+        self.produce_mana(black, blue, generic);
+        self.pool.spend(black, blue, generic);
     }
 }
 
@@ -844,7 +873,7 @@ fn choose_land_name(
         .filter_map(|(i, (_, def))| {
             if def.card_type != "land" { return None; }
             if fateful && def.cracked_land { return None; }
-            let w = if !has_black && def.produces_black { 3u32 } else { 1u32 };
+            let w = 1;
             Some((i, w))
         })
         .collect();
@@ -964,7 +993,7 @@ fn ability_available(
     }
     if !ability.mana_cost.is_empty() {
         let (b, bl, g) = parse_mana_cost(&ability.mana_cost);
-        if !state.player(who).mana().can_pay(b, bl, g) {
+        if !state.player(who).potential_mana().can_pay(b, bl, g) {
             return false;
         }
     }
@@ -1126,7 +1155,7 @@ fn pay_activation_cost(
     // Pay mana cost.
     if !ability.mana_cost.is_empty() {
         let (b, bl, g) = parse_mana_cost(&ability.mana_cost);
-        state.player_mut(who).tap(b, bl, g);
+        state.player_mut(who).pay_mana(b, bl, g);
     }
 
     // Pay life cost.
@@ -1251,7 +1280,7 @@ fn can_pay_alternate_cost(
     }
     if !cost.mana_cost.is_empty() {
         let (b, bl, g) = parse_mana_cost(&cost.mana_cost);
-        if !player.mana().can_pay(b, bl, g) {
+        if !player.potential_mana().can_pay(b, bl, g) {
             return false;
         }
     }
@@ -1311,7 +1340,7 @@ fn apply_alt_cost_components(
     }
     if !cost.mana_cost.is_empty() {
         let (b, bl, g) = parse_mana_cost(&cost.mana_cost);
-        state.player_mut(who).tap(b, bl, g);
+        state.player_mut(who).pay_mana(b, bl, g);
         parts.push(cost.mana_cost.clone());
     }
     if cost.life_cost > 0 {
@@ -1349,7 +1378,7 @@ fn cast_spell(
     // A spell with an empty mana_cost string and alternate costs is "alt-cost only":
     // it can't be cast for free, it must use one of its alternate costs.
     let has_alt_costs = !def.alternate_costs.is_empty();
-    let mana_is_usable = !def.mana_cost.is_empty() && state.player(who).mana().can_pay(b, bl, g);
+    let mana_is_usable = !def.mana_cost.is_empty() && state.player(who).potential_mana().can_pay(b, bl, g);
 
     // Select cost.
     let alt_cost: Option<AlternateCost> = if let Some(pc) = preferred_cost {
@@ -1386,7 +1415,7 @@ fn cast_spell(
         state.player_mut(who).hand.hidden -= 1;
         parts.join(", ")
     } else {
-        state.player_mut(who).tap(b, bl, g);
+        state.player_mut(who).pay_mana(b, bl, g);
         state.player_mut(who).hand.hidden -= 1;
         def.mana_cost.clone()
     };
@@ -1710,10 +1739,10 @@ fn decide_action(
         let lib: &Vec<(String, CardDef)> = if who == "us" { us_lib } else { opp_lib };
         let land_count = lib.iter().filter(|(_, d)| d.card_type == "land").count();
         if land_count > 0 {
-            // T1 ≈ 100%, T2 ≈ 75%, T3+ ≈ land density in remaining library.
+            // T1 ≈ 100%, T2 ≈ 80%, T3+ ≈ land density in remaining library.
             let prob = match t {
                 1 => 1.0,
-                2 => 0.75,
+                2 => 0.8,
                 _ => land_count as f64 / lib.len() as f64,
             };
             if rng.gen::<f64>() < prob {
@@ -1950,14 +1979,6 @@ fn do_step(
             for land in &mut state.player_mut(ap).lands {
                 land.tapped = false;
             }
-            // Remove ritual mana sentinels from the untapping player.
-            if ap == "us" {
-                us_lib.retain(|(name, _)| name != "__ritual_mana__");
-                state.us.lands.retain(|l| l.name != "Ritual mana");
-            } else {
-                opp_lib.retain(|(name, _)| name != "__ritual_mana__");
-                state.opp.lands.retain(|l| l.name != "Ritual mana");
-            }
             state.player_mut(ap).land_drop_available = true;
             state.player_mut(ap).spells_cast_this_turn = 0;
         }
@@ -1982,6 +2003,9 @@ fn do_step(
     if step.prio {
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
     }
+    // Mana pool drains at the end of every step.
+    state.us.pool.drain();
+    state.opp.pool.drain();
 }
 
 /// Execute a full phase: run each step, then optionally run a phase-level priority round.
@@ -2007,6 +2031,9 @@ fn do_phase(
         state.current_phase = "Main".to_string();
         roll_want_to_activate(state, ap, catalog_map, rng);
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
+        // Mana pool drains at the end of the main phase.
+        state.us.pool.drain();
+        state.opp.pool.drain();
     }
 }
 
@@ -2033,7 +2060,27 @@ fn do_turn(
 }
 
 
-/// Cast Doomsday on the fateful turn. Pays costs and logs the payment path.
+/// Sacrifice Lotus Petal for 1 black mana, adding it directly to the pool.
+fn sacrifice_petal(ps: &mut PlayerState) {
+    ps.permanents.retain(|p| p.name != "Lotus Petal");
+    ps.graveyard.visible.push("Lotus Petal".to_string());
+    ps.pool.black += 1;
+    ps.pool.total += 1;
+}
+
+/// Remove Dark Ritual from the library, add BBB to the pool, send it to graveyard.
+/// The caller is responsible for paying the B cost first (via pay_mana or sacrifice_petal).
+fn resolve_ritual(ps: &mut PlayerState) {
+    if let Some(idx) = ps.library.iter().position(|(n, _)| n == "Dark Ritual") {
+        ps.library.remove(idx);
+    }
+    ps.hand.hidden -= 1;
+    ps.graveyard.visible.push("Dark Ritual".to_string());
+    ps.pool.black += 3;
+    ps.pool.total += 3;
+}
+
+/// Cast Doomsday on the fateful turn. Pays costs via the mana pool and logs the payment path.
 /// Returns the Doomsday StackItem if a payment path was found, None otherwise.
 /// The actual resolution effect (pile construction / life loss) is handled by the caller
 /// via resolve_stack.
@@ -2046,69 +2093,46 @@ fn sim_cast_doomsday(state: &mut SimState, t: u8) -> Option<StackItem> {
         counters: None,
         permanent_target: None,
     };
-    let mana = state.us.mana();
-    // Path 1: BBB from lands
-    if mana.can_pay(3, 0, 0) {
-        state.us.tap(3, 0, 0);
+    let has_petal  = state.us.permanents.iter().any(|p| p.name == "Lotus Petal");
+    let has_ritual = state.us.library.iter().any(|(n, _)| n == "Dark Ritual");
+    let potential  = state.us.potential_mana();
+
+    // Path 1: BBB directly from lands/pool.
+    if potential.can_pay(3, 0, 0) {
+        state.us.pay_mana(3, 0, 0);
         state.us.hand.hidden -= 1;
-        state.log(t, "us", "Cast Doomsday (paid BBB from lands)");
+        state.log(t, "us", "Cast Doomsday (BBB)");
         return Some(dd());
     }
-    // Path 2: BB + Lotus Petal (Petal provides 1 of any color → treated as 1 generic)
-    let has_petal = state.us.permanents.iter().any(|p| p.name == "Lotus Petal");
-    if has_petal && mana.can_pay(2, 0, 0) {
-        state.us.tap(2, 0, 0);
-        state.us.permanents.retain(|p| p.name != "Lotus Petal");
-        state.us.graveyard.visible.push("Lotus Petal".to_string());
+    // Path 2: BB from lands + Lotus Petal → B (accumulate all three into pool, then pay).
+    if has_petal && potential.can_pay(2, 0, 0) {
+        state.us.produce_mana(2, 0, 0); // 2B now in pool
+        sacrifice_petal(&mut state.us);  // +1B → pool has 3B
+        state.log(t, "us", "Sacrifice Lotus Petal (→ B)");
+        state.us.pool.spend(3, 0, 0);   // pay BBB for Doomsday
         state.us.hand.hidden -= 1;
         state.log(t, "us", "Cast Doomsday (BB + Lotus Petal)");
         return Some(dd());
     }
-    // Path 3: 1 black land → Ritual (B→BBB) → Doomsday (BBB)
-    if mana.can_pay(1, 0, 0) && state.us.hand.hidden > 1 {
-        state.us.tap(1, 0, 0); // pay B for Ritual
-                               // Ritual produces BBB — add 3 virtual black mana
-        for _ in 0..3 {
-            state.us.lands.push(SimLand {
-                name: "Ritual mana".into(),
-                tapped: false,
-                produces_black: true,
-                produces_blue: false,
-                is_fetch: false,
-                basic: false,
-                want_to_activate: false,
-            });
-        }
-        // TODO: make this a real "cast a dark ritual" using the cast function
-        state.us.hand.hidden -= 1; // ritual
-        state.us.graveyard.visible.push("Dark Ritual".to_string());
+    // Path 3: B from lands → Dark Ritual → BBB → Doomsday.
+    if has_ritual && potential.can_pay(1, 0, 0) && state.us.hand.hidden > 1 {
+        state.us.pay_mana(1, 0, 0); // pay B for Ritual
+        resolve_ritual(&mut state.us); // adds BBB to pool
         state.log(t, "us", "Cast Dark Ritual (B → BBB)");
-        state.us.tap(3, 0, 0); // pay BBB for Doomsday
-        state.us.hand.hidden -= 1; // doomsday
+        state.us.pool.spend(3, 0, 0);
+        state.us.hand.hidden -= 1;
         state.log(t, "us", "Cast Doomsday (BBB from Ritual)");
         return Some(dd());
     }
-    // Path 4: Lotus Petal pays for Ritual (B→BBB) → Doomsday (BBB), 0 lands needed
-    if has_petal && state.us.hand.hidden > 1 {
-        state.us.permanents.retain(|p| p.name != "Lotus Petal"); // Petal pays B for Ritual
-        state.us.graveyard.visible.push("Lotus Petal".to_string());
-        state.us.hand.hidden -= 1; // ritual
-        state.us.graveyard.visible.push("Dark Ritual".to_string());
-        // Ritual produces BBB — add 3 virtual black mana
-        for _ in 0..3 {
-            state.us.lands.push(SimLand {
-                name: "Ritual mana".into(),
-                tapped: false,
-                produces_black: true,
-                produces_blue: false,
-                is_fetch: false,
-                basic: false,
-                want_to_activate: false,
-            });
-        }
-        state.log(t, "us", "Cast Dark Ritual via Lotus Petal (BBB)");
-        state.us.tap(3, 0, 0); // pay BBB for Doomsday
-        state.us.hand.hidden -= 1; // doomsday
+    // Path 4: Lotus Petal → B → Dark Ritual → BBB → Doomsday (0 lands needed).
+    if has_petal && has_ritual && state.us.hand.hidden > 1 {
+        sacrifice_petal(&mut state.us); // adds B to pool
+        state.log(t, "us", "Sacrifice Lotus Petal (→ B)");
+        state.us.pool.spend(1, 0, 0); // pay B for Ritual
+        resolve_ritual(&mut state.us); // adds BBB to pool
+        state.log(t, "us", "Cast Dark Ritual (Petal → BBB)");
+        state.us.pool.spend(3, 0, 0);
+        state.us.hand.hidden -= 1;
         state.log(t, "us", "Cast Doomsday (BBB from Ritual)");
         return Some(dd());
     }
@@ -2210,10 +2234,6 @@ fn simulate_game(
     if state.reroll {
         return None;
     }
-
-    // Clean up ritual sentinels before converting to output
-    // TODO: real mana pool
-    state.us.lands.retain(|l| l.name != "Ritual mana");
 
     Some(state)
 }
