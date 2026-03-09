@@ -4769,7 +4769,9 @@ mod tests {
         if let Ok(entries) = fs::read_dir("definitions") {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+                if path.extension().and_then(|s| s.to_str()) == Some("toml")
+                    && path.file_name().and_then(|s| s.to_str()) != Some("pilegen.toml")
+                {
                     match fs::read_to_string(&path) {
                         Ok(content) => {
                             match toml::from_str::<UnifiedArchetypeDefinition>(&content) {

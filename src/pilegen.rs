@@ -108,9 +108,11 @@ struct CardDef {
     #[serde(default)]
     mana_cost: String,
 
-    // Creature power (for combat damage fudge)
+    // Creature power/toughness (for combat)
     #[serde(default)]
     power: Option<i32>,
+    #[serde(default)]
+    toughness: Option<i32>,
 
     // DFC: back-face properties
     #[serde(default)]
@@ -175,6 +177,10 @@ struct CardDef {
     #[serde(default)]
     abilities: Vec<AbilityDef>,
 
+    /// If true, generic mana in the cost can be paid by exiling cards from graveyard.
+    #[serde(default)]
+    delve: bool,
+
     /// If set, this card is a counterspell that can target spells of the given type.
     /// Values: "any" | "noncreature" | "nonland" | "instant_or_sorcery"
     /// Must also have `alternate_costs` defined to be usable.
@@ -228,6 +234,9 @@ struct StackItem {
     /// For spells with a permanent target (`CardDef.target`): `(target_who, target_name)`.
     /// Resolved at cast time and locked in; used directly by `apply_spell_effects`.
     permanent_target: Option<(String, String)>,
+    /// Pre-computed annotation for permanents (e.g. Murktide size from delve count).
+    /// If Some, overrides random annotation_options pick at resolution time.
+    annotation: Option<String>,
 }
 
 
@@ -237,6 +246,8 @@ struct StackItem {
 enum PhaseKind {
     Beginning,
     PreCombatMain,
+    Combat,
+    PostCombatMain,
     End,
 }
 
@@ -245,6 +256,11 @@ enum StepKind {
     Untap,
     Upkeep,
     Draw,
+    BeginCombat,
+    DeclareAttackers,
+    DeclareBlockers,
+    CombatDamage,
+    EndCombat,
     End,
     Cleanup,
 }
@@ -261,7 +277,7 @@ struct Phase {
 
 impl Phase {
     fn is_main_phase(&self) -> bool {
-        matches!(self.kind, PhaseKind::PreCombatMain)
+        matches!(self.kind, PhaseKind::PreCombatMain | PhaseKind::PostCombatMain)
     }
 }
 
@@ -273,8 +289,12 @@ enum PriorityAction {
     LandDrop(String),
     /// Activate a permanent ability. Carries source name + ability def. Uses the stack, passes priority after.
     ActivateAbility(String, AbilityDef),
-    /// Cast a spell onto the stack; passes priority after.
-    CastSpell(StackItem),
+    /// Intent to cast a spell. No resources are spent until `handle_priority_round` accepts and
+    /// commits this action. The framework validates legality (sorcery-speed, etc.) there.
+    ///
+    /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
+    /// `counters`       — stack index this spell will counter (counterspell only).
+    CastSpell { name: String, preferred_cost: Option<AlternateCost>, counters: Option<usize> },
     /// Pass priority.
     Pass,
 }
@@ -296,6 +316,23 @@ fn main_phase() -> Phase {
     Phase { kind: PhaseKind::PreCombatMain, steps: vec![] }
 }
 
+fn combat_phase() -> Phase {
+    Phase {
+        kind: PhaseKind::Combat,
+        steps: vec![
+            Step { kind: StepKind::BeginCombat,      prio: true },
+            Step { kind: StepKind::DeclareAttackers, prio: true },
+            Step { kind: StepKind::DeclareBlockers,  prio: true },
+            Step { kind: StepKind::CombatDamage,     prio: true },
+            Step { kind: StepKind::EndCombat,        prio: true },
+        ],
+    }
+}
+
+fn post_combat_main_phase() -> Phase {
+    Phase { kind: PhaseKind::PostCombatMain, steps: vec![] }
+}
+
 fn end_phase() -> Phase {
     Phase {
         kind: PhaseKind::End,
@@ -308,9 +345,10 @@ fn end_phase() -> Phase {
 
 // ── Mana cost parsing ─────────────────────────────────────────────────────────
 
-/// Parse a mana cost string (e.g. "BBB", "1U", "UB", "2B") into (black, blue, generic).
+/// Parse a mana cost string (e.g. "BBB", "1U", "UB", "2B", "0") into (black, blue, generic).
 /// `generic` = leading number + W/R/G/C pips (can be paid with any color).
-/// Empty string = free (alternate-cost cards).
+/// Empty string = no castable mana cost (alt-cost-only or uncostable cards like Daze/FoW).
+/// "0" = genuinely free (Lotus Petal, LED).
 fn parse_mana_cost(cost: &str) -> (i32, i32, i32) {
     let mut generic = 0i32;
     let mut black = 0i32;
@@ -393,11 +431,24 @@ struct SimLand {
 struct SimPermanent {
     name: String,
     want_to_activate: bool,
+    /// Display annotation, e.g. "5/5" for Murktide or "Wizard" for Cavern.
+    annotation: Option<String>,
+    tapped: bool,
+    damage: i32,
+    /// True on the turn this permanent entered play (summoning sickness).
+    entered_this_turn: bool,
 }
 
 impl SimPermanent {
     fn new(name: impl Into<String>) -> Self {
-        SimPermanent { name: name.into(), want_to_activate: false }
+        SimPermanent {
+            name: name.into(),
+            want_to_activate: false,
+            annotation: None,
+            tapped: false,
+            damage: 0,
+            entered_this_turn: true,
+        }
     }
 }
 
@@ -554,10 +605,16 @@ struct SimState {
     log: Vec<String>,
     /// Set when Doomsday was countered and we couldn't protect it — scenario must be re-rolled.
     reroll: bool,
+    /// Set when Doomsday resolved — simulation ends successfully.
+    success: bool,
     /// Active player this phase/step (for log context).
     current_ap: String,
     /// Current phase/step label (for log context).
     current_phase: String,
+    /// Attackers declared this combat; cleared at EndCombat.
+    combat_attackers: Vec<String>,
+    /// Blocker assignments this combat: (attacker_name, blocker_name); cleared at EndCombat.
+    combat_blocks: Vec<(String, String)>,
 }
 
 impl SimState {
@@ -569,9 +626,17 @@ impl SimState {
             opp: opp,
             log: Vec::new(),
             reroll: false,
+            success: false,
             current_ap: String::new(),
             current_phase: String::new(),
+            combat_attackers: Vec::new(),
+            combat_blocks: Vec::new(),
         }
+    }
+
+    /// True when the simulation should stop (either success or reroll).
+    fn done(&self) -> bool {
+        self.reroll || self.success
     }
 
     fn player(&self, who: &str) -> &PlayerState {
@@ -634,7 +699,10 @@ impl std::fmt::Display for PlayerState {
         if !self.permanents.is_empty() {
             writeln!(f, "  Permanents :")?;
             for p in &self.permanents {
-                writeln!(f, "    * {}", p.name)?;
+                let ann = p.annotation.as_deref()
+                    .map(|a| format!(" [{}]", a))
+                    .unwrap_or_default();
+                writeln!(f, "    * {}{}", p.name, ann)?;
             }
         }
 
@@ -725,6 +793,9 @@ pub fn run(_args: PilegenArgs) {
 
     let all_cards = load_deck_cards(&deck_name);
     let opp_cards = load_deck_cards(&opp_deck_name);
+
+    warn_unimplemented_cards(&all_cards, &deck_name, &config);
+    warn_unimplemented_cards(&opp_cards, &opp_display, &config);
 
     loop {
         let state = generate_scenario(&deck_name, &opp_display, &config, &all_cards, &opp_cards);
@@ -875,6 +946,9 @@ fn choose_land_name(
     fateful: bool,
     rng: &mut impl Rng,
 ) -> Option<String> {
+    if state.player(who).hand.hidden <= 0 {
+        return None;
+    }
     // On the fateful turn, if we can't produce black mana yet, require a black source.
     let need_black = fateful && !state.player(who).has_black_mana();
     let weighted: Vec<(usize, u32)> = library
@@ -906,6 +980,7 @@ fn sim_play_land(
         SimLand::from_def(name, def)
     };
     state.player_mut(who).hand.hidden -= 1;
+    debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative playing land");
     state.player_mut(who).lands.push(land);
     state.log(t, who, format!("Play {}", land_name));
     library.remove(idx);
@@ -1017,13 +1092,36 @@ fn ability_available(
 
 /// Collect spells from hand that can be cast this turn (cantrips / permanents / discard).
 /// Abilities are handled separately in the ability pass.
+/// Collect spells that can be proactively cast from an empty-stack main phase.
+/// Counterspells are handled separately (via `respond_with_counter`); this only
+/// covers cantrips, permanents, removal, and other proactive non-counter spells.
+/// Returns true if the player can currently afford to cast `name` via any available cost.
+fn spell_is_affordable(
+    name: &str,
+    def: &CardDef,
+    state: &SimState,
+    who: &str,
+    library: &[(String, CardDef)],
+) -> bool {
+    let (b, bl, mut g) = parse_mana_cost(&def.mana_cost);
+    if def.delve && g > 0 {
+        let gy_len = state.player(who).graveyard.visible.len() as i32;
+        g = (g - gy_len).max(0);
+    }
+    let mana_is_usable = !def.mana_cost.is_empty() && state.player(who).potential_mana().can_pay(b, bl, g);
+    if mana_is_usable { return true; }
+    def.alternate_costs.iter().any(|c| can_pay_alternate_cost(c, state, who, name, library))
+}
+
 fn collect_spells(
     state: &SimState,
     who: &str,
     library: &[(String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
-    sorcery_speed: bool,
 ) -> Vec<String> {
+    if state.player(who).hand.hidden <= 0 {
+        return Vec::new();
+    }
     let permanents_in_play = &state.player(who).permanents;
     let opp_who = if who == "us" { "opp" } else { "us" };
     library
@@ -1032,13 +1130,10 @@ fn collect_spells(
             if def.card_type == "land" {
                 return None;
             }
-            // Sorceries (and creature/planeswalker permanents) can only be cast at sorcery speed:
-            // AP's main phase with an empty stack.
-            if !sorcery_speed && def.card_type != "instant" {
-                return None;
-            }
             let castable = def.effects.iter().any(|e| {
-                e == "cantrip" || e == "permanent" || e == "destroy" || e.starts_with("discard:")
+                e == "cantrip" || e == "permanent" || e == "destroy" || e == "doomsday"
+                    || e.starts_with("discard:") || e.starts_with("reanimate:")
+                    || e.starts_with("mana:")
             });
             if !castable {
                 return None;
@@ -1055,9 +1150,17 @@ fn collect_spells(
             // Check requires conditions.
             let ok = def.requires.iter().all(|req| match req.as_str() {
                 "opp_hand_nonempty" => state.player(opp_who).hand.hidden > 0,
+                "us_gy_has_creature" => state.player(who).graveyard.visible.iter()
+                    .any(|n| catalog_map.get(n.as_str())
+                        .map(|d| d.card_type == "creature")
+                        .unwrap_or(false)),
                 _ => true,
             });
             if !ok {
+                return None;
+            }
+            // Affordability: must be able to pay at least one cost.
+            if !spell_is_affordable(name, def, state, who, library) {
                 return None;
             }
             Some(name.to_string())
@@ -1204,6 +1307,18 @@ fn apply_ability_effect(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
+    // mana:* — add mana to pool (e.g. Lotus Petal sac for B).
+    if ability.effect.starts_with("mana:") {
+        let spec = &ability.effect["mana:".len()..];
+        let black = spec.chars().filter(|&c| c == 'B').count() as i32;
+        let blue  = spec.chars().filter(|&c| c == 'U').count() as i32;
+        state.player_mut(who).pool.black += black;
+        state.player_mut(who).pool.blue  += blue;
+        state.player_mut(who).pool.total += black + blue;
+        state.log(t, who, format!("{} ability → add {} to pool", source_name, spec));
+        return;
+    }
+
     // search:*:* — generic library search (e.g. fetchland: "search:land-ub:play").
     if ability.effect.starts_with("search:") {
         let mut parts = ability.effect.splitn(3, ':');
@@ -1389,10 +1504,24 @@ fn cast_spell(
     rng: &mut impl Rng,
 ) -> Option<StackItem> {
     let def = catalog_map.get(name)?;
-    let (b, bl, g) = parse_mana_cost(&def.mana_cost);
+    let (b, bl, mut g) = parse_mana_cost(&def.mana_cost);
 
-    // A spell with an empty mana_cost string and alternate costs is "alt-cost only":
-    // it can't be cast for free, it must use one of its alternate costs.
+    // Delve: reduce generic cost by exiling cards from the caster's graveyard.
+    let to_exile: Vec<String> = if def.delve && g > 0 {
+        let gy = state.player(who).graveyard.visible.clone();
+        let mut cards = Vec::new();
+        for card in &gy {
+            if cards.len() as i32 >= g { break; }
+            cards.push(card.clone());
+        }
+        g -= cards.len() as i32;
+        cards
+    } else {
+        Vec::new()
+    };
+
+    // Empty mana_cost means the card has no castable mana cost (alt-cost-only, or truly uncostable).
+    // Use mana_cost = "0" in the catalog for genuinely free spells (Lotus Petal, LED).
     let has_alt_costs = !def.alternate_costs.is_empty();
     let mana_is_usable = !def.mana_cost.is_empty() && state.player(who).potential_mana().can_pay(b, bl, g);
 
@@ -1429,14 +1558,41 @@ fn cast_spell(
     let cast_label = if let Some(ref cost) = alt_cost {
         let parts = apply_alt_cost_components(cost, state, who, name, library, catalog_map, rng);
         state.player_mut(who).hand.hidden -= 1;
+        debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative casting {} (alt cost)", name);
         parts.join(", ")
     } else {
         state.player_mut(who).pay_mana(b, bl, g);
         state.player_mut(who).hand.hidden -= 1;
+        debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative casting {}", name);
         def.mana_cost.clone()
     };
 
-    state.log(t, who, format!("Cast {} ({})", name, cast_label));
+    // Exile delve cards from graveyard (cost payment).
+    for card in &to_exile {
+        state.player_mut(who).graveyard.visible.retain(|n| n != card);
+        state.player_mut(who).exile.visible.push(card.clone());
+    }
+
+    // Compute annotation for permanents with delve (e.g. Murktide size from instants/sorceries exiled).
+    let annotation: Option<String> = if def.delve && !def.annotation_options.is_empty() {
+        let is_count = to_exile.iter()
+            .filter(|n| catalog_map.get(n.as_str())
+                .map(|d| d.card_type == "instant" || d.card_type == "sorcery")
+                .unwrap_or(false))
+            .count() as i32;
+        let base = def.power.unwrap_or(3);
+        let size = base + is_count;
+        Some(format!("{}/{}", size, size))
+    } else {
+        None
+    };
+
+    let delve_label = if to_exile.is_empty() {
+        String::new()
+    } else {
+        format!(", delve: {}", to_exile.join(", "))
+    };
+    state.log(t, who, format!("Cast {} ({}{})", name, cast_label, delve_label));
 
     Some(StackItem {
         name: name.to_string(),
@@ -1445,6 +1601,7 @@ fn cast_spell(
         ability_def: None,
         counters: None,
         permanent_target,
+        annotation,
     })
 }
 
@@ -1473,7 +1630,22 @@ fn apply_spell_effects(
 
     // Destination: permanents or graveyard.
     if is_permanent {
-        state.player_mut(&item.owner).permanents.push(SimPermanent::new(item.name.clone()));
+        // Pick annotation: use pre-computed (e.g. Murktide delve), else random from options (e.g. Cavern).
+        let annotation = if item.annotation.is_some() {
+            item.annotation.clone()
+        } else if !def.annotation_options.is_empty() {
+            Some(def.annotation_options[rng.gen_range(0..def.annotation_options.len())].clone())
+        } else {
+            None
+        };
+        state.player_mut(&item.owner).permanents.push(SimPermanent {
+            name: item.name.clone(),
+            want_to_activate: false,
+            annotation,
+            tapped: false,
+            damage: 0,
+            entered_this_turn: true,
+        });
     } else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
     }
@@ -1483,26 +1655,38 @@ fn apply_spell_effects(
     for effect in &def.effects {
         let parts: Vec<&str> = effect.splitn(3, ':').collect();
         match parts.as_slice() {
+            [e] if *e == "doomsday" => {
+                state.success = true;
+            }
             [e] if *e == "cantrip" => {
                 state.player_mut(&item.owner).hand.hidden += 1;
             }
-            ["discard", who_rel, n_str] => {
+            ["discard", who_rel, n_str_and_flags] => {
+                let (n_str, nonland_only) = match n_str_and_flags.split_once(':') {
+                    Some((n, "nonland")) => (n, true),
+                    _ => (*n_str_and_flags, false),
+                };
                 let n: i32 = n_str.parse().unwrap_or(0);
                 let target_who = resolve_who(who_rel, &item.owner).to_string();
-                let current = state.player(&target_who).hand.hidden;
+                let current = state.player(&target_who).hand.hidden.max(0);
                 let actual = n.min(current);
                 if actual > 0 {
                     let mut discarded: Vec<String> = Vec::new();
                     for _ in 0..actual {
-                        if !other_lib.is_empty() {
-                            let idx = rng.gen_range(0..other_lib.len());
+                        let candidates: Vec<usize> = other_lib.iter().enumerate()
+                            .filter(|(_, (_, d))| !nonland_only || d.card_type != "land")
+                            .map(|(i, _)| i)
+                            .collect();
+                        if let Some(&idx) = candidates.get(rng.gen_range(0..candidates.len().max(1))) {
                             let (card, _) = other_lib.remove(idx);
                             state.player_mut(&target_who).hand.hidden -= 1;
                             state.player_mut(&target_who).graveyard.visible.push(card.clone());
                             discarded.push(card);
                         }
                     }
-                    secondary_logs.push(format!("→ {} discards: {}", target_who, discarded.join(", ")));
+                    if !discarded.is_empty() {
+                        secondary_logs.push(format!("→ {} discards: {}", target_who, discarded.join(", ")));
+                    }
                 }
             }
             ["life_loss", n_str] => {
@@ -1524,6 +1708,28 @@ fn apply_spell_effects(
                 state.player_mut(&owner).pool.blue  += blue;
                 state.player_mut(&owner).pool.total += black + blue + generic;
                 secondary_logs.push(format!("→ add {} to pool", spec));
+            }
+            ["reanimate", who_rel, type_filter] => {
+                let target_who = resolve_who(who_rel, &item.owner).to_string();
+                let candidates: Vec<String> = state.player(&target_who).graveyard.visible.iter()
+                    .filter(|n| catalog_map.get(n.as_str())
+                        .map(|d| d.card_type == *type_filter || *type_filter == "any")
+                        .unwrap_or(false))
+                    .cloned()
+                    .collect();
+                if !candidates.is_empty() {
+                    let chosen = candidates[rng.gen_range(0..candidates.len())].clone();
+                    state.player_mut(&target_who).graveyard.visible.retain(|n| n != &chosen);
+                    state.player_mut(&target_who).permanents.push(SimPermanent {
+                        name: chosen.clone(),
+                        want_to_activate: false,
+                        annotation: None,
+                        tapped: false,
+                        damage: 0,
+                        entered_this_turn: true,
+                    });
+                    secondary_logs.push(format!("→ {} returns from graveyard", chosen));
+                }
             }
             _ => {}
         }
@@ -1553,50 +1759,6 @@ fn apply_spell_effects(
     }
 }
 
-/// Resolve the stack from top (last) to bottom (first).
-///
-/// A counterspell (item.counters = Some(idx)) fizzles its target; a fizzled item goes
-/// to graveyard without applying effects. Returns a mask: `true` = item was fizzled.
-///
-/// `actor_lib` / `other_lib` are relative to the active player (who started the spell cascade).
-fn resolve_stack(
-    stack: &[StackItem],
-    state: &mut SimState,
-    t: u8,
-    actor_lib: &mut Vec<(String, CardDef)>,
-    other_lib: &mut Vec<(String, CardDef)>,
-    catalog_map: &HashMap<&str, &CardDef>,
-    rng: &mut impl Rng,
-) -> Vec<bool> {
-    let mut fizzled = vec![false; stack.len()];
-
-    // Process top-to-bottom (last element first = LIFO resolution).
-    for i in (0..stack.len()).rev() {
-        let item = &stack[i];
-
-        if fizzled[i] {
-            // Countered before it could resolve: goes to graveyard with no effect.
-            state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
-            continue;
-        }
-
-        if let Some(target_idx) = item.counters {
-            // Counterspell resolves: fizzle the target if it's still live.
-            if !fizzled[target_idx] {
-                fizzled[target_idx] = true;
-                state.log(t, &item.owner,
-                    format!("{} counters {}", item.name, stack[target_idx].name));
-            }
-            // Counterspell itself goes to graveyard.
-            state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
-        } else {
-            // Normal spell resolves.
-            apply_spell_effects(item, state, t, actor_lib, other_lib, catalog_map, rng);
-        }
-    }
-
-    fizzled
-}
 
 /// Try to respond to `stack[target_idx]` by casting a counterspell.
 ///
@@ -1605,31 +1767,35 @@ fn resolve_stack(
 /// When `probabilistic = false` the attempt is deterministic — all payable options are
 /// tried in order (used when we must protect Doomsday).
 ///
-/// On success, returns a StackItem with `counters = Some(target_idx)` and the
-/// responding player's costs already paid. Returns None if no counter is possible.
+/// On success, returns a `CastSpell` intent with `counters = Some(target_idx)`.
+/// No resources are spent; the caller (`handle_priority_round`) commits the action.
 fn respond_with_counter(
-    state: &mut SimState,
-    t: u8,
+    state: &SimState,
     stack: &[StackItem],
     target_idx: usize,
     responding_who: &str,
-    responding_library: &mut Vec<(String, CardDef)>,
+    responding_library: &[(String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
     probabilistic: bool,
-) -> Option<StackItem> {
+) -> Option<PriorityAction> {
     let target_type = catalog_map
         .get(stack[target_idx].name.as_str())
         .map(|d| d.card_type.as_str())
         .unwrap_or("sorcery");
 
+    let target_owner = &stack[target_idx].owner;
+    let target_has_untapped_lands = state.player(target_owner).lands.iter().any(|l| !l.tapped);
+
     let counterspells: Vec<String> = responding_library
         .iter()
-        .filter(|(_, d)| {
+        .filter(|(n, d)| {
             d.counter_target
                 .as_deref()
                 .is_some_and(|ct| matches_counter_target(ct, target_type))
                 && !d.alternate_costs.is_empty()
+                // Daze is useless if the opponent can pay the 1-mana tax.
+                && !(n.as_str() == "Daze" && target_has_untapped_lands)
         })
         .map(|(n, _)| n.to_string())
         .collect();
@@ -1654,14 +1820,11 @@ fn respond_with_counter(
                 }
             }
             if can_pay_alternate_cost(cost, state, responding_who, cs_name, responding_library) {
-                let cost = cost.clone();
-                if let Some(mut item) = cast_spell(
-                    state, t, responding_who, cs_name,
-                    responding_library, Some(&cost), catalog_map, rng,
-                ) {
-                    item.counters = Some(target_idx);
-                    return Some(item);
-                }
+                return Some(PriorityAction::CastSpell {
+                    name: cs_name.clone(),
+                    preferred_cost: Some(cost.clone()),
+                    counters: Some(target_idx),
+                });
             }
         }
     }
@@ -1669,6 +1832,22 @@ fn respond_with_counter(
 }
 
 
+
+// ── Combat helpers ────────────────────────────────────────────────────────────
+
+/// Return (power, toughness) for a permanent, preferring the annotation if it's "X/Y" format.
+fn creature_stats(perm: &SimPermanent, def: Option<&CardDef>) -> (i32, i32) {
+    if let Some(ann) = &perm.annotation {
+        if let Some((p, t)) = ann.split_once('/') {
+            if let (Ok(p), Ok(t)) = (p.parse::<i32>(), t.parse::<i32>()) {
+                return (p, t);
+            }
+        }
+    }
+    let power     = def.and_then(|d| d.power).unwrap_or(1);
+    let toughness = def.and_then(|d| d.toughness).unwrap_or(1);
+    (power, toughness)
+}
 
 // ── New turn-structure functions ──────────────────────────────────────────────
 
@@ -1719,6 +1898,15 @@ fn roll_want_to_activate(
         }
     }
 
+    // Fateful turn: if we have Lotus Petal and need more black mana for Doomsday, force-activate it.
+    if ap == "us" && t == dd_turn && state.us.potential_mana().black < 3 {
+        if let Some(p) = state.us.permanents.iter_mut()
+            .find(|p| p.name == "Lotus Petal" && !p.want_to_activate)
+        {
+            p.want_to_activate = true;
+        }
+    }
+
     // Fateful turn: if we can't produce black mana, we must get a black source this turn.
     if ap == "us" && t == dd_turn && !state.us.has_black_mana() {
         let fetch_names: Vec<String> = state.us.lands.iter()
@@ -1739,6 +1927,171 @@ fn roll_want_to_activate(
     }
 }
 
+/// NAP decision: if AP just acted, try to counter the top opposing spell; otherwise pass.
+fn nap_action(
+    state: &SimState,
+    who: &str,
+    last_action: &PriorityAction,
+    stack: &[StackItem],
+    us_lib: &mut Vec<(String, CardDef)>,
+    opp_lib: &mut Vec<(String, CardDef)>,
+    catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut impl Rng,
+) -> PriorityAction {
+    let other_acted = matches!(last_action, PriorityAction::CastSpell { .. } | PriorityAction::ActivateAbility(..));
+    if other_acted {
+        let actor_lib: &[_] = if who == "us" { us_lib } else { opp_lib };
+        for idx in (0..stack.len()).rev() {
+            if stack[idx].owner != who && !stack[idx].is_ability {
+                if let Some(action) = respond_with_counter(state, stack, idx, who, actor_lib, catalog_map, rng, true) {
+                    if let PriorityAction::CastSpell { ref name, .. } = action {
+                        eprintln!("[decision] {}: NAP counter {} targeting {}", who, name, stack[idx].name);
+                    }
+                    return action;
+                }
+                eprintln!("[decision] {}: NAP passes (no counter available for {})", who, stack[idx].name);
+                break;
+            }
+        }
+    }
+    PriorityAction::Pass
+}
+
+/// AP reactive decision: respond to threats already on the stack.
+/// Currently handles protecting our Doomsday if the opponent has countered it.
+/// Returns Some(action) if we should respond, None to continue to proactive logic.
+fn ap_react(
+    state: &mut SimState,
+    t: u8,
+    who: &str,
+    stack: &[StackItem],
+    us_lib: &[(String, CardDef)],
+    catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut impl Rng,
+) -> Option<PriorityAction> {
+    if who != "us" || stack.is_empty() {
+        return None;
+    }
+    let top_idx = stack.len() - 1;
+    let top = &stack[top_idx];
+    let dd_countered = !top.is_ability
+        && top.owner != "us"
+        && top.counters
+            .map(|ti| stack[ti].name == "Doomsday" && stack[ti].owner == "us")
+            .unwrap_or(false);
+    if !dd_countered {
+        return None;
+    }
+    Some(
+        if let Some(action) = respond_with_counter(state, stack, top_idx, "us", us_lib, catalog_map, rng, false) {
+            action
+        } else {
+            state.log(t, "us", "⚠ Doomsday countered — could not protect");
+            state.reroll = true;
+            PriorityAction::Pass
+        },
+    )
+}
+
+/// AP proactive decision: land drop, abilities, Doomsday setup, and general spells.
+/// Only called when the AP is in the main phase.
+fn ap_proactive(
+    state: &mut SimState,
+    t: u8,
+    who: &str,
+    dd_turn: u8,
+    stack: &[StackItem],
+    us_lib: &mut Vec<(String, CardDef)>,
+    opp_lib: &mut Vec<(String, CardDef)>,
+    catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut impl Rng,
+) -> PriorityAction {
+    // Land drop (sorcery speed: requires empty stack).
+    if stack.is_empty() && state.player(who).land_drop_available {
+        let fateful = who == "us" && t == dd_turn;
+        // On the fateful turn, skip the land drop if Doomsday is already castable — playing
+        // a land might spend our last card in hand and leave us unable to cast Doomsday.
+        let dd_already_castable = fateful && !state.us.dd_cast
+            && state.us.potential_mana().can_pay(3, 0, 0)
+            && us_lib.iter().any(|(n, _)| n == "Doomsday");
+        if !dd_already_castable {
+            let force = state.player(who).must_land_drop;
+            let lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
+            let land_count = lib.iter().filter(|(_, d)| d.card_type == "land").count();
+            if land_count > 0 {
+                // T1=100%, T2=90%, T3=80%, T4+=70%; forced to 100% when must_land_drop is set.
+                let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
+                if rng.gen::<f64>() < prob {
+                    if let Some(name) = choose_land_name(state, who, lib, fateful, rng) {
+                        state.player_mut(who).must_land_drop = false;
+                        return PriorityAction::LandDrop(name);
+                    }
+                }
+            }
+            state.player_mut(who).must_land_drop = false;
+            state.player_mut(who).land_drop_available = false;
+        }
+    }
+
+    // Activate pending abilities (can happen with non-empty stack).
+    let source_name = state.player(who).lands.iter()
+        .find(|l| l.want_to_activate).map(|l| l.name.clone())
+        .or_else(|| state.player(who).permanents.iter()
+            .find(|p| p.want_to_activate).map(|p| p.name.clone()));
+    if let Some(source_name) = source_name {
+        if let Some(ab) = catalog_map.get(source_name.as_str())
+            .and_then(|def| def.abilities.iter()
+                .find(|ab| ability_available(ab, state, who, true, catalog_map))
+                .cloned())
+        {
+            return PriorityAction::ActivateAbility(source_name, ab);
+        }
+    }
+
+    // Proactive spell casting only on an empty stack: no Brainstorms in response to fetches.
+    if !stack.is_empty() {
+        return PriorityAction::Pass;
+    }
+
+    let actor_lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
+    let spells = collect_spells(state, who, actor_lib, catalog_map);
+    if spells.is_empty() {
+        let pool = &state.player(who).pool;
+        let hand = state.player(who).hand.hidden;
+        eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
+            who, pool.black, pool.blue, pool.total, hand);
+        if who == "us" && t == dd_turn && !state.us.dd_cast {
+            let dd_in_lib = actor_lib.iter().filter(|(n, _)| n == "Doomsday").count();
+            eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_lib={}, potential B={} tot={}",
+                hand, dd_in_lib, pool.black, pool.total);
+        }
+        return PriorityAction::Pass;
+    }
+
+    // On the fateful turn, prioritize: Doomsday > Dark Ritual > anything else.
+    let fateful = who == "us" && t == dd_turn && !state.us.dd_cast;
+    let spell_name = if fateful && spells.iter().any(|n| n == "Doomsday") {
+        "Doomsday".to_string()
+    } else if fateful && spells.iter().any(|n| n == "Dark Ritual") {
+        "Dark Ritual".to_string()
+    } else {
+        // General casting — decaying probability for multi-spell turns.
+        // 1st spell: always; 2nd: 30%; 3rd+: 10%.
+        // Override to 1.0 if mana is floating in the pool: we generated it on purpose.
+        let has_floating = state.player(who).pool.total > 0;
+        let cast_prob = if has_floating { 1.0 } else {
+            match state.player(who).spells_cast_this_turn { 0 => 1.0, 1 => 0.30, _ => 0.10 }
+        };
+        if rng.gen::<f64>() >= cast_prob {
+            return PriorityAction::Pass;
+        }
+        spells[rng.gen_range(0..spells.len())].clone()
+    };
+
+    eprintln!("[decision] {}: proactive cast {} (options: {})", who, spell_name, spells.join(", "));
+    PriorityAction::CastSpell { name: spell_name, preferred_cost: None, counters: None }
+}
+
 /// Decide what action the player `who` takes when they hold priority.
 /// `ap` is the active player (whose turn it is). Phase context is read from
 /// `state.current_phase` (set by `do_turn`/`do_step`/`do_phase` before each priority window).
@@ -1755,111 +2108,17 @@ fn decide_action(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
-    let is_ap = who == ap;
-    let in_main_phase = state.current_phase == "Main";
-
-    // NAP with an empty stack: nothing to react to.
-    if !is_ap && stack.is_empty() {
+    if who != ap {
+        if stack.is_empty() { return PriorityAction::Pass; }
+        return nap_action(state, who, last_action, stack, us_lib, opp_lib, catalog_map, rng);
+    }
+    if state.current_phase != "Main" {
         return PriorityAction::Pass;
     }
-
-    // NAP: only counter when AP just acted and there's an opposing spell on the stack.
-    if !is_ap {
-        let other_acted = matches!(last_action, PriorityAction::CastSpell(_) | PriorityAction::ActivateAbility(..));
-        if other_acted {
-            let actor_lib: &mut Vec<(String, CardDef)> =
-                if who == "us" { us_lib } else { opp_lib };
-            for idx in (0..stack.len()).rev() {
-                if stack[idx].owner != who && !stack[idx].is_ability {
-                    if let Some(counter) = respond_with_counter(
-                        state, t, stack, idx, who, actor_lib, catalog_map, rng, true,
-                    ) {
-                        return PriorityAction::CastSpell(counter);
-                    }
-                    break;
-                }
-            }
-        }
-        return PriorityAction::Pass;
+    if let Some(action) = ap_react(state, t, who, stack, us_lib, catalog_map, rng) {
+        return action;
     }
-
-    // AP outside main phase: no proactive actions.
-    if !in_main_phase {
-        return PriorityAction::Pass;
-    }
-
-    // AP in main phase: land drop (requires empty stack), abilities, Doomsday, spells.
-
-    if stack.is_empty() && state.player(who).land_drop_available {
-        let fateful = who == "us" && t == dd_turn;
-        let force = state.player(who).must_land_drop;
-        let lib: &Vec<(String, CardDef)> = if who == "us" { us_lib } else { opp_lib };
-        let land_count = lib.iter().filter(|(_, d)| d.card_type == "land").count();
-        if land_count > 0 {
-            // T1=100%, T2=90%, T3=80%, T4+=70%; forced to 100% when must_land_drop is set.
-            let prob = if force { 1.0 } else { match t {
-                1 => 1.0,
-                2 => 0.9,
-                3 => 0.80,
-                _ => 0.70,
-            }};
-            if rng.gen::<f64>() < prob {
-                if let Some(name) = choose_land_name(state, who, lib, fateful, rng) {
-                    state.player_mut(who).must_land_drop = false;
-                    return PriorityAction::LandDrop(name);
-                }
-            }
-        }
-        state.player_mut(who).must_land_drop = false;
-        state.player_mut(who).land_drop_available = false;
-    }
-
-    // Activate abilities (drains all pending before moving to spells).
-    let source_name = state.player(who).lands.iter()
-        .find(|l| l.want_to_activate).map(|l| l.name.clone())
-        .or_else(|| state.player(who).permanents.iter()
-            .find(|p| p.want_to_activate).map(|p| p.name.clone()));
-    if let Some(source_name) = source_name {
-        let ab = catalog_map.get(source_name.as_str())
-            .and_then(|def| def.abilities.iter()
-                .find(|ab| ability_available(ab, state, who, true, catalog_map))
-                .cloned());
-        if let Some(ab) = ab {
-            return PriorityAction::ActivateAbility(source_name, ab);
-        }
-    }
-
-    // Doomsday turn: cast Doomsday as primary action.
-    if who == "us" && t == dd_turn && !state.us.dd_cast {
-        if let Some(item) = sim_cast_doomsday(state, t, us_lib) {
-            state.us.dd_cast = true;
-            state.us.spells_cast_this_turn += 1;
-            return PriorityAction::CastSpell(item);
-        }
-    }
-
-    // Cast non-Doomsday spells — with decaying multi-spell probability.
-    // 1st spell: always attempt; 2nd: 30%; 3rd+: 10%.
-    let cast_prob = match state.player(who).spells_cast_this_turn {
-        0 => 1.0,
-        1 => 0.30,
-        _ => 0.10,
-    };
-    if rng.gen::<f64>() < cast_prob {
-        let (actor_lib, _other_lib): (&mut Vec<(String, CardDef)>, &mut Vec<(String, CardDef)>) =
-            if who == "us" { (us_lib, opp_lib) } else { (opp_lib, us_lib) };
-        let spells = collect_spells(state, who, actor_lib, catalog_map, true);
-        if !spells.is_empty() {
-            let idx = rng.gen_range(0..spells.len());
-            let spell_name = spells[idx].clone();
-            if let Some(item) = cast_spell(state, t, who, &spell_name, actor_lib, None, catalog_map, rng) {
-                state.player_mut(who).spells_cast_this_turn += 1;
-                return PriorityAction::CastSpell(item);
-            }
-        }
-    }
-
-    PriorityAction::Pass
+    ap_proactive(state, t, who, dd_turn, stack, us_lib, opp_lib, catalog_map, rng)
 }
 
 /// Run a priority round. AP gets priority first; both players must pass consecutively
@@ -1916,44 +2175,50 @@ fn handle_priority_round(
                     ability_def: Some(ability.clone()),
                     counters: None,
                     permanent_target: None,
+                    annotation: None,
                 });
                 let next = if who == ap { nap } else { ap };
                 priority_holder = next.to_string();
                 last_passer = None;
             }
-            PriorityAction::CastSpell(item) => {
-                // Check if this is Doomsday: if opponent counters and we can't protect, mark reroll.
-                let is_dd = item.name == "Doomsday" && item.owner == "us";
-                stack.push(item);
-                let next = if who == ap { nap } else { ap };
-                priority_holder = next.to_string();
-                last_passer = None;
-
-                // If we just cast Doomsday, immediately run the full Doomsday priority exchange
-                // (opponent responds, we counter-counter) then resolve and return.
-                if is_dd {
-                    // Opponent gets priority to counter.
-                    let dd_idx = stack.len() - 1;
-                    let opp_counter = respond_with_counter(
-                        state, t, &stack, dd_idx, "opp", opp_lib, catalog_map, rng, true,
-                    );
-                    if let Some(opp_item) = opp_counter {
-                        stack.push(opp_item);
-                        // We get priority back — try to protect Doomsday deterministically.
-                        let counter_idx = stack.len() - 1;
-                        let our_counter = respond_with_counter(
-                            state, t, &stack, counter_idx, "us", us_lib, catalog_map, rng, false,
-                        );
-                        if let Some(our_item) = our_counter {
-                            stack.push(our_item);
-                        } else {
-                            state.log(t, "us", "⚠ Doomsday countered — could not protect");
-                            state.reroll = true;
-                        }
+            PriorityAction::CastSpell { ref name, ref preferred_cost, counters } => {
+                // Framework legality check: non-instant spells require an empty stack.
+                // No resources have been spent yet, so it is safe to drop an illegal action.
+                let is_instant = catalog_map.get(name.as_str())
+                    .map(|d| d.card_type == "instant")
+                    .unwrap_or(false);
+                if !is_instant && !stack.is_empty() {
+                    eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack (stack={}), treating as Pass", name,
+                        stack.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
+                    debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
+                    // Treat as Pass — no resources spent, no card removed.
+                    last_passer = Some(who.clone());
+                    let other = if who == ap { nap } else { ap };
+                    priority_holder = other.to_string();
+                } else {
+                    // Commit: pay costs and create the StackItem.
+                    let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
+                    if let Some(mut item) = cast_spell(state, t, &who, name, actor_lib,
+                                                       preferred_cost.as_ref(), catalog_map, rng) {
+                        item.counters = counters;
+                        // Bookkeeping that was previously in the decision functions.
+                        if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
+                        state.player_mut(&who).spells_cast_this_turn += 1;
+                        stack.push(item);
+                        let next = if who == ap { nap } else { ap };
+                        priority_holder = next.to_string();
+                        last_passer = None;
+                    } else {
+                        // cast_spell failed (can't afford or card unavailable) — treat as Pass
+                        // to avoid an infinite loop where the same failing action repeats.
+                        let pool = &state.player(&who).pool;
+                        eprintln!("[priority] BUG: cast_spell failed for {} by {} (pool B={} U={} tot={}, hand={})",
+                            name, who, pool.black, pool.blue, pool.total, state.player(&who).hand.hidden);
+                        debug_assert!(false, "BUG: cast_spell failed for {} — decision function returned unaffordable/unavailable spell", name);
+                        last_passer = Some(who.clone());
+                        let other = if who == ap { nap } else { ap };
+                        priority_holder = other.to_string();
                     }
-                    // Resolve the full stack and return from this priority round.
-                    resolve_stack(&stack, state, t, us_lib, opp_lib, catalog_map, rng);
-                    return;
                 }
             }
             PriorityAction::Pass => {
@@ -2008,7 +2273,7 @@ fn handle_priority_round(
             }
         }
 
-        if state.reroll {
+        if state.done() {
             break;
         }
     }
@@ -2028,16 +2293,25 @@ fn do_step(
     rng: &mut impl Rng,
 ) {
     state.current_phase = match step.kind {
-        StepKind::Untap   => "Untap",
-        StepKind::Upkeep  => "Upkeep",
-        StepKind::Draw    => "Draw",
-        StepKind::End     => "EndStep",
-        StepKind::Cleanup => "Cleanup",
+        StepKind::Untap           => "Untap",
+        StepKind::Upkeep          => "Upkeep",
+        StepKind::Draw            => "Draw",
+        StepKind::BeginCombat     => "BeginCombat",
+        StepKind::DeclareAttackers => "DeclareAttackers",
+        StepKind::DeclareBlockers  => "DeclareBlockers",
+        StepKind::CombatDamage    => "CombatDamage",
+        StepKind::EndCombat       => "EndCombat",
+        StepKind::End             => "EndStep",
+        StepKind::Cleanup         => "Cleanup",
     }.to_string();
     match step.kind {
         StepKind::Untap => {
             for land in &mut state.player_mut(ap).lands {
                 land.tapped = false;
+            }
+            for perm in &mut state.player_mut(ap).permanents {
+                perm.tapped = false;
+                perm.entered_this_turn = false;
             }
             state.player_mut(ap).land_drop_available = true;
             state.player_mut(ap).spells_cast_this_turn = 0;
@@ -2054,8 +2328,143 @@ fn do_step(
         }
         StepKind::Cleanup => {
             sim_discard_to_limit(state, t, ap);
+            for perm in &mut state.player_mut(ap).permanents {
+                perm.damage = 0;
+            }
         }
-        StepKind::Upkeep | StepKind::End => {
+        StepKind::DeclareAttackers => {
+            let nap = if ap == "us" { "opp" } else { "us" };
+            // Sum of untapped NAP creature power (tapped creatures cannot block).
+            let nap_power: i32 = state.player(nap).permanents.iter()
+                .filter(|p| !p.tapped)
+                .filter_map(|p| {
+                    let def = catalog_map.get(p.name.as_str());
+                    if def.map(|d| d.card_type == "creature").unwrap_or(false) {
+                        Some(creature_stats(p, def.copied()).0)
+                    } else { None }
+                })
+                .sum();
+            let attackers: Vec<String> = state.player(ap).permanents.iter()
+                .filter(|p| !p.tapped && !p.entered_this_turn)
+                .filter_map(|p| {
+                    let def = catalog_map.get(p.name.as_str());
+                    if def.map(|d| d.card_type == "creature").unwrap_or(false) {
+                        let (_, tgh) = creature_stats(p, def.copied());
+                        if tgh > nap_power { Some(p.name.clone()) } else { None }
+                    } else { None }
+                })
+                .collect();
+            if !attackers.is_empty() {
+                state.log(t, ap, format!("Declare attackers: {}", attackers.join(", ")));
+                for name in &attackers {
+                    if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| &p.name == name) {
+                        p.tapped = true;
+                    }
+                }
+            }
+            state.combat_attackers = attackers;
+        }
+        StepKind::DeclareBlockers => {
+            let nap = if ap == "us" { "opp" } else { "us" };
+            let mut used_blockers: std::collections::HashSet<String> = Default::default();
+            let mut blocks: Vec<(String, String)> = Vec::new();
+            for atk_name in state.combat_attackers.clone() {
+                let atk_def = catalog_map.get(atk_name.as_str()).copied();
+                let (atk_pow, atk_tgh) = {
+                    let atk_perm = state.player(ap).permanents.iter().find(|p| p.name == atk_name);
+                    match atk_perm {
+                        Some(p) => creature_stats(p, atk_def),
+                        None    => continue,
+                    }
+                };
+                let blocker = state.player(nap).permanents.iter()
+                    .filter(|p| !p.tapped && !used_blockers.contains(&p.name))
+                    .filter_map(|p| {
+                        let def = catalog_map.get(p.name.as_str()).copied();
+                        if def.map(|d| d.card_type == "creature").unwrap_or(false) {
+                            let (blk_pow, blk_tgh) = creature_stats(p, def);
+                            // Good block: kills attacker OR both survive (touch butts). Not a chump.
+                            let good_block = blk_pow >= atk_tgh || atk_pow < blk_tgh;
+                            if good_block { Some(p.name.clone()) } else { None }
+                        } else { None }
+                    })
+                    .next();
+                if let Some(blk_name) = blocker {
+                    state.log(t, nap, format!("{} blocks {}", blk_name, atk_name));
+                    used_blockers.insert(blk_name.clone());
+                    blocks.push((atk_name, blk_name));
+                }
+            }
+            state.combat_blocks = blocks;
+        }
+        StepKind::CombatDamage => {
+            if !state.combat_attackers.is_empty() {
+                let nap = if ap == "us" { "opp" } else { "us" };
+                let attackers   = state.combat_attackers.clone();
+                let block_pairs = state.combat_blocks.clone();
+                let blocked: std::collections::HashSet<&str> = block_pairs.iter()
+                    .map(|(a, _)| a.as_str()).collect();
+
+                let mut player_damage = 0i32;
+
+                for (atk_name, blk_name) in &block_pairs {
+                    let atk_pow = {
+                        let p = state.player(ap).permanents.iter().find(|p| p.name == *atk_name);
+                        p.map(|p| creature_stats(p, catalog_map.get(atk_name.as_str()).copied()).0)
+                         .unwrap_or(1)
+                    };
+                    let blk_pow = {
+                        let p = state.player(nap).permanents.iter().find(|p| p.name == *blk_name);
+                        p.map(|p| creature_stats(p, catalog_map.get(blk_name.as_str()).copied()).0)
+                         .unwrap_or(1)
+                    };
+                    if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| p.name == *atk_name) {
+                        p.damage += blk_pow;
+                    }
+                    if let Some(p) = state.player_mut(nap).permanents.iter_mut().find(|p| p.name == *blk_name) {
+                        p.damage += atk_pow;
+                    }
+                }
+
+                for atk_name in &attackers {
+                    if !blocked.contains(atk_name.as_str()) {
+                        let atk_pow = {
+                            let p = state.player(ap).permanents.iter().find(|p| p.name == *atk_name);
+                            p.map(|p| creature_stats(p, catalog_map.get(atk_name.as_str()).copied()).0)
+                             .unwrap_or(1)
+                        };
+                        player_damage += atk_pow;
+                    }
+                }
+
+                if player_damage > 0 {
+                    state.log(t, ap, format!("Combat: {} unblocked damage to {}", player_damage, nap));
+                    state.lose_life(nap, player_damage);
+                }
+
+                // SBAs: lethal damage check on both boards.
+                for owner in [ap, nap] {
+                    let dying: Vec<String> = state.player(owner).permanents.iter()
+                        .filter_map(|p| {
+                            if p.damage == 0 { return None; }
+                            let def = catalog_map.get(p.name.as_str()).copied();
+                            let (_, tgh) = creature_stats(p, def);
+                            if p.damage >= tgh { Some(p.name.clone()) } else { None }
+                        })
+                        .collect();
+                    for name in dying {
+                        state.log(t, owner, format!("{} dies", name));
+                        state.player_mut(owner).permanents.retain(|p| p.name != name);
+                        state.player_mut(owner).graveyard.visible.push(name);
+                    }
+                }
+            }
+        }
+        StepKind::EndCombat => {
+            state.combat_attackers.clear();
+            state.combat_blocks.clear();
+        }
+        StepKind::Upkeep | StepKind::BeginCombat | StepKind::End => {
             // No automatic actions.
         }
     }
@@ -2083,7 +2492,7 @@ fn do_phase(
 ) {
     for step in &phase.steps {
         do_step(state, t, ap, step, dd_turn, on_play, us_lib, opp_lib, catalog_map, rng);
-        if state.reroll {
+        if state.done() {
             return;
         }
     }
@@ -2111,93 +2520,20 @@ fn do_turn(
 ) {
     state.current_ap = ap.to_string();
     do_phase(state, t, ap, &beginning_phase(), dd_turn, on_play, us_lib, opp_lib, catalog_map, rng);
-    if state.reroll { return; }
+    if state.done() { return; }
 
     do_phase(state, t, ap, &main_phase(), dd_turn, on_play, us_lib, opp_lib, catalog_map, rng);
-    if state.reroll { return; }
+    if state.done() { return; }
+
+    do_phase(state, t, ap, &combat_phase(), dd_turn, on_play, us_lib, opp_lib, catalog_map, rng);
+    if state.done() { return; }
+
+    do_phase(state, t, ap, &post_combat_main_phase(), dd_turn, on_play, us_lib, opp_lib, catalog_map, rng);
+    if state.done() { return; }
 
     do_phase(state, t, ap, &end_phase(), dd_turn, on_play, us_lib, opp_lib, catalog_map, rng);
 }
 
-
-/// Sacrifice Lotus Petal for 1 black mana, adding it directly to the pool.
-fn sacrifice_petal(ps: &mut PlayerState) {
-    ps.permanents.retain(|p| p.name != "Lotus Petal");
-    ps.graveyard.visible.push("Lotus Petal".to_string());
-    ps.pool.black += 1;
-    ps.pool.total += 1;
-}
-
-/// Remove Dark Ritual from the library, add BBB to the pool, send it to graveyard.
-/// The caller is responsible for paying the B cost first (via pay_mana or sacrifice_petal).
-fn resolve_ritual(ps: &mut PlayerState, library: &mut Vec<(String, CardDef)>) {
-    if let Some(idx) = library.iter().position(|(n, _)| n == "Dark Ritual") {
-        library.remove(idx);
-    }
-    ps.hand.hidden -= 1;
-    ps.graveyard.visible.push("Dark Ritual".to_string());
-    ps.pool.black += 3;
-    ps.pool.total += 3;
-}
-
-/// Cast Doomsday on the fateful turn. Pays costs via the mana pool and logs the payment path.
-/// Returns the Doomsday StackItem if a payment path was found, None otherwise.
-/// The actual resolution effect (pile construction / life loss) is handled by the caller
-/// via resolve_stack.
-fn sim_cast_doomsday(state: &mut SimState, t: u8, us_lib: &mut Vec<(String, CardDef)>) -> Option<StackItem> {
-    let dd = || StackItem {
-        name: "Doomsday".to_string(),
-        owner: "us".to_string(),
-        is_ability: false,
-        ability_def: None,
-        counters: None,
-        permanent_target: None,
-    };
-    let has_petal  = state.us.permanents.iter().any(|p| p.name == "Lotus Petal");
-    let has_ritual = us_lib.iter().any(|(n, _)| n == "Dark Ritual");
-    let potential  = state.us.potential_mana();
-
-    // Path 1: BBB directly from lands/pool.
-    if potential.can_pay(3, 0, 0) {
-        state.us.pay_mana(3, 0, 0);
-        state.us.hand.hidden -= 1;
-        state.log(t, "us", "Cast Doomsday (BBB)");
-        return Some(dd());
-    }
-    // Path 2: BB from lands + Lotus Petal → B (accumulate all three into pool, then pay).
-    if has_petal && potential.can_pay(2, 0, 0) {
-        state.us.produce_mana(2, 0, 0); // 2B now in pool
-        sacrifice_petal(&mut state.us);  // +1B → pool has 3B
-        state.log(t, "us", "Sacrifice Lotus Petal (→ B)");
-        state.us.pool.spend(3, 0, 0);   // pay BBB for Doomsday
-        state.us.hand.hidden -= 1;
-        state.log(t, "us", "Cast Doomsday (BB + Lotus Petal)");
-        return Some(dd());
-    }
-    // Path 3: B from lands → Dark Ritual → BBB → Doomsday.
-    if has_ritual && potential.can_pay(1, 0, 0) && state.us.hand.hidden > 1 {
-        state.us.pay_mana(1, 0, 0); // pay B for Ritual
-        resolve_ritual(&mut state.us, us_lib); // adds BBB to pool
-        state.log(t, "us", "Cast Dark Ritual (B → BBB)");
-        state.us.pool.spend(3, 0, 0);
-        state.us.hand.hidden -= 1;
-        state.log(t, "us", "Cast Doomsday (BBB from Ritual)");
-        return Some(dd());
-    }
-    // Path 4: Lotus Petal → B → Dark Ritual → BBB → Doomsday (0 lands needed).
-    if has_petal && has_ritual && state.us.hand.hidden > 1 {
-        sacrifice_petal(&mut state.us); // adds B to pool
-        state.log(t, "us", "Sacrifice Lotus Petal (→ B)");
-        state.us.pool.spend(1, 0, 0); // pay B for Ritual
-        resolve_ritual(&mut state.us, us_lib); // adds BBB to pool
-        state.log(t, "us", "Cast Dark Ritual (Petal → BBB)");
-        state.us.pool.spend(3, 0, 0);
-        state.us.hand.hidden -= 1;
-        state.log(t, "us", "Cast Doomsday (BBB from Ritual)");
-        return Some(dd());
-    }
-    None
-}
 
 /// Simulate the full game up to the Doomsday turn.
 /// Returns `None` if Doomsday was countered and could not be protected — caller should retry.
@@ -2271,7 +2607,7 @@ fn simulate_game(
             do_turn(&mut state, t, "opp", turn, on_play, &mut us_lib, &mut opp_lib, &catalog_map, rng);
             state.us.library = us_lib;
             state.opp.library = opp_lib;
-            if state.reroll { break; }
+            if state.done() { break; }
         }
         {
             let mut us_lib = std::mem::take(&mut state.us.library);
@@ -2279,7 +2615,7 @@ fn simulate_game(
             do_turn(&mut state, t, "us", turn, on_play, &mut us_lib, &mut opp_lib, &catalog_map, rng);
             state.us.library = us_lib;
             state.opp.library = opp_lib;
-            if state.reroll { break; }
+            if state.done() { break; }
         }
         if on_play && t < turn {
             let mut us_lib = std::mem::take(&mut state.us.library);
@@ -2287,11 +2623,11 @@ fn simulate_game(
             do_turn(&mut state, t, "opp", turn, on_play, &mut us_lib, &mut opp_lib, &catalog_map, rng);
             state.us.library = us_lib;
             state.opp.library = opp_lib;
-            if state.reroll { break; }
+            if state.done() { break; }
         }
     }
 
-    if state.reroll {
+    if !state.success {
         return None;
     }
 
@@ -2384,5 +2720,909 @@ fn weighted_choice<T: Clone>(options: &[(T, u32)], rng: &mut impl Rng) -> T {
     options.last().unwrap().0.clone()
 }
 
+// ── Implementation checking ───────────────────────────────────────────────────
+
+/// True if `def` has enough simulation implementation to do something during a game.
+///
+/// - Lands are always actionable (played via land-drop logic).
+/// - Spells need at least one castable effect, a counter_target, or abilities.
+fn card_has_implementation(def: &CardDef) -> bool {
+    if def.card_type == "land" { return true; }
+    if !def.abilities.is_empty() { return true; }
+    if def.counter_target.is_some() { return true; }
+    def.effects.iter().any(|e| {
+        e == "cantrip" || e == "permanent" || e == "destroy" || e == "doomsday"
+            || e.starts_with("discard:") || e.starts_with("mana:") || e.starts_with("reanimate:")
+    })
+}
+
+/// Print a warning for mainboard cards that lack a simulation implementation.
+///
+/// Two categories:
+///   ✗ not in pilegen.toml — excluded from simulation entirely (silently dropped)
+///   ~ in catalog but no actionable effects — drawn but never played/cast
+fn warn_unimplemented_cards(
+    cards: &[(String, i32, String)],
+    deck_label: &str,
+    config: &PilegenConfig,
+) {
+    let catalog: std::collections::HashMap<&str, &CardDef> =
+        config.cards.iter().map(|c| (c.name.as_str(), c)).collect();
+
+    let mut missing: Vec<(&str, i32)> = Vec::new();
+    let mut no_effects: Vec<(&str, i32)> = Vec::new();
+
+    for (name, qty, board) in cards {
+        if board != "main" { continue; }
+        match catalog.get(name.as_str()) {
+            None => missing.push((name, *qty)),
+            Some(def) if !card_has_implementation(def) => no_effects.push((name, *qty)),
+            _ => {}
+        }
+    }
+
+    if missing.is_empty() && no_effects.is_empty() { return; }
+
+    println!("\n⚠  {} — unimplemented cards:", deck_label);
+    for (name, qty) in &missing {
+        println!("   ✗ {}×{} — not in pilegen.toml (excluded from simulation)", qty, name);
+    }
+    for (name, qty) in &no_effects {
+        println!("   ~ {}×{} — no simulation effects (drawn but never cast)", qty, name);
+    }
+}
+
 // ── Card rule helpers ─────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use rand::{SeedableRng, rngs::StdRng};
+
+    // ── Test helpers ──────────────────────────────────────────────────────────
+
+    fn make_state() -> SimState {
+        let us = PlayerState::new("us_deck", 0);
+        let opp = PlayerState::new("opp_deck", 0);
+        SimState::new(us, opp)
+    }
+
+    fn seeded_rng() -> StdRng {
+        StdRng::seed_from_u64(42)
+    }
+
+    fn empty_libs() -> (Vec<(String, CardDef)>, Vec<(String, CardDef)>) {
+        (vec![], vec![])
+    }
+
+    fn creature(name: &str, power: i32, toughness: i32) -> CardDef {
+        let toml = format!(
+            "name = {:?}\ncard_type = \"creature\"\npower = {}\ntoughness = {}\n",
+            name, power, toughness
+        );
+        toml::from_str(&toml).unwrap()
+    }
+
+    fn make_land(name: &str, tapped: bool) -> SimLand {
+        SimLand {
+            name: name.to_string(),
+            tapped,
+            produces_black: false,
+            produces_blue: false,
+            is_fetch: false,
+            basic: false,
+            want_to_activate: false,
+        }
+    }
+
+    fn stack_item(name: &str, owner: &str) -> StackItem {
+        StackItem {
+            name: name.to_string(),
+            owner: owner.to_string(),
+            is_ability: false,
+            ability_def: None,
+            counters: None,
+            permanent_target: None,
+            annotation: None,
+        }
+    }
+
+    // ── Section 1: Pure Function Tests ────────────────────────────────────────
+
+    #[test]
+    fn test_parse_mana_cost_black() {
+        assert_eq!(parse_mana_cost("BBB"), (3, 0, 0));
+    }
+
+    #[test]
+    fn test_parse_mana_cost_mixed() {
+        // "1UB" → black=1, blue=1, generic=1
+        assert_eq!(parse_mana_cost("1UB"), (1, 1, 1));
+    }
+
+    #[test]
+    fn test_parse_mana_cost_zero() {
+        assert_eq!(parse_mana_cost("0"), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_mana_value() {
+        assert_eq!(mana_value("2BB"), 4);
+        assert_eq!(mana_value("0"), 0);
+        assert_eq!(mana_value("U"), 1);
+    }
+
+    #[test]
+    fn test_creature_stats_annotation_override() {
+        let perm = SimPermanent { annotation: Some("5/5".into()), ..SimPermanent::new("X") };
+        assert_eq!(creature_stats(&perm, None), (5, 5));
+    }
+
+    #[test]
+    fn test_creature_stats_from_def() {
+        let def = creature("Ragavan", 2, 1);
+        let perm = SimPermanent::new("Ragavan");
+        assert_eq!(creature_stats(&perm, Some(&def)), (2, 1));
+    }
+
+    #[test]
+    fn test_creature_stats_defaults() {
+        let perm = SimPermanent::new("Unknown");
+        assert_eq!(creature_stats(&perm, None), (1, 1));
+    }
+
+    #[test]
+    fn test_stage_label() {
+        assert_eq!(stage_label(1), "Early");
+        assert_eq!(stage_label(4), "Mid");
+        assert_eq!(stage_label(8), "Late");
+    }
+
+    // ── Section 2: Step Tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_untap_step_resets_permanents() {
+        let mut state = make_state();
+        state.us.lands.push(make_land("Island", true));
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.tapped = true;
+        ragavan.entered_this_turn = true;
+        state.us.permanents.push(ragavan);
+        state.us.spells_cast_this_turn = 2;
+
+        let step = Step { kind: StepKind::Untap, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(!state.us.lands[0].tapped, "land should be untapped");
+        assert!(!state.us.permanents[0].tapped, "permanent should be untapped");
+        assert!(!state.us.permanents[0].entered_this_turn, "summoning sickness should clear");
+        assert!(state.us.land_drop_available, "land drop should reset");
+        assert_eq!(state.us.spells_cast_this_turn, 0);
+    }
+
+    #[test]
+    fn test_draw_step_skipped_on_play_turn1() {
+        let mut state = make_state();
+        let initial_hidden = state.us.hand.hidden;
+
+        let step = Step { kind: StepKind::Draw, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        // on_play=true, t=1, ap="us" → this_player_on_play=true → skip
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.us.hand.hidden, initial_hidden, "no draw on the play turn 1");
+    }
+
+    #[test]
+    fn test_draw_step_draws_card() {
+        let mut state = make_state();
+        let initial_hidden = state.us.hand.hidden;
+
+        let step = Step { kind: StepKind::Draw, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        // on_play=false → this_player_on_play=false → no skip
+        do_step(&mut state, 1, "us", &step, 3, false, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.us.hand.hidden, initial_hidden + 1, "should draw one card");
+    }
+
+    #[test]
+    fn test_cleanup_removes_damage() {
+        let mut state = make_state();
+        let mut perm = SimPermanent::new("Ragavan");
+        perm.damage = 3;
+        state.us.permanents.push(perm);
+
+        let step = Step { kind: StepKind::Cleanup, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.us.permanents[0].damage, 0);
+    }
+
+    #[test]
+    fn test_declare_attackers_safe_to_attack() {
+        let mut state = make_state();
+        let ragavan_def = creature("Ragavan", 2, 4);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.entered_this_turn = false;
+        state.us.permanents.push(ragavan);
+
+        let catalog = vec![ragavan_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_attackers.contains(&"Ragavan".to_string()), "should attack");
+        assert!(state.us.permanents[0].tapped, "attacker should be tapped");
+    }
+
+    #[test]
+    fn test_declare_attackers_too_risky() {
+        let mut state = make_state();
+        let attacker_def = creature("Ragavan", 2, 2);
+        let blocker_def = creature("Mosscoat Construct", 3, 3);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.entered_this_turn = false;
+        state.us.permanents.push(ragavan);
+        state.opp.permanents.push(SimPermanent::new("Mosscoat Construct"));
+
+        let catalog = vec![attacker_def, blocker_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_attackers.is_empty(), "should not attack into 3/3");
+    }
+
+    #[test]
+    fn test_declare_attackers_summoning_sickness() {
+        let mut state = make_state();
+        let def = creature("Ragavan", 2, 4);
+        // entered_this_turn = true (default from SimPermanent::new)
+        state.us.permanents.push(SimPermanent::new("Ragavan"));
+
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_attackers.is_empty(), "sickness prevents attack");
+    }
+
+    #[test]
+    fn test_declare_blockers_good_block() {
+        let mut state = make_state();
+        state.combat_attackers = vec!["Ragavan".to_string()];
+        let atk_def = creature("Ragavan", 2, 2);
+        let blk_def = creature("Mosscoat Construct", 3, 3);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.entered_this_turn = false;
+        ragavan.tapped = false;
+        state.us.permanents.push(ragavan);
+        state.opp.permanents.push(SimPermanent::new("Mosscoat Construct"));
+
+        let catalog = vec![atk_def, blk_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.combat_blocks.len(), 1);
+        assert_eq!(state.combat_blocks[0], ("Ragavan".to_string(), "Mosscoat Construct".to_string()));
+    }
+
+    #[test]
+    fn test_declare_blockers_no_chump() {
+        let mut state = make_state();
+        state.combat_attackers = vec!["Beast".to_string()];
+        let atk_def = creature("Beast", 4, 4);
+        let blk_def = creature("Squirrel Token", 1, 1);
+        let mut beast = SimPermanent::new("Beast");
+        beast.entered_this_turn = false;
+        state.us.permanents.push(beast);
+        state.opp.permanents.push(SimPermanent::new("Squirrel Token"));
+
+        let catalog = vec![atk_def, blk_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_blocks.is_empty(), "should not chump block");
+    }
+
+    #[test]
+    fn test_combat_damage_unblocked_hits_player() {
+        let mut state = make_state();
+        let initial_life = state.opp.life;
+        state.combat_attackers = vec!["Ragavan".to_string()];
+        let atk_def = creature("Ragavan", 2, 1);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.tapped = true;
+        state.us.permanents.push(ragavan);
+
+        let catalog = vec![atk_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.opp.life, initial_life - 2);
+    }
+
+    #[test]
+    fn test_combat_damage_blocked_no_player_damage() {
+        let mut state = make_state();
+        let initial_life = state.opp.life;
+        state.combat_attackers = vec!["Ragavan".to_string()];
+        state.combat_blocks = vec![("Ragavan".to_string(), "Mosscoat Construct".to_string())];
+        let atk_def = creature("Ragavan", 2, 2);
+        let blk_def = creature("Mosscoat Construct", 3, 3);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.tapped = true;
+        state.us.permanents.push(ragavan);
+        state.opp.permanents.push(SimPermanent::new("Mosscoat Construct"));
+
+        let catalog = vec![atk_def, blk_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.opp.life, initial_life, "blocked — no player damage");
+    }
+
+    #[test]
+    fn test_combat_damage_sba_kills_both_2_2s() {
+        let mut state = make_state();
+        state.combat_attackers = vec!["Ragavan".to_string()];
+        state.combat_blocks = vec![("Ragavan".to_string(), "Mosscoat Construct".to_string())];
+        let atk_def = creature("Ragavan", 2, 2);
+        let blk_def = creature("Mosscoat Construct", 2, 2);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.tapped = true;
+        state.us.permanents.push(ragavan);
+        state.opp.permanents.push(SimPermanent::new("Mosscoat Construct"));
+
+        let catalog = vec![atk_def, blk_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.us.permanents.is_empty(), "attacker should die");
+        assert!(state.opp.permanents.is_empty(), "blocker should die");
+        assert!(state.us.graveyard.visible.contains(&"Ragavan".to_string()));
+        assert!(state.opp.graveyard.visible.contains(&"Mosscoat Construct".to_string()));
+    }
+
+    #[test]
+    fn test_combat_damage_outclassed_attacker_dies() {
+        let mut state = make_state();
+        state.combat_attackers = vec!["Ragavan".to_string()];
+        state.combat_blocks = vec![("Ragavan".to_string(), "Troll".to_string())];
+        let atk_def = creature("Ragavan", 2, 2);
+        let blk_def = creature("Troll", 3, 3);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.tapped = true;
+        state.us.permanents.push(ragavan);
+        state.opp.permanents.push(SimPermanent::new("Troll"));
+
+        let catalog = vec![atk_def, blk_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.us.permanents.is_empty(), "attacker dies");
+        assert!(!state.opp.permanents.is_empty(), "blocker survives");
+    }
+
+    #[test]
+    fn test_end_combat_clears_fields() {
+        let mut state = make_state();
+        state.combat_attackers = vec!["Ragavan".to_string()];
+        state.combat_blocks = vec![("Ragavan".to_string(), "Construct".to_string())];
+
+        let step = Step { kind: StepKind::EndCombat, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_attackers.is_empty());
+        assert!(state.combat_blocks.is_empty());
+    }
+
+    // ── Section 3: Phase Tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_beginning_phase_untaps_and_draws() {
+        let mut state = make_state();
+        state.us.lands.push(SimLand {
+            name: "Island".to_string(),
+            tapped: true,
+            produces_black: false,
+            produces_blue: true,
+            is_fetch: false,
+            basic: true,
+            want_to_activate: false,
+        });
+        let initial_hidden = state.us.hand.hidden; // 7
+
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        // t=2, on_play=false → draw fires (this_player_on_play=false)
+        do_phase(&mut state, 2, "us", &beginning_phase(), 3, false, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(!state.us.lands[0].tapped, "land should be untapped");
+        assert_eq!(state.us.hand.hidden, initial_hidden + 1, "should have drawn one card");
+    }
+
+    #[test]
+    fn test_combat_phase_full_cycle() {
+        let mut state = make_state();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        do_phase(&mut state, 1, "us", &combat_phase(), 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_attackers.is_empty());
+        assert!(state.combat_blocks.is_empty());
+    }
+
+    // ── Section 4: Priority Action Cycle ─────────────────────────────────────
+
+    #[test]
+    fn test_priority_round_both_pass_empty_stack() {
+        let mut state = make_state();
+        // current_phase is "" (not "Main") → both players pass immediately
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        handle_priority_round(&mut state, 1, "us", 3, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.us.life, 20);
+        assert_eq!(state.opp.life, 20);
+    }
+
+    // ── Section 5: Spell Casting ──────────────────────────────────────────────
+
+    #[test]
+    fn test_cast_spell_normal_cost_removes_from_library() {
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(r#"
+            name = "Dark Ritual"
+            card_type = "instant"
+            mana_cost = "B"
+            effects = ["mana:BBB"]
+        "#).unwrap();
+        let mut us_lib = vec![("Dark Ritual".to_string(), def.clone())];
+        state.us.pool.black = 1;
+        state.us.pool.total = 1;
+        // hand.hidden = 7 (from PlayerState::new)
+
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        let item = cast_spell(&mut state, 1, "us", "Dark Ritual", &mut us_lib, None, &catalog_map, &mut seeded_rng());
+
+        assert!(item.is_some(), "spell should be cast");
+        let item = item.unwrap();
+        assert_eq!(item.name, "Dark Ritual");
+        assert_eq!(item.owner, "us");
+        assert!(!us_lib.iter().any(|(n, _)| n == "Dark Ritual"), "removed from library");
+        assert_eq!(state.us.pool.black, 0, "mana spent");
+    }
+
+    #[test]
+    fn test_cast_spell_unaffordable_returns_none() {
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(r#"
+            name = "Doomsday"
+            card_type = "instant"
+            mana_cost = "BBB"
+            effects = ["doomsday"]
+        "#).unwrap();
+        let mut us_lib = vec![("Doomsday".to_string(), def.clone())];
+        // No mana in pool, no lands
+
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let item = cast_spell(&mut state, 1, "us", "Doomsday", &mut us_lib, None, &catalog_map, &mut seeded_rng());
+
+        assert!(item.is_none(), "can't cast with no mana");
+    }
+
+    #[test]
+    fn test_cast_spell_alt_cost_exiles_pitch_card() {
+        let mut state = make_state();
+        let fow_def: CardDef = toml::from_str(r#"
+            name = "Force of Will"
+            card_type = "instant"
+            mana_cost = "3UU"
+            blue = true
+            [[alternate_costs]]
+            mana_cost = ""
+            exile_blue_from_hand = true
+            life_cost = 1
+        "#).unwrap();
+        let brainstorm_def: CardDef = toml::from_str(r#"
+            name = "Brainstorm"
+            card_type = "instant"
+            mana_cost = "U"
+        "#).unwrap();
+        let mut us_lib = vec![
+            ("Force of Will".to_string(), fow_def.clone()),
+            ("Brainstorm".to_string(), brainstorm_def.clone()),
+        ];
+        let catalog = vec![fow_def.clone(), brainstorm_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        let alt_cost = &fow_def.alternate_costs[0];
+        let initial_life = state.us.life;
+
+        let item = cast_spell(&mut state, 1, "us", "Force of Will", &mut us_lib, Some(alt_cost), &catalog_map, &mut seeded_rng());
+
+        assert!(item.is_some(), "FoW should be cast via pitch");
+        assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
+        assert!(!us_lib.iter().any(|(n, _)| n == "Brainstorm"), "pitch card removed from library");
+        assert!(state.us.exile.visible.contains(&"Brainstorm".to_string()), "pitch card exiled");
+    }
+
+    // ── Section 6: Spell Resolution ───────────────────────────────────────────
+
+    #[test]
+    fn test_effect_doomsday_sets_success() {
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(r#"
+            name = "Doomsday"
+            card_type = "instant"
+            mana_cost = "BBB"
+            effects = ["doomsday"]
+        "#).unwrap();
+        let item = stack_item("Doomsday", "us");
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.success);
+    }
+
+    #[test]
+    fn test_effect_cantrip_increments_hand() {
+        let mut state = make_state();
+        let initial_hidden = state.us.hand.hidden;
+        let def: CardDef = toml::from_str(r#"
+            name = "Preordain"
+            card_type = "instant"
+            mana_cost = "U"
+            effects = ["cantrip"]
+        "#).unwrap();
+        let item = stack_item("Preordain", "us");
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.us.hand.hidden, initial_hidden + 1, "cantrip increments hand count");
+    }
+
+    #[test]
+    fn test_effect_life_loss_reduces_caster_life() {
+        let mut state = make_state();
+        let initial = state.us.life;
+        // life_loss:N reduces the caster's life
+        let def: CardDef = toml::from_str(r#"
+            name = "Dark Confidant"
+            card_type = "creature"
+            mana_cost = "1B"
+            effects = ["life_loss:2"]
+        "#).unwrap();
+        let item = stack_item("Dark Confidant", "us");
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.us.life, initial - 2);
+    }
+
+    #[test]
+    fn test_effect_mana_adds_to_pool() {
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(r#"
+            name = "Dark Ritual"
+            card_type = "instant"
+            mana_cost = "B"
+            effects = ["mana:BBB"]
+        "#).unwrap();
+        let item = stack_item("Dark Ritual", "us");
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.us.pool.black, 3, "should add 3 black mana");
+        assert_eq!(state.us.pool.total, 3);
+    }
+
+    #[test]
+    fn test_effect_discard_removes_opp_card() {
+        let mut state = make_state();
+        state.opp.hand.hidden = 1;
+        let def: CardDef = toml::from_str(r#"
+            name = "Thoughtseize"
+            card_type = "sorcery"
+            mana_cost = "B"
+            effects = ["discard:opp:1"]
+        "#).unwrap();
+        let target_card: CardDef = toml::from_str(r#"
+            name = "Counterspell"
+            card_type = "instant"
+            mana_cost = "UU"
+        "#).unwrap();
+        let item = stack_item("Thoughtseize", "us");
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let mut us_lib: Vec<(String, CardDef)> = vec![];
+        // other_lib = opp_lib: the card pool to discard from
+        let mut opp_lib: Vec<(String, CardDef)> = vec![("Counterspell".to_string(), target_card)];
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.opp.hand.hidden, 0, "opp hand decremented");
+        assert!(state.opp.graveyard.visible.contains(&"Counterspell".to_string()));
+        assert!(opp_lib.is_empty(), "card removed from opp library");
+    }
+
+    // ── Section 7: Ability Activation ─────────────────────────────────────────
+
+    #[test]
+    fn test_pay_activation_cost_mana() {
+        let mut state = make_state();
+        state.us.pool.black = 2;
+        state.us.pool.total = 2;
+        let ability: AbilityDef = toml::from_str(r#"
+            mana_cost = "B"
+            effect = "cantrip"
+        "#).unwrap();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &catalog_map);
+
+        assert_eq!(state.us.pool.black, 1, "1 black spent");
+        assert_eq!(state.us.pool.total, 1);
+    }
+
+    #[test]
+    fn test_pay_activation_cost_life() {
+        let mut state = make_state();
+        let initial = state.us.life;
+        let ability: AbilityDef = toml::from_str(r#"
+            mana_cost = ""
+            life_cost = 2
+            effect = "cantrip"
+        "#).unwrap();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &catalog_map);
+
+        assert_eq!(state.us.life, initial - 2);
+    }
+
+    #[test]
+    fn test_pay_activation_cost_sacrifice_self() {
+        let mut state = make_state();
+        state.us.permanents.push(SimPermanent::new("Lotus Petal"));
+        let ability: AbilityDef = toml::from_str(r#"
+            mana_cost = ""
+            sacrifice_self = true
+            effect = "mana:B"
+        "#).unwrap();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        pay_activation_cost(&mut state, 1, "us", "Lotus Petal", &ability, &catalog_map);
+
+        assert!(state.us.permanents.is_empty(), "Lotus Petal should be sacrificed");
+        assert!(state.us.graveyard.visible.contains(&"Lotus Petal".to_string()));
+    }
+
+    // ── Section 8: Destruction Effects ───────────────────────────────────────
+
+    // Spell resolution: destroy uses item.permanent_target set at cast time.
+
+    #[test]
+    fn test_effect_destroy_spell_removes_opp_land() {
+        let mut state = make_state();
+        state.opp.lands.push(make_land("Bayou", false));
+        let def: CardDef = toml::from_str(r#"
+            name = "Sinkhole"
+            card_type = "sorcery"
+            mana_cost = "BB"
+            target = "opp:land"
+            effects = ["destroy"]
+        "#).unwrap();
+        let item = StackItem {
+            permanent_target: Some(("opp".to_string(), "Bayou".to_string())),
+            ..stack_item("Sinkhole", "us")
+        };
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.opp.lands.is_empty(), "Bayou should be destroyed");
+        assert!(state.opp.graveyard.visible.contains(&"Bayou".to_string()));
+    }
+
+    #[test]
+    fn test_effect_destroy_spell_removes_opp_creature() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Troll"));
+        let troll_def = creature("Troll", 2, 2);
+        let swords_def: CardDef = toml::from_str(r#"
+            name = "Swords to Plowshares"
+            card_type = "instant"
+            mana_cost = "W"
+            target = "opp:creature"
+            effects = ["destroy"]
+        "#).unwrap();
+        let item = StackItem {
+            permanent_target: Some(("opp".to_string(), "Troll".to_string())),
+            ..stack_item("Swords to Plowshares", "us")
+        };
+        let catalog = vec![swords_def, troll_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.opp.permanents.is_empty(), "Troll should be destroyed");
+        assert!(state.opp.graveyard.visible.contains(&"Troll".to_string()));
+    }
+
+    // Ability resolution: target is chosen at resolution via sim_apply_targeted_effect.
+
+    #[test]
+    fn test_effect_destroy_ability_removes_nonbasic_land() {
+        let mut state = make_state();
+        state.opp.lands.push(SimLand { basic: false, ..make_land("Bayou", false) });
+        let ability: AbilityDef = toml::from_str(r#"
+            mana_cost = ""
+            target = "opp:nonbasic_land"
+            effect = "destroy"
+        "#).unwrap();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        let (mut us_lib, mut _opp_lib) = empty_libs();
+        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.opp.lands.is_empty(), "Bayou should be destroyed");
+        assert!(state.opp.graveyard.visible.contains(&"Bayou".to_string()));
+    }
+
+    #[test]
+    fn test_effect_destroy_ability_ignores_basic_land() {
+        let mut state = make_state();
+        state.opp.lands.push(SimLand { basic: true, ..make_land("Forest", false) });
+        let ability: AbilityDef = toml::from_str(r#"
+            mana_cost = ""
+            target = "opp:nonbasic_land"
+            effect = "destroy"
+        "#).unwrap();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        let (mut us_lib, mut _opp_lib) = empty_libs();
+        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(!state.opp.lands.is_empty(), "basic Forest should survive");
+        assert!(state.opp.graveyard.visible.is_empty());
+    }
+
+    // ── Section 9: Delve ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cast_delve_spell_exiles_graveyard_cards() {
+        // Spell costs 3 generic + U. Two graveyard cards reduce generic to 1.
+        // Pool supplies the remaining 1 generic + 1 blue.
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(r#"
+            name = "Treasure Cruise"
+            card_type = "instant"
+            mana_cost = "7U"
+            delve = true
+            effects = ["cantrip"]
+        "#).unwrap();
+        state.us.graveyard.visible = vec!["A".into(), "B".into(), "C".into(),
+                                          "D".into(), "E".into(), "F".into(), "G".into()];
+        state.us.pool.blue  = 1;
+        state.us.pool.total = 1; // only 1 mana in pool — delve pays the other 7
+
+        let mut us_lib = vec![("Treasure Cruise".to_string(), def.clone())];
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        let item = cast_spell(&mut state, 1, "us", "Treasure Cruise", &mut us_lib, None, &catalog_map, &mut seeded_rng());
+
+        assert!(item.is_some(), "should cast with full delve");
+        assert_eq!(state.us.graveyard.visible.len(), 0, "all 7 graveyard cards exiled");
+        assert_eq!(state.us.exile.visible.len(), 7, "exiled by delve");
+        assert_eq!(state.us.pool.blue, 0, "blue pip paid");
+    }
+
+    #[test]
+    fn test_cast_delve_spell_partial_delve() {
+        // Spell costs 3 generic. Graveyard has 2 cards — reduces cost to 1.
+        // Pool must cover the remaining 1 generic.
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(r#"
+            name = "Dead Drop"
+            card_type = "sorcery"
+            mana_cost = "3"
+            delve = true
+            effects = ["destroy"]
+        "#).unwrap();
+        state.us.graveyard.visible = vec!["Ritual".into(), "Ponder".into()];
+        state.us.pool.total = 1; // covers the 1 remaining generic after delve
+
+        let mut us_lib = vec![("Dead Drop".to_string(), def.clone())];
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        let item = cast_spell(&mut state, 1, "us", "Dead Drop", &mut us_lib, None, &catalog_map, &mut seeded_rng());
+
+        assert!(item.is_some(), "should cast with partial delve + 1 mana");
+        assert_eq!(state.us.graveyard.visible.len(), 0, "both graveyard cards exiled");
+        assert_eq!(state.us.exile.visible.len(), 2);
+        assert_eq!(state.us.pool.total, 0, "remaining generic pip paid");
+    }
+
+    #[test]
+    fn test_cast_delve_spell_insufficient_mana_after_delve() {
+        // Spell costs 3 generic. Graveyard has 2 cards — reduces cost to 1.
+        // Pool is empty — still can't cast.
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(r#"
+            name = "Dead Drop"
+            card_type = "sorcery"
+            mana_cost = "3"
+            delve = true
+            effects = ["destroy"]
+        "#).unwrap();
+        state.us.graveyard.visible = vec!["Ritual".into(), "Ponder".into()];
+        // no mana
+
+        let mut us_lib = vec![("Dead Drop".to_string(), def.clone())];
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        let item = cast_spell(&mut state, 1, "us", "Dead Drop", &mut us_lib, None, &catalog_map, &mut seeded_rng());
+
+        assert!(item.is_none(), "can't cast — 1 generic still unpaid");
+        assert_eq!(state.us.graveyard.visible.len(), 2, "graveyard unchanged on failed cast");
+        assert!(state.us.exile.visible.is_empty(), "nothing exiled on failed cast");
+    }
+
+    #[test]
+    fn test_effect_exile_ability_removes_creature() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Troll"));
+        let troll_def = creature("Troll", 2, 2);
+        let ability: AbilityDef = toml::from_str(r#"
+            mana_cost = ""
+            target = "opp:creature"
+            effect = "exile"
+        "#).unwrap();
+        let catalog = vec![troll_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut _opp_lib) = empty_libs();
+        apply_ability_effect(&mut state, 1, "us", "Karakas", &ability, &mut us_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.opp.permanents.is_empty(), "Troll should be exiled");
+        assert!(state.opp.exile.visible.contains(&"Troll".to_string()));
+        assert!(state.opp.graveyard.visible.is_empty(), "exiled, not dead");
+    }
+}
 
