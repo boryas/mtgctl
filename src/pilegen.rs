@@ -140,6 +140,7 @@ struct CreatureData {
     #[serde(default)] effects: Vec<String>,
     #[serde(default)] abilities: Vec<AbilityDef>,
     #[serde(default)] mana_abilities: Vec<ManaAbility>,
+    #[serde(default)] adventure: Option<AdventureFace>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -148,6 +149,16 @@ struct ArtifactData {
     #[serde(default)] effects: Vec<String>,
     #[serde(default)] abilities: Vec<AbilityDef>,
     #[serde(default)] mana_abilities: Vec<ManaAbility>,
+}
+
+/// The adventure face of an adventure card (the instant/sorcery half).
+#[derive(Deserialize, Clone)]
+struct AdventureFace {
+    name: String,
+    #[serde(default)] card_type: String,  // "instant" or "sorcery"
+    #[serde(default)] mana_cost: String,
+    #[serde(default)] target: Option<String>,
+    #[serde(default)] effects: Vec<String>,
 }
 
 /// Spell data shared by Instant and Sorcery variants.
@@ -330,6 +341,13 @@ impl CardDef {
             _ => None,
         }
     }
+
+    fn adventure(&self) -> Option<&AdventureFace> {
+        match &self.kind {
+            CardKind::Creature(c) => c.adventure.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 // ── TOML deserialization: two-step via RawCardDef ─────────────────────────────
@@ -374,6 +392,7 @@ struct RawCardDef {
     #[serde(default)] delve: bool,
     #[serde(default)] counter_target: Option<String>,
     #[serde(default)] alternate_costs: Vec<AlternateCost>,
+    #[serde(default)] adventure: Option<AdventureFace>,
 }
 
 impl From<RawCardDef> for CardDef {
@@ -399,6 +418,7 @@ impl From<RawCardDef> for CardDef {
                 effects: r.effects,
                 abilities: r.abilities,
                 mana_abilities: r.mana_abilities.clone(),
+                adventure: r.adventure,
             }),
             CardType::Instant => CardKind::Instant(SpellData {
                 mana_cost: r.mana_cost,
@@ -480,6 +500,13 @@ struct StackItem {
     /// Pre-computed annotation for permanents (e.g. Murktide size from delve count).
     /// If Some, overrides random annotation_options pick at resolution time.
     annotation: Option<String>,
+    /// When true, the spell is an adventure face: on resolution it goes to exile + on_adventure
+    /// instead of the graveyard.
+    adventure_exile: bool,
+    /// The physical card's name (creature half) when adventure_exile=true; used for exile placement.
+    adventure_card_name: Option<String>,
+    /// Adventure face data (name, effects, target) used at resolution when adventure_exile=true.
+    adventure_face: Option<AdventureFace>,
 }
 
 
@@ -538,6 +565,10 @@ enum PriorityAction {
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
     /// `counters`       — stack index this spell will counter (counterspell only).
     CastSpell { name: String, preferred_cost: Option<AlternateCost>, counters: Option<usize> },
+    /// Cast the adventure face of a card in hand.
+    CastAdventure { card_name: String },
+    /// Cast the creature face of a card currently on adventure in exile.
+    CastFromAdventure { card_name: String },
     /// Pass priority.
     Pass,
 }
@@ -830,6 +861,9 @@ struct PlayerState {
     /// On-board actions pre-collected at the start of each main phase (populated by
     /// `collect_on_board_actions`). `ap_proactive` pops from this list instead of scanning flags.
     pending_actions: Vec<PriorityAction>,
+    /// Cards currently in exile with the "on adventure" status — the creature face can be cast
+    /// from here. Does NOT clear on Untap (adventure status persists across turns).
+    on_adventure: Vec<String>,
 }
 
 impl PlayerState {
@@ -849,6 +883,7 @@ impl PlayerState {
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
             pending_actions: Vec::new(),
+            on_adventure: Vec::new(),
         }
     }
 
@@ -1428,6 +1463,9 @@ fn matches_target_type(
             matches!(kind, CardKind::Creature(_))
                 && def.map(|d| !d.is_black()).unwrap_or(true)
         }
+        // Non-land permanent: since all entries in `permanents` are already non-land,
+        // this is true for any permanent (lands are in `lands`, not `permanents`).
+        "permanent_nonland" => !matches!(kind, CardKind::Land(_)),
         _ => false,
     }
 }
@@ -1571,6 +1609,19 @@ fn collect_hand_actions(
                 actions.push(PriorityAction::ActivateAbility(name.clone(), ab.clone()));
             }
         }
+    }
+
+    // Adventure spell face: offer casting the adventure (goes to exile on resolution).
+    for (name, def) in library {
+        let Some(face) = def.adventure() else { continue; };
+        if !face.mana_cost.is_empty() {
+            let cost = parse_mana_cost(&face.mana_cost);
+            if !state.player(who).potential_mana().can_pay(&cost) { continue; }
+        }
+        if let Some(ref tgt) = face.target {
+            if !has_valid_target(tgt, state, who, catalog_map) { continue; }
+        }
+        actions.push(PriorityAction::CastAdventure { card_name: name.clone() });
     }
 
     actions
@@ -2034,6 +2085,9 @@ fn cast_spell(
         counters: None,
         permanent_target,
         annotation,
+        adventure_exile: false,
+        adventure_card_name: None,
+        adventure_face: None,
     })
 }
 
@@ -2052,6 +2106,29 @@ fn apply_spell_effects(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
+    // Adventure spell resolution: apply adventure effects, then exile the physical card.
+    if item.adventure_exile {
+        if let Some(ref face) = item.adventure_face {
+            // Apply bounce effect if present.
+            for effect in &face.effects {
+                if effect == "bounce" {
+                    if let Some((ref tw, ref tn)) = item.permanent_target {
+                        if let Some(perm_idx) = state.player(tw).permanents.iter().position(|p| &p.name == tn) {
+                            state.player_mut(tw).permanents.remove(perm_idx);
+                            state.player_mut(tw).hand.hidden += 1;
+                            state.log(t, &item.owner, format!("→ {} returned to {}'s hand", tn, tw));
+                        }
+                    }
+                }
+            }
+            let card_name = item.adventure_card_name.as_deref().unwrap_or(&item.name);
+            state.player_mut(&item.owner).exile.visible.push(card_name.to_string());
+            state.player_mut(&item.owner).on_adventure.push(card_name.to_string());
+            state.log(t, &item.owner, format!("{} resolves → {} on adventure in exile", face.name, card_name));
+        }
+        return;
+    }
+
     let Some(&def) = catalog_map.get(item.name.as_str()) else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
         return;
@@ -2348,6 +2425,18 @@ fn collect_on_board_actions(
         }
     }
 
+    // Adventure creatures in exile: 75% roll to cast the creature face.
+    let on_adventure_names: Vec<String> = state.player(ap).on_adventure.clone();
+    for card_name in on_adventure_names {
+        if let Some(&def) = catalog_map.get(card_name.as_str()) {
+            let cost = parse_mana_cost(def.mana_cost());
+            if !state.player(ap).potential_mana().can_pay(&cost) { continue; }
+            if rng.gen_bool(0.75) {
+                actions.push(PriorityAction::CastFromAdventure { card_name });
+            }
+        }
+    }
+
     // Fateful turn override: force-include fetch lands that can search for a black source,
     // if we have no black mana. (These bypass the 75% roll.)
     if ap == "us" && t == dd_turn && !state.us.has_black_mana() {
@@ -2395,7 +2484,7 @@ fn nap_action(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
-    let other_acted = matches!(last_action, PriorityAction::CastSpell { .. } | PriorityAction::ActivateAbility(..));
+    let other_acted = matches!(last_action, PriorityAction::CastSpell { .. } | PriorityAction::ActivateAbility(..) | PriorityAction::CastAdventure { .. } | PriorityAction::CastFromAdventure { .. });
     if other_acted {
         let actor_lib: &[_] = if who == "us" { us_lib } else { opp_lib };
         for idx in (0..stack.len()).rev() {
@@ -2634,7 +2723,108 @@ fn handle_priority_round(
                     counters: None,
                     permanent_target: None,
                     annotation: None,
+                    adventure_exile: false,
+                    adventure_card_name: None,
+                    adventure_face: None,
                 });
+                let next = if who == ap { nap } else { ap };
+                priority_holder = next.to_string();
+                last_passer = None;
+            }
+            PriorityAction::CastAdventure { ref card_name } => {
+                // Get adventure face.
+                let face = catalog_map.get(card_name.as_str())
+                    .and_then(|d| d.adventure())
+                    .cloned();
+                let Some(face) = face else {
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    continue;
+                };
+                // Sorcery-speed check.
+                let is_sorcery = face.card_type == "sorcery";
+                if is_sorcery && !stack.is_empty() {
+                    eprintln!("[priority] adventure sorcery {} on non-empty stack, treating as Pass", face.name);
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    continue;
+                }
+                // Remove card from library (hand).
+                let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
+                let Some(pos) = actor_lib.iter().position(|(n, _)| n == card_name) else {
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    continue;
+                };
+                actor_lib.remove(pos);
+                // Pay mana.
+                if !face.mana_cost.is_empty() {
+                    let cost = parse_mana_cost(&face.mana_cost);
+                    let mana_log = state.player_mut(&who).pay_mana(&cost);
+                    state.log_mana_activations(t, &who, mana_log);
+                }
+                state.player_mut(&who).hand.hidden -= 1;
+                // Choose target.
+                let permanent_target = face.target.as_deref()
+                    .and_then(|tgt| choose_permanent_target(tgt, &who, state, catalog_map, rng));
+                state.log(t, &who, format!("Cast {} (adventure, {})", face.name, face.mana_cost));
+                // Push StackItem.
+                stack.push(StackItem {
+                    name: face.name.clone(),
+                    owner: who.clone(),
+                    is_ability: false,
+                    ability_def: None,
+                    counters: None,
+                    permanent_target,
+                    annotation: None,
+                    adventure_exile: true,
+                    adventure_card_name: Some(card_name.clone()),
+                    adventure_face: Some(face),
+                });
+                state.player_mut(&who).spells_cast_this_turn += 1;
+                let next = if who == ap { nap } else { ap };
+                priority_holder = next.to_string();
+                last_passer = None;
+            }
+            PriorityAction::CastFromAdventure { ref card_name } => {
+                // Verify still on adventure.
+                if !state.player(&who).on_adventure.iter().any(|n| n == card_name) {
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    continue;
+                }
+                let Some(&def) = catalog_map.get(card_name.as_str()) else {
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    continue;
+                };
+                // Check still affordable.
+                let cost = parse_mana_cost(def.mana_cost());
+                if !state.player(&who).potential_mana().can_pay(&cost) {
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    continue;
+                }
+                // Remove from on_adventure and exile.
+                state.player_mut(&who).on_adventure.retain(|n| n != card_name);
+                state.player_mut(&who).exile.visible.retain(|n| n != card_name);
+                // Pay mana (no hand.hidden change — comes from exile).
+                let mana_log = state.player_mut(&who).pay_mana(&cost);
+                state.log_mana_activations(t, &who, mana_log);
+                state.log(t, &who, format!("Cast {} from adventure ({})", card_name, def.mana_cost()));
+                stack.push(StackItem {
+                    name: card_name.clone(),
+                    owner: who.clone(),
+                    is_ability: false,
+                    ability_def: None,
+                    counters: None,
+                    permanent_target: None,
+                    annotation: None,
+                    adventure_exile: false,
+                    adventure_card_name: None,
+                    adventure_face: None,
+                });
+                state.player_mut(&who).spells_cast_this_turn += 1;
                 let next = if who == ap { nap } else { ap };
                 priority_holder = next.to_string();
                 last_passer = None;
@@ -3283,6 +3473,9 @@ mod tests {
             counters: None,
             permanent_target: None,
             annotation: None,
+            adventure_exile: false,
+            adventure_card_name: None,
+            adventure_face: None,
         }
     }
 

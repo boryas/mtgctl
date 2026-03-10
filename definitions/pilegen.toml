@@ -294,4 +294,14 @@ card_type = "sorcery"
 mana_cost = "GW"  # cast cost; rarely cast directly
 abilities = [{zone = "hand", discard_self = true, sacrifice_land = true, effect = "draw:1"}]
 
+[[cards]]
+name = "Brazen Borrower"
+card_type = "creature"
+mana_cost = "1UU"
+blue = true
+power = 3
+toughness = 1
+effects = ["permanent"]
+adventure = {name = "Petty Theft", card_type = "instant", mana_cost = "1U", target = "opp:permanent_nonland", effects = ["bounce"]}
+
 
