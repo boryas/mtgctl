@@ -717,13 +717,11 @@ struct SimLand {
     #[allow(dead_code)]
     land_types: LandTypes,
     mana_abilities: Vec<ManaAbility>,
-    want_to_activate: bool,
 }
 
 #[derive(Clone)]
 struct SimPermanent {
     name: String,
-    want_to_activate: bool,
     /// Display annotation, e.g. "Wizard" for Cavern of Souls.
     annotation: Option<String>,
     /// +1/+1 counters on this permanent (e.g. from Murktide Regent's delve).
@@ -740,7 +738,6 @@ impl SimPermanent {
     fn new(name: impl Into<String>) -> Self {
         SimPermanent {
             name: name.into(),
-            want_to_activate: false,
             annotation: None,
             counters: 0,
             tapped: false,
@@ -760,7 +757,6 @@ impl SimLand {
             basic: land.basic,
             land_types: land.land_types.clone(),
             mana_abilities: land.mana_abilities.clone(),
-            want_to_activate: false,
         }
     }
 }
@@ -819,6 +815,9 @@ struct PlayerState {
     spells_cast_this_turn: u8,
     /// Mana produced but not yet spent; drains at end of each step/phase.
     pool: ManaPool,
+    /// On-board actions pre-collected at the start of each main phase (populated by
+    /// `collect_on_board_actions`). `ap_proactive` pops from this list instead of scanning flags.
+    pending_actions: Vec<PriorityAction>,
 }
 
 impl PlayerState {
@@ -837,6 +836,7 @@ impl PlayerState {
             dd_cast: false,
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
+            pending_actions: Vec::new(),
         }
     }
 
@@ -1476,12 +1476,12 @@ fn spell_is_affordable(
     def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name, library))
 }
 
-fn collect_spells(
+fn collect_hand_actions(
     state: &SimState,
     who: &str,
     library: &[(String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
-) -> Vec<String> {
+) -> Vec<PriorityAction> {
     if state.player(who).hand.hidden <= 0 {
         return Vec::new();
     }
@@ -1526,7 +1526,7 @@ fn collect_spells(
             if !spell_is_affordable(name, def, state, who, library) {
                 return None;
             }
-            Some(name.to_string())
+            Some(PriorityAction::CastSpell { name: name.clone(), preferred_cost: None, counters: None })
         })
         .collect()
 }
@@ -1708,7 +1708,6 @@ fn apply_ability_effect(
                     basic: ld.basic,
                     land_types: ld.land_types.clone(),
                     mana_abilities: ld.mana_abilities.clone(),
-                    want_to_activate: false,
                 }
             };
             let name = library[idx].0.clone();
@@ -2000,7 +1999,6 @@ fn apply_spell_effects(
         };
         state.player_mut(&item.owner).permanents.push(SimPermanent {
             name: item.name.clone(),
-            want_to_activate: false,
             annotation,
             counters,
             tapped: false,
@@ -2084,7 +2082,6 @@ fn apply_spell_effects(
                     state.player_mut(&target_who).graveyard.visible.retain(|n| n != &chosen);
                     state.player_mut(&target_who).permanents.push(SimPermanent {
                         name: chosen.clone(),
-                        want_to_activate: false,
                         annotation: None,
                         counters: 0,
                         tapped: false,
@@ -2209,54 +2206,69 @@ fn creature_stats(perm: &SimPermanent, def: Option<&CardDef>) -> (i32, i32) {
 
 // ── New turn-structure functions ──────────────────────────────────────────────
 
-/// At the start of the main phase, roll 75% per land/permanent with an available ability
-/// to decide whether it wants to activate this turn.
+/// Collect on-board actions (ability activations) to potentially take this main phase.
 ///
-/// On the fateful (Doomsday) turn, if we can't produce any black mana, fetches are force-marked
-/// so they'll crack for a black land; if there are no fetches, `must_land_drop` is set so the
-/// land drop is guaranteed.
-fn roll_want_to_activate(
+/// Performs a 75% roll per land/permanent with an available ability and returns the resulting
+/// `Vec<PriorityAction>`. This replaces the old `want_to_activate` flag system: instead of
+/// marking flags on `SimLand`/`SimPermanent`, we pre-collect a list of actions the player
+/// intends to take, which `ap_proactive` then pops in order.
+///
+/// On the fateful (Doomsday) turn, if we can't produce any black mana, fetches that can search
+/// for a black land are force-added (bypassing the 75% roll). If no such fetch exists,
+/// `state.us.must_land_drop` is set as a side effect so the land drop is guaranteed.
+fn collect_on_board_actions(
     state: &mut SimState,
-    t: u8,
     ap: &str,
+    t: u8,
     dd_turn: u8,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
-) {
-    // Collect names with available abilities (immutable borrow first).
-    let sources: Vec<String> = {
-        let player = state.player(ap);
-        let mut v = Vec::new();
-        for land in &player.lands {
-            if land.tapped || land.want_to_activate { continue; }
-            if let Some(def) = catalog_map.get(land.name.as_str()) {
-                if def.abilities().iter().any(|ab| ability_available(ab, state, ap, true, catalog_map)) {
-                    v.push(land.name.clone());
-                }
-            }
-        }
-        for perm in &player.permanents {
-            if perm.want_to_activate { continue; }
-            if let Some(def) = catalog_map.get(perm.name.as_str()) {
-                if def.abilities().iter().any(|ab| ability_available(ab, state, ap, true, catalog_map)) {
-                    v.push(perm.name.clone());
-                }
-            }
-        }
-        v
-    };
-    // Apply 75% roll (mutable borrow).
-    for source in sources {
+) -> Vec<PriorityAction> {
+    let mut actions: Vec<PriorityAction> = Vec::new();
+
+    // 75% roll per land with an available ability.
+    let land_names: Vec<String> = state.player(ap).lands.iter()
+        .filter(|l| !l.tapped)
+        .filter(|l| catalog_map.get(l.name.as_str())
+            .map_or(false, |def| def.abilities().iter()
+                .any(|ab| ability_available(ab, state, ap, true, catalog_map))))
+        .map(|l| l.name.clone())
+        .collect();
+    for name in land_names {
         if rng.gen_bool(0.75) {
-            if let Some(land) = state.player_mut(ap).lands.iter_mut().find(|l| l.name == source) {
-                land.want_to_activate = true;
-            } else if let Some(perm) = state.player_mut(ap).permanents.iter_mut().find(|p| p.name == source) {
-                perm.want_to_activate = true;
+            if let Some(def) = catalog_map.get(name.as_str()) {
+                if let Some(ab) = def.abilities().iter()
+                    .find(|ab| ability_available(ab, state, ap, true, catalog_map))
+                    .cloned()
+                {
+                    actions.push(PriorityAction::ActivateAbility(name, ab));
+                }
             }
         }
     }
 
-    // Fateful turn: if we can't produce black mana, we must get a black source this turn.
+    // 75% roll per permanent with an available ability.
+    let perm_names: Vec<(String, bool)> = state.player(ap).permanents.iter()
+        .filter(|p| catalog_map.get(p.name.as_str())
+            .map_or(false, |def| def.abilities().iter()
+                .any(|ab| ability_available(ab, state, ap, !p.tapped, catalog_map))))
+        .map(|p| (p.name.clone(), p.tapped))
+        .collect();
+    for (name, tapped) in perm_names {
+        if rng.gen_bool(0.75) {
+            if let Some(def) = catalog_map.get(name.as_str()) {
+                if let Some(ab) = def.abilities().iter()
+                    .find(|ab| ability_available(ab, state, ap, !tapped, catalog_map))
+                    .cloned()
+                {
+                    actions.push(PriorityAction::ActivateAbility(name, ab));
+                }
+            }
+        }
+    }
+
+    // Fateful turn override: force-include fetch lands that can search for a black source,
+    // if we have no black mana. (These bypass the 75% roll.)
     if ap == "us" && t == dd_turn && !state.us.has_black_mana() {
         let can_search_black = |name: &str| catalog_map.get(name).map_or(false, |def|
             def.abilities().iter().any(|ab|
@@ -2269,10 +2281,17 @@ fn roll_want_to_activate(
             .map(|l| l.name.clone())
             .collect();
         if !fetch_names.is_empty() {
-            // Force-crack all untapped fetches so they search for a black land.
             for name in &fetch_names {
-                if let Some(l) = state.us.lands.iter_mut().find(|l| &l.name == name) {
-                    l.want_to_activate = true;
+                // Add if not already in the list.
+                if !actions.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(n, _) if n == name)) {
+                    if let Some(def) = catalog_map.get(name.as_str()) {
+                        if let Some(ab) = def.abilities().iter()
+                            .find(|ab| ability_available(ab, state, "us", true, catalog_map))
+                            .cloned()
+                        {
+                            actions.push(PriorityAction::ActivateAbility(name.clone(), ab));
+                        }
+                    }
                 }
             }
         } else {
@@ -2280,6 +2299,8 @@ fn roll_want_to_activate(
             state.us.must_land_drop = true;
         }
     }
+
+    actions
 }
 
 /// NAP decision: if AP just acted, try to counter the top opposing spell; otherwise pass.
@@ -2388,29 +2409,32 @@ fn ap_proactive(
         }
     }
 
-    // Activate pending abilities (can happen with non-empty stack).
-    let source_name = state.player(who).lands.iter()
-        .find(|l| l.want_to_activate).map(|l| l.name.clone())
-        .or_else(|| state.player(who).permanents.iter()
-            .find(|p| p.want_to_activate).map(|p| p.name.clone()));
-    if let Some(source_name) = source_name {
-        if let Some(ab) = catalog_map.get(source_name.as_str())
-            .and_then(|def| def.abilities().iter()
-                .find(|ab| ability_available(ab, state, who, true, catalog_map))
-                .cloned())
-        {
-            return PriorityAction::ActivateAbility(source_name, ab);
+    // On-board actions: pop the first pending action (pre-rolled at phase start).
+    if let Some(action) = state.player(who).pending_actions.first().cloned() {
+        // Verify it's still valid before committing (source might have been tapped/sacrificed).
+        let still_valid = match &action {
+            PriorityAction::ActivateAbility(source, ab) => {
+                let source_untapped = state.player(who).lands.iter().any(|l| l.name == *source && !l.tapped)
+                    || state.player(who).permanents.iter().any(|p| p.name == *source && (!p.tapped || ab.sacrifice_self));
+                ability_available(ab, state, who, source_untapped, catalog_map)
+            }
+            _ => false,
+        };
+        state.player_mut(who).pending_actions.remove(0);
+        if still_valid {
+            return action;
         }
+        // Fall through to hand actions.
     }
 
-    // Proactive spell casting only on an empty stack: no Brainstorms in response to fetches.
+    // Hand actions: only on empty stack.
     if !stack.is_empty() {
         return PriorityAction::Pass;
     }
 
     let actor_lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-    let spells = collect_spells(state, who, actor_lib, catalog_map);
-    if spells.is_empty() {
+    let actions = collect_hand_actions(state, who, actor_lib, catalog_map);
+    if actions.is_empty() {
         let pool = &state.player(who).pool;
         let hand = state.player(who).hand.hidden;
         eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
@@ -2423,12 +2447,12 @@ fn ap_proactive(
         return PriorityAction::Pass;
     }
 
-    // On the fateful turn, prioritize: Doomsday > Dark Ritual > anything else.
+    // Fateful turn prioritization: Doomsday > Dark Ritual > anything else.
     let fateful = who == "us" && t == dd_turn && !state.us.dd_cast;
-    let spell_name = if fateful && spells.iter().any(|n| n == "Doomsday") {
-        "Doomsday".to_string()
-    } else if fateful && spells.iter().any(|n| n == "Dark Ritual") {
-        "Dark Ritual".to_string()
+    let action = if fateful && actions.iter().any(|a| matches!(a, PriorityAction::CastSpell { name, .. } if name == "Doomsday")) {
+        PriorityAction::CastSpell { name: "Doomsday".to_string(), preferred_cost: None, counters: None }
+    } else if fateful && actions.iter().any(|a| matches!(a, PriorityAction::CastSpell { name, .. } if name == "Dark Ritual")) {
+        PriorityAction::CastSpell { name: "Dark Ritual".to_string(), preferred_cost: None, counters: None }
     } else {
         // General casting — decaying probability for multi-spell turns.
         // 1st spell: always; 2nd: 30%; 3rd+: 10%.
@@ -2440,11 +2464,14 @@ fn ap_proactive(
         if rng.gen::<f64>() >= cast_prob {
             return PriorityAction::Pass;
         }
-        spells[rng.gen_range(0..spells.len())].clone()
+        actions[rng.gen_range(0..actions.len())].clone()
     };
 
-    eprintln!("[decision] {}: proactive cast {} (options: {})", who, spell_name, spells.join(", "));
-    PriorityAction::CastSpell { name: spell_name, preferred_cost: None, counters: None }
+    if let PriorityAction::CastSpell { ref name, .. } = action {
+        eprintln!("[decision] {}: proactive cast {} (options: {})", who, name,
+            actions.iter().filter_map(|a| if let PriorityAction::CastSpell { name, .. } = a { Some(name.as_str()) } else { None }).collect::<Vec<_>>().join(", "));
+    }
+    action
 }
 
 /// Decide what action the player `who` takes when they hold priority.
@@ -2516,12 +2543,6 @@ fn handle_priority_round(
             PriorityAction::ActivateAbility(ref source_name, ref ability) => {
                 // Pay costs now; effect is deferred until the ability resolves.
                 pay_activation_cost(state, t, &who, source_name, ability, catalog_map);
-                // Clear want_to_activate flag on the source.
-                if let Some(l) = state.player_mut(&who).lands.iter_mut().find(|l| l.name == *source_name) {
-                    l.want_to_activate = false;
-                } else if let Some(p) = state.player_mut(&who).permanents.iter_mut().find(|p| p.name == *source_name) {
-                    p.want_to_activate = false;
-                }
                 // Push ability stack item; ability_def carries the effect for resolution.
                 stack.push(StackItem {
                     name: source_name.clone(),
@@ -2670,6 +2691,7 @@ fn do_step(
             }
             state.player_mut(ap).land_drop_available = true;
             state.player_mut(ap).spells_cast_this_turn = 0;
+            state.player_mut(ap).pending_actions.clear();
         }
         StepKind::Draw => {
             let this_player_on_play = if ap == "us" { on_play } else { !on_play };
@@ -2853,7 +2875,8 @@ fn do_phase(
     }
     if phase.is_main_phase() {
         state.current_phase = "Main".to_string();
-        roll_want_to_activate(state, t, ap, dd_turn, catalog_map, rng);
+        let on_board = collect_on_board_actions(state, ap, t, dd_turn, catalog_map, rng);
+        state.player_mut(ap).pending_actions = on_board;
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
         // Mana pool drains at the end of the main phase.
         state.us.pool.drain();
@@ -3166,7 +3189,6 @@ mod tests {
             basic: false,
             land_types: LandTypes::default(),
             mana_abilities: vec![],
-            want_to_activate: false,
         }
     }
 
@@ -3516,7 +3538,6 @@ mod tests {
             basic: true,
             land_types: LandTypes { island: true, ..Default::default() },
             mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
-            want_to_activate: false,
         });
         let initial_hidden = state.us.hand.hidden; // 7
 
