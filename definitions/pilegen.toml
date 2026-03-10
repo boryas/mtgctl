@@ -8,8 +8,9 @@
 #            "sorcery" | "enchantment"
 #
 # Land-specific fields:
-#   is_fetch          — fetchlands are always untapped when in play
-#   produces_black    — land can tap for black mana
+#   basic              — basic land supertype
+#   land_types         — {island, swamp, plains, mountain, forest}
+#   mana_abilities     — [{tap_self, sacrifice_self, produces}] (e.g. {tap_self=true, produces="U"})
 #   annotation_options — one option is picked at random (e.g. Cavern creature type)
 #
 # DFC fields (for cards with two faces):
@@ -32,70 +33,85 @@
 [[cards]]
 name = "Underground Sea"
 card_type = "land"
-produces_black = true
-produces_blue = true
+land_types = {island = true, swamp = true}
+mana_abilities = [
+    {tap_self = true, produces = "U"},
+    {tap_self = true, produces = "B"},
+]
 
 [[cards]]
 name = "Swamp"
 card_type = "land"
-produces_black = true
-basic_land = true
+basic = true
+land_types = {swamp = true}
+mana_abilities = [{tap_self = true, produces = "B"}]
 play_weight = 25  # basic, uncommon in this list
 
 [[cards]]
 name = "Island"
 card_type = "land"
-produces_blue = true
-basic_land = true
+basic = true
+land_types = {island = true}
+mana_abilities = [{tap_self = true, produces = "U"}]
 play_weight = 25  # basic, uncommon in this list
 
 [[cards]]
 name = "Undercity Sewers"
 card_type = "land"
-produces_black = true
-produces_blue = true
+land_types = {island = true, swamp = true}
 enters_tapped = true
+mana_abilities = [
+    {tap_self = true, produces = "U"},
+    {tap_self = true, produces = "B"},
+]
 
 [[cards]]
 name = "Wasteland"
 card_type = "land"
-cracked_land = true  # usually spent before Doomsday — stage-filtered
 abilities = [{tap_self = true, sacrifice_self = true, target = "opp:nonbasic_land", effect = "destroy"}]
 
 [[cards]]
 name = "Polluted Delta"
 card_type = "land"
-is_fetch = true
 play_weight = 25  # likely cracked already
-abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-ub:play"}]
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-island|swamp:play"}]
 
 [[cards]]
 name = "Flooded Strand"
 card_type = "land"
-is_fetch = true
 play_weight = 25  # likely cracked already
-abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-u:play"}]
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-island:play"}]
 
 [[cards]]
 name = "Misty Rainforest"
 card_type = "land"
-is_fetch = true
 play_weight = 25  # likely cracked already
-abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-u:play"}]
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-island:play"}]
 
 [[cards]]
 name = "Scalding Tarn"
 card_type = "land"
-is_fetch = true
 play_weight = 25  # likely cracked already
-abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-u:play"}]
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-island:play"}]
 
 [[cards]]
 name = "Marsh Flats"
 card_type = "land"
-is_fetch = true
 play_weight = 25  # likely cracked already
-abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-b:play"}]
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-swamp:play"}]
+
+[[cards]]
+name = "Bloodstained Mire"
+card_type = "land"
+play_weight = 25  # likely cracked already
+abilities = [{sacrifice_self = true, life_cost = 1, effect = "search:land-swamp:play"}]
+
+[[cards]]
+name = "Cavern of Souls"
+card_type = "land"
+annotation_options = ["Wizard", "Orc", "Lhurgoyf", "Dragon"]
+play_weight = 50
+mana_abilities = [{tap_self = true}]   # produces = "" → generic only
 
 # ── Creatures ────────────────────────────────────────────────────────────────
 
@@ -125,10 +141,11 @@ effects = ["permanent"]
 name = "Murktide Regent"
 card_type = "creature"
 play_weight = 25
-annotation_options = ["3/3", "4/4", "5/5", "6/6", "7/7", "8/8"]
 mana_cost = "5UU"  # delve makes it cheaper in practice
+delve = true
 power = 3
 toughness = 3
+effects = ["permanent"]
 
 [[cards]]
 name = "Thassa's Oracle"
@@ -138,6 +155,7 @@ play_weight = 1  # almost never played out — it's the kill card
 mana_cost = "UU"
 power = 1
 toughness = 3
+effects = ["permanent"]
 
 [[cards]]
 name = "Street Wraith"
@@ -152,21 +170,26 @@ toughness = 4
 [[cards]]
 name = "Lotus Petal"
 card_type = "artifact"
+mana_cost = "0"
 play_weight = 25
-# no mana cost (free) — produces any color when sacrificed
+effects = ["permanent"]
+mana_abilities = [{sacrifice_self = true, produces = "WUBRG"}]
 
 [[cards]]
 name = "Lion's Eye Diamond"
 card_type = "artifact"
+mana_cost = "0"
 play_weight = 10
-# no mana cost (free) — produces BBB when sacrificed with spell on stack
+effects = ["permanent"]
+# free (mana_cost = "0") — produces BBB when sacrificed with spell on stack; never activated in sim
 
 # ── Spells ────────────────────────────────────────────────────────────────────
 
 [[cards]]
 name = "Doomsday"
 card_type = "sorcery"
-mana_cost = "BBB"  # handled specially in sim_cast_doomsday
+mana_cost = "BBB"
+effects = ["doomsday"]
 
 [[cards]]
 name = "Brainstorm"
@@ -248,12 +271,14 @@ name = "Thoughtseize"
 card_type = "sorcery"
 mana_cost = "B"
 requires = ["opp_hand_nonempty"]
-effects = ["discard:opp:1", "life_loss:2"]
+effects = ["discard:opp:1:nonland", "life_loss:2"]
 
 [[cards]]
 name = "Unearth"
 card_type = "sorcery"
 mana_cost = "B"
+requires = ["us_gy_has_creature"]
+effects = ["reanimate:us:creature"]
 
 [[cards]]
 name = "Hymn to Tourach"

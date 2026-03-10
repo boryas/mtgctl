@@ -4098,8 +4098,6 @@ fn truncate(s: &str, max_len: usize) -> String {
 
 fn edit_match_interactive(match_id: i32) {
     let connection = &mut establish_connection();
-    let config = load_config();
-    
     // Load the existing match
     let match_result = matches::table
         .find(match_id)

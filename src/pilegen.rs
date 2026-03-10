@@ -81,117 +81,359 @@ struct AbilityDef {
     effect: String,
 }
 
+// ── Mana ability types ────────────────────────────────────────────────────────
+
+/// How a permanent produces mana. `produces` is a string of color chars (e.g. "B", "U", "BU").
+/// Empty produces → contributes to generic total only (e.g. Cavern of Souls).
+#[derive(Deserialize, Clone, Default)]
+struct ManaAbility {
+    #[serde(default)] tap_self: bool,
+    #[serde(default)] sacrifice_self: bool,
+    #[serde(default)] produces: String,
+}
+
+/// The five basic land subtypes.
+#[derive(Deserialize, Clone, Default)]
+struct LandTypes {
+    #[serde(default)] plains: bool,
+    #[serde(default)] island: bool,
+    #[serde(default)] swamp: bool,
+    #[serde(default)] mountain: bool,
+    #[serde(default)] forest: bool,
+}
+
+// ── Per-variant data structs ──────────────────────────────────────────────────
+
+#[derive(Deserialize, Clone, Default)]
+struct LandData {
+    #[serde(default)] basic: bool,
+    #[serde(default)] land_types: LandTypes,
+    #[serde(default)] enters_tapped: bool,
+    #[serde(default)] annotation_options: Vec<String>,
+    #[serde(default)] mana_abilities: Vec<ManaAbility>,
+    #[serde(default)] abilities: Vec<AbilityDef>,
+}
+
+#[derive(Deserialize, Clone)]
+struct CreatureData {
+    #[serde(default)] mana_cost: String,
+    power: i32,
+    toughness: i32,
+    #[serde(default)] black: bool,
+    #[serde(default)] blue: bool,
+    #[allow(dead_code)]
+    #[serde(default)] exileable: bool,
+    #[serde(default)] legendary: bool,
+    #[serde(default)] delve: bool,
+    #[serde(default)] effects: Vec<String>,
+    #[serde(default)] abilities: Vec<AbilityDef>,
+    #[serde(default)] mana_abilities: Vec<ManaAbility>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+struct ArtifactData {
+    #[serde(default)] mana_cost: String,
+    #[serde(default)] effects: Vec<String>,
+    #[serde(default)] abilities: Vec<AbilityDef>,
+    #[serde(default)] mana_abilities: Vec<ManaAbility>,
+}
+
+/// Spell data shared by Instant and Sorcery variants.
+#[derive(Deserialize, Clone, Default)]
+struct SpellData {
+    #[serde(default)] mana_cost: String,
+    #[serde(default)] blue: bool,
+    #[serde(default)] black: bool,
+    #[allow(dead_code)]
+    #[serde(default)] exileable: bool,
+    #[serde(default)] target: Option<String>,
+    #[serde(default)] counter_target: Option<String>,
+    #[serde(default)] requires: Vec<String>,
+    #[serde(default)] effects: Vec<String>,
+    #[serde(default)] alternate_costs: Vec<AlternateCost>,
+    #[serde(default)] delve: bool,
+}
+
+#[derive(Deserialize, Clone)]
+struct PlaneswalkerData {
+    #[serde(default)] mana_cost: String,
+    #[allow(dead_code)]
+    #[serde(default)] loyalty: i32,
+    #[serde(default)] effects: Vec<String>,
+    #[serde(default)] abilities: Vec<AbilityDef>,
+}
+
+#[derive(Clone)]
+enum CardKind {
+    Land(LandData),
+    Creature(CreatureData),
+    Artifact(ArtifactData),
+    Instant(SpellData),
+    Sorcery(SpellData),
+    Planeswalker(PlaneswalkerData),
+    Enchantment,
+}
+
+// ── CardDef wrapper ───────────────────────────────────────────────────────────
+
 /// A card the generator knows about. Cards not in the catalog are treated as
 /// generic non-land spells: hand-eligible, not permanent candidates, not exileable.
-#[derive(Deserialize, Clone, Default)]
+///
+/// Wrapper struct preserving direct `.name` access and stable HashMap keys while
+/// holding a typed `kind` that enforces card-category invariants.
+#[derive(Clone)]
 struct CardDef {
     name: String,
-    /// "land" | "creature" | "planeswalker" | "artifact" | "instant" | "sorcery" | "enchantment"
-    card_type: String,
-
-    // Land-specific
-    #[serde(default)]
-    is_fetch: bool,
-    #[serde(default)]
-    enters_tapped: bool,
-    #[serde(default)]
-    basic_land: bool,
-    #[serde(default)]
-    produces_black: bool,
-    #[serde(default)]
-    produces_blue: bool,
-    #[serde(default)]
-    annotation_options: Vec<String>,
-
-    /// Mana cost in WURBG notation, e.g. "BBB", "1U", "UB", "2B".
-    /// Empty string = free (alternate-cost cards like Force of Will).
-    #[serde(default)]
-    mana_cost: String,
-
-    // Creature power/toughness (for combat)
-    #[serde(default)]
-    power: Option<i32>,
-    #[serde(default)]
-    toughness: Option<i32>,
-
-    // DFC: back-face properties
-    #[serde(default)]
-    flipped_name: Option<String>,
-    #[serde(default)]
-    flipped_card_type: Option<String>,
-    #[serde(default)]
-    flipped_loyalty: Option<i32>,
-
-    // Planeswalker
-    #[serde(default)]
-    loyalty: Option<i32>,
-
-    // Legendary rule
-    #[serde(default)]
-    legendary: bool,
-
-    // Colors (for cards whose mana_cost doesn't fully express them, e.g. FoW, Daze, Snuff Out)
-    #[serde(default)]
-    blue: bool,
-    #[serde(default)]
-    black: bool,
-
-    /// If set, this spell targets a permanent of this type when cast.
-    /// Uses the same "<who>:<type>" syntax as AbilityDef.target.
-    #[serde(default)]
-    target: Option<String>,
-
-    // Hand / exile rules
-    #[serde(default)]
-    exileable: bool,
-
-    /// Relative likelihood of appearing as a permanent in play.
-    /// Default 100. Set to 1 for cards that are almost never played out (100:1 odds).
-    #[serde(default)]
+    /// Relative likelihood of appearing as a permanent in play (default 100).
+    #[allow(dead_code)]
     play_weight: Option<u32>,
+    kind: CardKind,
+}
 
-    /// Land is usually cracked before Doomsday — filtered by stage probability.
-    #[serde(default)]
-    cracked_land: bool,
+impl CardDef {
+    fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
+    fn is_creature(&self) -> bool { matches!(self.kind, CardKind::Creature(_)) }
+    fn is_instant(&self) -> bool { matches!(self.kind, CardKind::Instant(_)) }
+    #[allow(dead_code)]
+    fn is_sorcery(&self) -> bool { matches!(self.kind, CardKind::Sorcery(_)) }
 
-    /// Token creature name placed when this permanent enters (e.g. "Orc Army (1/1)").
-    #[serde(default)]
-    entry_token: Option<String>,
-    /// Percent probability of entry token appearing (default 62).
-    #[serde(default)]
-    entry_token_prob: Option<u32>,
+    fn mana_cost(&self) -> &str {
+        match &self.kind {
+            CardKind::Land(_) | CardKind::Enchantment => "",
+            CardKind::Creature(c) => &c.mana_cost,
+            CardKind::Artifact(a) => &a.mana_cost,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.mana_cost,
+            CardKind::Planeswalker(p) => &p.mana_cost,
+        }
+    }
 
-    /// Card may leave clue tokens even if no longer in play (e.g. Tamiyo).
-    #[serde(default)]
-    generates_clues: bool,
+    fn effects(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Creature(c) => &c.effects,
+            CardKind::Artifact(a) => &a.effects,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.effects,
+            CardKind::Planeswalker(p) => &p.effects,
+            CardKind::Land(_) | CardKind::Enchantment => &[],
+        }
+    }
 
-    /// Pre-conditions beyond mana cost (e.g. "opp_hand_nonempty", "hand_min:2").
-    #[serde(default)]
-    requires: Vec<String>,
+    fn abilities(&self) -> &[AbilityDef] {
+        match &self.kind {
+            CardKind::Land(l) => &l.abilities,
+            CardKind::Creature(c) => &c.abilities,
+            CardKind::Artifact(a) => &a.abilities,
+            CardKind::Planeswalker(p) => &p.abilities,
+            CardKind::Instant(_) | CardKind::Sorcery(_) | CardKind::Enchantment => &[],
+        }
+    }
 
-    /// Post-effects beyond card-type defaults (e.g. "cantrip", "add_mana_black:2").
-    #[serde(default)]
-    effects: Vec<String>,
+    fn alternate_costs(&self) -> &[AlternateCost] {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.alternate_costs,
+            _ => &[],
+        }
+    }
 
-    /// Activated abilities this permanent has.
-    #[serde(default)]
-    abilities: Vec<AbilityDef>,
+    fn counter_target(&self) -> Option<&str> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.counter_target.as_deref(),
+            _ => None,
+        }
+    }
 
-    /// If true, generic mana in the cost can be paid by exiling cards from graveyard.
-    #[serde(default)]
-    delve: bool,
+    fn target(&self) -> Option<&str> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.target.as_deref(),
+            _ => None,
+        }
+    }
 
-    /// If set, this card is a counterspell that can target spells of the given type.
-    /// Values: "any" | "noncreature" | "nonland" | "instant_or_sorcery"
-    /// Must also have `alternate_costs` defined to be usable.
-    #[serde(default)]
-    counter_target: Option<String>,
+    fn requires(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.requires,
+            _ => &[],
+        }
+    }
 
-    /// Alternate ways to pay for this spell (used both for reactive counters and
-    /// proactive alternate-cost spells like Snuff Out).
-    /// Tried in order; first affordable option is taken.
-    #[serde(default)]
-    alternate_costs: Vec<AlternateCost>,
+    fn delve(&self) -> bool {
+        match &self.kind {
+            CardKind::Creature(c) => c.delve,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.delve,
+            _ => false,
+        }
+    }
+
+    fn legendary(&self) -> bool {
+        match &self.kind {
+            CardKind::Creature(c) => c.legendary,
+            _ => false,
+        }
+    }
+
+    fn annotation_options(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Land(l) => &l.annotation_options,
+            _ => &[],
+        }
+    }
+
+    fn is_blue(&self) -> bool {
+        self.mana_cost().contains('U')
+            || match &self.kind {
+                CardKind::Creature(c) => c.blue,
+                CardKind::Instant(s) | CardKind::Sorcery(s) => s.blue,
+                _ => false,
+            }
+    }
+
+    fn is_black(&self) -> bool {
+        self.mana_cost().contains('B')
+            || match &self.kind {
+                CardKind::Creature(c) => c.black,
+                CardKind::Instant(s) | CardKind::Sorcery(s) => s.black,
+                _ => false,
+            }
+    }
+
+    fn mana_abilities(&self) -> &[ManaAbility] {
+        match &self.kind {
+            CardKind::Land(l) => &l.mana_abilities,
+            CardKind::Creature(c) => &c.mana_abilities,
+            CardKind::Artifact(a) => &a.mana_abilities,
+            _ => &[],
+        }
+    }
+
+    fn as_land(&self) -> Option<&LandData> {
+        match &self.kind { CardKind::Land(l) => Some(l), _ => None }
+    }
+
+    fn as_creature(&self) -> Option<&CreatureData> {
+        match &self.kind { CardKind::Creature(c) => Some(c), _ => None }
+    }
+
+    fn as_spell(&self) -> Option<&SpellData> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
+// ── TOML deserialization: two-step via RawCardDef ─────────────────────────────
+
+/// Typed card category used only during TOML deserialization.
+#[derive(Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+enum CardType {
+    Land,
+    Creature,
+    Planeswalker,
+    Artifact,
+    #[default]
+    Instant,
+    Sorcery,
+    Enchantment,
+}
+
+/// Flat deserialization target. Converted to `CardDef` by `From<RawCardDef>`.
+#[derive(Deserialize, Clone, Default)]
+struct RawCardDef {
+    name: String,
+    card_type: CardType,
+    #[serde(default)] enters_tapped: bool,
+    #[serde(default)] basic: bool,
+    #[serde(default)] land_types: LandTypes,
+    #[serde(default)] mana_abilities: Vec<ManaAbility>,
+    #[serde(default)] annotation_options: Vec<String>,
+    #[serde(default)] mana_cost: String,
+    #[serde(default)] power: Option<i32>,
+    #[serde(default)] toughness: Option<i32>,
+    #[serde(default)] loyalty: Option<i32>,
+    #[serde(default)] legendary: bool,
+    #[serde(default)] blue: bool,
+    #[serde(default)] black: bool,
+    #[serde(default)] target: Option<String>,
+    #[serde(default)] exileable: bool,
+    #[serde(default)] play_weight: Option<u32>,
+    #[serde(default)] requires: Vec<String>,
+    #[serde(default)] effects: Vec<String>,
+    #[serde(default)] abilities: Vec<AbilityDef>,
+    #[serde(default)] delve: bool,
+    #[serde(default)] counter_target: Option<String>,
+    #[serde(default)] alternate_costs: Vec<AlternateCost>,
+}
+
+impl From<RawCardDef> for CardDef {
+    fn from(r: RawCardDef) -> Self {
+        let kind = match r.card_type {
+            CardType::Land => CardKind::Land(LandData {
+                basic: r.basic,
+                land_types: r.land_types,
+                enters_tapped: r.enters_tapped,
+                annotation_options: r.annotation_options,
+                mana_abilities: r.mana_abilities.clone(),
+                abilities: r.abilities,
+            }),
+            CardType::Creature => CardKind::Creature(CreatureData {
+                mana_cost: r.mana_cost,
+                power: r.power.unwrap_or(1),
+                toughness: r.toughness.unwrap_or(1),
+                black: r.black,
+                blue: r.blue,
+                exileable: r.exileable,
+                legendary: r.legendary,
+                delve: r.delve,
+                effects: r.effects,
+                abilities: r.abilities,
+                mana_abilities: r.mana_abilities.clone(),
+            }),
+            CardType::Instant => CardKind::Instant(SpellData {
+                mana_cost: r.mana_cost,
+                blue: r.blue,
+                black: r.black,
+                exileable: r.exileable,
+                target: r.target,
+                counter_target: r.counter_target,
+                requires: r.requires,
+                effects: r.effects,
+                alternate_costs: r.alternate_costs,
+                delve: r.delve,
+            }),
+            CardType::Sorcery => CardKind::Sorcery(SpellData {
+                mana_cost: r.mana_cost,
+                blue: r.blue,
+                black: r.black,
+                exileable: r.exileable,
+                target: r.target,
+                counter_target: r.counter_target,
+                requires: r.requires,
+                effects: r.effects,
+                alternate_costs: r.alternate_costs,
+                delve: r.delve,
+            }),
+            CardType::Artifact => CardKind::Artifact(ArtifactData {
+                mana_cost: r.mana_cost,
+                effects: r.effects,
+                abilities: r.abilities,
+                mana_abilities: r.mana_abilities.clone(),
+            }),
+            CardType::Planeswalker => CardKind::Planeswalker(PlaneswalkerData {
+                mana_cost: r.mana_cost,
+                loyalty: r.loyalty.unwrap_or(0),
+                effects: r.effects,
+                abilities: r.abilities,
+            }),
+            CardType::Enchantment => CardKind::Enchantment,
+        };
+        CardDef { name: r.name, play_weight: r.play_weight, kind }
+    }
+}
+
+impl<'de> Deserialize<'de> for CardDef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        RawCardDef::deserialize(d).map(CardDef::from)
+    }
 }
 
 
@@ -204,17 +446,6 @@ fn stage_label(turn: u8) -> &'static str {
 }
 
 // ── Game state ────────────────────────────────────────────────────────────────
-
-enum PermanentKind {
-    Creature { tapped: bool },
-    Planeswalker { loyalty: i32, activated: bool },
-    Artifact,
-}
-
-struct Permanent {
-    name: String,
-    kind: PermanentKind,
-}
 
 /// An item on the spell stack: a spell or ability that has been declared and paid for
 /// but not yet resolved.
@@ -345,67 +576,99 @@ fn end_phase() -> Phase {
 
 // ── Mana cost parsing ─────────────────────────────────────────────────────────
 
-/// Parse a mana cost string (e.g. "BBB", "1U", "UB", "2B", "0") into (black, blue, generic).
-/// `generic` = leading number + W/R/G/C pips (can be paid with any color).
+// ── Mana cost ─────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Default, Debug)]
+struct ManaCost {
+    w: i32,
+    u: i32,
+    b: i32,
+    r: i32,
+    g: i32,
+    c: i32,       // colorless pips {C}
+    generic: i32, // any-color pips {1}, {2}, ...
+}
+
+impl ManaCost {
+    fn total_specific(&self) -> i32 { self.w + self.u + self.b + self.r + self.g + self.c }
+    fn mana_value(&self) -> i32 { self.total_specific() + self.generic }
+}
+
+/// Parse a mana cost string into a ManaCost.
+/// Leading digits → generic; W/U/B/R/G/C → specific color pips.
 /// Empty string = no castable mana cost (alt-cost-only or uncostable cards like Daze/FoW).
 /// "0" = genuinely free (Lotus Petal, LED).
-fn parse_mana_cost(cost: &str) -> (i32, i32, i32) {
-    let mut generic = 0i32;
-    let mut black = 0i32;
-    let mut blue = 0i32;
-    let mut other = 0i32;
+fn parse_mana_cost(cost: &str) -> ManaCost {
+    let mut mc = ManaCost::default();
     let mut chars = cost.trim().chars().peekable();
     let mut num = String::new();
     while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
         num.push(chars.next().unwrap());
     }
     if !num.is_empty() {
-        generic = num.parse().unwrap_or(0);
+        mc.generic = num.parse().unwrap_or(0);
     }
     for c in chars {
         match c {
-            'B' => black += 1,
-            'U' => blue += 1,
-            'W' | 'R' | 'G' | 'C' => other += 1,
-            _ => {}
+            'W' => mc.w += 1,
+            'U' => mc.u += 1,
+            'B' => mc.b += 1,
+            'R' => mc.r += 1,
+            'G' => mc.g += 1,
+            'C' => mc.c += 1,
+            _ => mc.generic += 1,
         }
     }
-    (black, blue, generic + other)
+    mc
 }
 
 /// Total mana value (CMC) of a cost string.
 fn mana_value(cost: &str) -> i32 {
-    let (b, bl, g) = parse_mana_cost(cost);
-    b + bl + g
+    parse_mana_cost(cost).mana_value()
 }
 
 // ── Mana pool ─────────────────────────────────────────────────────────────────
 
-/// Mana tracking: black and blue are tracked separately (specific pip requirements);
-/// total covers generic costs. Dual lands contribute to multiple colors.
+/// Mana tracking: all 5 colors + colorless tracked separately; total covers all available mana.
 #[derive(Clone, Default)]
 struct ManaPool {
-    black: i32,
-    blue: i32,
+    w: i32,
+    u: i32,
+    b: i32,
+    r: i32,
+    g: i32,
+    c: i32,
     total: i32,
 }
 
 impl ManaPool {
-    fn can_pay(&self, black: i32, blue: i32, generic: i32) -> bool {
-        self.black >= black && self.blue >= blue && self.total >= black + blue + generic
+    fn can_pay(&self, cost: &ManaCost) -> bool {
+        self.w >= cost.w && self.u >= cost.u && self.b >= cost.b &&
+        self.r >= cost.r && self.g >= cost.g && self.c >= cost.c &&
+        self.total >= cost.total_specific() + cost.generic
     }
 
-    fn spend(&mut self, black: i32, blue: i32, generic: i32) {
-        self.black -= black;
-        self.blue  -= blue;
-        self.total -= black + blue + generic;
-        // Generic costs may consume colored mana from the pool; reduce the excess colored
-        // counters (black first, arbitrarily) so the invariant total >= black + blue holds.
-        let excess = (self.black + self.blue).saturating_sub(self.total);
+    fn spend(&mut self, cost: &ManaCost) {
+        self.w -= cost.w;
+        self.u -= cost.u;
+        self.b -= cost.b;
+        self.r -= cost.r;
+        self.g -= cost.g;
+        self.c -= cost.c;
+        self.total -= cost.total_specific() + cost.generic;
+        // Generic costs may consume colored mana; reduce excess colored counters
+        // proportionally so the invariant total >= sum_of_specifics holds.
+        let color_sum = self.w + self.u + self.b + self.r + self.g + self.c;
+        let excess = color_sum.saturating_sub(self.total);
         if excess > 0 {
-            let from_black = excess.min(self.black);
-            self.black -= from_black;
-            self.blue  -= (excess - from_black).min(self.blue);
+            // Drain colors in priority: b, u, w, r, g, c
+            let mut remaining = excess;
+            for field in [&mut self.b, &mut self.u, &mut self.w, &mut self.r, &mut self.g, &mut self.c] {
+                let drain = remaining.min(*field);
+                *field -= drain;
+                remaining -= drain;
+                if remaining == 0 { break; }
+            }
         }
     }
 
@@ -414,16 +677,46 @@ impl ManaPool {
     }
 }
 
+// ── Mana potential accumulation ───────────────────────────────────────────────
+
+/// Accumulate one source's potential contribution into the pool.
+/// A source (land or permanent) contributes at most 1 to `total` because a single
+/// tap or sacrifice produces one mana. The per-color fields reflect which colors
+/// that source *can* produce (union across all available abilities).
+fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
+    let avail: Vec<_> = abilities.iter()
+        .filter(|ma| !ma.tap_self || !tapped)
+        .collect();
+    if avail.is_empty() { return; }
+    p.total += 1;
+    let mut produced = [false; 6]; // W U B R G C
+    for ma in &avail {
+        for ch in ma.produces.chars() {
+            match ch {
+                'W' => produced[0] = true,
+                'U' => produced[1] = true,
+                'B' => produced[2] = true,
+                'R' => produced[3] = true,
+                'G' => produced[4] = true,
+                'C' => produced[5] = true,
+                _ => {}
+            }
+        }
+    }
+    let [w, u, b, r, g, c] = produced.map(|x| x as i32);
+    p.w += w; p.u += u; p.b += b; p.r += r; p.g += g; p.c += c;
+}
+
 // ── Simulation types ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct SimLand {
     name: String,
     tapped: bool,
-    produces_black: bool,
-    produces_blue: bool,
-    is_fetch: bool,
     basic: bool,
+    #[allow(dead_code)]
+    land_types: LandTypes,
+    mana_abilities: Vec<ManaAbility>,
     want_to_activate: bool,
 }
 
@@ -431,36 +724,42 @@ struct SimLand {
 struct SimPermanent {
     name: String,
     want_to_activate: bool,
-    /// Display annotation, e.g. "5/5" for Murktide or "Wizard" for Cavern.
+    /// Display annotation, e.g. "Wizard" for Cavern of Souls.
     annotation: Option<String>,
+    /// +1/+1 counters on this permanent (e.g. from Murktide Regent's delve).
+    counters: i32,
     tapped: bool,
     damage: i32,
     /// True on the turn this permanent entered play (summoning sickness).
     entered_this_turn: bool,
+    mana_abilities: Vec<ManaAbility>,
 }
 
 impl SimPermanent {
+    #[allow(dead_code)]
     fn new(name: impl Into<String>) -> Self {
         SimPermanent {
             name: name.into(),
             want_to_activate: false,
             annotation: None,
+            counters: 0,
             tapped: false,
             damage: 0,
             entered_this_turn: true,
+            mana_abilities: vec![],
         }
     }
 }
 
 impl SimLand {
     fn from_def(name: &str, def: &CardDef) -> Self {
+        let land = def.as_land().expect("SimLand::from_def called with non-land");
         SimLand {
             name: name.to_string(),
-            tapped: def.enters_tapped,
-            produces_black: def.produces_black,
-            produces_blue: def.produces_blue,
-            is_fetch: def.is_fetch,
-            basic: def.basic_land,
+            tapped: land.enters_tapped,
+            basic: land.basic,
+            land_types: land.land_types.clone(),
+            mana_abilities: land.mana_abilities.clone(),
             want_to_activate: false,
         }
     }
@@ -541,59 +840,119 @@ impl PlayerState {
         }
     }
 
-    /// Mana accessible right now: pool + what untapped non-fetch lands can still produce.
+    /// Mana accessible right now: pool + what untapped lands and permanents can still produce.
     fn potential_mana(&self) -> ManaPool {
         let mut p = self.pool.clone();
         for l in &self.lands {
-            if l.tapped || l.is_fetch { continue; }
-            if l.produces_black { p.black += 1; }
-            if l.produces_blue  { p.blue  += 1; }
-            p.total += 1;
+            if l.tapped { continue; }
+            accumulate_source_potential(&l.mana_abilities, false, &mut p);
+        }
+        for perm in &self.permanents {
+            accumulate_source_potential(&perm.mana_abilities, perm.tapped, &mut p);
         }
         p
     }
 
-    /// Tap lands to add mana to the pool. Black sources first, then blue, then any.
-    /// For generic costs only `pool.total` is incremented (color is not committed).
-    /// Fetches are never tapped for mana.
-    fn produce_mana(&mut self, black: i32, blue: i32, generic: i32) {
-        let mut b = black;
-        for l in &mut self.lands {
-            if !l.tapped && !l.is_fetch && b > 0 && l.produces_black {
-                l.tapped = true;
-                self.pool.black += 1;
-                self.pool.total += 1;
-                b -= 1;
+    /// Tap/sac lands and permanents to produce mana for the given cost.
+    /// Priority: B, U, W, R, G, C (specific pips), then generic.
+    fn produce_mana(&mut self, cost: &ManaCost) {
+        // For each specific color: find a source that produces it and activate it.
+        let color_specs: [(i32, char, fn(&mut ManaPool, i32)); 6] = [
+            (cost.b, 'B', |p, _| p.b += 1),
+            (cost.u, 'U', |p, _| p.u += 1),
+            (cost.w, 'W', |p, _| p.w += 1),
+            (cost.r, 'R', |p, _| p.r += 1),
+            (cost.g, 'G', |p, _| p.g += 1),
+            (cost.c, 'C', |p, _| p.c += 1),
+        ];
+
+        for (need, color_char, add_color) in color_specs {
+            let mut remaining = need;
+            while remaining > 0 {
+                // Try lands first.
+                let land_idx = self.lands.iter().position(|l| {
+                    !l.tapped && l.mana_abilities.iter().any(|ma| {
+                        (!ma.tap_self || true) && ma.produces.contains(color_char)
+                    })
+                });
+                if let Some(idx) = land_idx {
+                    self.lands[idx].tapped = true;
+                    add_color(&mut self.pool, 0);
+                    self.pool.total += 1;
+                    remaining -= 1;
+                    continue;
+                }
+                // Try permanents.
+                let perm_idx = self.permanents.iter().position(|p| {
+                    p.mana_abilities.iter().any(|ma| {
+                        (!ma.tap_self || !p.tapped) && ma.produces.contains(color_char)
+                    })
+                });
+                if let Some(idx) = perm_idx {
+                    let sac = self.permanents[idx].mana_abilities.iter()
+                        .find(|ma| (!ma.tap_self || !self.permanents[idx].tapped) && ma.produces.contains(color_char))
+                        .map(|ma| ma.sacrifice_self)
+                        .unwrap_or(false);
+                    if sac {
+                        let name = self.permanents[idx].name.clone();
+                        self.permanents.remove(idx);
+                        self.graveyard.visible.push(name);
+                    } else {
+                        self.permanents[idx].tapped = true;
+                    }
+                    add_color(&mut self.pool, 0);
+                    self.pool.total += 1;
+                    remaining -= 1;
+                    continue;
+                }
+                break; // No more sources available.
             }
         }
-        let mut u = blue;
-        for l in &mut self.lands {
-            if !l.tapped && !l.is_fetch && u > 0 && l.produces_blue {
-                l.tapped = true;
-                self.pool.blue  += 1;
+
+        // Generic: tap any remaining untapped source with any mana ability.
+        let mut remaining_generic = cost.generic;
+        while remaining_generic > 0 {
+            let land_idx = self.lands.iter().position(|l| {
+                !l.tapped && !l.mana_abilities.is_empty()
+            });
+            if let Some(idx) = land_idx {
+                self.lands[idx].tapped = true;
                 self.pool.total += 1;
-                u -= 1;
+                remaining_generic -= 1;
+                continue;
             }
-        }
-        let mut g = generic;
-        for l in &mut self.lands {
-            if !l.tapped && !l.is_fetch && g > 0 {
-                l.tapped = true;
-                self.pool.total += 1; // color not committed for generic
-                g -= 1;
+            let perm_idx = self.permanents.iter().position(|p| {
+                !p.mana_abilities.is_empty() && p.mana_abilities.iter().any(|ma| !ma.tap_self || !p.tapped)
+            });
+            if let Some(idx) = perm_idx {
+                let sac = self.permanents[idx].mana_abilities.iter()
+                    .find(|ma| !ma.tap_self || !self.permanents[idx].tapped)
+                    .map(|ma| ma.sacrifice_self)
+                    .unwrap_or(false);
+                if sac {
+                    let name = self.permanents[idx].name.clone();
+                    self.permanents.remove(idx);
+                    self.graveyard.visible.push(name);
+                } else {
+                    self.permanents[idx].tapped = true;
+                }
+                self.pool.total += 1;
+                remaining_generic -= 1;
+                continue;
             }
+            break;
         }
     }
 
-    /// Produce mana from lands and immediately spend it (the common pay-a-cost pattern).
-    fn pay_mana(&mut self, black: i32, blue: i32, generic: i32) {
-        self.produce_mana(black, blue, generic);
-        self.pool.spend(black, blue, generic);
+    /// Produce mana and immediately spend it (the common pay-a-cost pattern).
+    fn pay_mana(&mut self, cost: &ManaCost) {
+        self.produce_mana(cost);
+        self.pool.spend(cost);
     }
 
-    /// True if the player can currently produce at least one black mana (pool + untapped lands).
+    /// True if the player can currently produce at least one black mana (pool + untapped sources).
     fn has_black_mana(&self) -> bool {
-        self.potential_mana().black > 0
+        self.potential_mana().b > 0
     }
 }
 
@@ -699,10 +1058,15 @@ impl std::fmt::Display for PlayerState {
         if !self.permanents.is_empty() {
             writeln!(f, "  Permanents :")?;
             for p in &self.permanents {
-                let ann = p.annotation.as_deref()
-                    .map(|a| format!(" [{}]", a))
-                    .unwrap_or_default();
-                writeln!(f, "    * {}{}", p.name, ann)?;
+                let mut tags: Vec<String> = Vec::new();
+                if let Some(ann) = &p.annotation { tags.push(ann.clone()); }
+                if p.counters > 0 { tags.push(format!("+{} counters", p.counters)); }
+                let suffix = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", tags.join(", "))
+                };
+                writeln!(f, "    * {}{}", p.name, suffix)?;
             }
         }
 
@@ -955,9 +1319,8 @@ fn choose_land_name(
         .iter()
         .enumerate()
         .filter_map(|(i, (_, def))| {
-            if def.card_type != "land" { return None; }
-            if fateful && def.cracked_land { return None; }
-            if need_black && !def.produces_black { return None; }
+            let land = def.as_land()?;
+            if need_black && !land.mana_abilities.iter().any(|ma| ma.produces.contains('B')) { return None; }
             Some((i, 1))
         })
         .collect();
@@ -1016,25 +1379,24 @@ fn resolve_who<'a>(who_rel: &str, actor: &'a str) -> &'a str {
 /// required for MV and color checks (may be None for lands or unknown cards).
 fn matches_target_type(
     type_str: &str,
-    card_type: &str,
+    kind: &CardKind,
     basic: bool,
     def: Option<&CardDef>,
 ) -> bool {
     match type_str {
-        "nonbasic_land" => card_type == "land" && !basic,
-        "land" => card_type == "land",
-        "creature" => card_type == "creature",
-        "planeswalker" => card_type == "planeswalker",
-        "artifact" => card_type == "artifact",
-        "any" => true,
+        "nonbasic_land" => matches!(kind, CardKind::Land(_)) && !basic,
+        "land"          => matches!(kind, CardKind::Land(_)),
+        "creature"      => matches!(kind, CardKind::Creature(_)),
+        "planeswalker"  => matches!(kind, CardKind::Planeswalker(_)),
+        "artifact"      => matches!(kind, CardKind::Artifact(_)),
+        "any"           => true,
         "creature_mv_lt4" => {
-            card_type == "creature" && def.map(|d| mana_value(&d.mana_cost) < 4).unwrap_or(true)
+            matches!(kind, CardKind::Creature(_))
+                && def.map(|d| mana_value(d.mana_cost()) < 4).unwrap_or(true)
         }
         "creature_nonblack" => {
-            card_type == "creature"
-                && def
-                    .map(|d| !d.black && !d.mana_cost.contains('B'))
-                    .unwrap_or(true)
+            matches!(kind, CardKind::Creature(_))
+                && def.map(|d| !d.is_black()).unwrap_or(true)
         }
         _ => false,
     }
@@ -1056,11 +1418,12 @@ fn has_valid_target(
     player
         .lands
         .iter()
-        .any(|l| matches_target_type(type_str, "land", l.basic, None))
+        .any(|l| matches_target_type(type_str, &CardKind::Land(LandData::default()), l.basic, None))
         || player.permanents.iter().any(|p| {
-            let def = catalog_map.get(p.name.as_str()).copied();
-            let ct = def.map(|d| d.card_type.as_str()).unwrap_or("");
-            matches_target_type(type_str, ct, false, def)
+            match catalog_map.get(p.name.as_str()).copied() {
+                Some(d) => matches_target_type(type_str, &d.kind, false, Some(d)),
+                None    => type_str == "any",
+            }
         })
 }
 
@@ -1077,8 +1440,8 @@ fn ability_available(
         return false;
     }
     if !ability.mana_cost.is_empty() {
-        let (b, bl, g) = parse_mana_cost(&ability.mana_cost);
-        if !state.player(who).potential_mana().can_pay(b, bl, g) {
+        let cost = parse_mana_cost(&ability.mana_cost);
+        if !state.player(who).potential_mana().can_pay(&cost) {
             return false;
         }
     }
@@ -1103,14 +1466,14 @@ fn spell_is_affordable(
     who: &str,
     library: &[(String, CardDef)],
 ) -> bool {
-    let (b, bl, mut g) = parse_mana_cost(&def.mana_cost);
-    if def.delve && g > 0 {
+    let mut cost = parse_mana_cost(def.mana_cost());
+    if def.delve() && cost.generic > 0 {
         let gy_len = state.player(who).graveyard.visible.len() as i32;
-        g = (g - gy_len).max(0);
+        cost.generic = (cost.generic - gy_len).max(0);
     }
-    let mana_is_usable = !def.mana_cost.is_empty() && state.player(who).potential_mana().can_pay(b, bl, g);
+    let mana_is_usable = !def.mana_cost().is_empty() && state.player(who).potential_mana().can_pay(&cost);
     if mana_is_usable { return true; }
-    def.alternate_costs.iter().any(|c| can_pay_alternate_cost(c, state, who, name, library))
+    def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name, library))
 }
 
 fn collect_spells(
@@ -1127,10 +1490,10 @@ fn collect_spells(
     library
         .iter()
         .filter_map(|(name, def)| {
-            if def.card_type == "land" {
+            if def.is_land() {
                 return None;
             }
-            let castable = def.effects.iter().any(|e| {
+            let castable = def.effects().iter().any(|e| {
                 e == "cantrip" || e == "permanent" || e == "destroy" || e == "doomsday"
                     || e.starts_with("discard:") || e.starts_with("reanimate:")
                     || e.starts_with("mana:")
@@ -1138,21 +1501,21 @@ fn collect_spells(
             if !castable {
                 return None;
             }
-            if def.legendary && permanents_in_play.iter().any(|p| p.name == name.as_str()) {
+            if def.legendary() && permanents_in_play.iter().any(|p| p.name == name.as_str()) {
                 return None;
             }
             // Targeted spells need a valid target.
-            if let Some(tgt) = &def.target {
+            if let Some(tgt) = def.target() {
                 if !has_valid_target(tgt, state, who, catalog_map) {
                     return None;
                 }
             }
             // Check requires conditions.
-            let ok = def.requires.iter().all(|req| match req.as_str() {
+            let ok = def.requires().iter().all(|req| match req.as_str() {
                 "opp_hand_nonempty" => state.player(opp_who).hand.hidden > 0,
                 "us_gy_has_creature" => state.player(who).graveyard.visible.iter()
                     .any(|n| catalog_map.get(n.as_str())
-                        .map(|d| d.card_type == "creature")
+                        .map(|d| d.is_creature())
                         .unwrap_or(false)),
                 _ => true,
             });
@@ -1182,16 +1545,17 @@ fn choose_permanent_target(
 
     let mut candidates: Vec<String> = Vec::new();
     for land in &state.player(&target_who).lands {
-        if matches_target_type(type_str, "land", land.basic, None) {
+        if matches_target_type(type_str, &CardKind::Land(LandData::default()), land.basic, None) {
             candidates.push(land.name.clone());
         }
     }
     for perm in &state.player(&target_who).permanents {
         let def = catalog_map.get(perm.name.as_str()).copied();
-        let ct = def.map(|d| d.card_type.as_str()).unwrap_or("");
-        if matches_target_type(type_str, ct, false, def) {
-            candidates.push(perm.name.clone());
-        }
+        let matched = match def {
+            Some(d) => matches_target_type(type_str, &d.kind, false, Some(d)),
+            None    => type_str == "any",
+        };
+        if matched { candidates.push(perm.name.clone()); }
     }
     if candidates.is_empty() {
         return None;
@@ -1242,15 +1606,21 @@ fn sim_apply_targeted_effect(
 }
 
 /// Match a search filter string against a card definition.
-/// Filter syntax: `"land"`, `"land-u"`, `"land-b"`, `"land-ub"`.
+/// Filter syntax: `"land"`, `"land-island"`, `"land-swamp"`, `"land-island|swamp"`.
 fn matches_search_filter(filter: &str, def: &CardDef) -> bool {
-    match filter {
-        "land"    => def.card_type == "land",
-        "land-u"  => def.card_type == "land" && def.produces_blue,
-        "land-b"  => def.card_type == "land" && def.produces_black,
-        "land-ub" => def.card_type == "land" && (def.produces_blue || def.produces_black),
-        _         => false,
+    let Some(land) = def.as_land() else { return false; };
+    if filter == "land" { return true; }
+    if let Some(types_str) = filter.strip_prefix("land-") {
+        return types_str.split('|').any(|t| match t {
+            "island"   => land.land_types.island,
+            "swamp"    => land.land_types.swamp,
+            "plains"   => land.land_types.plains,
+            "mountain" => land.land_types.mountain,
+            "forest"   => land.land_types.forest,
+            _          => false,
+        });
     }
+    false
 }
 
 /// Pay the activation cost of an ability: mana, life, tap, and/or sacrifice.
@@ -1267,8 +1637,8 @@ fn pay_activation_cost(
 
     // Pay mana cost.
     if !ability.mana_cost.is_empty() {
-        let (b, bl, g) = parse_mana_cost(&ability.mana_cost);
-        state.player_mut(who).pay_mana(b, bl, g);
+        let cost = parse_mana_cost(&ability.mana_cost);
+        state.player_mut(who).pay_mana(&cost);
     }
 
     // Pay life cost.
@@ -1285,7 +1655,7 @@ fn pay_activation_cost(
 
     // Pay sacrifice cost.
     if ability.sacrifice_self {
-        let is_land = catalog_map.get(source_name).map(|d| d.card_type == "land").unwrap_or(false);
+        let is_land = catalog_map.get(source_name).map(|d| d.is_land()).unwrap_or(false);
         if is_land {
             state.player_mut(who).lands.retain(|l| l.name != source_name);
         } else {
@@ -1307,19 +1677,7 @@ fn apply_ability_effect(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
-    // mana:* — add mana to pool (e.g. Lotus Petal sac for B).
-    if ability.effect.starts_with("mana:") {
-        let spec = &ability.effect["mana:".len()..];
-        let black = spec.chars().filter(|&c| c == 'B').count() as i32;
-        let blue  = spec.chars().filter(|&c| c == 'U').count() as i32;
-        state.player_mut(who).pool.black += black;
-        state.player_mut(who).pool.blue  += blue;
-        state.player_mut(who).pool.total += black + blue;
-        state.log(t, who, format!("{} ability → add {} to pool", source_name, spec));
-        return;
-    }
-
-    // search:*:* — generic library search (e.g. fetchland: "search:land-ub:play").
+    // search:*:* — generic library search (e.g. fetchland: "search:land-island|swamp:play").
     if ability.effect.starts_with("search:") {
         let mut parts = ability.effect.splitn(3, ':');
         parts.next(); // "search"
@@ -1337,19 +1695,19 @@ fn apply_ability_effect(
             // Prefer black-producing lands so fetches reliably find a black source.
             let black_candidates: Vec<usize> = candidates.iter()
                 .copied()
-                .filter(|&i| library[i].1.produces_black)
+                .filter(|&i| library[i].1.as_land().map_or(false, |l| l.land_types.swamp || l.mana_abilities.iter().any(|ma| ma.produces.contains('B'))))
                 .collect();
             let pool = if !black_candidates.is_empty() { &black_candidates } else { &candidates };
             let idx = pool[rng.gen_range(0..pool.len())];
             let land = {
-                let (name, def) = &library[idx];
+                let (lname, ldef) = &library[idx];
+                let ld = ldef.as_land().expect("search result should be a land");
                 SimLand {
-                    name: name.clone(),
+                    name: lname.clone(),
                     tapped: false,
-                    is_fetch: false,
-                    basic: def.basic_land,
-                    produces_black: def.produces_black,
-                    produces_blue: def.produces_blue,
+                    basic: ld.basic,
+                    land_types: ld.land_types.clone(),
+                    mana_abilities: ld.mana_abilities.clone(),
                     want_to_activate: false,
                 }
             };
@@ -1380,18 +1738,13 @@ fn apply_ability_effect(
     state.log(t, who, format!("{} ability resolves", source_name));
 }
 
-/// Return true if a card is blue (U pip in mana_cost or explicit `blue` flag).
-fn is_blue(def: &CardDef) -> bool {
-    def.mana_cost.contains('U') || def.blue
-}
-
-/// Return true if `spell_type` is a valid target for a counterspell with `counter_target`.
-fn matches_counter_target(counter_target: &str, spell_type: &str) -> bool {
+/// Return true if `spell_kind` is a valid target for a counterspell with `counter_target`.
+fn matches_counter_target(counter_target: &str, spell_kind: &CardKind) -> bool {
     match counter_target {
-        "any" => true,
-        "noncreature" => spell_type != "creature",
-        "nonland" => spell_type != "land",
-        "instant_or_sorcery" => spell_type == "instant" || spell_type == "sorcery",
+        "any"              => true,
+        "noncreature"      => !matches!(spell_kind, CardKind::Creature(_)),
+        "nonland"          => !matches!(spell_kind, CardKind::Land(_)),
+        "instant_or_sorcery" => matches!(spell_kind, CardKind::Instant(_) | CardKind::Sorcery(_)),
         _ => false,
     }
 }
@@ -1410,21 +1763,21 @@ fn can_pay_alternate_cost(
         return false;
     }
     if !cost.mana_cost.is_empty() {
-        let (b, bl, g) = parse_mana_cost(&cost.mana_cost);
-        if !player.potential_mana().can_pay(b, bl, g) {
+        let cost_mc = parse_mana_cost(&cost.mana_cost);
+        if !player.potential_mana().can_pay(&cost_mc) {
             return false;
         }
     }
     if cost.exile_blue_from_hand {
         let has_pitch = library
             .iter()
-            .any(|(n, d)| n.as_str() != source_name && d.card_type != "land" && is_blue(d));
+            .any(|(n, d)| n.as_str() != source_name && !d.is_land() && d.is_blue());
         if !has_pitch {
             return false;
         }
     }
     if cost.bounce_island {
-        if !player.lands.iter().any(|l| !l.is_fetch && l.produces_blue) {
+        if !player.lands.iter().any(|l| l.mana_abilities.iter().any(|ma| ma.produces.contains('U'))) {
             return false;
         }
     }
@@ -1447,7 +1800,7 @@ fn apply_alt_cost_components(
         let pitch_indices: Vec<usize> = library
             .iter()
             .enumerate()
-            .filter(|(_, (n, d))| n.as_str() != source_name && d.card_type != "land" && is_blue(d))
+            .filter(|(_, (n, d))| n.as_str() != source_name && !d.is_land() && d.is_blue())
             .map(|(i, _)| i)
             .collect();
         let idx = pitch_indices[rng.gen_range(0..pitch_indices.len())];
@@ -1462,7 +1815,7 @@ fn apply_alt_cost_components(
             .player(who)
             .lands
             .iter()
-            .position(|l| !l.is_fetch && l.produces_blue)
+            .position(|l| l.mana_abilities.iter().any(|ma| ma.produces.contains('U')))
             .unwrap();
         let land_name = state.player(who).lands[idx].name.clone();
         state.player_mut(who).lands.remove(idx);
@@ -1470,8 +1823,8 @@ fn apply_alt_cost_components(
         parts.push(format!("bounce {}", land_name));
     }
     if !cost.mana_cost.is_empty() {
-        let (b, bl, g) = parse_mana_cost(&cost.mana_cost);
-        state.player_mut(who).pay_mana(b, bl, g);
+        let cost_mc = parse_mana_cost(&cost.mana_cost);
+        state.player_mut(who).pay_mana(&cost_mc);
         parts.push(cost.mana_cost.clone());
     }
     if cost.life_cost > 0 {
@@ -1503,18 +1856,18 @@ fn cast_spell(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<StackItem> {
-    let def = catalog_map.get(name)?;
-    let (b, bl, mut g) = parse_mana_cost(&def.mana_cost);
+    let def = *catalog_map.get(name)?;
+    let mut cost = parse_mana_cost(def.mana_cost());
 
     // Delve: reduce generic cost by exiling cards from the caster's graveyard.
-    let to_exile: Vec<String> = if def.delve && g > 0 {
+    let to_exile: Vec<String> = if def.delve() && cost.generic > 0 {
         let gy = state.player(who).graveyard.visible.clone();
         let mut cards = Vec::new();
         for card in &gy {
-            if cards.len() as i32 >= g { break; }
+            if cards.len() as i32 >= cost.generic { break; }
             cards.push(card.clone());
         }
-        g -= cards.len() as i32;
+        cost.generic -= cards.len() as i32;
         cards
     } else {
         Vec::new()
@@ -1522,8 +1875,8 @@ fn cast_spell(
 
     // Empty mana_cost means the card has no castable mana cost (alt-cost-only, or truly uncostable).
     // Use mana_cost = "0" in the catalog for genuinely free spells (Lotus Petal, LED).
-    let has_alt_costs = !def.alternate_costs.is_empty();
-    let mana_is_usable = !def.mana_cost.is_empty() && state.player(who).potential_mana().can_pay(b, bl, g);
+    let has_alt_costs = !def.alternate_costs().is_empty();
+    let mana_is_usable = !def.mana_cost().is_empty() && state.player(who).potential_mana().can_pay(&cost);
 
     // Select cost.
     let alt_cost: Option<AlternateCost> = if let Some(pc) = preferred_cost {
@@ -1531,7 +1884,7 @@ fn cast_spell(
         Some(pc.clone())
     } else if !mana_is_usable {
         // Can't pay mana (or mana_cost is empty / alt-cost-only): try alternate costs.
-        def.alternate_costs
+        def.alternate_costs()
             .iter()
             .find(|c| can_pay_alternate_cost(c, state, who, name, library))
             .cloned()
@@ -1547,7 +1900,7 @@ fn cast_spell(
     }
 
     // Choose permanent target (if the spell has one) before paying cost.
-    let permanent_target = def.target.as_deref()
+    let permanent_target = def.target()
         .and_then(|tgt| choose_permanent_target(tgt, who, state, catalog_map, rng));
 
     // Remove the spell from library.
@@ -1561,10 +1914,10 @@ fn cast_spell(
         debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative casting {} (alt cost)", name);
         parts.join(", ")
     } else {
-        state.player_mut(who).pay_mana(b, bl, g);
+        state.player_mut(who).pay_mana(&cost);
         state.player_mut(who).hand.hidden -= 1;
         debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative casting {}", name);
-        def.mana_cost.clone()
+        def.mana_cost().to_string()
     };
 
     // Exile delve cards from graveyard (cost payment).
@@ -1573,16 +1926,15 @@ fn cast_spell(
         state.player_mut(who).exile.visible.push(card.clone());
     }
 
-    // Compute annotation for permanents with delve (e.g. Murktide size from instants/sorceries exiled).
-    let annotation: Option<String> = if def.delve && !def.annotation_options.is_empty() {
-        let is_count = to_exile.iter()
+    // For delve permanents: encode +1/+1 counter count as "+N" in annotation.
+    // Counters come from instants/sorceries exiled via delve (e.g. Murktide Regent).
+    let annotation: Option<String> = if def.delve() && def.is_creature() {
+        let count = to_exile.iter()
             .filter(|n| catalog_map.get(n.as_str())
-                .map(|d| d.card_type == "instant" || d.card_type == "sorcery")
+                .map(|d| d.as_spell().is_some())
                 .unwrap_or(false))
             .count() as i32;
-        let base = def.power.unwrap_or(3);
-        let size = base + is_count;
-        Some(format!("{}/{}", size, size))
+        if count > 0 { Some(format!("+{}", count)) } else { None }
     } else {
         None
     };
@@ -1620,31 +1972,42 @@ fn apply_spell_effects(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
-    let Some(def) = catalog_map.get(item.name.as_str()) else {
+    let Some(&def) = catalog_map.get(item.name.as_str()) else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
         return;
     };
 
-    let is_permanent = def.effects.iter().any(|e| e == "permanent");
-    let is_cantrip = def.effects.iter().any(|e| e == "cantrip");
+    let is_permanent = def.effects().iter().any(|e| e == "permanent");
+    let is_cantrip = def.effects().iter().any(|e| e == "cantrip");
 
     // Destination: permanents or graveyard.
     if is_permanent {
-        // Pick annotation: use pre-computed (e.g. Murktide delve), else random from options (e.g. Cavern).
-        let annotation = if item.annotation.is_some() {
-            item.annotation.clone()
-        } else if !def.annotation_options.is_empty() {
-            Some(def.annotation_options[rng.gen_range(0..def.annotation_options.len())].clone())
-        } else {
-            None
+        // Decode annotation: "+N" encodes +1/+1 counters; anything else is a display label.
+        let (counters, annotation) = match item.annotation.as_deref() {
+            Some(s) if s.starts_with('+') => {
+                (s[1..].parse::<i32>().unwrap_or(0), None)
+            }
+            _ => {
+                let ann = if item.annotation.is_some() {
+                    item.annotation.clone()
+                } else if !def.annotation_options().is_empty() {
+                    Some(def.annotation_options()[rng.gen_range(0..def.annotation_options().len())].clone())
+                } else {
+                    None
+                };
+                (0, ann)
+            }
         };
         state.player_mut(&item.owner).permanents.push(SimPermanent {
             name: item.name.clone(),
             want_to_activate: false,
             annotation,
+            counters,
             tapped: false,
             damage: 0,
             entered_this_turn: true,
+            mana_abilities: catalog_map.get(item.name.as_str())
+                .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
         });
     } else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
@@ -1652,7 +2015,7 @@ fn apply_spell_effects(
 
     // Apply all effects and collect secondary log lines, before logging resolution.
     let mut secondary_logs: Vec<String> = Vec::new();
-    for effect in &def.effects {
+    for effect in def.effects() {
         let parts: Vec<&str> = effect.splitn(3, ':').collect();
         match parts.as_slice() {
             [e] if *e == "doomsday" => {
@@ -1674,7 +2037,7 @@ fn apply_spell_effects(
                     let mut discarded: Vec<String> = Vec::new();
                     for _ in 0..actual {
                         let candidates: Vec<usize> = other_lib.iter().enumerate()
-                            .filter(|(_, (_, d))| !nonland_only || d.card_type != "land")
+                            .filter(|(_, (_, d))| !nonland_only || !d.is_land())
                             .map(|(i, _)| i)
                             .collect();
                         if let Some(&idx) = candidates.get(rng.gen_range(0..candidates.len().max(1))) {
@@ -1695,25 +2058,24 @@ fn apply_spell_effects(
                 secondary_logs.push(format!("→ lose {} life (now {})", n, state.life_of(&item.owner)));
             }
             ["mana", spec] => {
-                // Parse MTG mana notation: count B's (black), U's (blue), leading digits (generic).
-                let black  = spec.chars().filter(|&c| c == 'B').count() as i32;
-                let blue   = spec.chars().filter(|&c| c == 'U').count() as i32;
-                let generic: i32 = spec.chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse()
-                    .unwrap_or(0);
+                // Parse MTG mana notation using parse_mana_cost.
+                let mc = parse_mana_cost(spec);
                 let owner = item.owner.clone();
-                state.player_mut(&owner).pool.black += black;
-                state.player_mut(&owner).pool.blue  += blue;
-                state.player_mut(&owner).pool.total += black + blue + generic;
+                let pool = &mut state.player_mut(&owner).pool;
+                pool.w += mc.w;
+                pool.u += mc.u;
+                pool.b += mc.b;
+                pool.r += mc.r;
+                pool.g += mc.g;
+                pool.c += mc.c;
+                pool.total += mc.mana_value();
                 secondary_logs.push(format!("→ add {} to pool", spec));
             }
             ["reanimate", who_rel, type_filter] => {
                 let target_who = resolve_who(who_rel, &item.owner).to_string();
                 let candidates: Vec<String> = state.player(&target_who).graveyard.visible.iter()
                     .filter(|n| catalog_map.get(n.as_str())
-                        .map(|d| d.card_type == *type_filter || *type_filter == "any")
+                        .map(|d| matches_target_type(type_filter, &d.kind, false, Some(*d)))
                         .unwrap_or(false))
                     .cloned()
                     .collect();
@@ -1724,9 +2086,12 @@ fn apply_spell_effects(
                         name: chosen.clone(),
                         want_to_activate: false,
                         annotation: None,
+                        counters: 0,
                         tapped: false,
                         damage: 0,
                         entered_this_turn: true,
+                        mana_abilities: catalog_map.get(chosen.as_str())
+                            .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
                     });
                     secondary_logs.push(format!("→ {} returns from graveyard", chosen));
                 }
@@ -1736,7 +2101,7 @@ fn apply_spell_effects(
     }
 
     // Targeted destroy effect: applied before log so resolution line reflects final state.
-    if def.effects.iter().any(|e| e == "destroy") {
+    if def.effects().iter().any(|e| e == "destroy") {
         if let Some((ref target_who, ref target_name)) = item.permanent_target {
             apply_effect_to("destroy", target_who, target_name, state, t, &item.owner);
         }
@@ -1779,10 +2144,11 @@ fn respond_with_counter(
     rng: &mut impl Rng,
     probabilistic: bool,
 ) -> Option<PriorityAction> {
-    let target_type = catalog_map
-        .get(stack[target_idx].name.as_str())
-        .map(|d| d.card_type.as_str())
-        .unwrap_or("sorcery");
+    let default_kind;
+    let target_kind: &CardKind = match catalog_map.get(stack[target_idx].name.as_str()) {
+        Some(d) => &d.kind,
+        None => { default_kind = CardKind::Sorcery(SpellData::default()); &default_kind }
+    };
 
     let target_owner = &stack[target_idx].owner;
     let target_has_untapped_lands = state.player(target_owner).lands.iter().any(|l| !l.tapped);
@@ -1790,10 +2156,9 @@ fn respond_with_counter(
     let counterspells: Vec<String> = responding_library
         .iter()
         .filter(|(n, d)| {
-            d.counter_target
-                .as_deref()
-                .is_some_and(|ct| matches_counter_target(ct, target_type))
-                && !d.alternate_costs.is_empty()
+            d.counter_target()
+                .is_some_and(|ct| matches_counter_target(ct, target_kind))
+                && !d.alternate_costs().is_empty()
                 // Daze is useless if the opponent can pay the 1-mana tax.
                 && !(n.as_str() == "Daze" && target_has_untapped_lands)
         })
@@ -1810,7 +2175,7 @@ fn respond_with_counter(
     }
 
     for cs_name in &counterspells {
-        let costs = catalog_map[cs_name.as_str()].alternate_costs.clone();
+        let costs = catalog_map[cs_name.as_str()].alternate_costs().to_vec();
         for cost in &costs {
             if probabilistic {
                 if let Some(p) = cost.prob {
@@ -1835,18 +2200,11 @@ fn respond_with_counter(
 
 // ── Combat helpers ────────────────────────────────────────────────────────────
 
-/// Return (power, toughness) for a permanent, preferring the annotation if it's "X/Y" format.
+/// Return (power, toughness) for a permanent, adding any +1/+1 counters to base stats.
 fn creature_stats(perm: &SimPermanent, def: Option<&CardDef>) -> (i32, i32) {
-    if let Some(ann) = &perm.annotation {
-        if let Some((p, t)) = ann.split_once('/') {
-            if let (Ok(p), Ok(t)) = (p.parse::<i32>(), t.parse::<i32>()) {
-                return (p, t);
-            }
-        }
-    }
-    let power     = def.and_then(|d| d.power).unwrap_or(1);
-    let toughness = def.and_then(|d| d.toughness).unwrap_or(1);
-    (power, toughness)
+    let power     = def.and_then(|d| d.as_creature()).map(|c| c.power).unwrap_or(1);
+    let toughness = def.and_then(|d| d.as_creature()).map(|c| c.toughness).unwrap_or(1);
+    (power + perm.counters, toughness + perm.counters)
 }
 
 // ── New turn-structure functions ──────────────────────────────────────────────
@@ -1872,7 +2230,7 @@ fn roll_want_to_activate(
         for land in &player.lands {
             if land.tapped || land.want_to_activate { continue; }
             if let Some(def) = catalog_map.get(land.name.as_str()) {
-                if def.abilities.iter().any(|ab| ability_available(ab, state, ap, true, catalog_map)) {
+                if def.abilities().iter().any(|ab| ability_available(ab, state, ap, true, catalog_map)) {
                     v.push(land.name.clone());
                 }
             }
@@ -1880,7 +2238,7 @@ fn roll_want_to_activate(
         for perm in &player.permanents {
             if perm.want_to_activate { continue; }
             if let Some(def) = catalog_map.get(perm.name.as_str()) {
-                if def.abilities.iter().any(|ab| ability_available(ab, state, ap, true, catalog_map)) {
+                if def.abilities().iter().any(|ab| ability_available(ab, state, ap, true, catalog_map)) {
                     v.push(perm.name.clone());
                 }
             }
@@ -1898,19 +2256,16 @@ fn roll_want_to_activate(
         }
     }
 
-    // Fateful turn: if we have Lotus Petal and need more black mana for Doomsday, force-activate it.
-    if ap == "us" && t == dd_turn && state.us.potential_mana().black < 3 {
-        if let Some(p) = state.us.permanents.iter_mut()
-            .find(|p| p.name == "Lotus Petal" && !p.want_to_activate)
-        {
-            p.want_to_activate = true;
-        }
-    }
-
     // Fateful turn: if we can't produce black mana, we must get a black source this turn.
     if ap == "us" && t == dd_turn && !state.us.has_black_mana() {
+        let can_search_black = |name: &str| catalog_map.get(name).map_or(false, |def|
+            def.abilities().iter().any(|ab|
+                ab.effect.starts_with("search:land-swamp")
+                    || ab.effect.starts_with("search:land-island|swamp")
+            )
+        );
         let fetch_names: Vec<String> = state.us.lands.iter()
-            .filter(|l| l.is_fetch && !l.tapped)
+            .filter(|l| !l.tapped && can_search_black(&l.name))
             .map(|l| l.name.clone())
             .collect();
         if !fetch_names.is_empty() {
@@ -2012,12 +2367,12 @@ fn ap_proactive(
         // On the fateful turn, skip the land drop if Doomsday is already castable — playing
         // a land might spend our last card in hand and leave us unable to cast Doomsday.
         let dd_already_castable = fateful && !state.us.dd_cast
-            && state.us.potential_mana().can_pay(3, 0, 0)
+            && state.us.potential_mana().can_pay(&ManaCost { b: 3, ..Default::default() })
             && us_lib.iter().any(|(n, _)| n == "Doomsday");
         if !dd_already_castable {
             let force = state.player(who).must_land_drop;
             let lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-            let land_count = lib.iter().filter(|(_, d)| d.card_type == "land").count();
+            let land_count = lib.iter().filter(|(_, d)| d.is_land()).count();
             if land_count > 0 {
                 // T1=100%, T2=90%, T3=80%, T4+=70%; forced to 100% when must_land_drop is set.
                 let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
@@ -2040,7 +2395,7 @@ fn ap_proactive(
             .find(|p| p.want_to_activate).map(|p| p.name.clone()));
     if let Some(source_name) = source_name {
         if let Some(ab) = catalog_map.get(source_name.as_str())
-            .and_then(|def| def.abilities.iter()
+            .and_then(|def| def.abilities().iter()
                 .find(|ab| ability_available(ab, state, who, true, catalog_map))
                 .cloned())
         {
@@ -2059,11 +2414,11 @@ fn ap_proactive(
         let pool = &state.player(who).pool;
         let hand = state.player(who).hand.hidden;
         eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
-            who, pool.black, pool.blue, pool.total, hand);
+            who, pool.b, pool.u, pool.total, hand);
         if who == "us" && t == dd_turn && !state.us.dd_cast {
             let dd_in_lib = actor_lib.iter().filter(|(n, _)| n == "Doomsday").count();
             eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_lib={}, potential B={} tot={}",
-                hand, dd_in_lib, pool.black, pool.total);
+                hand, dd_in_lib, pool.b, pool.total);
         }
         return PriorityAction::Pass;
     }
@@ -2185,7 +2540,7 @@ fn handle_priority_round(
                 // Framework legality check: non-instant spells require an empty stack.
                 // No resources have been spent yet, so it is safe to drop an illegal action.
                 let is_instant = catalog_map.get(name.as_str())
-                    .map(|d| d.card_type == "instant")
+                    .map(|d| d.is_instant())
                     .unwrap_or(false);
                 if !is_instant && !stack.is_empty() {
                     eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack (stack={}), treating as Pass", name,
@@ -2213,7 +2568,7 @@ fn handle_priority_round(
                         // to avoid an infinite loop where the same failing action repeats.
                         let pool = &state.player(&who).pool;
                         eprintln!("[priority] BUG: cast_spell failed for {} by {} (pool B={} U={} tot={}, hand={})",
-                            name, who, pool.black, pool.blue, pool.total, state.player(&who).hand.hidden);
+                            name, who, pool.b, pool.u, pool.total, state.player(&who).hand.hidden);
                         debug_assert!(false, "BUG: cast_spell failed for {} — decision function returned unaffordable/unavailable spell", name);
                         last_passer = Some(who.clone());
                         let other = if who == ap { nap } else { ap };
@@ -2339,7 +2694,7 @@ fn do_step(
                 .filter(|p| !p.tapped)
                 .filter_map(|p| {
                     let def = catalog_map.get(p.name.as_str());
-                    if def.map(|d| d.card_type == "creature").unwrap_or(false) {
+                    if def.map(|d| d.is_creature()).unwrap_or(false) {
                         Some(creature_stats(p, def.copied()).0)
                     } else { None }
                 })
@@ -2348,7 +2703,7 @@ fn do_step(
                 .filter(|p| !p.tapped && !p.entered_this_turn)
                 .filter_map(|p| {
                     let def = catalog_map.get(p.name.as_str());
-                    if def.map(|d| d.card_type == "creature").unwrap_or(false) {
+                    if def.map(|d| d.is_creature()).unwrap_or(false) {
                         let (_, tgh) = creature_stats(p, def.copied());
                         if tgh > nap_power { Some(p.name.clone()) } else { None }
                     } else { None }
@@ -2381,7 +2736,7 @@ fn do_step(
                     .filter(|p| !p.tapped && !used_blockers.contains(&p.name))
                     .filter_map(|p| {
                         let def = catalog_map.get(p.name.as_str()).copied();
-                        if def.map(|d| d.card_type == "creature").unwrap_or(false) {
+                        if def.map(|d| d.is_creature()).unwrap_or(false) {
                             let (blk_pow, blk_tgh) = creature_stats(p, def);
                             // Good block: kills attacker OR both survive (touch butts). Not a chump.
                             let good_block = blk_pow >= atk_tgh || atk_pow < blk_tgh;
@@ -2438,8 +2793,8 @@ fn do_step(
                 }
 
                 if player_damage > 0 {
-                    state.log(t, ap, format!("Combat: {} unblocked damage to {}", player_damage, nap));
                     state.lose_life(nap, player_damage);
+                    state.log(t, ap, format!("Combat: {} unblocked damage to {} (life: {})", player_damage, nap, state.life_of(nap)));
                 }
 
                 // SBAs: lethal damage check on both boards.
@@ -2727,10 +3082,10 @@ fn weighted_choice<T: Clone>(options: &[(T, u32)], rng: &mut impl Rng) -> T {
 /// - Lands are always actionable (played via land-drop logic).
 /// - Spells need at least one castable effect, a counter_target, or abilities.
 fn card_has_implementation(def: &CardDef) -> bool {
-    if def.card_type == "land" { return true; }
-    if !def.abilities.is_empty() { return true; }
-    if def.counter_target.is_some() { return true; }
-    def.effects.iter().any(|e| {
+    if def.is_land() { return true; }
+    if !def.abilities().is_empty() { return true; }
+    if def.counter_target().is_some() { return true; }
+    def.effects().iter().any(|e| {
         e == "cantrip" || e == "permanent" || e == "destroy" || e == "doomsday"
             || e.starts_with("discard:") || e.starts_with("mana:") || e.starts_with("reanimate:")
     })
@@ -2808,10 +3163,9 @@ mod tests {
         SimLand {
             name: name.to_string(),
             tapped,
-            produces_black: false,
-            produces_blue: false,
-            is_fetch: false,
             basic: false,
+            land_types: LandTypes::default(),
+            mana_abilities: vec![],
             want_to_activate: false,
         }
     }
@@ -2832,18 +3186,25 @@ mod tests {
 
     #[test]
     fn test_parse_mana_cost_black() {
-        assert_eq!(parse_mana_cost("BBB"), (3, 0, 0));
+        let mc = parse_mana_cost("BBB");
+        assert_eq!(mc.b, 3);
+        assert_eq!(mc.u, 0);
+        assert_eq!(mc.generic, 0);
     }
 
     #[test]
     fn test_parse_mana_cost_mixed() {
-        // "1UB" → black=1, blue=1, generic=1
-        assert_eq!(parse_mana_cost("1UB"), (1, 1, 1));
+        // "1UB" → b=1, u=1, generic=1
+        let mc = parse_mana_cost("1UB");
+        assert_eq!(mc.b, 1);
+        assert_eq!(mc.u, 1);
+        assert_eq!(mc.generic, 1);
     }
 
     #[test]
     fn test_parse_mana_cost_zero() {
-        assert_eq!(parse_mana_cost("0"), (0, 0, 0));
+        let mc = parse_mana_cost("0");
+        assert_eq!(mc.mana_value(), 0);
     }
 
     #[test]
@@ -2854,9 +3215,10 @@ mod tests {
     }
 
     #[test]
-    fn test_creature_stats_annotation_override() {
-        let perm = SimPermanent { annotation: Some("5/5".into()), ..SimPermanent::new("X") };
-        assert_eq!(creature_stats(&perm, None), (5, 5));
+    fn test_creature_stats_counters() {
+        let perm = SimPermanent { counters: 3, ..SimPermanent::new("Murktide Regent") };
+        let def = creature("Murktide Regent", 3, 3);
+        assert_eq!(creature_stats(&perm, Some(&def)), (6, 6));
     }
 
     #[test]
@@ -3151,10 +3513,9 @@ mod tests {
         state.us.lands.push(SimLand {
             name: "Island".to_string(),
             tapped: true,
-            produces_black: false,
-            produces_blue: true,
-            is_fetch: false,
             basic: true,
+            land_types: LandTypes { island: true, ..Default::default() },
+            mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
             want_to_activate: false,
         });
         let initial_hidden = state.us.hand.hidden; // 7
@@ -3205,7 +3566,7 @@ mod tests {
             effects = ["mana:BBB"]
         "#).unwrap();
         let mut us_lib = vec![("Dark Ritual".to_string(), def.clone())];
-        state.us.pool.black = 1;
+        state.us.pool.b = 1;
         state.us.pool.total = 1;
         // hand.hidden = 7 (from PlayerState::new)
 
@@ -3219,7 +3580,7 @@ mod tests {
         assert_eq!(item.name, "Dark Ritual");
         assert_eq!(item.owner, "us");
         assert!(!us_lib.iter().any(|(n, _)| n == "Dark Ritual"), "removed from library");
-        assert_eq!(state.us.pool.black, 0, "mana spent");
+        assert_eq!(state.us.pool.b, 0, "mana spent");
     }
 
     #[test]
@@ -3266,7 +3627,7 @@ mod tests {
         let catalog = vec![fow_def.clone(), brainstorm_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let alt_cost = &fow_def.alternate_costs[0];
+        let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
         let item = cast_spell(&mut state, 1, "us", "Force of Will", &mut us_lib, Some(alt_cost), &catalog_map, &mut seeded_rng());
@@ -3351,7 +3712,7 @@ mod tests {
         let (mut us_lib, mut opp_lib) = empty_libs();
         apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
 
-        assert_eq!(state.us.pool.black, 3, "should add 3 black mana");
+        assert_eq!(state.us.pool.b, 3, "should add 3 black mana");
         assert_eq!(state.us.pool.total, 3);
     }
 
@@ -3388,7 +3749,7 @@ mod tests {
     #[test]
     fn test_pay_activation_cost_mana() {
         let mut state = make_state();
-        state.us.pool.black = 2;
+        state.us.pool.b = 2;
         state.us.pool.total = 2;
         let ability: AbilityDef = toml::from_str(r#"
             mana_cost = "B"
@@ -3397,7 +3758,7 @@ mod tests {
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &catalog_map);
 
-        assert_eq!(state.us.pool.black, 1, "1 black spent");
+        assert_eq!(state.us.pool.b, 1, "1 black spent");
         assert_eq!(state.us.pool.total, 1);
     }
 
@@ -3537,7 +3898,7 @@ mod tests {
         "#).unwrap();
         state.us.graveyard.visible = vec!["A".into(), "B".into(), "C".into(),
                                           "D".into(), "E".into(), "F".into(), "G".into()];
-        state.us.pool.blue  = 1;
+        state.us.pool.u  = 1;
         state.us.pool.total = 1; // only 1 mana in pool — delve pays the other 7
 
         let mut us_lib = vec![("Treasure Cruise".to_string(), def.clone())];
@@ -3549,7 +3910,7 @@ mod tests {
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.us.graveyard.visible.len(), 0, "all 7 graveyard cards exiled");
         assert_eq!(state.us.exile.visible.len(), 7, "exiled by delve");
-        assert_eq!(state.us.pool.blue, 0, "blue pip paid");
+        assert_eq!(state.us.pool.u, 0, "blue pip paid");
     }
 
     #[test]
@@ -3577,6 +3938,111 @@ mod tests {
         assert_eq!(state.us.graveyard.visible.len(), 0, "both graveyard cards exiled");
         assert_eq!(state.us.exile.visible.len(), 2);
         assert_eq!(state.us.pool.total, 0, "remaining generic pip paid");
+    }
+
+    #[test]
+    fn test_murktide_counters_from_exiled_instants_sorceries() {
+        // Murktide exiles 4 cards via delve; 3 are instants/sorceries → enters as 6/6.
+        let mut state = make_state();
+        let murktide_def: CardDef = toml::from_str(r#"
+            name = "Murktide Regent"
+            card_type = "creature"
+            mana_cost = "5UU"
+            delve = true
+            power = 3
+            toughness = 3
+            effects = ["permanent"]
+        "#).unwrap();
+        let ritual_def: CardDef   = toml::from_str("name = \"Dark Ritual\"\ncard_type = \"instant\"\nmana_cost = \"B\"").unwrap();
+        let ponder_def: CardDef   = toml::from_str("name = \"Ponder\"\ncard_type = \"sorcery\"\nmana_cost = \"U\"").unwrap();
+        let consider_def: CardDef = toml::from_str("name = \"Consider\"\ncard_type = \"instant\"\nmana_cost = \"U\"").unwrap();
+        let ragavan_def  = creature("Ragavan", 2, 1); // creature — does NOT count
+
+        state.us.graveyard.visible = vec![
+            "Dark Ritual".into(), "Ponder".into(), "Consider".into(), "Ragavan".into(),
+        ];
+        // After delving all 4, generic cost = 5-4 = 1. Need UU + 1 generic.
+        state.us.pool.u  = 2;
+        state.us.pool.total = 3;
+
+        let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let mut us_lib = vec![("Murktide Regent".to_string(), murktide_def)];
+
+        let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
+        // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
+        assert_eq!(item.annotation.as_deref(), Some("+3"));
+
+        // Resolve and check permanent
+        let (mut us_lib2, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib2, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        let murktide = &state.us.permanents[0];
+        assert_eq!(murktide.counters, 3, "3 instants/sorceries exiled → 3 counters");
+        assert!(murktide.annotation.is_none(), "counter annotation consumed");
+
+        // creature_stats reflects counters in damage calculations
+        let def = catalog_map["Murktide Regent"];
+        assert_eq!(creature_stats(murktide, Some(def)), (6, 6));
+    }
+
+    #[test]
+    fn test_murktide_zero_counters_when_no_instants_exiled() {
+        // Delve only exiles a creature — no instants/sorceries → enters as base 3/3.
+        let mut state = make_state();
+        let murktide_def: CardDef = toml::from_str(r#"
+            name = "Murktide Regent"
+            card_type = "creature"
+            mana_cost = "5UU"
+            delve = true
+            power = 3
+            toughness = 3
+            effects = ["permanent"]
+        "#).unwrap();
+        let ragavan_def = creature("Ragavan", 2, 1);
+
+        state.us.graveyard.visible = vec!["Ragavan".into()];
+        // 5 - 1 = 4 generic remaining; need UU + 4 generic
+        state.us.pool.u  = 2;
+        state.us.pool.total = 6;
+
+        let catalog = vec![murktide_def.clone(), ragavan_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let mut us_lib = vec![("Murktide Regent".to_string(), murktide_def)];
+
+        let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
+        assert!(item.annotation.is_none(), "no instants/sorceries → no counter annotation");
+
+        let (mut us_lib2, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib2, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        let murktide = &state.us.permanents[0];
+        assert_eq!(murktide.counters, 0);
+        let def = catalog_map["Murktide Regent"];
+        assert_eq!(creature_stats(murktide, Some(def)), (3, 3));
+    }
+
+    #[test]
+    fn test_murktide_attacks_with_counter_boosted_stats() {
+        // A 6/6 Murktide (base 3/3 + 3 counters) should survive attacking into a 5-power blocker.
+        let mut state = make_state();
+        let murktide_def = creature("Murktide Regent", 3, 3);
+        let mut murktide = SimPermanent::new("Murktide Regent");
+        murktide.counters = 3;
+        murktide.entered_this_turn = false;
+        // Opponent has a 5/5 blocker — Murktide's toughness 6 > opp power 5, safe to attack.
+        let blocker_def = creature("Dragon", 5, 5);
+        state.opp.permanents.push(SimPermanent::new("Dragon"));
+        state.us.permanents.push(murktide);
+
+        let catalog = vec![murktide_def, blocker_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_attackers.contains(&"Murktide Regent".to_string()),
+            "6/6 Murktide should attack into a 5-power blocker");
     }
 
     #[test]
