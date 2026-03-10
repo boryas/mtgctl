@@ -304,4 +304,25 @@ toughness = 1
 effects = ["permanent"]
 adventure = {name = "Petty Theft", card_type = "instant", mana_cost = "1U", target = "opp:permanent_nonland", effects = ["bounce"]}
 
+[[cards]]
+name = "Ingenious Infiltrator"
+card_type = "creature"
+mana_cost = "1UB"
+blue = true
+black = true
+power = 2
+toughness = 1
+effects = ["permanent"]
+ninjutsu = {mana_cost = "1U"}
 
+[[cards]]
+name = "Kaito, Bane of Nightmares"
+card_type = "creature"
+legendary = true
+mana_cost = "2UB"
+blue = true
+black = true
+power = 3
+toughness = 4
+effects = ["permanent"]
+ninjutsu = {mana_cost = "1UB"}

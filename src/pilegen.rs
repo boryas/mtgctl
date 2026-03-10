@@ -91,6 +91,10 @@ struct AbilityDef {
     // ── Effect ────────────────────────────────────────────────────────────────
     #[serde(default)]
     effect: String,
+    /// If true, this is a ninjutsu activation: cost includes returning an unblocked attacker to
+    /// hand, and the effect puts the ninja into play tapped and attacking.
+    #[serde(default)]
+    ninjutsu: bool,
 }
 
 // ── Mana ability types ────────────────────────────────────────────────────────
@@ -141,6 +145,7 @@ struct CreatureData {
     #[serde(default)] abilities: Vec<AbilityDef>,
     #[serde(default)] mana_abilities: Vec<ManaAbility>,
     #[serde(default)] adventure: Option<AdventureFace>,
+    #[serde(default)] ninjutsu: Option<NinjutsuAbility>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -149,6 +154,23 @@ struct ArtifactData {
     #[serde(default)] effects: Vec<String>,
     #[serde(default)] abilities: Vec<AbilityDef>,
     #[serde(default)] mana_abilities: Vec<ManaAbility>,
+}
+
+/// The ninjutsu ability on a ninja creature.
+#[derive(Deserialize, Clone)]
+struct NinjutsuAbility {
+    mana_cost: String,
+}
+
+impl NinjutsuAbility {
+    fn as_ability_def(&self) -> AbilityDef {
+        AbilityDef {
+            zone: "hand".to_string(),
+            mana_cost: self.mana_cost.clone(),
+            ninjutsu: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// The adventure face of an adventure card (the instant/sorcery half).
@@ -348,6 +370,13 @@ impl CardDef {
             _ => None,
         }
     }
+
+    fn ninjutsu(&self) -> Option<&NinjutsuAbility> {
+        match &self.kind {
+            CardKind::Creature(c) => c.ninjutsu.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 // ── TOML deserialization: two-step via RawCardDef ─────────────────────────────
@@ -393,6 +422,7 @@ struct RawCardDef {
     #[serde(default)] counter_target: Option<String>,
     #[serde(default)] alternate_costs: Vec<AlternateCost>,
     #[serde(default)] adventure: Option<AdventureFace>,
+    #[serde(default)] ninjutsu: Option<NinjutsuAbility>,
 }
 
 impl From<RawCardDef> for CardDef {
@@ -419,6 +449,7 @@ impl From<RawCardDef> for CardDef {
                 abilities: r.abilities,
                 mana_abilities: r.mana_abilities.clone(),
                 adventure: r.adventure,
+                ninjutsu: r.ninjutsu,
             }),
             CardType::Instant => CardKind::Instant(SpellData {
                 mana_cost: r.mana_cost,
@@ -774,6 +805,10 @@ struct SimPermanent {
     /// True on the turn this permanent entered play (summoning sickness).
     entered_this_turn: bool,
     mana_abilities: Vec<ManaAbility>,
+    /// Set when this creature was declared as an attacker this combat.
+    attacking: bool,
+    /// Set in DeclareBlockers if this attacking creature was not assigned a blocker.
+    unblocked: bool,
 }
 
 impl SimPermanent {
@@ -787,6 +822,8 @@ impl SimPermanent {
             damage: 0,
             entered_this_turn: true,
             mana_abilities: vec![],
+            attacking: false,
+            unblocked: false,
         }
     }
 }
@@ -1777,6 +1814,24 @@ fn pay_activation_cost(
         }
     }
 
+    // Ninjutsu cost: remove ninja from library (hand) and return an unblocked attacker to hand.
+    if ability.ninjutsu {
+        if let Some(idx) = library.iter().position(|(n, _)| n == source_name) {
+            library.remove(idx);
+            state.player_mut(who).hand.hidden -= 1;
+        }
+        let unblocked_attacker = state.player(who).permanents.iter()
+            .find(|p| p.attacking && p.unblocked)
+            .map(|p| p.name.clone());
+        if let Some(atk_name) = unblocked_attacker {
+            state.player_mut(who).permanents.retain(|p| p.name != atk_name);
+            state.combat_attackers.retain(|a| *a != atk_name);
+            state.combat_blocks.retain(|(a, _)| *a != atk_name);
+            state.player_mut(who).hand.hidden += 1;
+            state.log(t, who, format!("→ return {} to hand (ninjutsu)", atk_name));
+        }
+    }
+
     // Sacrifice-a-land cost (e.g. Edge of Autumn cycling).
     if ability.sacrifice_land {
         // Prefer non-mana-producing lands to preserve mana sources.
@@ -1803,6 +1858,26 @@ fn apply_ability_effect(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
+    // Ninjutsu effect: ninja enters play tapped and attacking (unblocked).
+    if ability.ninjutsu {
+        let mana_abs = catalog_map.get(source_name)
+            .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+        state.player_mut(who).permanents.push(SimPermanent {
+            name: source_name.to_string(),
+            annotation: None,
+            counters: 0,
+            tapped: true,
+            damage: 0,
+            entered_this_turn: true,
+            mana_abilities: mana_abs,
+            attacking: true,
+            unblocked: true,
+        });
+        state.combat_attackers.push(source_name.to_string());
+        state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", source_name));
+        return;
+    }
+
     // draw:N — draw N cards (cycling effect).
     if let Some(rest) = ability.effect.strip_prefix("draw:") {
         let n: i32 = rest.parse().unwrap_or(1);
@@ -2170,6 +2245,8 @@ fn apply_spell_effects(
             entered_this_turn: true,
             mana_abilities: catalog_map.get(item.name.as_str())
                 .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
+            attacking: false,
+            unblocked: false,
         });
     } else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
@@ -2254,6 +2331,8 @@ fn apply_spell_effects(
                         entered_this_turn: true,
                         mana_abilities: catalog_map.get(chosen.as_str())
                             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
+                        attacking: false,
+                        unblocked: false,
                     });
                     secondary_logs.push((item.owner.clone(), format!("→ {} returns from graveyard", chosen)));
                 }
@@ -2366,6 +2445,40 @@ fn creature_stats(perm: &SimPermanent, def: Option<&CardDef>) -> (i32, i32) {
     let power     = def.and_then(|d| d.as_creature()).map(|c| c.power).unwrap_or(1);
     let toughness = def.and_then(|d| d.as_creature()).map(|c| c.toughness).unwrap_or(1);
     (power + perm.counters, toughness + perm.counters)
+}
+
+/// Try to perform ninjutsu during a combat priority window (DeclareBlockers / CombatDamage / EndCombat).
+///
+/// Requires: unblocked attacker, ninjutsu card in library (treated probabilistically as in-hand),
+/// and enough mana. Returns a `Ninjutsu` action or `None` if conditions aren't met.
+fn try_ninjutsu(
+    state: &SimState,
+    who: &str,
+    library: &[(String, CardDef)],
+    rng: &mut impl Rng,
+) -> Option<PriorityAction> {
+    if state.player(who).hand.hidden <= 0 { return None; }
+    // Find an unblocked attacker controlled by `who`.
+    let unblocked: Vec<&str> = state.player(who).permanents.iter()
+        .filter(|p| p.attacking && p.unblocked)
+        .map(|p| p.name.as_str())
+        .collect();
+    if unblocked.is_empty() { return None; }
+    // Find ninjutsu cards in the library (hand + undrawn combined).
+    let ninja_indices: Vec<usize> = library.iter()
+        .enumerate()
+        .filter(|(_, (_, def))| def.ninjutsu().is_some())
+        .map(|(i, _)| i)
+        .collect();
+    if ninja_indices.is_empty() { return None; }
+    // 35% roll: simulates probability of holding it and wanting to use it.
+    if !rng.gen_bool(0.35) { return None; }
+    // Pick a random ninja and verify mana.
+    let idx = ninja_indices[rng.gen_range(0..ninja_indices.len())];
+    let (ninja_name, ninja_def) = &library[idx];
+    let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
+    if !state.player(who).potential_mana().can_pay(&ninjutsu_cost) { return None; }
+    Some(PriorityAction::ActivateAbility(ninja_name.clone(), ninja_def.ninjutsu()?.as_ability_def()))
 }
 
 // ── New turn-structure functions ──────────────────────────────────────────────
@@ -2594,6 +2707,12 @@ fn ap_proactive(
                     || state.player(who).permanents.iter().any(|p| p.name == *source && (!p.tapped || ab.sacrifice_self));
                 ability_available(ab, state, who, source_untapped, catalog_map)
             }
+            PriorityAction::CastFromAdventure { card_name } => {
+                state.player(who).on_adventure.iter().any(|n| n == card_name)
+                    && catalog_map.get(card_name.as_str())
+                        .map(|def| state.player(who).potential_mana().can_pay(&parse_mana_cost(def.mana_cost())))
+                        .unwrap_or(false)
+            }
             _ => false,
         };
         state.player_mut(who).pending_actions.remove(0);
@@ -2669,6 +2788,16 @@ fn decide_action(
     if who != ap {
         if stack.is_empty() { return PriorityAction::Pass; }
         return nap_action(state, who, last_action, stack, us_lib, opp_lib, catalog_map, rng);
+    }
+    // Ninjutsu: AP can activate during DeclareBlockers / CombatDamage / EndCombat.
+    let in_ninjutsu_step = matches!(state.current_phase.as_str(),
+        "DeclareBlockers" | "CombatDamage" | "EndCombat");
+    if in_ninjutsu_step {
+        let actor_lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
+        if let Some(action) = try_ninjutsu(state, who, actor_lib, rng) {
+            return action;
+        }
+        return PriorityAction::Pass;
     }
     if state.current_phase != "Main" {
         return PriorityAction::Pass;
@@ -3014,6 +3143,7 @@ fn do_step(
                 for name in &attackers {
                     if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| &p.name == name) {
                         p.tapped = true;
+                        p.attacking = true;
                     }
                 }
             }
@@ -3051,6 +3181,20 @@ fn do_step(
                 }
             }
             state.combat_blocks = blocks;
+            // Mark unblocked attackers so ninjutsu can target them.
+            let unblocked_names: Vec<String> = {
+                let blocked: std::collections::HashSet<&str> = state.combat_blocks.iter()
+                    .map(|(a, _)| a.as_str()).collect();
+                state.combat_attackers.iter()
+                    .filter(|a| !blocked.contains(a.as_str()))
+                    .cloned()
+                    .collect()
+            };
+            for name in unblocked_names {
+                if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| p.name == name) {
+                    p.unblocked = true;
+                }
+            }
         }
         StepKind::CombatDamage => {
             if !state.combat_attackers.is_empty() {
@@ -3118,6 +3262,8 @@ fn do_step(
         StepKind::EndCombat => {
             state.combat_attackers.clear();
             state.combat_blocks.clear();
+            for p in state.us.permanents.iter_mut() { p.attacking = false; p.unblocked = false; }
+            for p in state.opp.permanents.iter_mut() { p.attacking = false; p.unblocked = false; }
         }
         StepKind::Upkeep | StepKind::BeginCombat | StepKind::End => {
             // No automatic actions.
@@ -4391,6 +4537,330 @@ mod tests {
         assert!(state.opp.permanents.is_empty(), "Troll should be exiled");
         assert!(state.opp.exile.visible.contains(&"Troll".to_string()));
         assert!(state.opp.graveyard.visible.is_empty(), "exiled, not dead");
+    }
+
+    // ── Section 10: Ninjutsu ──────────────────────────────────────────────────
+
+    fn ninja_def() -> CardDef {
+        toml::from_str(r#"
+            name = "Ninja"
+            card_type = "creature"
+            power = 2
+            toughness = 1
+            effects = ["permanent"]
+            ninjutsu = {mana_cost = "U"}
+        "#).unwrap()
+    }
+
+    fn island_land() -> SimLand {
+        SimLand {
+            name: "Island".to_string(),
+            tapped: false,
+            basic: true,
+            land_types: LandTypes { island: true, ..Default::default() },
+            mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
+        }
+    }
+
+    #[test]
+    fn test_declare_attackers_sets_attacking_flag() {
+        let mut state = make_state();
+        let def = creature("Attacker", 2, 4);
+        let mut perm = SimPermanent::new("Attacker");
+        perm.entered_this_turn = false;
+        state.us.permanents.push(perm);
+
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.us.permanents[0].attacking, "declared attacker gets attacking=true");
+    }
+
+    #[test]
+    fn test_declare_blockers_sets_unblocked_flag_when_no_blocker() {
+        let mut state = make_state();
+        state.combat_attackers = vec!["Attacker".to_string()];
+        let def = creature("Attacker", 2, 4);
+        let mut perm = SimPermanent::new("Attacker");
+        perm.attacking = true;
+        perm.tapped = true;
+        state.us.permanents.push(perm);
+        // No opp creatures → no blocker
+
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.us.permanents[0].unblocked, "unblocked attacker gets unblocked=true");
+    }
+
+    #[test]
+    fn test_declare_blockers_blocked_attacker_not_unblocked() {
+        let mut state = make_state();
+        state.combat_attackers = vec!["Ragavan".to_string()];
+        let atk_def = creature("Ragavan", 2, 2);
+        let blk_def = creature("Wall", 0, 6);
+        let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.attacking = true;
+        ragavan.tapped = true;
+        state.us.permanents.push(ragavan);
+        state.opp.permanents.push(SimPermanent::new("Wall"));
+
+        let catalog = vec![atk_def, blk_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(!state.us.permanents[0].unblocked, "blocked attacker stays unblocked=false");
+        assert_eq!(state.combat_blocks.len(), 1, "blocker declared");
+    }
+
+    #[test]
+    fn test_end_combat_clears_attacking_unblocked_flags() {
+        let mut state = make_state();
+        let mut perm = SimPermanent::new("Ninja");
+        perm.attacking = true;
+        perm.unblocked = true;
+        state.us.permanents.push(perm);
+        state.combat_attackers = vec!["Ninja".to_string()];
+
+        let step = Step { kind: StepKind::EndCombat, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(!state.us.permanents[0].attacking, "attacking cleared at EndCombat");
+        assert!(!state.us.permanents[0].unblocked, "unblocked cleared at EndCombat");
+    }
+
+    // Negative try_ninjutsu precondition tests (deterministic — RNG roll is never reached).
+
+    #[test]
+    fn test_try_ninjutsu_no_hand_returns_none() {
+        let mut state = make_state();
+        state.us.hand.hidden = 0;
+        let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = true;
+        state.us.permanents.push(atk);
+        let lib = vec![("Ninja".to_string(), ninja_def())];
+        assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no hand → None");
+    }
+
+    #[test]
+    fn test_try_ninjutsu_no_unblocked_returns_none() {
+        let mut state = make_state();
+        state.us.hand.hidden = 3;
+        let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = false;
+        state.us.permanents.push(atk);
+        state.us.pool.u = 1; state.us.pool.total = 1;
+        let lib = vec![("Ninja".to_string(), ninja_def())];
+        assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no unblocked attacker → None");
+    }
+
+    #[test]
+    fn test_try_ninjutsu_no_ninja_in_library_returns_none() {
+        let mut state = make_state();
+        state.us.hand.hidden = 3;
+        let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = true;
+        state.us.permanents.push(atk);
+        state.us.pool.u = 1; state.us.pool.total = 1;
+        let lib = vec![("Brainstorm".to_string(), toml::from_str::<CardDef>("name=\"Brainstorm\"\ncard_type=\"instant\"\nmana_cost=\"U\"").unwrap())];
+        assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no ninja card → None");
+    }
+
+    #[test]
+    fn test_try_ninjutsu_no_mana_returns_none() {
+        let mut state = make_state();
+        state.us.hand.hidden = 3;
+        let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = true;
+        state.us.permanents.push(atk);
+        // No mana available
+        let lib = vec![("Ninja".to_string(), ninja_def())];
+        assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no mana → None");
+    }
+
+    #[test]
+    fn test_ninjutsu_swaps_attacker_for_ninja() {
+        // try_ninjutsu returns ActivateAbility; when committed via handle_priority_round
+        // in a DeclareBlockers window, the ninja enters play and the attacker returns to hand.
+        let def = ninja_def();
+        let catalog = vec![def.clone()];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        // Loop over seeds until ninjutsu fires (35% per attempt → statistically guaranteed within 50).
+        for seed in 0u64..50 {
+            let mut state = make_state();
+            state.current_phase = "DeclareBlockers".to_string();
+            state.current_ap = "us".to_string();
+            let mut ragavan = SimPermanent::new("Ragavan");
+            ragavan.attacking = true; ragavan.unblocked = true;
+            state.us.permanents.push(ragavan);
+            let initial_hand = state.us.hand.hidden;
+            state.us.lands.push(island_land());
+            let mut us_lib = vec![("Ninja".to_string(), def.clone())];
+            let mut opp_lib = vec![];
+            let mut rng = StdRng::seed_from_u64(seed);
+            handle_priority_round(&mut state, 1, "us", 3, &mut us_lib, &mut opp_lib, &catalog_map, &mut rng);
+
+            if state.us.permanents.iter().any(|p| p.name == "Ninja") {
+                let ninja = state.us.permanents.iter().find(|p| p.name == "Ninja").unwrap();
+                assert!(ninja.attacking, "ninja should be attacking");
+                assert!(ninja.tapped, "ninja should be tapped");
+                assert!(!state.us.permanents.iter().any(|p| p.name == "Ragavan"), "Ragavan returned to hand");
+                assert_eq!(state.us.hand.hidden, initial_hand, "net hand size unchanged (+1 return, -1 ninja)");
+                assert!(state.combat_attackers.contains(&"Ninja".to_string()), "ninja in combat_attackers");
+                return;
+            }
+        }
+        panic!("ninjutsu should have fired within 50 seeds");
+    }
+
+    // ── Section 11: Cycling ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_cycling_draw_effect() {
+        // apply_ability_effect with draw:1 increments hand.hidden.
+        let mut state = make_state();
+        let initial = state.us.hand.hidden;
+        let ability: AbilityDef = toml::from_str(r#"effect = "draw:1""#).unwrap();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        apply_ability_effect(&mut state, 1, "us", "Street Wraith", &ability, &mut vec![], &catalog_map, &mut seeded_rng());
+        assert_eq!(state.us.hand.hidden, initial + 1, "cycling draws one card");
+    }
+
+    #[test]
+    fn test_cycling_discard_self_removes_card_from_library() {
+        // pay_activation_cost with discard_self=true removes the card from the library
+        // (simulating it being discarded from hand) and sends it to the graveyard.
+        let mut state = make_state();
+        let wraith_def: CardDef = toml::from_str(r#"
+            name = "Street Wraith"
+            card_type = "creature"
+            mana_cost = "3BB"
+            power = 3
+            toughness = 4
+        "#).unwrap();
+        let mut us_lib = vec![("Street Wraith".to_string(), wraith_def.clone())];
+        let ability: AbilityDef = toml::from_str(r#"
+            zone = "hand"
+            discard_self = true
+            life_cost = 2
+            effect = "draw:1"
+        "#).unwrap();
+        let catalog = vec![wraith_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let initial_hand = state.us.hand.hidden;
+
+        pay_activation_cost(&mut state, 1, "us", "Street Wraith", &ability, &mut us_lib, &catalog_map);
+
+        assert!(us_lib.is_empty(), "Street Wraith removed from library");
+        assert!(state.us.graveyard.visible.contains(&"Street Wraith".to_string()), "in graveyard");
+        assert_eq!(state.us.hand.hidden, initial_hand - 1, "hand size decremented");
+        assert_eq!(state.us.life, 20 - 2, "paid 2 life");
+    }
+
+    // ── Section 12: Adventure ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_adventure_resolve_exiles_to_on_adventure() {
+        // An adventure StackItem routes to exile + on_adventure instead of the graveyard.
+        let mut state = make_state();
+        let face = AdventureFace {
+            name: "Petty Theft".to_string(),
+            card_type: "instant".to_string(),
+            mana_cost: "1U".to_string(),
+            target: None,
+            effects: vec![],
+        };
+        let item = StackItem {
+            adventure_exile: true,
+            adventure_card_name: Some("Brazen Borrower".to_string()),
+            adventure_face: Some(face),
+            ..stack_item("Petty Theft", "us")
+        };
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.us.exile.visible.contains(&"Brazen Borrower".to_string()), "Borrower in exile");
+        assert!(state.us.on_adventure.contains(&"Brazen Borrower".to_string()), "Borrower on adventure");
+        assert!(state.us.graveyard.visible.is_empty(), "not in graveyard");
+    }
+
+    #[test]
+    fn test_adventure_bounce_effect_returns_opp_permanent() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let initial_opp_hand = state.opp.hand.hidden;
+        let face = AdventureFace {
+            name: "Petty Theft".to_string(),
+            card_type: "instant".to_string(),
+            mana_cost: "1U".to_string(),
+            target: Some("opp:permanent_nonland".to_string()),
+            effects: vec!["bounce".to_string()],
+        };
+        let item = StackItem {
+            adventure_exile: true,
+            adventure_card_name: Some("Brazen Borrower".to_string()),
+            adventure_face: Some(face),
+            permanent_target: Some(("opp".to_string(), "Orcish Bowmasters".to_string())),
+            ..stack_item("Petty Theft", "us")
+        };
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.opp.permanents.is_empty(), "Bowmasters bounced off board");
+        assert_eq!(state.opp.hand.hidden, initial_opp_hand + 1, "bounced to opp hand");
+        assert!(state.us.exile.visible.contains(&"Brazen Borrower".to_string()), "Borrower on adventure in exile");
+    }
+
+    #[test]
+    fn test_cast_from_adventure_enters_play() {
+        // With the still_valid fix, CastFromAdventure in pending_actions is validated and
+        // executed, putting the creature into play and clearing the on_adventure marker.
+        let borrower_def: CardDef = toml::from_str(r#"
+            name = "Brazen Borrower"
+            card_type = "creature"
+            mana_cost = "1UU"
+            blue = true
+            power = 3
+            toughness = 1
+            effects = ["permanent"]
+        "#).unwrap();
+        let catalog = vec![borrower_def.clone()];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        let mut state = make_state();
+        state.current_phase = "Main".to_string();
+        state.current_ap = "us".to_string();
+        state.us.exile.visible.push("Brazen Borrower".to_string());
+        state.us.on_adventure.push("Brazen Borrower".to_string());
+        // 1UU mana: two Islands + one generic (Swamp)
+        state.us.lands.push(island_land());
+        state.us.lands.push(SimLand { name: "Island2".to_string(), ..island_land() });
+        state.us.lands.push(SimLand {
+            name: "Swamp".to_string(),
+            basic: true,
+            land_types: LandTypes { swamp: true, ..Default::default() },
+            mana_abilities: vec![ManaAbility { tap_self: true, produces: "B".into(), ..Default::default() }],
+            ..island_land()
+        });
+        // Inject the pending action directly (bypasses the 75% roll from collect_on_board_actions).
+        state.us.pending_actions = vec![
+            PriorityAction::CastFromAdventure { card_name: "Brazen Borrower".to_string() }
+        ];
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        handle_priority_round(&mut state, 1, "us", 3, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.us.permanents.iter().any(|p| p.name == "Brazen Borrower"), "Borrower enters play");
+        assert!(!state.us.on_adventure.contains(&"Brazen Borrower".to_string()), "removed from on_adventure");
+        assert!(!state.us.exile.visible.contains(&"Brazen Borrower".to_string()), "removed from exile");
     }
 }
 
