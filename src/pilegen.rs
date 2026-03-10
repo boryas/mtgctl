@@ -867,7 +867,9 @@ impl PlayerState {
 
     /// Tap/sac lands and permanents to produce mana for the given cost.
     /// Priority: B, U, W, R, G, C (specific pips), then generic.
-    fn produce_mana(&mut self, cost: &ManaCost) {
+    /// Returns a log of activations (e.g. "tap Underground Sea → B").
+    fn produce_mana(&mut self, cost: &ManaCost) -> Vec<String> {
+        let mut log: Vec<String> = Vec::new();
         // For each specific color: find a source that produces it and activate it.
         let color_specs: [(i32, char, fn(&mut ManaPool, i32)); 6] = [
             (cost.b, 'B', |p, _| p.b += 1),
@@ -891,6 +893,7 @@ impl PlayerState {
                     self.lands[idx].tapped = true;
                     add_color(&mut self.pool, 0);
                     self.pool.total += 1;
+                    log.push(format!("tap {} → {}", self.lands[idx].name, color_char));
                     remaining -= 1;
                     continue;
                 }
@@ -907,9 +910,11 @@ impl PlayerState {
                         .unwrap_or(false);
                     if sac {
                         let name = self.permanents[idx].name.clone();
+                        log.push(format!("sac {} → {}", name, color_char));
                         self.permanents.remove(idx);
                         self.graveyard.visible.push(name);
                     } else {
+                        log.push(format!("tap {} → {}", self.permanents[idx].name, color_char));
                         self.permanents[idx].tapped = true;
                     }
                     add_color(&mut self.pool, 0);
@@ -930,6 +935,7 @@ impl PlayerState {
             if let Some(idx) = land_idx {
                 self.lands[idx].tapped = true;
                 self.pool.total += 1;
+                log.push(format!("tap {} → 1", self.lands[idx].name));
                 remaining_generic -= 1;
                 continue;
             }
@@ -943,9 +949,11 @@ impl PlayerState {
                     .unwrap_or(false);
                 if sac {
                     let name = self.permanents[idx].name.clone();
+                    log.push(format!("sac {} → 1", name));
                     self.permanents.remove(idx);
                     self.graveyard.visible.push(name);
                 } else {
+                    log.push(format!("tap {} → 1", self.permanents[idx].name));
                     self.permanents[idx].tapped = true;
                 }
                 self.pool.total += 1;
@@ -954,12 +962,15 @@ impl PlayerState {
             }
             break;
         }
+        log
     }
 
     /// Produce mana and immediately spend it (the common pay-a-cost pattern).
-    fn pay_mana(&mut self, cost: &ManaCost) {
-        self.produce_mana(cost);
+    /// Returns the activation log from produce_mana for callers that want to emit it.
+    fn pay_mana(&mut self, cost: &ManaCost) -> Vec<String> {
+        let log = self.produce_mana(cost);
         self.pool.spend(cost);
+        log
     }
 
     /// True if the player can currently produce at least one black mana (pool + untapped sources).
@@ -1036,6 +1047,13 @@ impl SimState {
             String::new()
         };
         self.log.push(format!("T{} [{}{}] {}{}", t, who, ctx, msg.into(), suffix));
+    }
+
+    /// Log each mana activation returned by pay_mana/produce_mana.
+    fn log_mana_activations(&mut self, t: u8, who: &str, activations: Vec<String>) {
+        for entry in activations {
+            self.log(t, who, format!("→ {}", entry));
+        }
     }
 }
 
@@ -1666,7 +1684,8 @@ fn pay_activation_cost(
     // Pay mana cost.
     if !ability.mana_cost.is_empty() {
         let cost = parse_mana_cost(&ability.mana_cost);
-        state.player_mut(who).pay_mana(&cost);
+        let mana_log = state.player_mut(who).pay_mana(&cost);
+        state.log_mana_activations(t, who, mana_log);
     }
 
     // Pay life cost.
@@ -1846,6 +1865,7 @@ fn can_pay_alternate_cost(
 fn apply_alt_cost_components(
     cost: &AlternateCost,
     state: &mut SimState,
+    t: u8,
     who: &str,
     source_name: &str,
     library: &mut Vec<(String, CardDef)>,
@@ -1881,9 +1901,11 @@ fn apply_alt_cost_components(
     }
     if !cost.mana_cost.is_empty() {
         let cost_mc = parse_mana_cost(&cost.mana_cost);
-        state.player_mut(who).pay_mana(&cost_mc);
+        let mana_log = state.player_mut(who).pay_mana(&cost_mc);
+        state.log_mana_activations(t, who, mana_log);
         parts.push(cost.mana_cost.clone());
     }
+
     if cost.life_cost > 0 {
         state.lose_life(who, cost.life_cost);
         parts.push(format!("-{} life", cost.life_cost));
@@ -1966,12 +1988,13 @@ fn cast_spell(
 
     // Pay cost and build a log label.
     let cast_label = if let Some(ref cost) = alt_cost {
-        let parts = apply_alt_cost_components(cost, state, who, name, library, catalog_map, rng);
+        let parts = apply_alt_cost_components(cost, state, t, who, name, library, catalog_map, rng);
         state.player_mut(who).hand.hidden -= 1;
         debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative casting {} (alt cost)", name);
         parts.join(", ")
     } else {
-        state.player_mut(who).pay_mana(&cost);
+        let mana_log = state.player_mut(who).pay_mana(&cost);
+        state.log_mana_activations(t, who, mana_log);
         state.player_mut(who).hand.hidden -= 1;
         debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative casting {}", name);
         def.mana_cost().to_string()
@@ -2070,7 +2093,8 @@ fn apply_spell_effects(
     }
 
     // Apply all effects and collect secondary log lines, before logging resolution.
-    let mut secondary_logs: Vec<String> = Vec::new();
+    // Each entry is (who, msg) so discard lines can be attributed to the discarding player.
+    let mut secondary_logs: Vec<(String, String)> = Vec::new();
     for effect in def.effects() {
         let parts: Vec<&str> = effect.splitn(3, ':').collect();
         match parts.as_slice() {
@@ -2104,14 +2128,14 @@ fn apply_spell_effects(
                         }
                     }
                     if !discarded.is_empty() {
-                        secondary_logs.push(format!("→ {} discards: {}", target_who, discarded.join(", ")));
+                        secondary_logs.push((target_who.clone(), format!("→ {} discards: {}", target_who, discarded.join(", "))));
                     }
                 }
             }
             ["life_loss", n_str] => {
                 let n: i32 = n_str.parse().unwrap_or(0);
                 state.lose_life(&item.owner, n);
-                secondary_logs.push(format!("→ lose {} life (now {})", n, state.life_of(&item.owner)));
+                secondary_logs.push((item.owner.clone(), format!("→ lose {} life (now {})", n, state.life_of(&item.owner))));
             }
             ["mana", spec] => {
                 // Parse MTG mana notation using parse_mana_cost.
@@ -2125,7 +2149,7 @@ fn apply_spell_effects(
                 pool.g += mc.g;
                 pool.c += mc.c;
                 pool.total += mc.mana_value();
-                secondary_logs.push(format!("→ add {} to pool", spec));
+                secondary_logs.push((item.owner.clone(), format!("→ add {} to pool", spec)));
             }
             ["reanimate", who_rel, type_filter] => {
                 let target_who = resolve_who(who_rel, &item.owner).to_string();
@@ -2148,7 +2172,7 @@ fn apply_spell_effects(
                         mana_abilities: catalog_map.get(chosen.as_str())
                             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
                     });
-                    secondary_logs.push(format!("→ {} returns from graveyard", chosen));
+                    secondary_logs.push((item.owner.clone(), format!("→ {} returns from graveyard", chosen)));
                 }
             }
             _ => {}
@@ -2173,9 +2197,8 @@ fn apply_spell_effects(
     state.log(t, &item.owner, format!("{} {}", item.name, resolve_label));
 
     // Secondary effect detail logs.
-    for msg in secondary_logs {
-        let owner = item.owner.clone();
-        state.log(t, &owner, msg);
+    for (who, msg) in secondary_logs {
+        state.log(t, &who, msg);
     }
 }
 
