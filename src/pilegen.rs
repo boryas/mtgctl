@@ -1147,7 +1147,13 @@ impl std::fmt::Display for PlayerState {
 
         if !self.exile.is_empty() {
             writeln!(f, "  Exile      :")?;
-            write!(f, "{}", self.exile)?;
+            for card in &self.exile.visible {
+                let tag = if self.on_adventure.contains(card) { " [on adventure]" } else { "" };
+                writeln!(f, "    * {}{}", card, tag)?;
+            }
+            if self.exile.hidden > 0 {
+                writeln!(f, "    * ({} hidden)", self.exile.hidden)?;
+            }
         }
 
         Ok(())
