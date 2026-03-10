@@ -76,6 +76,18 @@ struct AbilityDef {
     #[serde(default)]
     target: Option<String>,
 
+    // ── Zone ──────────────────────────────────────────────────────────────────
+    /// Zone the card must be in for this ability. Default "" / "play" = in play.
+    /// Use "hand" for cycling/channel abilities.
+    #[serde(default)]
+    zone: String,
+    /// Discard this card as part of the cost (zone="hand" abilities).
+    #[serde(default)]
+    discard_self: bool,
+    /// Sacrifice a land you control as part of the cost (e.g. Edge of Autumn cycling).
+    #[serde(default)]
+    sacrifice_land: bool,
+
     // ── Effect ────────────────────────────────────────────────────────────────
     #[serde(default)]
     effect: String,
@@ -1476,6 +1488,16 @@ fn spell_is_affordable(
     def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name, library))
 }
 
+fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) -> bool {
+    let player = state.player(who);
+    if !ability.mana_cost.is_empty() {
+        if !player.potential_mana().can_pay(&parse_mana_cost(&ability.mana_cost)) { return false; }
+    }
+    if ability.life_cost > 0 && player.life <= ability.life_cost { return false; }
+    if ability.sacrifice_land && player.lands.is_empty() { return false; }
+    true
+}
+
 fn collect_hand_actions(
     state: &SimState,
     who: &str,
@@ -1487,7 +1509,8 @@ fn collect_hand_actions(
     }
     let permanents_in_play = &state.player(who).permanents;
     let opp_who = if who == "us" { "opp" } else { "us" };
-    library
+
+    let mut actions: Vec<PriorityAction> = library
         .iter()
         .filter_map(|(name, def)| {
             if def.is_land() {
@@ -1504,13 +1527,11 @@ fn collect_hand_actions(
             if def.legendary() && permanents_in_play.iter().any(|p| p.name == name.as_str()) {
                 return None;
             }
-            // Targeted spells need a valid target.
             if let Some(tgt) = def.target() {
                 if !has_valid_target(tgt, state, who, catalog_map) {
                     return None;
                 }
             }
-            // Check requires conditions.
             let ok = def.requires().iter().all(|req| match req.as_str() {
                 "opp_hand_nonempty" => state.player(opp_who).hand.hidden > 0,
                 "us_gy_has_creature" => state.player(who).graveyard.visible.iter()
@@ -1519,16 +1540,22 @@ fn collect_hand_actions(
                         .unwrap_or(false)),
                 _ => true,
             });
-            if !ok {
-                return None;
-            }
-            // Affordability: must be able to pay at least one cost.
-            if !spell_is_affordable(name, def, state, who, library) {
-                return None;
-            }
+            if !ok { return None; }
+            if !spell_is_affordable(name, def, state, who, library) { return None; }
             Some(PriorityAction::CastSpell { name: name.clone(), preferred_cost: None, counters: None })
         })
-        .collect()
+        .collect();
+
+    // In-hand abilities (cycling, channel, etc.) — one entry per card with a zone="hand" ability.
+    for (name, def) in library {
+        for ab in def.abilities().iter().filter(|ab| ab.zone == "hand") {
+            if hand_ability_affordable(ab, state, who) {
+                actions.push(PriorityAction::ActivateAbility(name.clone(), ab.clone()));
+            }
+        }
+    }
+
+    actions
 }
 
 /// Pick a random valid permanent target for `target_str` (e.g. "opp:creature_mv_lt4").
@@ -1631,6 +1658,7 @@ fn pay_activation_cost(
     who: &str,
     source_name: &str,
     ability: &AbilityDef,
+    library: &mut Vec<(String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
 ) {
     state.log(t, who, format!("Activate {} ability", source_name));
@@ -1653,8 +1681,8 @@ fn pay_activation_cost(
         }
     }
 
-    // Pay sacrifice cost.
-    if ability.sacrifice_self {
+    // Pay sacrifice cost (in-play permanent or land).
+    if ability.sacrifice_self && ability.zone != "hand" {
         let is_land = catalog_map.get(source_name).map(|d| d.is_land()).unwrap_or(false);
         if is_land {
             state.player_mut(who).lands.retain(|l| l.name != source_name);
@@ -1662,6 +1690,28 @@ fn pay_activation_cost(
             state.player_mut(who).permanents.retain(|p| p.name != source_name);
         }
         state.player_mut(who).graveyard.visible.push(source_name.to_string());
+    }
+
+    // Discard cost (zone="hand"): remove from library, send to graveyard.
+    if ability.discard_self {
+        if let Some(idx) = library.iter().position(|(n, _)| n == source_name) {
+            library.remove(idx);
+            state.player_mut(who).hand.hidden -= 1;
+            state.player_mut(who).graveyard.visible.push(source_name.to_string());
+        }
+    }
+
+    // Sacrifice-a-land cost (e.g. Edge of Autumn cycling).
+    if ability.sacrifice_land {
+        // Prefer non-mana-producing lands to preserve mana sources.
+        let idx = state.player(who).lands.iter()
+            .position(|l| l.mana_abilities.is_empty())
+            .unwrap_or(0);
+        if !state.player(who).lands.is_empty() {
+            let land_name = state.player(who).lands[idx].name.clone();
+            state.player_mut(who).lands.remove(idx);
+            state.player_mut(who).graveyard.visible.push(land_name);
+        }
     }
 }
 
@@ -1677,6 +1727,14 @@ fn apply_ability_effect(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
+    // draw:N — draw N cards (cycling effect).
+    if let Some(rest) = ability.effect.strip_prefix("draw:") {
+        let n: i32 = rest.parse().unwrap_or(1);
+        state.player_mut(who).hand.hidden += n;
+        state.log(t, who, format!("{} → draw {}", source_name, n));
+        return;
+    }
+
     // search:*:* — generic library search (e.g. fetchland: "search:land-island|swamp:play").
     if ability.effect.starts_with("search:") {
         let mut parts = ability.effect.splitn(3, ':');
@@ -2542,7 +2600,8 @@ fn handle_priority_round(
             }
             PriorityAction::ActivateAbility(ref source_name, ref ability) => {
                 // Pay costs now; effect is deferred until the ability resolves.
-                pay_activation_cost(state, t, &who, source_name, ability, catalog_map);
+                let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
+                pay_activation_cost(state, t, &who, source_name, ability, actor_lib, catalog_map);
                 // Push ability stack item; ability_def carries the effect for resolution.
                 stack.push(StackItem {
                     name: source_name.clone(),
@@ -3777,7 +3836,7 @@ mod tests {
             effect = "cantrip"
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &mut vec![], &catalog_map);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
         assert_eq!(state.us.pool.total, 1);
@@ -3793,7 +3852,7 @@ mod tests {
             effect = "cantrip"
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &mut vec![], &catalog_map);
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -3808,7 +3867,7 @@ mod tests {
             effect = "mana:B"
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", "Lotus Petal", &ability, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", "Lotus Petal", &ability, &mut vec![], &catalog_map);
 
         assert!(state.us.permanents.is_empty(), "Lotus Petal should be sacrificed");
         assert!(state.us.graveyard.visible.contains(&"Lotus Petal".to_string()));

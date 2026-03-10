@@ -164,6 +164,7 @@ play_weight = 1  # almost always cycled, rarely cast
 mana_cost = "3BB"
 power = 3
 toughness = 4
+abilities = [{zone = "hand", discard_self = true, life_cost = 2, effect = "draw:1"}]
 
 # ── Artifacts ─────────────────────────────────────────────────────────────────
 
@@ -290,6 +291,7 @@ effects = ["discard:opp:2"]
 [[cards]]
 name = "Edge of Autumn"
 card_type = "sorcery"
-mana_cost = "GW"  # cycle cost; rarely cast directly
+mana_cost = "GW"  # cast cost; rarely cast directly
+abilities = [{zone = "hand", discard_self = true, sacrifice_land = true, effect = "draw:1"}]
 
 
