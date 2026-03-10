@@ -146,6 +146,7 @@ struct CreatureData {
     #[serde(default)] mana_abilities: Vec<ManaAbility>,
     #[serde(default)] adventure: Option<AdventureFace>,
     #[serde(default)] ninjutsu: Option<NinjutsuAbility>,
+    #[serde(default)] keywords: Vec<String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -232,6 +233,8 @@ struct CardDef {
     /// Relative likelihood of appearing as a permanent in play (default 100).
     #[allow(dead_code)]
     play_weight: Option<u32>,
+    /// True for tokens and flip-targets: never in a library, created by effects at runtime.
+    is_token: bool,
     kind: CardKind,
 }
 
@@ -377,6 +380,17 @@ impl CardDef {
             _ => None,
         }
     }
+
+    fn keywords(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Creature(c) => &c.keywords,
+            _ => &[],
+        }
+    }
+
+    fn has_keyword(&self, kw: &str) -> bool {
+        self.keywords().iter().any(|k| k == kw)
+    }
 }
 
 // ── TOML deserialization: two-step via RawCardDef ─────────────────────────────
@@ -423,6 +437,8 @@ struct RawCardDef {
     #[serde(default)] alternate_costs: Vec<AlternateCost>,
     #[serde(default)] adventure: Option<AdventureFace>,
     #[serde(default)] ninjutsu: Option<NinjutsuAbility>,
+    #[serde(default)] keywords: Vec<String>,
+    #[serde(default)] is_token: bool,
 }
 
 impl From<RawCardDef> for CardDef {
@@ -450,6 +466,7 @@ impl From<RawCardDef> for CardDef {
                 mana_abilities: r.mana_abilities.clone(),
                 adventure: r.adventure,
                 ninjutsu: r.ninjutsu,
+                keywords: r.keywords,
             }),
             CardType::Instant => CardKind::Instant(SpellData {
                 mana_cost: r.mana_cost,
@@ -489,7 +506,7 @@ impl From<RawCardDef> for CardDef {
             }),
             CardType::Enchantment => CardKind::Enchantment,
         };
-        CardDef { name: r.name, play_weight: r.play_weight, kind }
+        CardDef { name: r.name, play_weight: r.play_weight, is_token: r.is_token, kind }
     }
 }
 
@@ -538,8 +555,67 @@ struct StackItem {
     adventure_card_name: Option<String>,
     /// Adventure face data (name, effects, target) used at resolution when adventure_exile=true.
     adventure_face: Option<AdventureFace>,
+    /// For triggered abilities: the trigger payload to apply at resolution.
+    /// When Some, this overrides ability_def / spell resolution — `apply_trigger` is called instead.
+    trigger_context: Option<TriggerContext>,
 }
 
+
+// ── Trigger system ────────────────────────────────────────────────────────────
+
+/// Zones a card or permanent can occupy.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ZoneId {
+    Hand,
+    Library,
+    Battlefield,
+    Graveyard,
+    Exile,
+    Stack,
+}
+
+/// A game event emitted at key moments. Handlers inspect this to decide whether their
+/// trigger fires. Owned strings to avoid lifetime issues when pushing onto the stack.
+#[derive(Clone)]
+enum GameEvent {
+    /// A card moved from one zone to another. Library→Hand draws carry `draw_index`
+    /// (n-th draw this turn) and `is_natural_draw` (true only for the draw step draw).
+    ZoneChange {
+        card: String,
+        card_type: String,
+        from: ZoneId,
+        to: ZoneId,
+        controller: String,
+        draw_index: Option<u8>,
+        is_natural_draw: bool,
+    },
+    /// Fired after step-specific actions complete and before priority begins.
+    /// `active_player` is the player whose turn it is.
+    EnteredStep {
+        step: StepKind,
+        active_player: String,
+    },
+    // Future variants: DamageDealt, SpellCast, SpellResolved, AbilityActivated,
+    //                  CounterChanged, LifeChanged, TokenCreated.
+}
+
+/// Data stored with a triggered ability's `StackItem`. Identifies what to do at resolution.
+#[derive(Clone)]
+struct TriggerContext {
+    source: String,       // card name of the triggering permanent
+    controller: String,   // player controlling that permanent
+    payload: TriggerPayload,
+}
+
+/// The specific effect a triggered ability applies when it resolves.
+#[derive(Clone)]
+enum TriggerPayload {
+    BowmastersEtb,
+    BowmastersDrawTrigger { drawing_player: String },
+    MurktideExile,
+    TamiyoClue,
+    TamiyoFlip,
+}
 
 // ── Turn structure ────────────────────────────────────────────────────────────
 
@@ -901,6 +977,8 @@ struct PlayerState {
     /// Cards currently in exile with the "on adventure" status — the creature face can be cast
     /// from here. Does NOT clear on Untap (adventure status persists across turns).
     on_adventure: Vec<String>,
+    /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
+    draws_this_turn: u8,
 }
 
 impl PlayerState {
@@ -921,6 +999,7 @@ impl PlayerState {
             pool: ManaPool::default(),
             pending_actions: Vec::new(),
             on_adventure: Vec::new(),
+            draws_this_turn: 0,
         }
     }
 
@@ -1069,6 +1148,8 @@ struct SimState {
     combat_attackers: Vec<String>,
     /// Blocker assignments this combat: (attacker_name, blocker_name); cleared at EndCombat.
     combat_blocks: Vec<(String, String)>,
+    /// Triggered abilities waiting to be pushed onto the stack at the next priority window.
+    pending_triggers: Vec<TriggerContext>,
 }
 
 impl SimState {
@@ -1085,7 +1166,13 @@ impl SimState {
             current_phase: String::new(),
             combat_attackers: Vec::new(),
             combat_blocks: Vec::new(),
+            pending_triggers: Vec::new(),
         }
+    }
+
+    fn queue_triggers(&mut self, event: &GameEvent) {
+        let triggers = fire_triggers(event, self);
+        self.pending_triggers.extend(triggers);
     }
 
     /// True when the simulation should stop (either success or reroll).
@@ -2136,6 +2223,20 @@ fn cast_spell(
     for card in &to_exile {
         state.player_mut(who).graveyard.visible.retain(|n| n != card);
         state.player_mut(who).exile.visible.push(card.clone());
+        // Fire exile-from-GY trigger (e.g. Murktide counter).
+        let card_type = catalog_map.get(card.as_str())
+            .map(|d| if d.is_instant() { "instant" } else if d.is_sorcery() { "sorcery" } else { "" })
+            .unwrap_or("");
+        let exile_ev = GameEvent::ZoneChange {
+            card: card.clone(),
+            card_type: card_type.to_string(),
+            from: ZoneId::Graveyard,
+            to: ZoneId::Exile,
+            controller: who.to_string(),
+            draw_index: None,
+            is_natural_draw: false,
+        };
+        state.queue_triggers(&exile_ev);
     }
 
     // For delve permanents: encode +1/+1 counter count as "+N" in annotation.
@@ -2169,6 +2270,7 @@ fn cast_spell(
         adventure_exile: false,
         adventure_card_name: None,
         adventure_face: None,
+        trigger_context: None,
     })
 }
 
@@ -2248,6 +2350,17 @@ fn apply_spell_effects(
             attacking: false,
             unblocked: false,
         });
+        // Fire ETB triggers (e.g. Bowmasters).
+        let etb_ev = GameEvent::ZoneChange {
+            card: item.name.clone(),
+            card_type: "creature".to_string(), // permanent — may be non-creature, but triggers check name
+            from: ZoneId::Stack,
+            to: ZoneId::Battlefield,
+            controller: item.owner.clone(),
+            draw_index: None,
+            is_natural_draw: false,
+        };
+        state.queue_triggers(&etb_ev);
     } else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
     }
@@ -2262,7 +2375,19 @@ fn apply_spell_effects(
                 state.success = true;
             }
             [e] if *e == "cantrip" => {
+                state.player_mut(&item.owner).draws_this_turn += 1;
+                let draw_idx = state.player(&item.owner).draws_this_turn;
                 state.player_mut(&item.owner).hand.hidden += 1;
+                let cantrip_ev = GameEvent::ZoneChange {
+                    card: String::new(),
+                    card_type: String::new(),
+                    from: ZoneId::Library,
+                    to: ZoneId::Hand,
+                    controller: item.owner.clone(),
+                    draw_index: Some(draw_idx),
+                    is_natural_draw: false,
+                };
+                state.queue_triggers(&cantrip_ev);
             }
             ["discard", who_rel, n_str_and_flags] => {
                 let (n_str, nonland_only) = match n_str_and_flags.split_once(':') {
@@ -2479,6 +2604,204 @@ fn try_ninjutsu(
     let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
     if !state.player(who).potential_mana().can_pay(&ninjutsu_cost) { return None; }
     Some(PriorityAction::ActivateAbility(ninja_name.clone(), ninja_def.ninjutsu()?.as_ability_def()))
+}
+
+// ── Keyword helpers ───────────────────────────────────────────────────────────
+
+fn creature_has_keyword(name: &str, kw: &str, catalog_map: &HashMap<&str, &CardDef>) -> bool {
+    catalog_map.get(name).map(|d| d.has_keyword(kw)).unwrap_or(false)
+}
+
+// ── Trigger check functions (one per trigger-having card) ─────────────────────
+
+fn bowmasters_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerContext>) {
+    match event {
+        // ETB: only fires for the entering Bowmasters itself.
+        GameEvent::ZoneChange { card, to: ZoneId::Battlefield, controller: ctlr, .. }
+            if card == "Orcish Bowmasters" && ctlr == controller =>
+        {
+            pending.push(TriggerContext {
+                source: "Orcish Bowmasters".into(),
+                controller: controller.into(),
+                payload: TriggerPayload::BowmastersEtb,
+            });
+        }
+        // Opponent draws any card that isn't their natural draw-step draw,
+        // OR a draw-step draw that is their 2nd+ draw this turn.
+        GameEvent::ZoneChange {
+            from: ZoneId::Library, to: ZoneId::Hand,
+            controller: drawer, draw_index, is_natural_draw, ..
+        } if drawer != controller
+            && (!is_natural_draw || draw_index.map_or(false, |n| n > 1)) =>
+        {
+            pending.push(TriggerContext {
+                source: "Orcish Bowmasters".into(),
+                controller: controller.into(),
+                payload: TriggerPayload::BowmastersDrawTrigger {
+                    drawing_player: drawer.clone(),
+                },
+            });
+        }
+        _ => {}
+    }
+}
+
+fn murktide_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerContext>) {
+    if let GameEvent::ZoneChange {
+        from: ZoneId::Graveyard, to: ZoneId::Exile,
+        card_type, controller: exiler, ..
+    } = event {
+        if (card_type == "instant" || card_type == "sorcery") && exiler == controller {
+            pending.push(TriggerContext {
+                source: "Murktide Regent".into(),
+                controller: controller.into(),
+                payload: TriggerPayload::MurktideExile,
+            });
+        }
+    }
+}
+
+fn tamiyo_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerContext>) {
+    match event {
+        // EnteredStep DeclareAttackers fires after attackers are marked, so p.attacking is set.
+        GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
+            if active_player == controller =>
+        {
+            pending.push(TriggerContext {
+                source: "Tamiyo, the Enigma Scroll".into(),
+                controller: controller.into(),
+                payload: TriggerPayload::TamiyoClue,
+            });
+        }
+        // Controller draws their 3rd card this turn.
+        GameEvent::ZoneChange {
+            from: ZoneId::Library, to: ZoneId::Hand,
+            controller: drawer, draw_index: Some(3), ..
+        } if drawer == controller => {
+            pending.push(TriggerContext {
+                source: "Tamiyo, the Enigma Scroll".into(),
+                controller: controller.into(),
+                payload: TriggerPayload::TamiyoFlip,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Signature for a per-card trigger check function.
+/// Inspects the event, and if a trigger fires, appends a `TriggerContext` to `pending`.
+/// Does NOT modify state — triggers are queued and pushed onto the stack by the caller.
+type TriggerCheckFn = fn(&GameEvent, &str, &mut Vec<TriggerContext>);
+
+static CARD_TRIGGERS: &[(&str, TriggerCheckFn)] = &[
+    ("Orcish Bowmasters",         bowmasters_check),
+    ("Murktide Regent",           murktide_check),
+    ("Tamiyo, the Enigma Scroll", tamiyo_check),
+];
+
+/// Check every in-play permanent against `CARD_TRIGGERS` for the given event.
+/// Returns any triggered ability contexts that should be pushed onto the stack.
+///
+/// O(|CARD_TRIGGERS| × |permanents per side|) — negligible at simulator scale.
+fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerContext> {
+    let mut pending: Vec<TriggerContext> = Vec::new();
+    for &(card_name, check_fn) in CARD_TRIGGERS {
+        for owner in ["us", "opp"] {
+            if state.player(owner).permanents.iter().any(|p| p.name == card_name) {
+                check_fn(event, owner, &mut pending);
+            }
+        }
+    }
+    pending
+}
+
+/// Push a vec of `TriggerContext`s onto the stack as uncounterable triggered ability items.
+fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>) {
+    for ctx in triggers {
+        stack.push(StackItem {
+            name: format!("{} trigger", ctx.source),
+            owner: ctx.controller.clone(),
+            is_ability: true,       // NAP skips countering triggered abilities
+            ability_def: None,
+            counters: None,
+            permanent_target: None,
+            annotation: None,
+            adventure_exile: false,
+            adventure_card_name: None,
+            adventure_face: None,
+            trigger_context: Some(ctx),
+        });
+    }
+}
+
+/// Apply the resolution effect of a triggered ability.
+fn apply_trigger(ctx: &TriggerContext, state: &mut SimState, t: u8, rng: &mut impl Rng) {
+    let opp = opp_of(&ctx.controller);
+    match &ctx.payload {
+        TriggerPayload::BowmastersEtb => {
+            state.lose_life(opp, 1);
+            do_amass_orc(&ctx.controller, 1, state, t);
+            state.log(t, &ctx.controller, "Bowmasters ETB: deal 1, amass Orc 1");
+        }
+        TriggerPayload::BowmastersDrawTrigger { drawing_player } => {
+            state.lose_life(drawing_player, 1);
+            do_amass_orc(&ctx.controller, 1, state, t);
+            state.log(t, &ctx.controller, "Bowmasters: opp draws — amass Orc 1, deal 1");
+        }
+        TriggerPayload::MurktideExile => {
+            if let Some(p) = state.player_mut(&ctx.controller).permanents
+                .iter_mut().find(|p| p.name == "Murktide Regent")
+            {
+                p.counters += 1;
+                state.log(t, &ctx.controller, "Murktide: inst/sorc exiled → +1/+1 counter");
+            }
+        }
+        TriggerPayload::TamiyoClue => {
+            // Only create clue if Tamiyo is actually attacking (checked at resolution time).
+            if state.player(&ctx.controller).permanents.iter()
+                .any(|p| p.name == "Tamiyo, the Enigma Scroll" && p.attacking)
+            {
+                do_create_clue(&ctx.controller, state, t);
+            }
+        }
+        TriggerPayload::TamiyoFlip => {
+            do_flip_tamiyo(&ctx.controller, state, t);
+        }
+    }
+}
+
+fn opp_of(who: &str) -> &'static str {
+    if who == "us" { "opp" } else { "us" }
+}
+
+fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
+    if let Some(army) = state.player_mut(controller).permanents
+        .iter_mut().find(|p| p.name == "Orc Army")
+    {
+        army.counters += n;
+        let c = army.counters;
+        state.log(t, controller, format!("Orc Army grows to {c}/{c}"));
+    } else {
+        state.player_mut(controller).permanents.push(SimPermanent {
+            name: "Orc Army".to_string(),
+            counters: n,
+            ..SimPermanent::new("Orc Army")
+        });
+        state.log(t, controller, format!("Orc Army token created {n}/{n}"));
+    }
+}
+
+fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
+    state.player_mut(controller).permanents.push(SimPermanent::new("Clue Token"));
+    state.log(t, controller, "Clue Token created");
+}
+
+fn do_flip_tamiyo(controller: &str, state: &mut SimState, t: u8) {
+    state.player_mut(controller).permanents
+        .retain(|p| p.name != "Tamiyo, the Enigma Scroll");
+    state.player_mut(controller).permanents
+        .push(SimPermanent::new("Tamiyo, Seasoned Scholar"));
+    state.log(t, controller, "Tamiyo flips → Tamiyo, Seasoned Scholar");
 }
 
 // ── New turn-structure functions ──────────────────────────────────────────────
@@ -2829,6 +3152,13 @@ fn handle_priority_round(
     let mut last_action: PriorityAction = PriorityAction::Pass;
 
     loop {
+        // Drain any triggers queued since the last priority check (from step actions or
+        // spell resolution). Triggers in no-priority steps are deferred until the next
+        // priority window — acceptable because none of our current triggered abilities
+        // fire during Untap or Cleanup steps.
+        let queued = std::mem::take(&mut state.pending_triggers);
+        push_triggers(queued, &mut stack);
+
         let who = priority_holder.clone();
         let action = decide_action(
             state, t, ap, &who, dd_turn, &last_action, &stack,
@@ -2861,6 +3191,7 @@ fn handle_priority_round(
                     adventure_exile: false,
                     adventure_card_name: None,
                     adventure_face: None,
+                    trigger_context: None,
                 });
                 let next = if who == ap { nap } else { ap };
                 priority_holder = next.to_string();
@@ -2915,6 +3246,7 @@ fn handle_priority_round(
                     adventure_exile: true,
                     adventure_card_name: Some(card_name.clone()),
                     adventure_face: Some(face),
+                    trigger_context: None,
                 });
                 state.player_mut(&who).spells_cast_this_turn += 1;
                 let next = if who == ap { nap } else { ap };
@@ -2958,6 +3290,7 @@ fn handle_priority_round(
                     adventure_exile: false,
                     adventure_card_name: None,
                     adventure_face: None,
+                    trigger_context: None,
                 });
                 state.player_mut(&who).spells_cast_this_turn += 1;
                 let next = if who == ap { nap } else { ap };
@@ -3027,8 +3360,11 @@ fn handle_priority_round(
                                 state.log(t, &top.owner, &format!("{} fizzles (target already resolved)", top.name));
                             }
                         } else if top.is_ability {
-                            // Ability resolves: apply the deferred effect now.
-                            if let Some(ref ab) = top.ability_def {
+                            // Triggered ability resolves.
+                            if let Some(ref ctx) = top.trigger_context.clone() {
+                                apply_trigger(ctx, state, t, rng);
+                            // Activated ability resolves.
+                            } else if let Some(ref ab) = top.ability_def {
                                 let (actor_lib, _other_lib) = if top.owner == "us" {
                                     (&mut *us_lib, &mut *opp_lib)
                                 } else {
@@ -3099,6 +3435,7 @@ fn do_step(
             state.player_mut(ap).land_drop_available = true;
             state.player_mut(ap).spells_cast_this_turn = 0;
             state.player_mut(ap).pending_actions.clear();
+            state.player_mut(ap).draws_this_turn = 0;
         }
         StepKind::Draw => {
             let this_player_on_play = if ap == "us" { on_play } else { !on_play };
@@ -3106,8 +3443,20 @@ fn do_step(
             if skip {
                 state.log(t, ap, "No draw (on the play)");
             } else {
+                state.player_mut(ap).draws_this_turn += 1;
+                let draw_idx = state.player(ap).draws_this_turn;
                 state.player_mut(ap).hand.hidden += 1;
                 state.log(t, ap, "Draw");
+                let ev = GameEvent::ZoneChange {
+                    card: String::new(),
+                    card_type: String::new(),
+                    from: ZoneId::Library,
+                    to: ZoneId::Hand,
+                    controller: ap.to_string(),
+                    draw_index: Some(draw_idx),
+                    is_natural_draw: true,
+                };
+                state.queue_triggers(&ev);
             }
         }
         StepKind::Cleanup => {
@@ -3118,23 +3467,34 @@ fn do_step(
         }
         StepKind::DeclareAttackers => {
             let nap = if ap == "us" { "opp" } else { "us" };
-            // Sum of untapped NAP creature power (tapped creatures cannot block).
-            let nap_power: i32 = state.player(nap).permanents.iter()
+            // For each candidate attacker, compute the relevant NAP blocking power:
+            // only untapped NAP creatures that *can* block that attacker count.
+            // Flying attackers are only threatened by flying blockers.
+            let nap_blockers: Vec<(String, i32)> = state.player(nap).permanents.iter()
                 .filter(|p| !p.tapped)
                 .filter_map(|p| {
                     let def = catalog_map.get(p.name.as_str());
                     if def.map(|d| d.is_creature()).unwrap_or(false) {
-                        Some(creature_stats(p, def.copied()).0)
+                        Some((p.name.clone(), creature_stats(p, def.copied()).0))
                     } else { None }
                 })
-                .sum();
+                .collect();
             let attackers: Vec<String> = state.player(ap).permanents.iter()
                 .filter(|p| !p.tapped && !p.entered_this_turn)
                 .filter_map(|p| {
                     let def = catalog_map.get(p.name.as_str());
                     if def.map(|d| d.is_creature()).unwrap_or(false) {
+                        let atk_flies = creature_has_keyword(&p.name, "flying", catalog_map);
+                        // Sum power of NAP creatures that can block this attacker.
+                        let relevant_power: i32 = nap_blockers.iter()
+                            .filter(|(blk_name, _)| {
+                                // A flyer can only be blocked by flyers.
+                                !atk_flies || creature_has_keyword(blk_name, "flying", catalog_map)
+                            })
+                            .map(|(_, pow)| pow)
+                            .sum();
                         let (_, tgh) = creature_stats(p, def.copied());
-                        if tgh > nap_power { Some(p.name.clone()) } else { None }
+                        if tgh > relevant_power { Some(p.name.clone()) } else { None }
                     } else { None }
                 })
                 .collect();
@@ -3148,6 +3508,12 @@ fn do_step(
                 }
             }
             state.combat_attackers = attackers;
+            // Fire EnteredStep trigger AFTER attackers are marked (p.attacking is now set).
+            let step_ev = GameEvent::EnteredStep {
+                step: StepKind::DeclareAttackers,
+                active_player: ap.to_string(),
+            };
+            state.queue_triggers(&step_ev);
         }
         StepKind::DeclareBlockers => {
             let nap = if ap == "us" { "opp" } else { "us" };
@@ -3162,11 +3528,16 @@ fn do_step(
                         None    => continue,
                     }
                 };
+                let atk_flies = creature_has_keyword(&atk_name, "flying", catalog_map);
                 let blocker = state.player(nap).permanents.iter()
                     .filter(|p| !p.tapped && !used_blockers.contains(&p.name))
                     .filter_map(|p| {
                         let def = catalog_map.get(p.name.as_str()).copied();
                         if def.map(|d| d.is_creature()).unwrap_or(false) {
+                            // Flying attackers can only be blocked by flying creatures.
+                            if atk_flies && !creature_has_keyword(&p.name, "flying", catalog_map) {
+                                return None;
+                            }
                             let (blk_pow, blk_tgh) = creature_stats(p, def);
                             // Good block: kills attacker OR both survive (touch butts). Not a chump.
                             let good_block = blk_pow >= atk_tgh || atk_pow < blk_tgh;
@@ -3628,6 +3999,7 @@ mod tests {
             adventure_exile: false,
             adventure_card_name: None,
             adventure_face: None,
+            trigger_context: None,
         }
     }
 
@@ -4861,6 +5233,353 @@ mod tests {
         assert!(state.us.permanents.iter().any(|p| p.name == "Brazen Borrower"), "Borrower enters play");
         assert!(!state.us.on_adventure.contains(&"Brazen Borrower".to_string()), "removed from on_adventure");
         assert!(!state.us.exile.visible.contains(&"Brazen Borrower".to_string()), "removed from exile");
+    }
+
+    // ── Section 8: Keyword Tests ──────────────────────────────────────────────
+
+    fn flying_creature(name: &str, power: i32, toughness: i32) -> CardDef {
+        let toml = format!(
+            "name = {:?}\ncard_type = \"creature\"\npower = {}\ntoughness = {}\nkeywords = [\"flying\"]\n",
+            name, power, toughness
+        );
+        toml::from_str(&toml).unwrap()
+    }
+
+    #[test]
+    fn test_flying_not_blocked_by_ground() {
+        // Flying attacker should not be assigned a ground blocker.
+        let mut state = make_state();
+        let flyer = flying_creature("Murktide Regent", 3, 3);
+        let ground = creature("Troll", 3, 3);
+
+        let mut attacker = SimPermanent::new("Murktide Regent");
+        attacker.attacking = true;
+        state.us.permanents.push(attacker);
+        state.opp.permanents.push(SimPermanent::new("Troll"));
+        state.combat_attackers = vec!["Murktide Regent".to_string()];
+
+        let catalog = vec![flyer, ground];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.combat_blocks.is_empty(), "ground creature cannot block a flyer");
+    }
+
+    #[test]
+    fn test_flying_blocked_by_flyer() {
+        // Flying attacker CAN be blocked by another flying creature.
+        let mut state = make_state();
+        let flyer_atk = flying_creature("Murktide Regent", 3, 3);
+        let flyer_blk = flying_creature("Subtlety", 3, 3);
+
+        let mut attacker = SimPermanent::new("Murktide Regent");
+        attacker.attacking = true;
+        state.us.permanents.push(attacker);
+        state.opp.permanents.push(SimPermanent::new("Subtlety"));
+        state.combat_attackers = vec!["Murktide Regent".to_string()];
+
+        let catalog = vec![flyer_atk, flyer_blk];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert_eq!(state.combat_blocks.len(), 1, "flyer can block flyer");
+        assert_eq!(state.combat_blocks[0], ("Murktide Regent".to_string(), "Subtlety".to_string()));
+    }
+
+    #[test]
+    fn test_flying_attack_safety_ignores_ground() {
+        // A flying 3/3 attacker should attack freely even if a 3/3 ground creature is in play,
+        // because that ground creature cannot block the flyer.
+        let mut state = make_state();
+        let flyer = flying_creature("Murktide Regent", 3, 3);
+        let ground = creature("Troll", 3, 3); // cannot block flyer
+
+        let mut perm = SimPermanent::new("Murktide Regent");
+        perm.entered_this_turn = false;
+        state.us.permanents.push(perm);
+        state.opp.permanents.push(SimPermanent::new("Troll"));
+
+        let catalog = vec![flyer, ground];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        // Murktide's toughness (3) > relevant blocking power (0 — Troll can't block flyer).
+        assert!(state.combat_attackers.contains(&"Murktide Regent".to_string()),
+            "flying creature should attack when only ground blockers exist");
+    }
+
+    // ── Section 9: Trigger Tests ──────────────────────────────────────────────
+
+    fn bowmasters_def() -> CardDef {
+        toml::from_str(r#"
+            name = "Orcish Bowmasters"
+            card_type = "creature"
+            mana_cost = "1B"
+            power = 1
+            toughness = 1
+            effects = ["permanent"]
+        "#).unwrap()
+    }
+
+    fn murktide_def() -> CardDef {
+        toml::from_str(r#"
+            name = "Murktide Regent"
+            card_type = "creature"
+            mana_cost = "5UU"
+            power = 3
+            toughness = 3
+            delve = true
+            effects = ["permanent"]
+            keywords = ["flying"]
+        "#).unwrap()
+    }
+
+    #[test]
+    fn test_fire_triggers_returns_context_for_bowmasters_etb() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+
+        let ev = GameEvent::ZoneChange {
+            card: "Orcish Bowmasters".to_string(),
+            card_type: "creature".to_string(),
+            from: ZoneId::Stack,
+            to: ZoneId::Battlefield,
+            controller: "opp".to_string(),
+            draw_index: None,
+            is_natural_draw: false,
+        };
+        let result = fire_triggers(&ev, &state);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].payload, TriggerPayload::BowmastersEtb));
+    }
+
+    #[test]
+    fn test_fire_triggers_empty_when_no_bowmasters_in_play() {
+        let state = make_state(); // no permanents
+        let ev = GameEvent::ZoneChange {
+            card: "Orcish Bowmasters".to_string(),
+            card_type: "creature".to_string(),
+            from: ZoneId::Stack,
+            to: ZoneId::Battlefield,
+            controller: "opp".to_string(),
+            draw_index: None,
+            is_natural_draw: false,
+        };
+        let result = fire_triggers(&ev, &state);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_apply_bowmasters_etb_deals_damage_and_creates_army() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let initial_life = state.us.life;
+
+        let ctx = TriggerContext {
+            source: "Orcish Bowmasters".into(),
+            controller: "opp".into(),
+            payload: TriggerPayload::BowmastersEtb,
+        };
+        apply_trigger(&ctx, &mut state, 1, &mut seeded_rng());
+
+        assert_eq!(state.us.life, initial_life - 1, "ETB deals 1 to us");
+        assert!(state.opp.permanents.iter().any(|p| p.name == "Orc Army"), "Orc Army token created");
+        let army = state.opp.permanents.iter().find(|p| p.name == "Orc Army").unwrap();
+        assert_eq!(army.counters, 1, "Orc Army has 1 counter");
+    }
+
+    #[test]
+    fn test_apply_bowmasters_etb_grows_existing_army() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let mut army = SimPermanent::new("Orc Army");
+        army.counters = 2;
+        state.opp.permanents.push(army);
+
+        let ctx = TriggerContext {
+            source: "Orcish Bowmasters".into(),
+            controller: "opp".into(),
+            payload: TriggerPayload::BowmastersEtb,
+        };
+        apply_trigger(&ctx, &mut state, 1, &mut seeded_rng());
+
+        let army = state.opp.permanents.iter().find(|p| p.name == "Orc Army").unwrap();
+        assert_eq!(army.counters, 3, "Orc Army grows from 2 to 3");
+    }
+
+    #[test]
+    fn test_bowmasters_no_trigger_on_natural_first_draw() {
+        // Natural draw step draw (draw_index=1, is_natural_draw=true) should NOT trigger.
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+
+        let ev = GameEvent::ZoneChange {
+            card: String::new(),
+            card_type: String::new(),
+            from: ZoneId::Library,
+            to: ZoneId::Hand,
+            controller: "us".to_string(), // us draws
+            draw_index: Some(1),
+            is_natural_draw: true,
+        };
+        let result = fire_triggers(&ev, &state);
+        assert!(result.is_empty(), "no trigger on first natural draw");
+    }
+
+    #[test]
+    fn test_bowmasters_triggers_on_second_natural_draw() {
+        // Natural draw step draw (is_natural_draw=true) beyond the first triggers Bowmasters.
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+
+        let ev = GameEvent::ZoneChange {
+            card: String::new(),
+            card_type: String::new(),
+            from: ZoneId::Library,
+            to: ZoneId::Hand,
+            controller: "us".to_string(),
+            draw_index: Some(2),
+            is_natural_draw: true,
+        };
+        let result = fire_triggers(&ev, &state);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0].payload, TriggerPayload::BowmastersDrawTrigger { drawing_player } if drawing_player == "us"));
+    }
+
+    #[test]
+    fn test_bowmasters_triggers_on_cantrip_draw() {
+        // Non-natural draw (cantrip) always triggers Bowmasters (draw_index=1, is_natural_draw=false).
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+
+        let ev = GameEvent::ZoneChange {
+            card: String::new(),
+            card_type: String::new(),
+            from: ZoneId::Library,
+            to: ZoneId::Hand,
+            controller: "us".to_string(),
+            draw_index: Some(1),
+            is_natural_draw: false, // cantrip
+        };
+        let result = fire_triggers(&ev, &state);
+        assert_eq!(result.len(), 1, "cantrip draw triggers Bowmasters");
+    }
+
+    #[test]
+    fn test_murktide_counter_on_instant_exile() {
+        let mut state = make_state();
+        let mut murktide = SimPermanent::new("Murktide Regent");
+        murktide.counters = 0;
+        state.us.permanents.push(murktide);
+
+        let ev = GameEvent::ZoneChange {
+            card: "Counterspell".to_string(),
+            card_type: "instant".to_string(),
+            from: ZoneId::Graveyard,
+            to: ZoneId::Exile,
+            controller: "us".to_string(),
+            draw_index: None,
+            is_natural_draw: false,
+        };
+        let result = fire_triggers(&ev, &state);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].payload, TriggerPayload::MurktideExile));
+
+        let mut state2 = state;
+        apply_trigger(&result[0], &mut state2, 1, &mut seeded_rng());
+        let murktide = state2.us.permanents.iter().find(|p| p.name == "Murktide Regent").unwrap();
+        assert_eq!(murktide.counters, 1, "Murktide gains +1/+1 counter");
+    }
+
+    #[test]
+    fn test_murktide_no_counter_on_land_exile() {
+        let mut state = make_state();
+        state.us.permanents.push(SimPermanent::new("Murktide Regent"));
+
+        let ev = GameEvent::ZoneChange {
+            card: "Island".to_string(),
+            card_type: "land".to_string(),
+            from: ZoneId::Graveyard,
+            to: ZoneId::Exile,
+            controller: "us".to_string(),
+            draw_index: None,
+            is_natural_draw: false,
+        };
+        let result = fire_triggers(&ev, &state);
+        assert!(result.is_empty(), "land exile does not trigger Murktide");
+    }
+
+    #[test]
+    fn test_tamiyo_clue_when_attacking() {
+        let mut state = make_state();
+        let mut tamiyo = SimPermanent::new("Tamiyo, the Enigma Scroll");
+        tamiyo.attacking = true;
+        state.us.permanents.push(tamiyo);
+
+        let ev = GameEvent::EnteredStep {
+            step: StepKind::DeclareAttackers,
+            active_player: "us".to_string(),
+        };
+        let result = fire_triggers(&ev, &state);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].payload, TriggerPayload::TamiyoClue));
+
+        let mut state2 = state;
+        apply_trigger(&result[0], &mut state2, 1, &mut seeded_rng());
+        assert!(state2.us.permanents.iter().any(|p| p.name == "Clue Token"),
+            "Clue Token created when Tamiyo attacks");
+    }
+
+    #[test]
+    fn test_tamiyo_no_clue_when_not_attacking() {
+        let mut state = make_state();
+        let tamiyo = SimPermanent::new("Tamiyo, the Enigma Scroll"); // attacking = false
+        state.us.permanents.push(tamiyo);
+
+        let ev = GameEvent::EnteredStep {
+            step: StepKind::DeclareAttackers,
+            active_player: "us".to_string(),
+        };
+        let result = fire_triggers(&ev, &state);
+        // Trigger queues (Tamiyo is in play), but resolves to nothing (not attacking).
+        if let Some(ctx) = result.first() {
+            let mut state2 = state;
+            apply_trigger(ctx, &mut state2, 1, &mut seeded_rng());
+            assert!(!state2.us.permanents.iter().any(|p| p.name == "Clue Token"),
+                "no Clue Token if Tamiyo is not attacking");
+        }
+    }
+
+    #[test]
+    fn test_tamiyo_flip_on_third_draw() {
+        let mut state = make_state();
+        state.us.permanents.push(SimPermanent::new("Tamiyo, the Enigma Scroll"));
+
+        let ev = GameEvent::ZoneChange {
+            card: String::new(),
+            card_type: String::new(),
+            from: ZoneId::Library,
+            to: ZoneId::Hand,
+            controller: "us".to_string(),
+            draw_index: Some(3),
+            is_natural_draw: false,
+        };
+        let result = fire_triggers(&ev, &state);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(result[0].payload, TriggerPayload::TamiyoFlip));
+
+        let mut state2 = state;
+        apply_trigger(&result[0], &mut state2, 1, &mut seeded_rng());
+        assert!(!state2.us.permanents.iter().any(|p| p.name == "Tamiyo, the Enigma Scroll"),
+            "original Tamiyo removed");
+        assert!(state2.us.permanents.iter().any(|p| p.name == "Tamiyo, Seasoned Scholar"),
+            "Tamiyo, Seasoned Scholar enters");
     }
 }
 
