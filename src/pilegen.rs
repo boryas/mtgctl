@@ -936,12 +936,12 @@ fn eff_discard(caster: impl Into<String>, target: Who, n: usize, nonland: bool) 
         for _ in 0..n {
             if state.player(&target_who).hand.hidden <= 0 { break; }
             let candidates: Vec<usize> = lib.iter().enumerate()
-                .filter(|(_, (_, d))| !nonland || !d.is_land())
+                .filter(|(_, (_, _, d))| !nonland || !d.is_land())
                 .map(|(i, _)| i)
                 .collect();
             if candidates.is_empty() { break; }
             let idx = candidates[rng.gen_range(0..candidates.len())];
-            let (card, _) = lib.remove(idx);
+            let (_id, card, _) = lib.remove(idx);
             state.player_mut(&target_who).hand.hidden -= 1;
             state.player_mut(&target_who).graveyard.visible.push(card.clone());
             discarded.push(card);
@@ -981,7 +981,10 @@ fn eff_enter_permanent(
             .unwrap_or(0);
         let mana_abs = catalog.get(card_name.as_str())
             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+        let new_id = state.alloc_id();
+        state.cards.insert(new_id, CardObject::new(new_id, card_name.clone(), &owner));
         state.player_mut(&owner).permanents.push(SimPermanent {
+            id: new_id,
             name: card_name.clone(),
             annotation: ann,
             counters,
@@ -1026,7 +1029,10 @@ fn eff_reanimate(actor: impl Into<String>, target: Who, type_filter: impl Into<S
         let chosen = candidates[rng.gen_range(0..candidates.len())].clone();
         state.player_mut(&target_who).graveyard.visible.retain(|n| n != &chosen);
         let mana_abs = catalog.get(chosen.as_str()).map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+        let new_id = state.alloc_id();
+        state.cards.insert(new_id, CardObject::new(new_id, chosen.clone(), &target_who));
         state.player_mut(&target_who).permanents.push(SimPermanent {
+            id: new_id,
             name: chosen.clone(),
             mana_abilities: mana_abs,
             ..SimPermanent::new(&chosen)
@@ -1060,11 +1066,11 @@ fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, 
         TargetSpec::AnyOpponentCreature => {
             state.player(opp).permanents.iter()
                 .find(|p| p.name != "Orc Army") // placeholder: any creature
-                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
         }
         TargetSpec::AnyOpponentNonlandPermanent => {
             state.player(opp).permanents.first()
-                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
         }
         TargetSpec::OpponentCreatureMvLt4 => {
             state.player(opp).permanents.iter()
@@ -1073,7 +1079,7 @@ fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, 
                         .map(|d| d.is_creature() && mana_value(d.mana_cost()) < 4)
                         .unwrap_or(true)
                 })
-                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
         }
         TargetSpec::OpponentNonblackCreature => {
             state.player(opp).permanents.iter()
@@ -1082,7 +1088,7 @@ fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, 
                         .map(|d| d.is_creature() && !d.is_black())
                         .unwrap_or(true)
                 })
-                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
         }
         TargetSpec::CardInOwnGraveyard { .. } => {
             state.player(controller).graveyard.visible.first()
@@ -1106,7 +1112,7 @@ fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, 
                 .map(|p| p.name.clone())
                 .next()
             {
-                return Some(Target::Permanent { name, id: ObjId::UNSET, controller: opp.to_string() });
+                return Some(Target::Permanent { name: name.clone(), id: state.player(opp).permanents.iter().find(|p| p.name == name).map(|p| p.id).unwrap_or(ObjId::UNSET), controller: opp.to_string() });
             }
             Some(Target::Player(opp.to_string()))
         }
@@ -1367,6 +1373,7 @@ fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut 
 
 #[derive(Clone)]
 struct SimLand {
+    id: ObjId,
     name: String,
     tapped: bool,
     basic: bool,
@@ -1377,6 +1384,7 @@ struct SimLand {
 
 #[derive(Clone)]
 struct SimPermanent {
+    id: ObjId,
     name: String,
     /// Display annotation, e.g. "Wizard" for Cavern of Souls.
     annotation: Option<String>,
@@ -1407,6 +1415,7 @@ impl SimPermanent {
     #[allow(dead_code)]
     fn new(name: impl Into<String>) -> Self {
         SimPermanent {
+            id: ObjId::UNSET,
             name: name.into(),
             annotation: None,
             counters: 0,
@@ -1429,6 +1438,7 @@ impl SimLand {
     fn from_def(name: &str, def: &CardDef) -> Self {
         let land = def.as_land().expect("SimLand::from_def called with non-land");
         SimLand {
+            id: ObjId::UNSET,
             name: name.to_string(),
             tapped: land.enters_tapped,
             basic: land.basic,
@@ -1475,7 +1485,7 @@ impl std::fmt::Display for Zone {
 struct PlayerState {
     deck_name: String,
     life: i32,
-    library: Vec<(String, CardDef)>,
+    library: Vec<(ObjId, String, CardDef)>,
     hand: Zone,
     lands: Vec<SimLand>,
     permanents: Vec<SimPermanent>,
@@ -2093,7 +2103,7 @@ fn select_deck(prompt: &str, flow_type_filter: Option<&str>) -> Option<(String, 
 fn choose_land_name(
     state: &SimState,
     who: &str,
-    library: &[(String, CardDef)],
+    library: &[(ObjId, String, CardDef)],
     fateful: bool,
     rng: &mut impl Rng,
 ) -> Option<String> {
@@ -2105,14 +2115,14 @@ fn choose_land_name(
     let weighted: Vec<(usize, u32)> = library
         .iter()
         .enumerate()
-        .filter_map(|(i, (_, def))| {
+        .filter_map(|(i, (_, _, def))| {
             let land = def.as_land()?;
             if need_black && !land.mana_abilities.iter().any(|ma| ma.produces.contains('B')) { return None; }
             Some((i, 1))
         })
         .collect();
     if weighted.is_empty() { return None; }
-    Some(library[weighted_choice(&weighted, rng)].0.clone())
+    Some(library[weighted_choice(&weighted, rng)].1.clone())
 }
 
 /// Play a specific, pre-chosen land from the library (removes the entry).
@@ -2121,14 +2131,17 @@ fn sim_play_land(
     state: &mut SimState,
     t: u8,
     who: &str,
-    library: &mut Vec<(String, CardDef)>,
+    library: &mut Vec<(ObjId, String, CardDef)>,
     land_name: &str,
 ) {
-    let Some(idx) = library.iter().position(|(n, _)| n == land_name) else { return; };
-    let land = {
-        let (name, def) = &library[idx];
+    let Some(idx) = library.iter().position(|(_, n, _)| n == land_name) else { return; };
+    let mut land = {
+        let (_id, name, def) = &library[idx];
         SimLand::from_def(name, def)
     };
+    let new_id = state.alloc_id();
+    state.cards.insert(new_id, CardObject::new(new_id, land_name.to_string(), who));
+    land.id = new_id;
     state.player_mut(who).hand.hidden -= 1;
     debug_assert!(state.player(who).hand.hidden >= 0, "hand.hidden went negative playing land");
     state.player_mut(who).lands.push(land);
@@ -2254,7 +2267,7 @@ fn spell_is_affordable(
     def: &CardDef,
     state: &SimState,
     who: &str,
-    library: &[(String, CardDef)],
+    library: &[(ObjId, String, CardDef)],
 ) -> bool {
     let mut cost = parse_mana_cost(def.mana_cost());
     if def.delve() && cost.generic > 0 {
@@ -2279,7 +2292,7 @@ fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) ->
 fn collect_hand_actions(
     state: &SimState,
     who: &str,
-    library: &[(String, CardDef)],
+    library: &[(ObjId, String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
 ) -> Vec<PriorityAction> {
     if state.player(who).hand.hidden <= 0 {
@@ -2290,7 +2303,7 @@ fn collect_hand_actions(
 
     let mut actions: Vec<PriorityAction> = library
         .iter()
-        .filter_map(|(name, def)| {
+        .filter_map(|(_id, name, def)| {
             if def.is_land() {
                 return None;
             }
@@ -2320,7 +2333,7 @@ fn collect_hand_actions(
         .collect();
 
     // In-hand abilities (cycling, channel, etc.) — one entry per card with a zone="hand" ability.
-    for (name, def) in library {
+    for (_id, name, def) in library {
         for ab in def.abilities().iter().filter(|ab| ab.zone == "hand") {
             if hand_ability_affordable(ab, state, who) {
                 actions.push(PriorityAction::ActivateAbility(name.clone(), ab.clone()));
@@ -2329,7 +2342,7 @@ fn collect_hand_actions(
     }
 
     // Adventure spell face: offer casting the adventure (goes to exile on resolution).
-    for (name, def) in library {
+    for (_id, name, def) in library {
         let Some(face) = def.adventure() else { continue; };
         if !face.mana_cost.is_empty() {
             let cost = parse_mana_cost(&face.mana_cost);
@@ -2444,7 +2457,7 @@ fn pay_activation_cost(
     who: &str,
     source_name: &str,
     ability: &AbilityDef,
-    library: &mut Vec<(String, CardDef)>,
+    library: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
 ) {
     state.log(t, who, format!("Activate {} ability", source_name));
@@ -2481,7 +2494,7 @@ fn pay_activation_cost(
 
     // Discard cost (zone="hand"): remove from library, send to graveyard.
     if ability.discard_self {
-        if let Some(idx) = library.iter().position(|(n, _)| n == source_name) {
+        if let Some(idx) = library.iter().position(|(_, n, _)| n == source_name) {
             library.remove(idx);
             state.player_mut(who).hand.hidden -= 1;
             state.player_mut(who).graveyard.visible.push(source_name.to_string());
@@ -2490,7 +2503,7 @@ fn pay_activation_cost(
 
     // Ninjutsu cost: remove ninja from library (hand) and return an unblocked attacker to hand.
     if ability.ninjutsu {
-        if let Some(idx) = library.iter().position(|(n, _)| n == source_name) {
+        if let Some(idx) = library.iter().position(|(_, n, _)| n == source_name) {
             library.remove(idx);
             state.player_mut(who).hand.hidden -= 1;
         }
@@ -2546,7 +2559,7 @@ fn apply_ability_effect(
     who: &str,
     source_name: &str,
     ability: &AbilityDef,
-    library: &mut Vec<(String, CardDef)>,
+    library: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
     ninjutsu_attack_target: Option<&str>,
@@ -2556,7 +2569,10 @@ fn apply_ability_effect(
         let mana_abs = catalog_map.get(source_name)
             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
         let target = ninjutsu_attack_target.unwrap_or("").to_string();
+        let new_id = state.alloc_id();
+        state.cards.insert(new_id, CardObject::new(new_id, source_name.to_string(), who));
         state.player_mut(who).permanents.push(SimPermanent {
+            id: new_id,
             name: source_name.to_string(),
             annotation: None,
             counters: 0,
@@ -2597,7 +2613,7 @@ fn apply_ability_effect(
         let candidates: Vec<usize> = library
             .iter()
             .enumerate()
-            .filter(|(_, (_, d))| matches_search_filter(filter, d))
+            .filter(|(_, (_, _, d))| matches_search_filter(filter, d))
             .map(|(i, _)| i)
             .collect();
 
@@ -2605,14 +2621,15 @@ fn apply_ability_effect(
             // Prefer black-producing lands so fetches reliably find a black source.
             let black_candidates: Vec<usize> = candidates.iter()
                 .copied()
-                .filter(|&i| library[i].1.as_land().map_or(false, |l| l.land_types.swamp || l.mana_abilities.iter().any(|ma| ma.produces.contains('B'))))
+                .filter(|&i| library[i].2.as_land().map_or(false, |l| l.land_types.swamp || l.mana_abilities.iter().any(|ma| ma.produces.contains('B'))))
                 .collect();
             let pool = if !black_candidates.is_empty() { &black_candidates } else { &candidates };
             let idx = pool[rng.gen_range(0..pool.len())];
-            let land = {
-                let (lname, ldef) = &library[idx];
+            let mut land = {
+                let (_lid, lname, ldef) = &library[idx];
                 let ld = ldef.as_land().expect("search result should be a land");
                 SimLand {
+                    id: ObjId::UNSET,
                     name: lname.clone(),
                     tapped: false,
                     basic: ld.basic,
@@ -2620,10 +2637,13 @@ fn apply_ability_effect(
                     mana_abilities: ld.mana_abilities.clone(),
                 }
             };
-            let name = library[idx].0.clone();
+            let name = library[idx].1.clone();
             library.remove(idx);
             match dest {
                 "play" => {
+                    let new_id = state.alloc_id();
+                    state.cards.insert(new_id, CardObject::new(new_id, name.clone(), who));
+                    land.id = new_id;
                     state.player_mut(who).lands.push(land);
                     state.log(t, who, format!("{} ability → {}", source_name, name));
                 }
@@ -2672,7 +2692,7 @@ fn can_pay_alternate_cost(
     state: &SimState,
     who: &str,
     source_name: &str,
-    library: &[(String, CardDef)],
+    library: &[(ObjId, String, CardDef)],
 ) -> bool {
     let player = state.player(who);
     if player.hand.hidden < cost.hand_min {
@@ -2687,7 +2707,7 @@ fn can_pay_alternate_cost(
     if cost.exile_blue_from_hand {
         let has_pitch = library
             .iter()
-            .any(|(n, d)| n.as_str() != source_name && !d.is_land() && d.is_blue());
+            .any(|(_, n, d)| n.as_str() != source_name && !d.is_land() && d.is_blue());
         if !has_pitch {
             return false;
         }
@@ -2708,7 +2728,7 @@ fn apply_alt_cost_components(
     t: u8,
     who: &str,
     source_name: &str,
-    library: &mut Vec<(String, CardDef)>,
+    library: &mut Vec<(ObjId, String, CardDef)>,
     _catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Vec<String> {
@@ -2717,11 +2737,11 @@ fn apply_alt_cost_components(
         let pitch_indices: Vec<usize> = library
             .iter()
             .enumerate()
-            .filter(|(_, (n, d))| n.as_str() != source_name && !d.is_land() && d.is_blue())
+            .filter(|(_, (_, n, d))| n.as_str() != source_name && !d.is_land() && d.is_blue())
             .map(|(i, _)| i)
             .collect();
         let idx = pitch_indices[rng.gen_range(0..pitch_indices.len())];
-        let pitch_name = library[idx].0.clone();
+        let pitch_name = library[idx].1.clone();
         library.remove(idx);
         state.player_mut(who).hand.hidden -= 1;
         state.player_mut(who).exile.visible.push(pitch_name.clone());
@@ -2770,7 +2790,7 @@ fn cast_spell(
     t: u8,
     who: &str,
     name: &str,
-    library: &mut Vec<(String, CardDef)>,
+    library: &mut Vec<(ObjId, String, CardDef)>,
     preferred_cost: Option<&AlternateCost>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
@@ -2823,7 +2843,7 @@ fn cast_spell(
         .and_then(|tgt| choose_permanent_target(tgt, who, state, catalog_map, rng));
 
     // Remove the spell from library.
-    let pos = library.iter().position(|(n, _)| n.as_str() == name)?;
+    let pos = library.iter().position(|(_, n, _)| n.as_str() == name)?;
     library.remove(pos);
 
     // Pay cost and build a log label.
@@ -2911,8 +2931,8 @@ fn apply_spell_effects(
     item: &StackItem,
     state: &mut SimState,
     t: u8,
-    _actor_lib: &mut Vec<(String, CardDef)>,
-    _other_lib: &mut Vec<(String, CardDef)>,
+    _actor_lib: &mut Vec<(ObjId, String, CardDef)>,
+    _other_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -2971,7 +2991,10 @@ fn apply_spell_effects(
         let pw_loyalty = if let Some(d) = catalog_map.get(item.name.as_str()) {
             if let CardKind::Planeswalker(ref p) = d.kind { p.loyalty } else { 0 }
         } else { 0 };
+        let new_id = state.alloc_id();
+        state.cards.insert(new_id, CardObject::new(new_id, item.name.clone(), &item.owner));
         state.player_mut(&item.owner).permanents.push(SimPermanent {
+            id: new_id,
             name: item.name.clone(),
             annotation,
             counters,
@@ -3103,7 +3126,7 @@ fn respond_with_counter(
     stack: &[StackItem],
     target_idx: usize,
     responding_who: &str,
-    responding_library: &[(String, CardDef)],
+    responding_library: &[(ObjId, String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
     probabilistic: bool,
@@ -3121,13 +3144,13 @@ fn respond_with_counter(
     let mut seen = std::collections::HashSet::new();
     let counterspells: Vec<String> = responding_library
         .iter()
-        .filter(|(n, d)| {
+        .filter(|(_, n, d)| {
             d.counter_target()
                 .is_some_and(|ct| matches_counter_target(ct, target_kind))
                 && !d.alternate_costs().is_empty()
                 && !(n.as_str() == "Daze" && target_has_untapped_lands)
         })
-        .filter_map(|(n, _)| seen.insert(n.clone()).then(|| n.clone()))
+        .filter_map(|(_, n, _)| seen.insert(n.clone()).then(|| n.clone()))
         .collect();
 
     if counterspells.is_empty() {
@@ -3140,7 +3163,7 @@ fn respond_with_counter(
     for cs_name in &counterspells {
         if probabilistic {
             // Roll: is this counterspell in our hand?
-            let copies = responding_library.iter().filter(|(n, _)| n == cs_name).count();
+            let copies = responding_library.iter().filter(|(_, n, _)| n == cs_name).count();
             let p_have = p_card_in_hand(lib_size, hand_size, copies);
             if !rng.gen_bool(p_have.max(f64::MIN_POSITIVE)) { continue; }
 
@@ -3155,7 +3178,7 @@ fn respond_with_counter(
             // For pitch costs, also roll whether we have a blue card to pitch.
             if probabilistic && cost.exile_blue_from_hand {
                 let n_blue = responding_library.iter()
-                    .filter(|(n, d)| n.as_str() != cs_name && !d.is_land() && d.is_blue())
+                    .filter(|(_, n, d)| n.as_str() != cs_name && !d.is_land() && d.is_blue())
                     .count();
                 let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
                 if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
@@ -3190,7 +3213,7 @@ fn creature_stats(perm: &SimPermanent, def: Option<&CardDef>) -> (i32, i32) {
 fn try_ninjutsu(
     state: &SimState,
     who: &str,
-    library: &[(String, CardDef)],
+    library: &[(ObjId, String, CardDef)],
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
     if state.player(who).hand.hidden <= 0 { return None; }
@@ -3203,7 +3226,7 @@ fn try_ninjutsu(
     // Find ninjutsu cards in the library (hand + undrawn combined).
     let ninja_indices: Vec<usize> = library.iter()
         .enumerate()
-        .filter(|(_, (_, def))| def.ninjutsu().is_some())
+        .filter(|(_, (_, _, def))| def.ninjutsu().is_some())
         .map(|(i, _)| i)
         .collect();
     if ninja_indices.is_empty() { return None; }
@@ -3211,7 +3234,7 @@ fn try_ninjutsu(
     if !rng.gen_bool(0.35) { return None; }
     // Pick a random ninja and verify mana.
     let idx = ninja_indices[rng.gen_range(0..ninja_indices.len())];
-    let (ninja_name, ninja_def) = &library[idx];
+    let (_ninja_id, ninja_name, ninja_def) = &library[idx];
     let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
     if !state.player(who).potential_mana().can_pay(&ninjutsu_cost) { return None; }
     Some(PriorityAction::ActivateAbility(ninja_name.clone(), ninja_def.ninjutsu()?.as_ability_def()))
@@ -3502,7 +3525,10 @@ fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
         let c = army.counters;
         state.log(t, controller, format!("Orc Army grows to {c}/{c}"));
     } else {
+        let new_id = state.alloc_id();
+        state.cards.insert(new_id, CardObject::new(new_id, "Orc Army".to_string(), controller));
         state.player_mut(controller).permanents.push(SimPermanent {
+            id: new_id,
             name: "Orc Army".to_string(),
             counters: n,
             ..SimPermanent::new("Orc Army")
@@ -3512,7 +3538,11 @@ fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
 }
 
 fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
-    state.player_mut(controller).permanents.push(SimPermanent::new("Clue Token"));
+    let new_id = state.alloc_id();
+    state.cards.insert(new_id, CardObject::new(new_id, "Clue Token".to_string(), controller));
+    let mut clue = SimPermanent::new("Clue Token");
+    clue.id = new_id;
+    state.player_mut(controller).permanents.push(clue);
     state.log(t, controller, "Clue Token created");
 }
 
@@ -3522,7 +3552,10 @@ fn do_flip_tamiyo(controller: &str, state: &mut SimState, t: u8, catalog_map: &H
     let loyalty = catalog_map.get("Tamiyo, Seasoned Scholar")
         .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
         .unwrap_or(2);
+    let new_id = state.alloc_id();
+    state.cards.insert(new_id, CardObject::new(new_id, "Tamiyo, Seasoned Scholar".to_string(), controller));
     state.player_mut(controller).permanents.push(SimPermanent {
+        id: new_id,
         loyalty,
         ..SimPermanent::new("Tamiyo, Seasoned Scholar")
     });
@@ -3646,8 +3679,8 @@ fn nap_action(
     who: &str,
     last_action: &PriorityAction,
     stack: &[StackItem],
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
@@ -3678,7 +3711,7 @@ fn ap_react(
     t: u8,
     who: &str,
     stack: &[StackItem],
-    us_lib: &[(String, CardDef)],
+    us_lib: &[(ObjId, String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
@@ -3714,8 +3747,8 @@ fn ap_proactive(
     who: &str,
     dd_turn: u8,
     stack: &[StackItem],
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
@@ -3726,11 +3759,11 @@ fn ap_proactive(
         // a land might spend our last card in hand and leave us unable to cast Doomsday.
         let dd_already_castable = fateful && !state.us.dd_cast
             && state.us.potential_mana().can_pay(&ManaCost { b: 3, ..Default::default() })
-            && us_lib.iter().any(|(n, _)| n == "Doomsday");
+            && us_lib.iter().any(|(_, n, _)| n == "Doomsday");
         if !dd_already_castable {
             let force = state.player(who).must_land_drop;
-            let lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-            let land_count = lib.iter().filter(|(_, d)| d.is_land()).count();
+            let lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
+            let land_count = lib.iter().filter(|(_, _, d)| d.is_land()).count();
             if land_count > 0 {
                 // T1=100%, T2=90%, T3=80%, T4+=70%; forced to 100% when must_land_drop is set.
                 let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
@@ -3792,7 +3825,7 @@ fn ap_proactive(
         return PriorityAction::Pass;
     }
 
-    let actor_lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
+    let actor_lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
     let actions = collect_hand_actions(state, who, actor_lib, catalog_map);
     if actions.is_empty() {
         let pool = &state.player(who).pool;
@@ -3800,7 +3833,7 @@ fn ap_proactive(
         eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
             who, pool.b, pool.u, pool.total, hand);
         if who == "us" && t == dd_turn && !state.us.dd_cast {
-            let dd_in_lib = actor_lib.iter().filter(|(n, _)| n == "Doomsday").count();
+            let dd_in_lib = actor_lib.iter().filter(|(_, n, _)| n == "Doomsday").count();
             eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_lib={}, potential B={} tot={}",
                 hand, dd_in_lib, pool.b, pool.total);
         }
@@ -3845,8 +3878,8 @@ fn decide_action(
     dd_turn: u8,
     last_action: &PriorityAction,
     stack: &[StackItem],
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
@@ -3858,7 +3891,7 @@ fn decide_action(
     let in_ninjutsu_step = matches!(state.current_phase.as_str(),
         "DeclareBlockers" | "CombatDamage" | "EndCombat");
     if in_ninjutsu_step {
-        let actor_lib: &[(String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
+        let actor_lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
         if let Some(action) = try_ninjutsu(state, who, actor_lib, rng) {
             return action;
         }
@@ -3881,8 +3914,8 @@ fn handle_priority_round(
     t: u8,
     ap: &str,
     dd_turn: u8,
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -3978,7 +4011,7 @@ fn handle_priority_round(
                 }
                 // Remove card from library (hand).
                 let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
-                let Some(pos) = actor_lib.iter().position(|(n, _)| n == card_name) else {
+                let Some(pos) = actor_lib.iter().position(|(_, n, _)| n == card_name) else {
                     last_passer = Some(who.clone());
                     priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
                     continue;
@@ -4198,8 +4231,8 @@ fn do_step(
     step: &Step,
     dd_turn: u8,
     on_play: bool,
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -4521,8 +4554,8 @@ fn activate_planeswalkers(
     t: u8,
     ap: &str,
     dd_turn: u8,
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -4561,8 +4594,8 @@ fn do_phase(
     phase: &Phase,
     dd_turn: u8,
     on_play: bool,
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -4595,8 +4628,8 @@ fn do_turn(
     ap: &str,
     dd_turn: u8,
     on_play: bool,
-    us_lib: &mut Vec<(String, CardDef)>,
-    opp_lib: &mut Vec<(String, CardDef)>,
+    us_lib: &mut Vec<(ObjId, String, CardDef)>,
+    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -4664,7 +4697,7 @@ fn simulate_game(
         .filter_map(|(name, qty, _)| {
             catalog_map
                 .get(name.as_str())
-                .map(|d| std::iter::repeat((name.clone(), (*d).clone())).take(*qty as usize))
+                .map(|d| std::iter::repeat((ObjId::UNSET, name.clone(), (*d).clone())).take(*qty as usize))
         })
         .flatten()
         .collect();
@@ -4675,10 +4708,28 @@ fn simulate_game(
         .filter_map(|(name, qty, _)| {
             catalog_map
                 .get(name.as_str())
-                .map(|d| std::iter::repeat((name.clone(), (*d).clone())).take(*qty as usize))
+                .map(|d| std::iter::repeat((ObjId::UNSET, name.clone(), (*d).clone())).take(*qty as usize))
         })
         .flatten()
         .collect();
+
+    // Assign stable ObjIds to all library cards and register in state.cards.
+    {
+        let us_names: Vec<String> = state.us.library.iter().map(|(_, n, _)| n.clone()).collect();
+        for (i, name) in us_names.iter().enumerate() {
+            let id = state.alloc_id();
+            state.us.library[i].0 = id;
+            state.cards.insert(id, CardObject::new(id, name.clone(), "us"));
+        }
+    }
+    {
+        let opp_names: Vec<String> = state.opp.library.iter().map(|(_, n, _)| n.clone()).collect();
+        for (i, name) in opp_names.iter().enumerate() {
+            let id = state.alloc_id();
+            state.opp.library[i].0 = id;
+            state.cards.insert(id, CardObject::new(id, name.clone(), "opp"));
+        }
+    }
 
     // ── Turn loop ────────────────────────────────────────────────────────────
 
@@ -4739,7 +4790,7 @@ fn load_deck_cards(deck_name: &str) -> Vec<(String, i32, String)> {
 
 /// Sample `count` cards from `library` without replacement into `zone.visible`,
 /// decrementing `zone.hidden` by the same amount.
-fn reveal_hand(zone: &mut Zone, library: &[(String, CardDef)], count: i32, rng: &mut impl Rng) {
+fn reveal_hand(zone: &mut Zone, library: &[(ObjId, String, CardDef)], count: i32, rng: &mut impl Rng) {
     let n = (count as usize).min(library.len());
     if n == 0 {
         return;
@@ -4750,7 +4801,7 @@ fn reveal_hand(zone: &mut Zone, library: &[(String, CardDef)], count: i32, rng: 
         indices.swap(i, j);
     }
     for &idx in &indices[..n] {
-        zone.visible.push(library[idx].0.clone());
+        zone.visible.push(library[idx].1.clone());
         zone.hidden -= 1;
     }
     zone.visible.sort();
@@ -4887,7 +4938,7 @@ mod tests {
         StdRng::seed_from_u64(42)
     }
 
-    fn empty_libs() -> (Vec<(String, CardDef)>, Vec<(String, CardDef)>) {
+    fn empty_libs() -> (Vec<(ObjId, String, CardDef)>, Vec<(ObjId, String, CardDef)>) {
         (vec![], vec![])
     }
 
@@ -4901,6 +4952,7 @@ mod tests {
 
     fn make_land(name: &str, tapped: bool) -> SimLand {
         SimLand {
+            id: ObjId::UNSET,
             name: name.to_string(),
             tapped,
             basic: false,
@@ -5257,6 +5309,7 @@ mod tests {
     fn test_beginning_phase_untaps_and_draws() {
         let mut state = make_state();
         state.us.lands.push(SimLand {
+            id: ObjId::UNSET,
             name: "Island".to_string(),
             tapped: true,
             basic: true,
@@ -5309,7 +5362,7 @@ mod tests {
             card_type = "instant"
             mana_cost = "B"
         "#).unwrap();
-        let mut us_lib = vec![("Dark Ritual".to_string(), def.clone())];
+        let mut us_lib = vec![(ObjId::UNSET, "Dark Ritual".to_string(), def.clone())];
         state.us.pool.b = 1;
         state.us.pool.total = 1;
         // hand.hidden = 7 (from PlayerState::new)
@@ -5323,7 +5376,7 @@ mod tests {
         let item = item.unwrap();
         assert_eq!(item.name, "Dark Ritual");
         assert_eq!(item.owner, "us");
-        assert!(!us_lib.iter().any(|(n, _)| n == "Dark Ritual"), "removed from library");
+        assert!(!us_lib.iter().any(|(_, n, _)| n == "Dark Ritual"), "removed from library");
         assert_eq!(state.us.pool.b, 0, "mana spent");
     }
 
@@ -5335,7 +5388,7 @@ mod tests {
             card_type = "instant"
             mana_cost = "BBB"
         "#).unwrap();
-        let mut us_lib = vec![("Doomsday".to_string(), def.clone())];
+        let mut us_lib = vec![(ObjId::UNSET, "Doomsday".to_string(), def.clone())];
         // No mana in pool, no lands
 
         let catalog = vec![def];
@@ -5364,8 +5417,8 @@ mod tests {
             mana_cost = "U"
         "#).unwrap();
         let mut us_lib = vec![
-            ("Force of Will".to_string(), fow_def.clone()),
-            ("Brainstorm".to_string(), brainstorm_def.clone()),
+            (ObjId::UNSET, "Force of Will".to_string(), fow_def.clone()),
+            (ObjId::UNSET, "Brainstorm".to_string(), brainstorm_def.clone()),
         ];
         let catalog = vec![fow_def.clone(), brainstorm_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5377,7 +5430,7 @@ mod tests {
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
-        assert!(!us_lib.iter().any(|(n, _)| n == "Brainstorm"), "pitch card removed from library");
+        assert!(!us_lib.iter().any(|(_, n, _)| n == "Brainstorm"), "pitch card removed from library");
         assert!(state.us.exile.visible.contains(&"Brainstorm".to_string()), "pitch card exiled");
     }
 
@@ -5469,7 +5522,7 @@ mod tests {
             card_type = "instant"
             mana_cost = "UU"
         "#).unwrap();
-        state.opp.library = vec![("Counterspell".to_string(), target_card)];
+        state.opp.library = vec![(ObjId::UNSET, "Counterspell".to_string(), target_card)];
         eff_discard("us", Who::Opp, 1, false).call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
 
         assert_eq!(state.opp.hand.hidden, 0, "opp hand decremented");
@@ -5606,7 +5659,7 @@ mod tests {
         state.us.pool.u  = 1;
         state.us.pool.total = 1; // only 1 mana in pool — delve pays the other 7
 
-        let mut us_lib = vec![("Treasure Cruise".to_string(), def.clone())];
+        let mut us_lib = vec![(ObjId::UNSET, "Treasure Cruise".to_string(), def.clone())];
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
@@ -5632,7 +5685,7 @@ mod tests {
         state.us.graveyard.visible = vec!["Ritual".into(), "Ponder".into()];
         state.us.pool.total = 1; // covers the 1 remaining generic after delve
 
-        let mut us_lib = vec![("Dead Drop".to_string(), def.clone())];
+        let mut us_lib = vec![(ObjId::UNSET, "Dead Drop".to_string(), def.clone())];
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
@@ -5670,7 +5723,7 @@ mod tests {
 
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let mut us_lib = vec![("Murktide Regent".to_string(), murktide_def)];
+        let mut us_lib = vec![(ObjId::UNSET, "Murktide Regent".to_string(), murktide_def)];
 
         let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
         // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
@@ -5710,7 +5763,7 @@ mod tests {
 
         let catalog = vec![murktide_def.clone(), ragavan_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let mut us_lib = vec![("Murktide Regent".to_string(), murktide_def)];
+        let mut us_lib = vec![(ObjId::UNSET, "Murktide Regent".to_string(), murktide_def)];
 
         let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
         assert!(item.annotation.is_none(), "no instants/sorceries → no counter annotation");
@@ -5761,7 +5814,7 @@ mod tests {
         state.us.graveyard.visible = vec!["Ritual".into(), "Ponder".into()];
         // no mana
 
-        let mut us_lib = vec![("Dead Drop".to_string(), def.clone())];
+        let mut us_lib = vec![(ObjId::UNSET, "Dead Drop".to_string(), def.clone())];
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
@@ -5806,6 +5859,7 @@ mod tests {
 
     fn island_land() -> SimLand {
         SimLand {
+            id: ObjId::UNSET,
             name: "Island".to_string(),
             tapped: false,
             basic: true,
@@ -5899,7 +5953,7 @@ mod tests {
         state.us.hand.hidden = 0;
         let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = true;
         state.us.permanents.push(atk);
-        let lib = vec![("Ninja".to_string(), ninja_def())];
+        let lib = vec![(ObjId::UNSET, "Ninja".to_string(), ninja_def())];
         assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no hand → None");
     }
 
@@ -5910,7 +5964,7 @@ mod tests {
         let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = false;
         state.us.permanents.push(atk);
         state.us.pool.u = 1; state.us.pool.total = 1;
-        let lib = vec![("Ninja".to_string(), ninja_def())];
+        let lib = vec![(ObjId::UNSET, "Ninja".to_string(), ninja_def())];
         assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no unblocked attacker → None");
     }
 
@@ -5921,7 +5975,7 @@ mod tests {
         let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = true;
         state.us.permanents.push(atk);
         state.us.pool.u = 1; state.us.pool.total = 1;
-        let lib = vec![("Brainstorm".to_string(), toml::from_str::<CardDef>("name=\"Brainstorm\"\ncard_type=\"instant\"\nmana_cost=\"U\"").unwrap())];
+        let lib = vec![(ObjId::UNSET, "Brainstorm".to_string(), toml::from_str::<CardDef>("name=\"Brainstorm\"\ncard_type=\"instant\"\nmana_cost=\"U\"").unwrap())];
         assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no ninja card → None");
     }
 
@@ -5932,7 +5986,7 @@ mod tests {
         let mut atk = SimPermanent::new("Ragavan"); atk.attacking = true; atk.unblocked = true;
         state.us.permanents.push(atk);
         // No mana available
-        let lib = vec![("Ninja".to_string(), ninja_def())];
+        let lib = vec![(ObjId::UNSET, "Ninja".to_string(), ninja_def())];
         assert!(try_ninjutsu(&state, "us", &lib, &mut seeded_rng()).is_none(), "no mana → None");
     }
 
@@ -5954,7 +6008,7 @@ mod tests {
             state.us.permanents.push(ragavan);
             let initial_hand = state.us.hand.hidden;
             state.us.lands.push(island_land());
-            let mut us_lib = vec![("Ninja".to_string(), def.clone())];
+            let mut us_lib = vec![(ObjId::UNSET, "Ninja".to_string(), def.clone())];
             let mut opp_lib = vec![];
             let mut rng = StdRng::seed_from_u64(seed);
             handle_priority_round(&mut state, 1, "us", 3, &mut us_lib, &mut opp_lib, &catalog_map, &mut rng);
@@ -5997,7 +6051,7 @@ mod tests {
             power = 3
             toughness = 4
         "#).unwrap();
-        let mut us_lib = vec![("Street Wraith".to_string(), wraith_def.clone())];
+        let mut us_lib = vec![(ObjId::UNSET, "Street Wraith".to_string(), wraith_def.clone())];
         let ability: AbilityDef = toml::from_str(r#"
             zone = "hand"
             discard_self = true
