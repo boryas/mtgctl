@@ -126,7 +126,16 @@ generates_clues = true
 mana_cost = "U"
 power = 0
 toughness = 3
-effects = ["permanent"]
+
+[[cards]]
+name = "Tamiyo, Seasoned Scholar"
+card_type = "planeswalker"
+is_token = true   # created by flipping, never in a library
+loyalty = 2
+
+[[cards.abilities]]
+loyalty_cost = 2
+effect = "tamiyo_plus_two"
 
 [[cards]]
 name = "Orcish Bowmasters"
@@ -135,7 +144,6 @@ mana_cost = "1B"
 black = true
 power = 1
 toughness = 1
-effects = ["permanent"]
 
 [[cards]]
 name = "Murktide Regent"
@@ -145,7 +153,6 @@ mana_cost = "5UU"  # delve makes it cheaper in practice
 delve = true
 power = 3
 toughness = 3
-effects = ["permanent"]
 
 [[cards]]
 name = "Thassa's Oracle"
@@ -155,7 +162,6 @@ play_weight = 1  # almost never played out — it's the kill card
 mana_cost = "UU"
 power = 1
 toughness = 3
-effects = ["permanent"]
 
 [[cards]]
 name = "Street Wraith"
@@ -173,7 +179,6 @@ name = "Lotus Petal"
 card_type = "artifact"
 mana_cost = "0"
 play_weight = 25
-effects = ["permanent"]
 mana_abilities = [{sacrifice_self = true, produces = "WUBRG"}]
 
 [[cards]]
@@ -181,7 +186,6 @@ name = "Lion's Eye Diamond"
 card_type = "artifact"
 mana_cost = "0"
 play_weight = 10
-effects = ["permanent"]
 # free (mana_cost = "0") — produces BBB when sacrificed with spell on stack; never activated in sim
 
 # ── Spells ────────────────────────────────────────────────────────────────────
@@ -190,28 +194,24 @@ effects = ["permanent"]
 name = "Doomsday"
 card_type = "sorcery"
 mana_cost = "BBB"
-effects = ["doomsday"]
 
 [[cards]]
 name = "Brainstorm"
 card_type = "instant"
 exileable = true
 mana_cost = "U"
-effects = ["cantrip"]
 
 [[cards]]
 name = "Ponder"
 card_type = "sorcery"
 exileable = true
 mana_cost = "U"
-effects = ["cantrip"]
 
 [[cards]]
 name = "Consider"
 card_type = "instant"
 exileable = true
 mana_cost = "U"
-effects = ["cantrip"]
 
 [[cards]]
 name = "Daze"
@@ -238,14 +238,12 @@ alternate_costs = [
 name = "Dark Ritual"
 card_type = "instant"
 mana_cost = "B"
-effects = ["mana:BBB"]  # adds BBB to pool on resolution
 
 [[cards]]
 name = "Fatal Push"
 card_type = "instant"
 mana_cost = "B"
 target = "opp:creature_mv_lt4"
-effects = ["destroy"]
 
 [[cards]]
 name = "Snuff Out"
@@ -253,7 +251,6 @@ card_type = "instant"
 mana_cost = "3BB"
 black = true
 target = "opp:creature_nonblack"
-effects = ["destroy"]
 alternate_costs = [
   { life_cost = 4 },
 ]
@@ -265,28 +262,24 @@ mana_cost = "2B"
 black = true
 power = 0
 toughness = 1
-effects = ["permanent"]
 
 [[cards]]
 name = "Thoughtseize"
 card_type = "sorcery"
 mana_cost = "B"
 requires = ["opp_hand_nonempty"]
-effects = ["discard:opp:1:nonland", "life_loss:2"]
 
 [[cards]]
 name = "Unearth"
 card_type = "sorcery"
 mana_cost = "B"
 requires = ["us_gy_has_creature"]
-effects = ["reanimate:us:creature"]
 
 [[cards]]
 name = "Hymn to Tourach"
 card_type = "sorcery"
 mana_cost = "BB"
 requires = ["opp_hand_nonempty"]
-effects = ["discard:opp:2"]
 
 [[cards]]
 name = "Edge of Autumn"
@@ -301,7 +294,6 @@ mana_cost = "1UU"
 blue = true
 power = 3
 toughness = 1
-effects = ["permanent"]
 adventure = {name = "Petty Theft", card_type = "instant", mana_cost = "1U", target = "opp:permanent_nonland", effects = ["bounce"]}
 
 [[cards]]
@@ -312,7 +304,6 @@ blue = true
 black = true
 power = 2
 toughness = 1
-effects = ["permanent"]
 ninjutsu = {mana_cost = "1U"}
 
 [[cards]]
@@ -324,5 +315,4 @@ blue = true
 black = true
 power = 3
 toughness = 4
-effects = ["permanent"]
 ninjutsu = {mana_cost = "1UB"}

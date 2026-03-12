@@ -95,6 +95,11 @@ struct AbilityDef {
     /// hand, and the effect puts the ninja into play tapped and attacking.
     #[serde(default)]
     ninjutsu: bool,
+    /// If Some, this is a loyalty ability with the given loyalty adjustment
+    /// (positive = gain loyalty, negative = spend loyalty, 0 = 0-loyalty ability).
+    /// Loyalty abilities are sorcery-speed and can only be activated once per turn per planeswalker.
+    #[serde(default)]
+    loyalty_cost: Option<i32>,
 }
 
 // ── Mana ability types ────────────────────────────────────────────────────────
@@ -141,7 +146,6 @@ struct CreatureData {
     #[serde(default)] exileable: bool,
     #[serde(default)] legendary: bool,
     #[serde(default)] delve: bool,
-    #[serde(default)] effects: Vec<String>,
     #[serde(default)] abilities: Vec<AbilityDef>,
     #[serde(default)] mana_abilities: Vec<ManaAbility>,
     #[serde(default)] adventure: Option<AdventureFace>,
@@ -152,7 +156,6 @@ struct CreatureData {
 #[derive(Deserialize, Clone, Default)]
 struct ArtifactData {
     #[serde(default)] mana_cost: String,
-    #[serde(default)] effects: Vec<String>,
     #[serde(default)] abilities: Vec<AbilityDef>,
     #[serde(default)] mana_abilities: Vec<ManaAbility>,
 }
@@ -195,7 +198,6 @@ struct SpellData {
     #[serde(default)] target: Option<String>,
     #[serde(default)] counter_target: Option<String>,
     #[serde(default)] requires: Vec<String>,
-    #[serde(default)] effects: Vec<String>,
     #[serde(default)] alternate_costs: Vec<AlternateCost>,
     #[serde(default)] delve: bool,
 }
@@ -203,9 +205,7 @@ struct SpellData {
 #[derive(Deserialize, Clone)]
 struct PlaneswalkerData {
     #[serde(default)] mana_cost: String,
-    #[allow(dead_code)]
     #[serde(default)] loyalty: i32,
-    #[serde(default)] effects: Vec<String>,
     #[serde(default)] abilities: Vec<AbilityDef>,
 }
 
@@ -252,16 +252,6 @@ impl CardDef {
             CardKind::Artifact(a) => &a.mana_cost,
             CardKind::Instant(s) | CardKind::Sorcery(s) => &s.mana_cost,
             CardKind::Planeswalker(p) => &p.mana_cost,
-        }
-    }
-
-    fn effects(&self) -> &[String] {
-        match &self.kind {
-            CardKind::Creature(c) => &c.effects,
-            CardKind::Artifact(a) => &a.effects,
-            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.effects,
-            CardKind::Planeswalker(p) => &p.effects,
-            CardKind::Land(_) | CardKind::Enchantment => &[],
         }
     }
 
@@ -430,7 +420,6 @@ struct RawCardDef {
     #[serde(default)] exileable: bool,
     #[serde(default)] play_weight: Option<u32>,
     #[serde(default)] requires: Vec<String>,
-    #[serde(default)] effects: Vec<String>,
     #[serde(default)] abilities: Vec<AbilityDef>,
     #[serde(default)] delve: bool,
     #[serde(default)] counter_target: Option<String>,
@@ -461,7 +450,6 @@ impl From<RawCardDef> for CardDef {
                 exileable: r.exileable,
                 legendary: r.legendary,
                 delve: r.delve,
-                effects: r.effects,
                 abilities: r.abilities,
                 mana_abilities: r.mana_abilities.clone(),
                 adventure: r.adventure,
@@ -476,7 +464,6 @@ impl From<RawCardDef> for CardDef {
                 target: r.target,
                 counter_target: r.counter_target,
                 requires: r.requires,
-                effects: r.effects,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
             }),
@@ -488,20 +475,17 @@ impl From<RawCardDef> for CardDef {
                 target: r.target,
                 counter_target: r.counter_target,
                 requires: r.requires,
-                effects: r.effects,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
             }),
             CardType::Artifact => CardKind::Artifact(ArtifactData {
                 mana_cost: r.mana_cost,
-                effects: r.effects,
                 abilities: r.abilities,
                 mana_abilities: r.mana_abilities.clone(),
             }),
             CardType::Planeswalker => CardKind::Planeswalker(PlaneswalkerData {
                 mana_cost: r.mana_cost,
                 loyalty: r.loyalty.unwrap_or(0),
-                effects: r.effects,
                 abilities: r.abilities,
             }),
             CardType::Enchantment => CardKind::Enchantment,
@@ -526,6 +510,107 @@ fn stage_label(turn: u8) -> &'static str {
 }
 
 // ── Game state ────────────────────────────────────────────────────────────────
+
+// ── Stable object identity ────────────────────────────────────────────────────
+
+/// Opaque game object identifier. Every player, card, token, and stack ability
+/// gets one at construction time and keeps it through all zone changes.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
+struct ObjId(u64);
+
+impl ObjId {
+    const UNSET: ObjId = ObjId(0);
+    fn is_set(self) -> bool { self.0 != 0 }
+}
+
+/// Zone a card currently occupies. Changed by move_to_zone / move_to_battlefield.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CardZone {
+    Library,
+    Hand { known: bool },   // known = identity visible to opponent
+    Stack,
+    Battlefield,
+    Graveyard,
+    Exile { on_adventure: bool },
+}
+
+/// In-play state for any permanent (land, creature, artifact, planeswalker, enchantment, token).
+/// Replaces SimPermanent + SimLand. Whether a permanent is a land/creature/etc. is determined
+/// by looking up its CardDef from the catalog.
+#[derive(Clone)]
+struct BattlefieldState {
+    tapped: bool,
+    damage: i32,
+    entered_this_turn: bool,
+    counters: i32,              // +1/+1 counters
+    power_mod: i32,
+    toughness_mod: i32,
+    loyalty: i32,               // planeswalker loyalty (0 for non-PWs)
+    pw_activated_this_turn: bool,
+    attacking: bool,
+    unblocked: bool,
+    attack_target: Option<ObjId>,  // None = attacking player, Some = attacking planeswalker
+    annotation: Option<String>,
+    mana_abilities: Vec<ManaAbility>,  // cached from CardDef at entry
+}
+
+impl BattlefieldState {
+    fn new(mana_abilities: Vec<ManaAbility>) -> Self {
+        BattlefieldState {
+            tapped: false, damage: 0, entered_this_turn: true, counters: 0,
+            power_mod: 0, toughness_mod: 0, loyalty: 0, pw_activated_this_turn: false,
+            attacking: false, unblocked: false, attack_target: None,
+            annotation: None, mana_abilities,
+        }
+    }
+}
+
+/// State for a spell on the stack.
+#[derive(Clone)]
+struct StackSpellState {
+    chosen_targets: Vec<Target>,
+    effect: Option<Effect>,
+    annotation: Option<String>,
+    is_adventure_face: bool,    // resolve to Exile { on_adventure: true } instead of graveyard
+}
+
+/// A card as a game object — follows the card through all zone changes.
+/// The immutable blueprint (CardDef) is looked up by name from the catalog.
+#[derive(Clone)]
+struct CardObject {
+    id: ObjId,
+    name: String,
+    owner: String,        // "us" or "opp" — kept as String for compat with existing player(&str) API
+    controller: String,
+    zone: CardZone,
+    bf: Option<BattlefieldState>,      // Some only when zone == Battlefield
+    stack: Option<StackSpellState>,    // Some only when zone == Stack
+}
+
+impl CardObject {
+    fn new(id: ObjId, name: impl Into<String>, owner: impl Into<String>) -> Self {
+        let owner = owner.into();
+        CardObject {
+            id, name: name.into(), controller: owner.clone(), owner,
+            zone: CardZone::Library, bf: None, stack: None,
+        }
+    }
+}
+
+/// An activated or triggered ability on the stack (not a card).
+#[derive(Clone)]
+struct StackAbility {
+    id: ObjId,
+    source_id: ObjId,
+    source_name: String,
+    owner: String,
+    controller: String,
+    ability_def: Option<AbilityDef>,
+    trigger_context: Option<TriggerContext>,
+    chosen_targets: Vec<Target>,
+    effect: Option<Effect>,
+    annotation: Option<String>,
+}
 
 /// An item on the spell stack: a spell or ability that has been declared and paid for
 /// but not yet resolved.
@@ -558,6 +643,14 @@ struct StackItem {
     /// For triggered abilities: the trigger payload to apply at resolution.
     /// When Some, this overrides ability_def / spell resolution — `apply_trigger` is called instead.
     trigger_context: Option<TriggerContext>,
+    /// Targets chosen when the trigger was put on the stack (from trigger_context.target_spec).
+    chosen_targets: Vec<Target>,
+    /// For ninjutsu abilities: the attack_target of the replaced attacker, so the ninja can inherit it.
+    ninjutsu_attack_target: Option<String>,
+    /// Composable effect closure populated by `spell_effect` at cast time.
+    /// When Some, the new Effect path is used at resolution. When None, falls back
+    /// to legacy `apply_spell_effects` string dispatch.
+    effect: Option<Effect>,
 }
 
 
@@ -578,16 +671,21 @@ enum ZoneId {
 /// trigger fires. Owned strings to avoid lifetime issues when pushing onto the stack.
 #[derive(Clone)]
 enum GameEvent {
-    /// A card moved from one zone to another. Library→Hand draws carry `draw_index`
-    /// (n-th draw this turn) and `is_natural_draw` (true only for the draw step draw).
+    /// A card moved from one zone to another (ETB, GY→Exile, etc.).
+    /// Does NOT include drawing — use `Draw` for that.
     ZoneChange {
         card: String,
         card_type: String,
         from: ZoneId,
         to: ZoneId,
         controller: String,
-        draw_index: Option<u8>,
-        is_natural_draw: bool,
+    },
+    /// A player draws a card. `draw_index` is which draw this is this turn (1-based).
+    /// `is_natural` is true only for the draw-step draw.
+    Draw {
+        controller: String,
+        draw_index: u8,
+        is_natural: bool,
     },
     /// Fired after step-specific actions complete and before priority begins.
     /// `active_player` is the player whose turn it is.
@@ -595,26 +693,434 @@ enum GameEvent {
         step: StepKind,
         active_player: String,
     },
+    /// A creature was declared as an attacker.
+    CreatureAttacked {
+        attacker: String,
+        attacker_controller: String,
+        attack_target: String, // empty = player, non-empty = planeswalker name
+    },
     // Future variants: DamageDealt, SpellCast, SpellResolved, AbilityActivated,
     //                  CounterChanged, LifeChanged, TokenCreated.
 }
 
-/// Data stored with a triggered ability's `StackItem`. Identifies what to do at resolution.
+/// Data stored with a triggered ability's `StackItem`.
+/// The effect closure captures all context (targets, source data) at trigger-push time.
 #[derive(Clone)]
 struct TriggerContext {
-    source: String,       // card name of the triggering permanent
-    controller: String,   // player controlling that permanent
-    payload: TriggerPayload,
+    /// Card name of the triggering permanent. TODO(ids): replace with permanent ID.
+    source: String,
+    /// Player who controls that permanent.
+    controller: String,
+    /// Short string label for this trigger type — used in logging and test assertions.
+    kind: &'static str,
+    /// Legal targets this trigger may choose from. Resolved when pushed to the stack.
+    target_spec: TargetSpec,
+    /// The effect to apply when this trigger resolves. Receives the chosen targets.
+    effect: EffectFn,
 }
 
-/// The specific effect a triggered ability applies when it resolves.
+// ── Continuous effects ────────────────────────────────────────────────────────
+
+/// When a continuous effect expires.
+#[derive(Clone, PartialEq)]
+enum EffectExpiry {
+    /// Removed at the start of the controlling player's next Untap step.
+    StartOfControllerNextTurn,
+    /// Removed during the Cleanup step of the current turn.
+    EndOfTurn,
+}
+
+/// A reversible power/toughness modification. Kept as structured data so
+/// Cleanup can undo it precisely without the closure needing mutable access at expiry.
 #[derive(Clone)]
-enum TriggerPayload {
-    BowmastersEtb,
-    BowmastersDrawTrigger { drawing_player: String },
-    MurktideExile,
-    TamiyoClue,
-    TamiyoFlip,
+struct StatModData {
+    target_name: String,
+    target_controller: String,
+    power_delta: i32,
+    toughness_delta: i32,
+}
+
+/// A continuous effect that persists across steps or turns.
+#[derive(Clone)]
+struct ContinuousEffect {
+    /// Player who registered this effect (controls the source permanent).
+    controller: String,
+    expires: EffectExpiry,
+    /// Called for each game event. Returns a TriggerContext if this effect fires a triggered
+    /// ability in response to that event. None means the effect is purely passive.
+    on_event: Option<std::sync::Arc<dyn Fn(&GameEvent, &str) -> Option<TriggerContext> + Send + Sync>>,
+    /// If Some, a stat modification that Cleanup must reverse when this effect expires.
+    stat_mod: Option<StatModData>,
+}
+
+// ── Effect system (new) ───────────────────────────────────────────────────────
+//
+// Long-term goal: replace TriggerPayload, ContinuousEffectKind, and the
+// string-dispatched apply_ability_effect / apply_spell_effects with this system.
+//
+// Migration is staged: new card logic is written in terms of these types;
+// existing named variants are converted one at a time under test.
+
+/// A concrete, resolved reference to a game object that can be targeted.
+/// `id` fields default to `ObjId::UNSET` for now; they'll be filled in as objects get IDs.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    Player(String),
+    Permanent { name: String, id: ObjId, controller: String },
+    CardInZone { name: String, id: ObjId, zone: ZoneId, controller: String },
+}
+
+/// Declarative description of what targets a spell or ability may choose from.
+/// Used both to enumerate legal choices and to re-validate at resolution.
+#[derive(Clone, Debug)]
+enum TargetSpec {
+    None,
+    Player,
+    AnyOpponentCreature,
+    AnyOpponentNonlandPermanent,
+    OpponentCreatureMvLt4,
+    OpponentNonblackCreature,
+    CardInOwnGraveyard { card_type: Option<String> },
+    /// Any player or creature — used by Orcish Bowmasters ping.
+    AnyTarget,
+    // Extend as new cards require it.
+}
+
+/// The closure type for all resolved effects: spells, abilities, and triggered abilities.
+/// Targets were chosen at stack-push time and are passed in at resolution.
+/// The function is responsible for re-checking target legality and doing nothing (fizzle)
+/// if the target is no longer valid.
+type EffectFn = std::sync::Arc<dyn Fn(&mut SimState, u8, &[Target], &HashMap<&str, &CardDef>) + Send + Sync>;
+
+/// Builds a no-op EffectFn. Useful as a placeholder during migration.
+#[allow(dead_code)]
+fn no_effect() -> EffectFn {
+    std::sync::Arc::new(|_state, _t, _targets, _catalog| {})
+}
+
+// ── Effect newtype (composable spell/ability effects) ─────────────────────────
+//
+// `Effect` wraps a closure that applies a game effect. Unlike the existing
+// `EffectFn` (used by triggered abilities), Effect includes an RngCore reference
+// for effects that need randomness at resolution time (discard, reanimate, etc.).
+//
+// Compose effects with `.then()`:
+//   eff_draw(who, 3).then(eff_put_back(who, 2))  // Brainstorm
+
+/// Actor-relative player reference used in effect primitives.
+/// `Actor` = the spell's controller; `Opp` = their opponent.
+#[derive(Clone, Copy)]
+enum Who { Actor, Opp }
+
+impl Who {
+    fn resolve<'a>(&self, actor: &'a str) -> &'a str {
+        match self { Who::Actor => actor, Who::Opp => opp_of(actor) }
+    }
+}
+
+/// A composable game effect. Wraps a closure that mutates SimState.
+/// Built from primitives (eff_draw, eff_destroy_target, etc.) and chained with `.then()`.
+struct Effect(std::sync::Arc<dyn Fn(&mut SimState, u8, &[Target], &HashMap<&str, &CardDef>, &mut dyn rand::RngCore) + Send + Sync>);
+
+impl Clone for Effect {
+    fn clone(&self) -> Self { Effect(std::sync::Arc::clone(&self.0)) }
+}
+
+impl Effect {
+    fn call(
+        &self,
+        state: &mut SimState,
+        t: u8,
+        targets: &[Target],
+        catalog: &HashMap<&str, &CardDef>,
+        rng: &mut dyn rand::RngCore,
+    ) {
+        (self.0)(state, t, targets, catalog, rng);
+    }
+
+    /// Chain two effects: `self` runs first, then `next`.
+    fn then(self, next: Effect) -> Effect {
+        let a = self.0;
+        let b = next.0;
+        Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+            a(state, t, targets, catalog, rng);
+            b(state, t, targets, catalog, rng);
+        }))
+    }
+}
+
+// ── Effect primitives ─────────────────────────────────────────────────────────
+
+/// Draw `n` cards for `who`.
+fn eff_draw(who: impl Into<String>, n: usize) -> Effect {
+    let who = who.into();
+    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+        for _ in 0..n {
+            state.sim_draw(&who, t, false);
+        }
+    }))
+}
+
+/// Put `n` cards back from `who`'s hand (Brainstorm put-back).
+fn eff_put_back(who: impl Into<String>, n: usize) -> Effect {
+    let who = who.into();
+    Effect(std::sync::Arc::new(move |state, _t, _targets, _catalog, _rng| {
+        let actual = (n as i32).min(state.player(&who).hand.hidden);
+        state.player_mut(&who).hand.hidden -= actual;
+    }))
+}
+
+/// `who` loses `n` life, with a log line.
+fn eff_life_loss(who: impl Into<String>, n: i32) -> Effect {
+    let who = who.into();
+    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+        state.lose_life(&who, n);
+        let life = state.life_of(&who);
+        state.log(t, &who, format!("→ lose {} life (now {})", n, life));
+    }))
+}
+
+/// Add mana per `spec` (e.g. `"BBB"`) to `who`'s pool.
+fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effect {
+    let who = who.into();
+    let spec = spec.into();
+    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+        let mc = parse_mana_cost(&spec);
+        let pool = &mut state.player_mut(&who).pool;
+        pool.w += mc.w; pool.u += mc.u; pool.b += mc.b;
+        pool.r += mc.r; pool.g += mc.g; pool.c += mc.c;
+        pool.total += mc.mana_value();
+        state.log(t, &who, format!("→ add {} to pool", spec));
+    }))
+}
+
+/// Destroy the permanent in `targets[0]`. `caster` used for logging.
+fn eff_destroy_target(caster: impl Into<String>) -> Effect {
+    let caster = caster.into();
+    Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
+        if let Some(Target::Permanent { name, controller, .. }) = targets.first() {
+            apply_effect_to("destroy", controller, name, state, t, &caster);
+        }
+    }))
+}
+
+/// Bounce the permanent in `targets[0]` to its controller's hand.
+fn eff_bounce_target(caster: impl Into<String>) -> Effect {
+    let caster = caster.into();
+    Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
+        if let Some(Target::Permanent { name, controller, .. }) = targets.first() {
+            if let Some(idx) = state.player(controller).permanents.iter().position(|p| &p.name == name) {
+                state.player_mut(controller).permanents.remove(idx);
+                state.player_mut(controller).hand.hidden += 1;
+                state.log(t, &caster, format!("→ {} returned to {}'s hand", name, controller));
+            }
+        }
+    }))
+}
+
+/// Set `state.success = true` (Doomsday resolved).
+fn eff_doomsday() -> Effect {
+    Effect(std::sync::Arc::new(|state, _t, _targets, _catalog, _rng| {
+        state.success = true;
+    }))
+}
+
+/// Discard `n` random cards from `target`'s hand. `nonland=true` skips lands.
+fn eff_discard(caster: impl Into<String>, target: Who, n: usize, nonland: bool) -> Effect {
+    let caster = caster.into();
+    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, rng| {
+        use rand::Rng;
+        let target_who = target.resolve(&caster).to_string();
+        let mut lib = std::mem::take(&mut state.player_mut(&target_who).library);
+        let mut discarded: Vec<String> = Vec::new();
+        for _ in 0..n {
+            if state.player(&target_who).hand.hidden <= 0 { break; }
+            let candidates: Vec<usize> = lib.iter().enumerate()
+                .filter(|(_, (_, d))| !nonland || !d.is_land())
+                .map(|(i, _)| i)
+                .collect();
+            if candidates.is_empty() { break; }
+            let idx = candidates[rng.gen_range(0..candidates.len())];
+            let (card, _) = lib.remove(idx);
+            state.player_mut(&target_who).hand.hidden -= 1;
+            state.player_mut(&target_who).graveyard.visible.push(card.clone());
+            discarded.push(card);
+        }
+        state.player_mut(&target_who).library = lib;
+        if !discarded.is_empty() {
+            state.log(t, &caster, format!("→ {} discards: {}", target_who, discarded.join(", ")));
+        }
+    }))
+}
+
+/// Put `card_name` onto the battlefield as a permanent for `owner`. Fires ETB triggers.
+fn eff_enter_permanent(
+    owner: impl Into<String>,
+    card_name: impl Into<String>,
+    annotation: Option<String>,
+) -> Effect {
+    let owner = owner.into();
+    let card_name = card_name.into();
+    Effect(std::sync::Arc::new(move |state, t, _targets, catalog, rng| {
+        use rand::Rng;
+        let (counters, ann) = match annotation.as_deref() {
+            Some(s) if s.starts_with('+') => (s[1..].parse::<i32>().unwrap_or(0), None),
+            _ => {
+                let ann = if annotation.is_some() {
+                    annotation.clone()
+                } else if let Some(d) = catalog.get(card_name.as_str()) {
+                    if !d.annotation_options().is_empty() {
+                        Some(d.annotation_options()[rng.gen_range(0..d.annotation_options().len())].clone())
+                    } else { None }
+                } else { None };
+                (0, ann)
+            }
+        };
+        let pw_loyalty = catalog.get(card_name.as_str())
+            .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
+            .unwrap_or(0);
+        let mana_abs = catalog.get(card_name.as_str())
+            .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+        state.player_mut(&owner).permanents.push(SimPermanent {
+            name: card_name.clone(),
+            annotation: ann,
+            counters,
+            tapped: false,
+            damage: 0,
+            entered_this_turn: true,
+            mana_abilities: mana_abs,
+            attacking: false,
+            unblocked: false,
+            loyalty: pw_loyalty,
+            pw_activated_this_turn: false,
+            attack_target: String::new(),
+            power_mod: 0,
+            toughness_mod: 0,
+        });
+        let etb_ev = GameEvent::ZoneChange {
+            card: card_name.clone(),
+            card_type: "creature".to_string(),
+            from: ZoneId::Stack,
+            to: ZoneId::Battlefield,
+            controller: owner.clone(),
+        };
+        state.queue_triggers(&etb_ev);
+        state.log(t, &owner, format!("{} enters play", card_name));
+    }))
+}
+
+/// Reanimate a random card of `type_filter` from `target`'s graveyard.
+fn eff_reanimate(actor: impl Into<String>, target: Who, type_filter: impl Into<String>) -> Effect {
+    let actor = actor.into();
+    let type_filter = type_filter.into();
+    Effect(std::sync::Arc::new(move |state, t, _targets, catalog, rng| {
+        use rand::Rng;
+        let target_who = target.resolve(&actor).to_string();
+        let candidates: Vec<String> = state.player(&target_who).graveyard.visible.iter()
+            .filter(|n| catalog.get(n.as_str())
+                .map(|d| matches_target_type(&type_filter, &d.kind, false, Some(*d)))
+                .unwrap_or(false))
+            .cloned()
+            .collect();
+        if candidates.is_empty() { return; }
+        let chosen = candidates[rng.gen_range(0..candidates.len())].clone();
+        state.player_mut(&target_who).graveyard.visible.retain(|n| n != &chosen);
+        let mana_abs = catalog.get(chosen.as_str()).map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+        state.player_mut(&target_who).permanents.push(SimPermanent {
+            name: chosen.clone(),
+            mana_abilities: mana_abs,
+            ..SimPermanent::new(&chosen)
+        });
+        state.log(t, &actor, format!("→ {} returns from graveyard", chosen));
+    }))
+}
+
+/// Describes a triggered ability at the moment it wants to go on the stack:
+/// what card triggered it, who controls it, what targets it may choose, and
+/// how to build the EffectFn once a target is chosen.
+/// TODO(ids): source should be a permanent ID, not a name string.
+struct TriggerDef {
+    /// Card name of the permanent that triggered.
+    source: String,
+    /// Player who controls that permanent.
+    controller: String,
+    /// Legal target specification. `TargetSpec::None` means no target required.
+    target_spec: TargetSpec,
+    /// Given the chosen target (None iff target_spec is None), produce the effect closure.
+    make_effect: std::sync::Arc<dyn Fn(Option<Target>) -> EffectFn + Send + Sync>,
+}
+
+/// Choose a target for a trigger according to its spec and current game state.
+/// Returns None if the spec is None or no legal targets exist.
+fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, catalog_map: &HashMap<&str, &CardDef>) -> Option<Target> {
+    let opp = opp_of(controller);
+    match spec {
+        TargetSpec::None => None,
+        TargetSpec::Player => Some(Target::Player(opp.to_string())),
+        TargetSpec::AnyOpponentCreature => {
+            state.player(opp).permanents.iter()
+                .find(|p| p.name != "Orc Army") // placeholder: any creature
+                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+        }
+        TargetSpec::AnyOpponentNonlandPermanent => {
+            state.player(opp).permanents.first()
+                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+        }
+        TargetSpec::OpponentCreatureMvLt4 => {
+            state.player(opp).permanents.iter()
+                .find(|p| {
+                    catalog_map.get(p.name.as_str())
+                        .map(|d| d.is_creature() && mana_value(d.mana_cost()) < 4)
+                        .unwrap_or(true)
+                })
+                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+        }
+        TargetSpec::OpponentNonblackCreature => {
+            state.player(opp).permanents.iter()
+                .find(|p| {
+                    catalog_map.get(p.name.as_str())
+                        .map(|d| d.is_creature() && !d.is_black())
+                        .unwrap_or(true)
+                })
+                .map(|p| Target::Permanent { name: p.name.clone(), id: ObjId::UNSET, controller: opp.to_string() })
+        }
+        TargetSpec::CardInOwnGraveyard { .. } => {
+            state.player(controller).graveyard.visible.first()
+                .map(|name| Target::CardInZone {
+                    name: name.clone(),
+                    id: ObjId::UNSET,
+                    zone: ZoneId::Graveyard,
+                    controller: controller.to_string(),
+                })
+        }
+        TargetSpec::AnyTarget => {
+            // Strategy: prefer a killable opponent creature (1-damage kill),
+            // then default to pinging the opponent's face.
+            if let Some(name) = state.player(opp).permanents.iter()
+                .filter(|p| {
+                    let def = catalog_map.get(p.name.as_str());
+                    if !def.map(|d| d.is_creature()).unwrap_or(false) { return false; }
+                    let (_, tgh) = creature_stats(p, def.copied());
+                    tgh - p.damage <= 1 && tgh > 0
+                })
+                .map(|p| p.name.clone())
+                .next()
+            {
+                return Some(Target::Permanent { name, id: ObjId::UNSET, controller: opp.to_string() });
+            }
+            Some(Target::Player(opp.to_string()))
+        }
+    }
+}
+
+/// Choose a target for a spell using the same TargetSpec logic as trigger target selection.
+fn choose_spell_target(
+    spec: &TargetSpec,
+    caster: &str,
+    state: &SimState,
+    catalog_map: &HashMap<&str, &CardDef>,
+) -> Option<Target> {
+    choose_trigger_target(spec, caster, state, catalog_map)
 }
 
 // ── Turn structure ────────────────────────────────────────────────────────────
@@ -885,6 +1391,16 @@ struct SimPermanent {
     attacking: bool,
     /// Set in DeclareBlockers if this attacking creature was not assigned a blocker.
     unblocked: bool,
+    /// For planeswalkers: current loyalty (0 for non-planeswalkers).
+    loyalty: i32,
+    /// Set when a loyalty ability has been activated this turn; reset at Untap.
+    pw_activated_this_turn: bool,
+    /// Combat attack target: empty string = attacking the player; non-empty = attacking named planeswalker.
+    attack_target: String,
+    /// Temporary power/toughness modification from continuous effects (e.g. Tamiyo +2).
+    /// Cleared at EndCombat.
+    power_mod: i32,
+    toughness_mod: i32,
 }
 
 impl SimPermanent {
@@ -900,6 +1416,11 @@ impl SimPermanent {
             mana_abilities: vec![],
             attacking: false,
             unblocked: false,
+            loyalty: 0,
+            pw_activated_this_turn: false,
+            attack_target: String::new(),
+            power_mod: 0,
+            toughness_mod: 0,
         }
     }
 }
@@ -1150,6 +1671,14 @@ struct SimState {
     combat_blocks: Vec<(String, String)>,
     /// Triggered abilities waiting to be pushed onto the stack at the next priority window.
     pending_triggers: Vec<TriggerContext>,
+    /// Active continuous effects (from loyalty abilities, spells, etc.).
+    active_effects: Vec<ContinuousEffect>,
+    /// All cards in all zones, keyed by stable ObjId. Added as part of staged object model migration.
+    cards: HashMap<ObjId, CardObject>,
+    /// Activated/triggered abilities currently on the stack, keyed by ObjId.
+    abilities: HashMap<ObjId, StackAbility>,
+    /// ID allocator — starts at 1; 0 is reserved as ObjId::UNSET.
+    next_id: u64,
 }
 
 impl SimState {
@@ -1167,12 +1696,74 @@ impl SimState {
             combat_attackers: Vec::new(),
             combat_blocks: Vec::new(),
             pending_triggers: Vec::new(),
+            active_effects: Vec::new(),
+            cards: HashMap::new(),
+            abilities: HashMap::new(),
+            next_id: 0,
         }
+    }
+
+    fn alloc_id(&mut self) -> ObjId {
+        self.next_id += 1;
+        ObjId(self.next_id)
+    }
+
+    fn card(&self, id: ObjId) -> Option<&CardObject> {
+        self.cards.get(&id)
+    }
+
+    fn card_mut(&mut self, id: ObjId) -> Option<&mut CardObject> {
+        self.cards.get_mut(&id)
+    }
+
+    fn permanents_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a CardObject> {
+        self.cards.values().filter(move |c| c.controller == who && c.zone == CardZone::Battlefield)
+    }
+
+    fn lands_of<'a>(&'a self, who: &'a str, catalog: &'a HashMap<&str, &CardDef>) -> impl Iterator<Item = &'a CardObject> {
+        self.cards.values().filter(move |c| {
+            c.controller == who && c.zone == CardZone::Battlefield &&
+            catalog.get(c.name.as_str()).map(|d| d.is_land()).unwrap_or(false)
+        })
+    }
+
+    fn hand_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a CardObject> {
+        self.cards.values().filter(move |c| c.owner == who && matches!(c.zone, CardZone::Hand { .. }))
+    }
+
+    fn graveyard_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a CardObject> {
+        self.cards.values().filter(move |c| c.owner == who && c.zone == CardZone::Graveyard)
+    }
+
+    fn exile_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a CardObject> {
+        self.cards.values().filter(move |c| c.owner == who && matches!(c.zone, CardZone::Exile { .. }))
+    }
+
+    fn library_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a CardObject> {
+        self.cards.values().filter(move |c| c.owner == who && c.zone == CardZone::Library)
+    }
+
+    fn find_permanent_by_name<'a>(&'a self, name: &str, controller: &str) -> Option<&'a CardObject> {
+        self.cards.values().find(|c| c.name == name && c.controller == controller && c.zone == CardZone::Battlefield)
+    }
+
+    fn find_card_by_name_in_zone<'a>(&'a self, name: &str, zone_pred: impl Fn(&CardZone) -> bool, owner: &str) -> Option<&'a CardObject> {
+        self.cards.values().find(|c| c.name == name && c.owner == owner && zone_pred(&c.zone))
     }
 
     fn queue_triggers(&mut self, event: &GameEvent) {
         let triggers = fire_triggers(event, self);
         self.pending_triggers.extend(triggers);
+    }
+
+    /// Draw one card for `who`. Increments draws_this_turn and hand.hidden, then fires a Draw event.
+    fn sim_draw(&mut self, who: &str, t: u8, is_natural: bool) {
+        self.player_mut(who).draws_this_turn += 1;
+        let draw_index = self.player(who).draws_this_turn;
+        self.player_mut(who).hand.hidden += 1;
+        let ev = GameEvent::Draw { controller: who.to_string(), draw_index, is_natural };
+        self.queue_triggers(&ev);
+        self.log(t, who, if is_natural { "Draw".to_string() } else { format!("draw ({})", draw_index) });
     }
 
     /// True when the simulation should stop (either success or reroll).
@@ -1250,6 +1841,7 @@ impl std::fmt::Display for PlayerState {
                 let mut tags: Vec<String> = Vec::new();
                 if let Some(ann) = &p.annotation { tags.push(ann.clone()); }
                 if p.counters > 0 { tags.push(format!("+{} counters", p.counters)); }
+                if p.loyalty > 0 { tags.push(format!("loyalty: {}", p.loyalty)); }
                 let suffix = if tags.is_empty() {
                     String::new()
                 } else {
@@ -1702,12 +2294,7 @@ fn collect_hand_actions(
             if def.is_land() {
                 return None;
             }
-            let castable = def.effects().iter().any(|e| {
-                e == "cantrip" || e == "permanent" || e == "destroy" || e == "doomsday"
-                    || e.starts_with("discard:") || e.starts_with("reanimate:")
-                    || e.starts_with("mana:")
-            });
-            if !castable {
+            if !card_has_implementation(def) {
                 return None;
             }
             if def.legendary() && permanents_in_play.iter().any(|p| p.name == name.as_str()) {
@@ -1909,8 +2496,8 @@ fn pay_activation_cost(
         }
         let unblocked_attacker = state.player(who).permanents.iter()
             .find(|p| p.attacking && p.unblocked)
-            .map(|p| p.name.clone());
-        if let Some(atk_name) = unblocked_attacker {
+            .map(|p| (p.name.clone(), p.attack_target.clone()));
+        if let Some((atk_name, _atk_target)) = unblocked_attacker {
             state.player_mut(who).permanents.retain(|p| p.name != atk_name);
             state.combat_attackers.retain(|a| *a != atk_name);
             state.combat_blocks.retain(|(a, _)| *a != atk_name);
@@ -1931,6 +2518,24 @@ fn pay_activation_cost(
             state.player_mut(who).graveyard.visible.push(land_name);
         }
     }
+
+    // Loyalty ability: adjust planeswalker loyalty and mark activated this turn.
+    if let Some(loyalty_delta) = ability.loyalty_cost {
+        let new_loyalty = {
+            if let Some(perm) = state.player_mut(who).permanents.iter_mut().find(|p| p.name == source_name) {
+                perm.loyalty += loyalty_delta;
+                perm.pw_activated_this_turn = true;
+                Some(perm.loyalty)
+            } else {
+                None
+            }
+        };
+        if let Some(new_loyalty) = new_loyalty {
+            state.log(t, who, format!("→ {} loyalty {} → {}", source_name,
+                if loyalty_delta >= 0 { format!("+{}", loyalty_delta) } else { loyalty_delta.to_string() },
+                new_loyalty));
+        }
+    }
 }
 
 /// Apply the resolution effect of an activated ability.
@@ -1944,11 +2549,13 @@ fn apply_ability_effect(
     library: &mut Vec<(String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
+    ninjutsu_attack_target: Option<&str>,
 ) {
     // Ninjutsu effect: ninja enters play tapped and attacking (unblocked).
     if ability.ninjutsu {
         let mana_abs = catalog_map.get(source_name)
             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+        let target = ninjutsu_attack_target.unwrap_or("").to_string();
         state.player_mut(who).permanents.push(SimPermanent {
             name: source_name.to_string(),
             annotation: None,
@@ -1959,16 +2566,23 @@ fn apply_ability_effect(
             mana_abilities: mana_abs,
             attacking: true,
             unblocked: true,
+            loyalty: 0,
+            pw_activated_this_turn: false,
+            attack_target: target,
+            power_mod: 0,
+            toughness_mod: 0,
         });
         state.combat_attackers.push(source_name.to_string());
         state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", source_name));
         return;
     }
 
-    // draw:N — draw N cards (cycling effect).
+    // draw:N — draw N cards (cycling, clue, etc.). Fires a draw event per card.
     if let Some(rest) = ability.effect.strip_prefix("draw:") {
         let n: i32 = rest.parse().unwrap_or(1);
-        state.player_mut(who).hand.hidden += n;
+        for _ in 0..n {
+            state.sim_draw(who, t, false);
+        }
         state.log(t, who, format!("{} → draw {}", source_name, n));
         return;
     }
@@ -2020,6 +2634,13 @@ fn apply_ability_effect(
                 _ => {}
             }
         }
+        return;
+    }
+
+    // tamiyo_plus_two: register a continuous effect until controller's next turn.
+    if ability.effect == "tamiyo_plus_two" {
+        state.active_effects.push(tamiyo_plus_two_effect(who));
+        state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
         return;
     }
 
@@ -2233,8 +2854,6 @@ fn cast_spell(
             from: ZoneId::Graveyard,
             to: ZoneId::Exile,
             controller: who.to_string(),
-            draw_index: None,
-            is_natural_draw: false,
         };
         state.queue_triggers(&exile_ev);
     }
@@ -2259,6 +2878,11 @@ fn cast_spell(
     };
     state.log(t, who, format!("Cast {} ({}{})", name, cast_label, delve_label));
 
+    let (spell_target_spec, spell_eff) = spell_effect(name, who, annotation.clone(), catalog_map);
+    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, catalog_map)
+        .into_iter()
+        .collect::<Vec<_>>();
+
     Some(StackItem {
         name: name.to_string(),
         owner: who.to_string(),
@@ -2271,6 +2895,9 @@ fn cast_spell(
         adventure_card_name: None,
         adventure_face: None,
         trigger_context: None,
+        chosen_targets: spell_chosen_targets,
+        ninjutsu_attack_target: None,
+        effect: Some(spell_eff),
     })
 }
 
@@ -2285,7 +2912,7 @@ fn apply_spell_effects(
     state: &mut SimState,
     t: u8,
     _actor_lib: &mut Vec<(String, CardDef)>,
-    other_lib: &mut Vec<(String, CardDef)>,
+    _other_lib: &mut Vec<(String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
@@ -2312,13 +2939,16 @@ fn apply_spell_effects(
         return;
     }
 
+    // Non-adventure fallback: use kind to determine permanent vs spell.
+    // This path is used by tests that create StackItems with `effect: None`.
     let Some(&def) = catalog_map.get(item.name.as_str()) else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
         return;
     };
 
-    let is_permanent = def.effects().iter().any(|e| e == "permanent");
-    let is_cantrip = def.effects().iter().any(|e| e == "cantrip");
+    let is_permanent = matches!(def.kind,
+        CardKind::Creature(_) | CardKind::Artifact(_)
+        | CardKind::Planeswalker(_) | CardKind::Enchantment);
 
     // Destination: permanents or graveyard.
     if is_permanent {
@@ -2338,6 +2968,9 @@ fn apply_spell_effects(
                 (0, ann)
             }
         };
+        let pw_loyalty = if let Some(d) = catalog_map.get(item.name.as_str()) {
+            if let CardKind::Planeswalker(ref p) = d.kind { p.loyalty } else { 0 }
+        } else { 0 };
         state.player_mut(&item.owner).permanents.push(SimPermanent {
             name: item.name.clone(),
             annotation,
@@ -2349,6 +2982,11 @@ fn apply_spell_effects(
                 .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
             attacking: false,
             unblocked: false,
+            loyalty: pw_loyalty,
+            pw_activated_this_turn: false,
+            attack_target: String::new(),
+            power_mod: 0,
+            toughness_mod: 0,
         });
         // Fire ETB triggers (e.g. Bowmasters).
         let etb_ev = GameEvent::ZoneChange {
@@ -2357,145 +2995,106 @@ fn apply_spell_effects(
             from: ZoneId::Stack,
             to: ZoneId::Battlefield,
             controller: item.owner.clone(),
-            draw_index: None,
-            is_natural_draw: false,
         };
         state.queue_triggers(&etb_ev);
+        state.log(t, &item.owner, format!("{} enters play", item.name));
     } else {
         state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
-    }
-
-    // Apply all effects and collect secondary log lines, before logging resolution.
-    // Each entry is (who, msg) so discard lines can be attributed to the discarding player.
-    let mut secondary_logs: Vec<(String, String)> = Vec::new();
-    for effect in def.effects() {
-        let parts: Vec<&str> = effect.splitn(3, ':').collect();
-        match parts.as_slice() {
-            [e] if *e == "doomsday" => {
-                state.success = true;
-            }
-            [e] if *e == "cantrip" => {
-                state.player_mut(&item.owner).draws_this_turn += 1;
-                let draw_idx = state.player(&item.owner).draws_this_turn;
-                state.player_mut(&item.owner).hand.hidden += 1;
-                let cantrip_ev = GameEvent::ZoneChange {
-                    card: String::new(),
-                    card_type: String::new(),
-                    from: ZoneId::Library,
-                    to: ZoneId::Hand,
-                    controller: item.owner.clone(),
-                    draw_index: Some(draw_idx),
-                    is_natural_draw: false,
-                };
-                state.queue_triggers(&cantrip_ev);
-            }
-            ["discard", who_rel, n_str_and_flags] => {
-                let (n_str, nonland_only) = match n_str_and_flags.split_once(':') {
-                    Some((n, "nonland")) => (n, true),
-                    _ => (*n_str_and_flags, false),
-                };
-                let n: i32 = n_str.parse().unwrap_or(0);
-                let target_who = resolve_who(who_rel, &item.owner).to_string();
-                let current = state.player(&target_who).hand.hidden.max(0);
-                let actual = n.min(current);
-                if actual > 0 {
-                    let mut discarded: Vec<String> = Vec::new();
-                    for _ in 0..actual {
-                        let candidates: Vec<usize> = other_lib.iter().enumerate()
-                            .filter(|(_, (_, d))| !nonland_only || !d.is_land())
-                            .map(|(i, _)| i)
-                            .collect();
-                        if let Some(&idx) = candidates.get(rng.gen_range(0..candidates.len().max(1))) {
-                            let (card, _) = other_lib.remove(idx);
-                            state.player_mut(&target_who).hand.hidden -= 1;
-                            state.player_mut(&target_who).graveyard.visible.push(card.clone());
-                            discarded.push(card);
-                        }
-                    }
-                    if !discarded.is_empty() {
-                        secondary_logs.push((target_who.clone(), format!("→ {} discards: {}", target_who, discarded.join(", "))));
-                    }
-                }
-            }
-            ["life_loss", n_str] => {
-                let n: i32 = n_str.parse().unwrap_or(0);
-                state.lose_life(&item.owner, n);
-                secondary_logs.push((item.owner.clone(), format!("→ lose {} life (now {})", n, state.life_of(&item.owner))));
-            }
-            ["mana", spec] => {
-                // Parse MTG mana notation using parse_mana_cost.
-                let mc = parse_mana_cost(spec);
-                let owner = item.owner.clone();
-                let pool = &mut state.player_mut(&owner).pool;
-                pool.w += mc.w;
-                pool.u += mc.u;
-                pool.b += mc.b;
-                pool.r += mc.r;
-                pool.g += mc.g;
-                pool.c += mc.c;
-                pool.total += mc.mana_value();
-                secondary_logs.push((item.owner.clone(), format!("→ add {} to pool", spec)));
-            }
-            ["reanimate", who_rel, type_filter] => {
-                let target_who = resolve_who(who_rel, &item.owner).to_string();
-                let candidates: Vec<String> = state.player(&target_who).graveyard.visible.iter()
-                    .filter(|n| catalog_map.get(n.as_str())
-                        .map(|d| matches_target_type(type_filter, &d.kind, false, Some(*d)))
-                        .unwrap_or(false))
-                    .cloned()
-                    .collect();
-                if !candidates.is_empty() {
-                    let chosen = candidates[rng.gen_range(0..candidates.len())].clone();
-                    state.player_mut(&target_who).graveyard.visible.retain(|n| n != &chosen);
-                    state.player_mut(&target_who).permanents.push(SimPermanent {
-                        name: chosen.clone(),
-                        annotation: None,
-                        counters: 0,
-                        tapped: false,
-                        damage: 0,
-                        entered_this_turn: true,
-                        mana_abilities: catalog_map.get(chosen.as_str())
-                            .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
-                        attacking: false,
-                        unblocked: false,
-                    });
-                    secondary_logs.push((item.owner.clone(), format!("→ {} returns from graveyard", chosen)));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Targeted destroy effect: applied before log so resolution line reflects final state.
-    if def.effects().iter().any(|e| e == "destroy") {
+        state.log(t, &item.owner, format!("{} resolves", item.name));
+        // For tests using the fallback path: apply targeted destroy if permanent_target set.
         if let Some((ref target_who, ref target_name)) = item.permanent_target {
             apply_effect_to("destroy", target_who, target_name, state, t, &item.owner);
         }
     }
+}
 
-    // Log resolution (hand count now reflects cantrip draw; life reflects life_loss).
-    let resolve_label = if is_permanent {
-        "enters play"
-    } else if is_cantrip {
-        "resolves (draw)"
-    } else {
-        "resolves"
-    };
-    state.log(t, &item.owner, format!("{} {}", item.name, resolve_label));
+/// Build the effect for a non-adventure spell at cast time.
+/// Returns `(TargetSpec, Effect)`: the TargetSpec describes the target requirement;
+/// the Effect closure applies the card's game text when it resolves off the stack.
+///
+/// Handles all non-adventure, non-counterspell cards in pilegen.toml.
+/// Permanents use `eff_enter_permanent`; spells use composed primitives.
+fn spell_effect(
+    name: &str,
+    owner: &str,
+    annotation: Option<String>,
+    catalog_map: &HashMap<&str, &CardDef>,
+) -> (TargetSpec, Effect) {
+    let w = owner.to_string();
+    match name {
+        // ── Cantrips ──────────────────────────────────────────────────────────
+        "Brainstorm" => (TargetSpec::None, eff_draw(w.clone(), 3).then(eff_put_back(w, 2))),
+        "Ponder" | "Consider" | "Preordain" => (TargetSpec::None, eff_draw(w, 1)),
 
-    // Secondary effect detail logs.
-    for (who, msg) in secondary_logs {
-        state.log(t, &who, msg);
+        // ── Rituals / mana ────────────────────────────────────────────────────
+        "Dark Ritual" => (TargetSpec::None, eff_mana(w, "BBB")),
+
+        // ── Win condition ─────────────────────────────────────────────────────
+        "Doomsday" => (TargetSpec::None, eff_doomsday()),
+
+        // ── Targeted removal ──────────────────────────────────────────────────
+        "Fatal Push" => (TargetSpec::OpponentCreatureMvLt4, eff_destroy_target(w)),
+        "Snuff Out"  => (TargetSpec::OpponentNonblackCreature, eff_destroy_target(w)),
+
+        // ── Discard ───────────────────────────────────────────────────────────
+        "Thoughtseize" => (
+            TargetSpec::None,
+            eff_discard(w.clone(), Who::Opp, 1, true).then(eff_life_loss(w, 2)),
+        ),
+        "Hymn to Tourach" => (TargetSpec::None, eff_discard(w, Who::Opp, 2, false)),
+
+        // ── Reanimation ───────────────────────────────────────────────────────
+        "Unearth" => (TargetSpec::None, eff_reanimate(w, Who::Actor, "creature")),
+
+        // ── Bounce ────────────────────────────────────────────────────────────
+        "Petty Theft" => (TargetSpec::AnyOpponentNonlandPermanent, eff_bounce_target(w)),
+
+        // ── Permanents (catch-all: any creature / artifact / planeswalker / enchantment) ──
+        _ => {
+            if let Some(def) = catalog_map.get(name) {
+                match &def.kind {
+                    CardKind::Creature(_) | CardKind::Artifact(_)
+                    | CardKind::Planeswalker(_) | CardKind::Enchantment => {
+                        return (TargetSpec::None, eff_enter_permanent(w, name.to_string(), annotation));
+                    }
+                    _ => {}
+                }
+            }
+            // Non-permanent spell with no registered game text: no-op Effect
+            (TargetSpec::None, Effect(std::sync::Arc::new(|_state, _t, _targets, _catalog, _rng| {})))
+        }
     }
 }
 
 
+/// Hypergeometric P(≥1 copy of a card is in the "in-hand" portion of the library pool).
+///
+/// `library_size` — total cards remaining in the pool (hand + undrawn).
+/// `hand_size`    — how many of those are conceptually in hand.
+/// `copies`       — how many copies of the card exist in the pool.
+fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
+    let t = library_size;
+    let h = (hand_size.max(0) as usize).min(t);
+    let n = copies;
+    if n == 0 || h == 0 { return 0.0; }
+    if n >= t { return 1.0; }
+    // P(0 in hand) = ∏ᵢ₌₀ʰ⁻¹ (T-N-i)/(T-i)
+    let mut p_none: f64 = 1.0;
+    for i in 0..h {
+        let num = t.saturating_sub(n + i);
+        if num == 0 { return 1.0; }
+        p_none *= num as f64 / (t - i) as f64;
+    }
+    (1.0 - p_none).max(0.0)
+}
+
 /// Try to respond to `stack[target_idx]` by casting a counterspell.
 ///
-/// When `probabilistic = true` a 35% base check is applied and per-cost `prob` rolls are
-/// honoured (used for the opponent's optional counter decisions).
-/// When `probabilistic = false` the attempt is deterministic — all payable options are
-/// tried in order (used when we must protect Doomsday).
+/// When `probabilistic = true`:
+///   - Per counterspell: roll P(card in hand) via hypergeometric, then a strategic 50% choice
+///     (overridden by `cost.prob` if set on the first cost option).
+///   - For `exile_blue_from_hand` costs: also roll P(have a blue pitch card in hand).
+/// When `probabilistic = false` the attempt is deterministic (used when protecting Doomsday).
 ///
 /// On success, returns a `CastSpell` intent with `counters = Some(target_idx)`.
 /// No resources are spent; the caller (`handle_priority_round`) commits the action.
@@ -2518,36 +3117,48 @@ fn respond_with_counter(
     let target_owner = &stack[target_idx].owner;
     let target_has_untapped_lands = state.player(target_owner).lands.iter().any(|l| !l.tapped);
 
+    // Deduplicate counterspell names so each spell is evaluated once.
+    let mut seen = std::collections::HashSet::new();
     let counterspells: Vec<String> = responding_library
         .iter()
         .filter(|(n, d)| {
             d.counter_target()
                 .is_some_and(|ct| matches_counter_target(ct, target_kind))
                 && !d.alternate_costs().is_empty()
-                // Daze is useless if the opponent can pay the 1-mana tax.
                 && !(n.as_str() == "Daze" && target_has_untapped_lands)
         })
-        .map(|(n, _)| n.to_string())
+        .filter_map(|(n, _)| seen.insert(n.clone()).then(|| n.clone()))
         .collect();
 
     if counterspells.is_empty() {
         return None;
     }
 
-    // Probabilistic: 35% base chance the opponent even tries.
-    if probabilistic && !rng.gen_bool(0.35) {
-        return None;
-    }
+    let hand_size = state.player(responding_who).hand.hidden;
+    let lib_size  = responding_library.len();
 
     for cs_name in &counterspells {
+        if probabilistic {
+            // Roll: is this counterspell in our hand?
+            let copies = responding_library.iter().filter(|(n, _)| n == cs_name).count();
+            let p_have = p_card_in_hand(lib_size, hand_size, copies);
+            if !rng.gen_bool(p_have.max(f64::MIN_POSITIVE)) { continue; }
+
+            // Roll: strategic choice to use it (default 50%; per-spell override via first cost.prob).
+            let costs = catalog_map[cs_name.as_str()].alternate_costs();
+            let strategic = costs.first().and_then(|c| c.prob).unwrap_or(0.5);
+            if !rng.gen_bool(strategic) { continue; }
+        }
+
         let costs = catalog_map[cs_name.as_str()].alternate_costs().to_vec();
         for cost in &costs {
-            if probabilistic {
-                if let Some(p) = cost.prob {
-                    if !rng.gen_bool(p) {
-                        continue;
-                    }
-                }
+            // For pitch costs, also roll whether we have a blue card to pitch.
+            if probabilistic && cost.exile_blue_from_hand {
+                let n_blue = responding_library.iter()
+                    .filter(|(n, d)| n.as_str() != cs_name && !d.is_land() && d.is_blue())
+                    .count();
+                let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
+                if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
             }
             if can_pay_alternate_cost(cost, state, responding_who, cs_name, responding_library) {
                 return Some(PriorityAction::CastSpell {
@@ -2565,11 +3176,11 @@ fn respond_with_counter(
 
 // ── Combat helpers ────────────────────────────────────────────────────────────
 
-/// Return (power, toughness) for a permanent, adding any +1/+1 counters to base stats.
+/// Return (power, toughness) for a permanent, adding any +1/+1 counters and temporary mods.
 fn creature_stats(perm: &SimPermanent, def: Option<&CardDef>) -> (i32, i32) {
     let power     = def.and_then(|d| d.as_creature()).map(|c| c.power).unwrap_or(1);
     let toughness = def.and_then(|d| d.as_creature()).map(|c| c.toughness).unwrap_or(1);
-    (power + perm.counters, toughness + perm.counters)
+    (power + perm.counters + perm.power_mod, toughness + perm.counters + perm.toughness_mod)
 }
 
 /// Try to perform ninjutsu during a combat priority window (DeclareBlockers / CombatDamage / EndCombat).
@@ -2614,33 +3225,53 @@ fn creature_has_keyword(name: &str, kw: &str, catalog_map: &HashMap<&str, &CardD
 
 // ── Trigger check functions (one per trigger-having card) ─────────────────────
 
+/// Build a Bowmasters trigger context. Target is chosen at resolution time via TargetSpec::AnyTarget.
+fn bowmasters_trigger_ctx(controller: &str, kind: &'static str, log_msg: &'static str) -> TriggerContext {
+    let ctl = controller.to_string();
+    TriggerContext {
+        source: "Orcish Bowmasters".into(),
+        controller: ctl.clone(),
+        kind,
+        target_spec: TargetSpec::AnyTarget,
+        effect: std::sync::Arc::new(move |state, t, targets, catalog| {
+            // Apply 1 damage to the chosen target, then amass.
+            match targets.first() {
+                Some(Target::Player(player)) => {
+                    state.player_mut(player).life -= 1;
+                    state.log(t, &ctl, format!("Bowmasters: 1 damage to {player}"));
+                }
+                Some(Target::Permanent { name, controller: tgt_ctl, .. }) => {
+                    if let Some(p) = state.player_mut(tgt_ctl).permanents
+                        .iter_mut().find(|p| &p.name == name)
+                    {
+                        p.damage += 1;
+                        state.log(t, &ctl, format!("Bowmasters: 1 damage to {name}"));
+                    }
+                }
+                _ => {
+                    // No target chosen (no legal targets) — do nothing.
+                }
+            }
+            do_amass_orc(&ctl, 1, state, t);
+            state.log(t, &ctl, log_msg);
+        }),
+    }
+}
+
 fn bowmasters_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerContext>) {
     match event {
         // ETB: only fires for the entering Bowmasters itself.
         GameEvent::ZoneChange { card, to: ZoneId::Battlefield, controller: ctlr, .. }
             if card == "Orcish Bowmasters" && ctlr == controller =>
         {
-            pending.push(TriggerContext {
-                source: "Orcish Bowmasters".into(),
-                controller: controller.into(),
-                payload: TriggerPayload::BowmastersEtb,
-            });
+            pending.push(bowmasters_trigger_ctx(controller, "BowmastersEtb", "Bowmasters ETB: amass Orc 1"));
         }
         // Opponent draws any card that isn't their natural draw-step draw,
         // OR a draw-step draw that is their 2nd+ draw this turn.
-        GameEvent::ZoneChange {
-            from: ZoneId::Library, to: ZoneId::Hand,
-            controller: drawer, draw_index, is_natural_draw, ..
-        } if drawer != controller
-            && (!is_natural_draw || draw_index.map_or(false, |n| n > 1)) =>
+        GameEvent::Draw { controller: drawer, draw_index, is_natural }
+            if drawer != controller && (!is_natural || *draw_index > 1) =>
         {
-            pending.push(TriggerContext {
-                source: "Orcish Bowmasters".into(),
-                controller: controller.into(),
-                payload: TriggerPayload::BowmastersDrawTrigger {
-                    drawing_player: drawer.clone(),
-                },
-            });
+            pending.push(bowmasters_trigger_ctx(controller, "BowmastersDrawTrigger", "Bowmasters draw trigger: amass Orc 1"));
         }
         _ => {}
     }
@@ -2652,10 +3283,20 @@ fn murktide_check(event: &GameEvent, controller: &str, pending: &mut Vec<Trigger
         card_type, controller: exiler, ..
     } = event {
         if (card_type == "instant" || card_type == "sorcery") && exiler == controller {
+            let ctl = controller.to_string();
             pending.push(TriggerContext {
                 source: "Murktide Regent".into(),
-                controller: controller.into(),
-                payload: TriggerPayload::MurktideExile,
+                controller: ctl.clone(),
+                kind: "MurktideExile",
+                target_spec: TargetSpec::None,
+                effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
+                    if let Some(p) = state.player_mut(&ctl).permanents
+                        .iter_mut().find(|p| p.name == "Murktide Regent")
+                    {
+                        p.counters += 1;
+                        state.log(t, &ctl, "Murktide: inst/sorc exiled → +1/+1 counter");
+                    }
+                }),
             });
         }
     }
@@ -2667,21 +3308,34 @@ fn tamiyo_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerCo
         GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
             if active_player == controller =>
         {
+            let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source: "Tamiyo, the Enigma Scroll".into(),
-                controller: controller.into(),
-                payload: TriggerPayload::TamiyoClue,
+                source: "Tamiyo, Inquisitive Student".into(),
+                controller: ctl.clone(),
+                kind: "TamiyoClue",
+                target_spec: TargetSpec::None,
+                effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
+                    if state.player(&ctl).permanents.iter()
+                        .any(|p| p.name == "Tamiyo, Inquisitive Student" && p.attacking)
+                    {
+                        do_create_clue(&ctl, state, t);
+                    }
+                }),
             });
         }
         // Controller draws their 3rd card this turn.
-        GameEvent::ZoneChange {
-            from: ZoneId::Library, to: ZoneId::Hand,
-            controller: drawer, draw_index: Some(3), ..
-        } if drawer == controller => {
+        GameEvent::Draw { controller: drawer, draw_index: 3, .. }
+            if drawer == controller =>
+        {
+            let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source: "Tamiyo, the Enigma Scroll".into(),
-                controller: controller.into(),
-                payload: TriggerPayload::TamiyoFlip,
+                source: "Tamiyo, Inquisitive Student".into(),
+                controller: ctl.clone(),
+                kind: "TamiyoFlip",
+                target_spec: TargetSpec::None,
+                effect: std::sync::Arc::new(move |state, t, _targets, catalog| {
+                    do_flip_tamiyo(&ctl, state, t, catalog);
+                }),
             });
         }
         _ => {}
@@ -2696,15 +3350,16 @@ type TriggerCheckFn = fn(&GameEvent, &str, &mut Vec<TriggerContext>);
 static CARD_TRIGGERS: &[(&str, TriggerCheckFn)] = &[
     ("Orcish Bowmasters",         bowmasters_check),
     ("Murktide Regent",           murktide_check),
-    ("Tamiyo, the Enigma Scroll", tamiyo_check),
+    ("Tamiyo, Inquisitive Student", tamiyo_check),
 ];
 
-/// Check every in-play permanent against `CARD_TRIGGERS` for the given event.
+/// Check every in-play permanent against `CARD_TRIGGERS` for the given event,
+/// then check `state.active_effects` for registered effect-based triggers.
 /// Returns any triggered ability contexts that should be pushed onto the stack.
-///
-/// O(|CARD_TRIGGERS| × |permanents per side|) — negligible at simulator scale.
 fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerContext> {
     let mut pending: Vec<TriggerContext> = Vec::new();
+
+    // Static card-based triggers.
     for &(card_name, check_fn) in CARD_TRIGGERS {
         for owner in ["us", "opp"] {
             if state.player(owner).permanents.iter().any(|p| p.name == card_name) {
@@ -2712,12 +3367,25 @@ fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerContext> {
             }
         }
     }
+
+    // Effect-based triggers registered in active_effects.
+    for effect in &state.active_effects {
+        if let Some(on_event) = &effect.on_event {
+            if let Some(ctx) = on_event(event, &effect.controller) {
+                pending.push(ctx);
+            }
+        }
+    }
+
     pending
 }
 
 /// Push a vec of `TriggerContext`s onto the stack as uncounterable triggered ability items.
-fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>) {
+/// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
+fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>, state: &SimState, catalog_map: &HashMap<&str, &CardDef>) {
     for ctx in triggers {
+        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map)
+            .into_iter().collect();
         stack.push(StackItem {
             name: format!("{} trigger", ctx.source),
             owner: ctx.controller.clone(),
@@ -2730,43 +3398,95 @@ fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>) {
             adventure_card_name: None,
             adventure_face: None,
             trigger_context: Some(ctx),
+            chosen_targets,
+            ninjutsu_attack_target: None, // sentinel to avoid replace_all collision
+            effect: None,
         });
     }
 }
 
 /// Apply the resolution effect of a triggered ability.
-fn apply_trigger(ctx: &TriggerContext, state: &mut SimState, t: u8, rng: &mut impl Rng) {
-    let opp = opp_of(&ctx.controller);
-    match &ctx.payload {
-        TriggerPayload::BowmastersEtb => {
-            state.lose_life(opp, 1);
-            do_amass_orc(&ctx.controller, 1, state, t);
-            state.log(t, &ctx.controller, "Bowmasters ETB: deal 1, amass Orc 1");
-        }
-        TriggerPayload::BowmastersDrawTrigger { drawing_player } => {
-            state.lose_life(drawing_player, 1);
-            do_amass_orc(&ctx.controller, 1, state, t);
-            state.log(t, &ctx.controller, "Bowmasters: opp draws — amass Orc 1, deal 1");
-        }
-        TriggerPayload::MurktideExile => {
-            if let Some(p) = state.player_mut(&ctx.controller).permanents
-                .iter_mut().find(|p| p.name == "Murktide Regent")
+fn apply_trigger(ctx: &TriggerContext, targets: &[Target], state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
+    (ctx.effect)(state, t, targets, catalog_map);
+}
+
+/// Build a TriggerContext for the Tamiyo +2 per-attacker trigger.
+/// Extracted to keep the on_event closure in `tamiyo_plus_two_effect` readable.
+fn tamiyo_plus_two_fire_ctx(tamiyo_ctl: String, attacker: String, attacker_ctl: String) -> TriggerContext {
+    let ctl = tamiyo_ctl.clone();
+    let atk = attacker.clone();
+    let atk_ctl = attacker_ctl.clone();
+    TriggerContext {
+        source: "Tamiyo, Seasoned Scholar".into(),
+        controller: tamiyo_ctl,
+        kind: "TamiyoPlusTwoFire",
+        target_spec: TargetSpec::None,
+        effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
+            if let Some(p) = state.player_mut(&atk_ctl).permanents
+                .iter_mut().find(|p| p.name == atk)
             {
-                p.counters += 1;
-                state.log(t, &ctx.controller, "Murktide: inst/sorc exiled → +1/+1 counter");
+                p.power_mod -= 1;
             }
-        }
-        TriggerPayload::TamiyoClue => {
-            // Only create clue if Tamiyo is actually attacking (checked at resolution time).
-            if state.player(&ctx.controller).permanents.iter()
-                .any(|p| p.name == "Tamiyo, the Enigma Scroll" && p.attacking)
-            {
-                do_create_clue(&ctx.controller, state, t);
+            state.active_effects.push(ContinuousEffect {
+                controller: ctl.clone(),
+                expires: EffectExpiry::EndOfTurn,
+                on_event: None,
+                stat_mod: Some(StatModData {
+                    target_name: atk.clone(),
+                    target_controller: atk_ctl.clone(),
+                    power_delta: -1,
+                    toughness_delta: 0,
+                }),
+            });
+            state.log(t, &ctl, format!("Tamiyo +2: {atk} gets -1/-0 until end of turn"));
+        }),
+    }
+}
+
+/// Build a ContinuousEffect for Tamiyo's +2 loyalty ability.
+fn tamiyo_plus_two_effect(controller: &str) -> ContinuousEffect {
+    ContinuousEffect {
+        controller: controller.to_string(),
+        expires: EffectExpiry::StartOfControllerNextTurn,
+        on_event: Some(std::sync::Arc::new(|event, effect_controller| {
+            if let GameEvent::CreatureAttacked { attacker, attacker_controller, .. } = event {
+                if attacker_controller != effect_controller {
+                    return Some(tamiyo_plus_two_fire_ctx(
+                        effect_controller.to_string(),
+                        attacker.clone(),
+                        attacker_controller.clone(),
+                    ));
+                }
             }
-        }
-        TriggerPayload::TamiyoFlip => {
-            do_flip_tamiyo(&ctx.controller, state, t);
-        }
+            None
+        })),
+        stat_mod: None,
+    }
+}
+
+/// Deal 1 damage from Bowmasters to the best target on `target_player`'s side.
+
+/// Remove creatures whose accumulated damage meets or exceeds their toughness (SBA).
+fn check_lethal_damage(who: &str, state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
+    let dead: Vec<String> = state.player(who).permanents.iter()
+        .filter_map(|p| {
+            let def = catalog_map.get(p.name.as_str())?;
+            let (_, tgh) = creature_stats(p, Some(def));
+            if p.damage >= tgh { Some(p.name.clone()) } else { None }
+        })
+        .collect();
+    for name in dead {
+        state.player_mut(who).permanents.retain(|p| p.name != name);
+        state.player_mut(who).graveyard.visible.push(name.clone());
+        state.log(t, who, format!("{} dies (lethal damage)", name));
+        let ev = GameEvent::ZoneChange {
+            card: name,
+            card_type: "creature".to_string(),
+            from: ZoneId::Battlefield,
+            to: ZoneId::Graveyard,
+            controller: who.to_string(),
+        };
+        state.queue_triggers(&ev);
     }
 }
 
@@ -2796,12 +3516,17 @@ fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
     state.log(t, controller, "Clue Token created");
 }
 
-fn do_flip_tamiyo(controller: &str, state: &mut SimState, t: u8) {
+fn do_flip_tamiyo(controller: &str, state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
     state.player_mut(controller).permanents
-        .retain(|p| p.name != "Tamiyo, the Enigma Scroll");
-    state.player_mut(controller).permanents
-        .push(SimPermanent::new("Tamiyo, Seasoned Scholar"));
-    state.log(t, controller, "Tamiyo flips → Tamiyo, Seasoned Scholar");
+        .retain(|p| p.name != "Tamiyo, Inquisitive Student");
+    let loyalty = catalog_map.get("Tamiyo, Seasoned Scholar")
+        .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
+        .unwrap_or(2);
+    state.player_mut(controller).permanents.push(SimPermanent {
+        loyalty,
+        ..SimPermanent::new("Tamiyo, Seasoned Scholar")
+    });
+    state.log(t, controller, format!("Tamiyo flips → Tamiyo, Seasoned Scholar [loyalty: {}]", loyalty));
 }
 
 // ── New turn-structure functions ──────────────────────────────────────────────
@@ -2847,18 +3572,18 @@ fn collect_on_board_actions(
         }
     }
 
-    // 75% roll per permanent with an available ability.
+    // 75% roll per permanent with an available non-loyalty ability.
     let perm_names: Vec<(String, bool)> = state.player(ap).permanents.iter()
         .filter(|p| catalog_map.get(p.name.as_str())
             .map_or(false, |def| def.abilities().iter()
-                .any(|ab| ability_available(ab, state, ap, !p.tapped, catalog_map))))
+                .any(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !p.tapped, catalog_map))))
         .map(|p| (p.name.clone(), p.tapped))
         .collect();
     for (name, tapped) in perm_names {
         if rng.gen_bool(0.75) {
             if let Some(def) = catalog_map.get(name.as_str()) {
                 if let Some(ab) = def.abilities().iter()
-                    .find(|ab| ability_available(ab, state, ap, !tapped, catalog_map))
+                    .find(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped, catalog_map))
                     .cloned()
                 {
                     actions.push(PriorityAction::ActivateAbility(name, ab));
@@ -3026,9 +3751,26 @@ fn ap_proactive(
         // Verify it's still valid before committing (source might have been tapped/sacrificed).
         let still_valid = match &action {
             PriorityAction::ActivateAbility(source, ab) => {
-                let source_untapped = state.player(who).lands.iter().any(|l| l.name == *source && !l.tapped)
-                    || state.player(who).permanents.iter().any(|p| p.name == *source && (!p.tapped || ab.sacrifice_self));
-                ability_available(ab, state, who, source_untapped, catalog_map)
+                if let Some(cost) = ab.loyalty_cost {
+                    if !stack.is_empty() { false }
+                    else {
+                        let loyalty_ok = if cost < 0 {
+                            state.player(who).permanents.iter()
+                                .find(|p| p.name == *source)
+                                .map_or(false, |p| p.loyalty >= -cost)
+                        } else {
+                            state.player(who).permanents.iter().any(|p| p.name == *source)
+                        };
+                        let already_used = state.player(who).permanents.iter()
+                            .find(|p| p.name == *source)
+                            .map_or(true, |p| p.pw_activated_this_turn);
+                        loyalty_ok && !already_used
+                    }
+                } else {
+                    let source_untapped = state.player(who).lands.iter().any(|l| l.name == *source && !l.tapped)
+                        || state.player(who).permanents.iter().any(|p| p.name == *source && (!p.tapped || ab.sacrifice_self));
+                    ability_available(ab, state, who, source_untapped, catalog_map)
+                }
             }
             PriorityAction::CastFromAdventure { card_name } => {
                 state.player(who).on_adventure.iter().any(|n| n == card_name)
@@ -3156,8 +3898,11 @@ fn handle_priority_round(
         // spell resolution). Triggers in no-priority steps are deferred until the next
         // priority window — acceptable because none of our current triggered abilities
         // fire during Untap or Cleanup steps.
+        // Drain pending triggers onto the stack, then check SBAs before giving priority.
         let queued = std::mem::take(&mut state.pending_triggers);
-        push_triggers(queued, &mut stack);
+        push_triggers(queued, &mut stack, state, catalog_map);
+        check_lethal_damage("us",  state, t, catalog_map);
+        check_lethal_damage("opp", state, t, catalog_map);
 
         let who = priority_holder.clone();
         let action = decide_action(
@@ -3176,10 +3921,23 @@ fn handle_priority_round(
                 // Priority stays with the same player.
             }
             PriorityAction::ActivateAbility(ref source_name, ref ability) => {
+                // For loyalty abilities: sorcery-speed check.
+                if ability.loyalty_cost.is_some() && !stack.is_empty() {
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    continue;
+                }
+                // For ninjutsu: capture replaced attacker's attack_target BEFORE paying cost.
+                let ninjutsu_attack_target = if ability.ninjutsu {
+                    state.player(&who).permanents.iter()
+                        .find(|p| p.attacking && p.unblocked)
+                        .map(|p| p.attack_target.clone())
+                } else {
+                    None
+                };
                 // Pay costs now; effect is deferred until the ability resolves.
                 let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
                 pay_activation_cost(state, t, &who, source_name, ability, actor_lib, catalog_map);
-                // Push ability stack item; ability_def carries the effect for resolution.
                 stack.push(StackItem {
                     name: source_name.clone(),
                     owner: who.clone(),
@@ -3192,6 +3950,9 @@ fn handle_priority_round(
                     adventure_card_name: None,
                     adventure_face: None,
                     trigger_context: None,
+                    chosen_targets: vec![],
+                    ninjutsu_attack_target,
+                    effect: None,
                 });
                 let next = if who == ap { nap } else { ap };
                 priority_holder = next.to_string();
@@ -3247,6 +4008,9 @@ fn handle_priority_round(
                     adventure_card_name: Some(card_name.clone()),
                     adventure_face: Some(face),
                     trigger_context: None,
+                    chosen_targets: vec![],
+                    ninjutsu_attack_target: None,
+                    effect: None,
                 });
                 state.player_mut(&who).spells_cast_this_turn += 1;
                 let next = if who == ap { nap } else { ap };
@@ -3279,6 +4043,10 @@ fn handle_priority_round(
                 let mana_log = state.player_mut(&who).pay_mana(&cost);
                 state.log_mana_activations(t, &who, mana_log);
                 state.log(t, &who, format!("Cast {} from adventure ({})", card_name, def.mana_cost()));
+                let (from_adv_spec, from_adv_eff) = spell_effect(card_name, &who, None, catalog_map);
+                let from_adv_targets = choose_spell_target(&from_adv_spec, &who, state, catalog_map)
+                    .into_iter()
+                    .collect::<Vec<_>>();
                 stack.push(StackItem {
                     name: card_name.clone(),
                     owner: who.clone(),
@@ -3291,6 +4059,9 @@ fn handle_priority_round(
                     adventure_card_name: None,
                     adventure_face: None,
                     trigger_context: None,
+                    chosen_targets: from_adv_targets,
+                    ninjutsu_attack_target: None,
+                    effect: Some(from_adv_eff),
                 });
                 state.player_mut(&who).spells_cast_this_turn += 1;
                 let next = if who == ap { nap } else { ap };
@@ -3362,7 +4133,7 @@ fn handle_priority_round(
                         } else if top.is_ability {
                             // Triggered ability resolves.
                             if let Some(ref ctx) = top.trigger_context.clone() {
-                                apply_trigger(ctx, state, t, rng);
+                                apply_trigger(ctx, &top.chosen_targets, state, t, catalog_map);
                             // Activated ability resolves.
                             } else if let Some(ref ab) = top.ability_def {
                                 let (actor_lib, _other_lib) = if top.owner == "us" {
@@ -3370,9 +4141,30 @@ fn handle_priority_round(
                                 } else {
                                     (&mut *opp_lib, &mut *us_lib)
                                 };
-                                apply_ability_effect(state, t, &top.owner, &top.name, ab, actor_lib, catalog_map, rng);
+                                apply_ability_effect(state, t, &top.owner, &top.name, ab, actor_lib, catalog_map, rng, top.ninjutsu_attack_target.as_deref());
                             }
+                        } else if top.adventure_exile {
+                            // Adventure spell path (bounce + exile + on_adventure).
+                            let (actor_lib, other_lib) = if top.owner == "us" {
+                                (&mut *us_lib, &mut *opp_lib)
+                            } else {
+                                (&mut *opp_lib, &mut *us_lib)
+                            };
+                            apply_spell_effects(&top, state, t, actor_lib, other_lib, catalog_map, rng);
+                        } else if let Some(ref eff) = top.effect {
+                            // New Effect path: used for all non-adventure spells.
+                            let is_perm = catalog_map.get(top.name.as_str())
+                                .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
+                                    | CardKind::Planeswalker(_) | CardKind::Enchantment))
+                                .unwrap_or(false);
+                            if !is_perm {
+                                state.player_mut(&top.owner).graveyard.visible.push(top.name.clone());
+                                state.log(t, &top.owner, format!("{} resolves", top.name));
+                            }
+                            let rng_dyn: &mut dyn rand::RngCore = rng;
+                            eff.call(state, t, &top.chosen_targets, catalog_map, rng_dyn);
                         } else {
+                            // Fallback: old string-dispatch path (for tests using stack_item() with effect: None).
                             let (actor_lib, other_lib) = if top.owner == "us" {
                                 (&mut *us_lib, &mut *opp_lib)
                             } else {
@@ -3431,11 +4223,16 @@ fn do_step(
             for perm in &mut state.player_mut(ap).permanents {
                 perm.tapped = false;
                 perm.entered_this_turn = false;
+                perm.pw_activated_this_turn = false;
             }
             state.player_mut(ap).land_drop_available = true;
             state.player_mut(ap).spells_cast_this_turn = 0;
             state.player_mut(ap).pending_actions.clear();
             state.player_mut(ap).draws_this_turn = 0;
+            // Expire "until your next turn" effects whose controller is now the active player.
+            state.active_effects.retain(|e| {
+                !(e.expires == EffectExpiry::StartOfControllerNextTurn && e.controller == ap)
+            });
         }
         StepKind::Draw => {
             let this_player_on_play = if ap == "us" { on_play } else { !on_play };
@@ -3443,26 +4240,28 @@ fn do_step(
             if skip {
                 state.log(t, ap, "No draw (on the play)");
             } else {
-                state.player_mut(ap).draws_this_turn += 1;
-                let draw_idx = state.player(ap).draws_this_turn;
-                state.player_mut(ap).hand.hidden += 1;
-                state.log(t, ap, "Draw");
-                let ev = GameEvent::ZoneChange {
-                    card: String::new(),
-                    card_type: String::new(),
-                    from: ZoneId::Library,
-                    to: ZoneId::Hand,
-                    controller: ap.to_string(),
-                    draw_index: Some(draw_idx),
-                    is_natural_draw: true,
-                };
-                state.queue_triggers(&ev);
+                state.sim_draw(ap, t, true);
             }
         }
         StepKind::Cleanup => {
             sim_discard_to_limit(state, t, ap);
             for perm in &mut state.player_mut(ap).permanents {
                 perm.damage = 0;
+            }
+            // Expire EndOfTurn continuous effects, undoing any StatMod they applied.
+            let expiring: Vec<ContinuousEffect> = state.active_effects.iter()
+                .filter(|e| e.expires == EffectExpiry::EndOfTurn)
+                .cloned()
+                .collect();
+            state.active_effects.retain(|e| e.expires != EffectExpiry::EndOfTurn);
+            for effect in expiring {
+                if let Some(sm) = &effect.stat_mod {
+                    let player = state.player_mut(&sm.target_controller);
+                    if let Some(p) = player.permanents.iter_mut().find(|p| p.name == sm.target_name) {
+                        p.power_mod -= sm.power_delta;
+                        p.toughness_mod -= sm.toughness_delta;
+                    }
+                }
             }
         }
         StepKind::DeclareAttackers => {
@@ -3498,17 +4297,49 @@ fn do_step(
                     } else { None }
                 })
                 .collect();
-            if !attackers.is_empty() {
-                state.log(t, ap, format!("Declare attackers: {}", attackers.join(", ")));
-                for name in &attackers {
-                    if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| &p.name == name) {
-                        p.tapped = true;
-                        p.attacking = true;
-                    }
+            // Assign attack targets: each attacker picks the player or a random NAP planeswalker.
+            let nap_pw_names: Vec<String> = state.player(nap).permanents.iter()
+                .filter(|p| catalog_map.get(p.name.as_str())
+                    .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_))))
+                .map(|p| p.name.clone())
+                .collect();
+            for name in &attackers {
+                let target = if !nap_pw_names.is_empty() && rng.gen_bool(0.5) {
+                    nap_pw_names[rng.gen_range(0..nap_pw_names.len())].clone()
+                } else {
+                    String::new()
+                };
+                if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| &p.name == name) {
+                    p.attack_target = target;
+                    p.tapped = true;
+                    p.attacking = true;
                 }
             }
-            state.combat_attackers = attackers;
-            // Fire EnteredStep trigger AFTER attackers are marked (p.attacking is now set).
+            if !attackers.is_empty() {
+                let atk_descs: Vec<String> = attackers.iter().map(|name| {
+                    let target = state.player(ap).permanents.iter()
+                        .find(|p| &p.name == name)
+                        .map(|p| if p.attack_target.is_empty() { "player".to_string() } else { p.attack_target.clone() })
+                        .unwrap_or_else(|| "player".to_string());
+                    format!("{} → {}", name, target)
+                }).collect();
+                state.log(t, ap, format!("Declare attackers: {}", atk_descs.join(", ")));
+            }
+            state.combat_attackers = attackers.clone();
+
+            // Fire per-creature and step events AFTER attackers are marked.
+            for name in &attackers {
+                let target = state.player(ap).permanents.iter()
+                    .find(|p| &p.name == name)
+                    .map(|p| p.attack_target.clone())
+                    .unwrap_or_default();
+                let ev = GameEvent::CreatureAttacked {
+                    attacker: name.clone(),
+                    attacker_controller: ap.to_string(),
+                    attack_target: target,
+                };
+                state.queue_triggers(&ev);
+            }
             let step_ev = GameEvent::EnteredStep {
                 step: StepKind::DeclareAttackers,
                 active_player: ap.to_string(),
@@ -3596,20 +4427,36 @@ fn do_step(
                     }
                 }
 
+                let mut pw_damage: HashMap<String, i32> = HashMap::new();
                 for atk_name in &attackers {
                     if !blocked.contains(atk_name.as_str()) {
-                        let atk_pow = {
-                            let p = state.player(ap).permanents.iter().find(|p| p.name == *atk_name);
-                            p.map(|p| creature_stats(p, catalog_map.get(atk_name.as_str()).copied()).0)
-                             .unwrap_or(1)
-                        };
-                        player_damage += atk_pow;
+                        let atk_perm = state.player(ap).permanents.iter().find(|p| p.name == *atk_name);
+                        let atk_pow = atk_perm.map(|p| creature_stats(p, catalog_map.get(atk_name.as_str()).copied()).0).unwrap_or(1);
+                        let attack_target = atk_perm.map(|p| p.attack_target.clone()).unwrap_or_default();
+                        if attack_target.is_empty() {
+                            player_damage += atk_pow;
+                        } else {
+                            *pw_damage.entry(attack_target).or_insert(0) += atk_pow;
+                        }
                     }
                 }
 
                 if player_damage > 0 {
                     state.lose_life(nap, player_damage);
                     state.log(t, ap, format!("Combat: {} unblocked damage to {} (life: {})", player_damage, nap, state.life_of(nap)));
+                }
+                for (pw_name, dmg) in &pw_damage {
+                    let new_loyalty = {
+                        if let Some(perm) = state.player_mut(nap).permanents.iter_mut().find(|p| p.name == *pw_name) {
+                            perm.loyalty -= dmg;
+                            Some(perm.loyalty)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(new_loyalty) = new_loyalty {
+                        state.log(t, ap, format!("Combat: {} damage to {} (loyalty: {})", dmg, pw_name, new_loyalty));
+                    }
                 }
 
                 // SBAs: lethal damage check on both boards.
@@ -3624,6 +4471,23 @@ fn do_step(
                         .collect();
                     for name in dying {
                         state.log(t, owner, format!("{} dies", name));
+                        state.player_mut(owner).permanents.retain(|p| p.name != name);
+                        state.player_mut(owner).graveyard.visible.push(name);
+                    }
+                }
+
+                // SBA: destroy planeswalkers with loyalty ≤ 0.
+                for owner in [ap, nap] {
+                    let dying_pw: Vec<String> = state.player(owner).permanents.iter()
+                        .filter(|p| {
+                            catalog_map.get(p.name.as_str())
+                                .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_)))
+                                && p.loyalty <= 0
+                        })
+                        .map(|p| p.name.clone())
+                        .collect();
+                    for name in dying_pw {
+                        state.log(t, owner, format!("{} is destroyed (loyalty 0)", name));
                         state.player_mut(owner).permanents.retain(|p| p.name != name);
                         state.player_mut(owner).graveyard.visible.push(name);
                     }
@@ -3647,6 +4511,46 @@ fn do_step(
     // Mana pool drains at the end of every step.
     state.us.pool.drain();
     state.opp.pool.drain();
+}
+
+/// Activate each AP planeswalker's loyalty ability once (100% — never skip).
+/// Called at the end of each main phase, after the regular priority round.
+/// For each unactivated PW, picks a random available loyalty ability and runs a priority round.
+fn activate_planeswalkers(
+    state: &mut SimState,
+    t: u8,
+    ap: &str,
+    dd_turn: u8,
+    us_lib: &mut Vec<(String, CardDef)>,
+    opp_lib: &mut Vec<(String, CardDef)>,
+    catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut impl Rng,
+) {
+    // Collect unactivated PW names + their current loyalty snapshot.
+    let pw_names: Vec<(String, i32)> = state.player(ap).permanents.iter()
+        .filter(|p| !p.pw_activated_this_turn)
+        .filter(|p| catalog_map.get(p.name.as_str())
+            .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_))))
+        .map(|p| (p.name.clone(), p.loyalty))
+        .collect();
+
+    for (name, loyalty) in pw_names {
+        let def = match catalog_map.get(name.as_str()) { Some(d) => *d, None => continue };
+        let available: Vec<AbilityDef> = def.abilities().iter()
+            .filter(|ab| {
+                let Some(cost) = ab.loyalty_cost else { return false; };
+                !(cost < 0 && loyalty < -cost)
+            })
+            .cloned()
+            .collect();
+        if available.is_empty() { continue; }
+        let ab = available[rng.gen_range(0..available.len())].clone();
+        state.player_mut(ap).pending_actions = vec![PriorityAction::ActivateAbility(name, ab)];
+        handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
+        state.us.pool.drain();
+        state.opp.pool.drain();
+        if state.done() { return; }
+    }
 }
 
 /// Execute a full phase: run each step, then optionally run a phase-level priority round.
@@ -3674,6 +4578,11 @@ fn do_phase(
         state.player_mut(ap).pending_actions = on_board;
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
         // Mana pool drains at the end of the main phase.
+        state.us.pool.drain();
+        state.opp.pool.drain();
+        if state.done() { return; }
+        // Activate each AP planeswalker's loyalty ability (100% — runs after all other actions).
+        activate_planeswalkers(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
         state.us.pool.drain();
         state.opp.pool.drain();
     }
@@ -3898,15 +4807,28 @@ fn weighted_choice<T: Clone>(options: &[(T, u32)], rng: &mut impl Rng) -> T {
 /// True if `def` has enough simulation implementation to do something during a game.
 ///
 /// - Lands are always actionable (played via land-drop logic).
-/// - Spells need at least one castable effect, a counter_target, or abilities.
+/// - Permanents (creatures, artifacts, planeswalkers, enchantments) are always castable.
+/// - Spells need a counter_target, abilities, or a known entry in `spell_effect`.
 fn card_has_implementation(def: &CardDef) -> bool {
     if def.is_land() { return true; }
     if !def.abilities().is_empty() { return true; }
     if def.counter_target().is_some() { return true; }
-    def.effects().iter().any(|e| {
-        e == "cantrip" || e == "permanent" || e == "destroy" || e == "doomsday"
-            || e.starts_with("discard:") || e.starts_with("mana:") || e.starts_with("reanimate:")
-    })
+    match &def.kind {
+        CardKind::Creature(_) | CardKind::Artifact(_)
+        | CardKind::Planeswalker(_) | CardKind::Enchantment => true,
+        CardKind::Instant(_) | CardKind::Sorcery(_) => {
+            matches!(def.name.as_str(),
+                "Brainstorm" | "Ponder" | "Consider" | "Preordain"
+                | "Dark Ritual"
+                | "Doomsday"
+                | "Fatal Push" | "Snuff Out"
+                | "Thoughtseize" | "Hymn to Tourach"
+                | "Unearth"
+                | "Petty Theft"
+            )
+        }
+        CardKind::Land(_) => true,
+    }
 }
 
 /// Print a warning for mainboard cards that lack a simulation implementation.
@@ -4000,6 +4922,9 @@ mod tests {
             adventure_card_name: None,
             adventure_face: None,
             trigger_context: None,
+            chosen_targets: vec![],
+            ninjutsu_attack_target: None,
+            effect: None,
         }
     }
 
@@ -4383,7 +5308,6 @@ mod tests {
             name = "Dark Ritual"
             card_type = "instant"
             mana_cost = "B"
-            effects = ["mana:BBB"]
         "#).unwrap();
         let mut us_lib = vec![("Dark Ritual".to_string(), def.clone())];
         state.us.pool.b = 1;
@@ -4410,7 +5334,6 @@ mod tests {
             name = "Doomsday"
             card_type = "instant"
             mana_cost = "BBB"
-            effects = ["doomsday"]
         "#).unwrap();
         let mut us_lib = vec![("Doomsday".to_string(), def.clone())];
         // No mana in pool, no lands
@@ -4463,17 +5386,7 @@ mod tests {
     #[test]
     fn test_effect_doomsday_sets_success() {
         let mut state = make_state();
-        let def: CardDef = toml::from_str(r#"
-            name = "Doomsday"
-            card_type = "instant"
-            mana_cost = "BBB"
-            effects = ["doomsday"]
-        "#).unwrap();
-        let item = stack_item("Doomsday", "us");
-        let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        eff_doomsday().call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
 
         assert!(state.success);
     }
@@ -4482,37 +5395,58 @@ mod tests {
     fn test_effect_cantrip_increments_hand() {
         let mut state = make_state();
         let initial_hidden = state.us.hand.hidden;
-        let def: CardDef = toml::from_str(r#"
-            name = "Preordain"
-            card_type = "instant"
-            mana_cost = "U"
-            effects = ["cantrip"]
-        "#).unwrap();
-        let item = stack_item("Preordain", "us");
-        let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        eff_draw("us", 1).call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
 
         assert_eq!(state.us.hand.hidden, initial_hidden + 1, "cantrip increments hand count");
+    }
+
+    #[test]
+    fn test_brainstorm_net_one_card() {
+        // draw:3 + put_back:2 = net +1 hand size.
+        let mut state = make_state();
+        let initial = state.us.hand.hidden;
+        eff_draw("us", 3).then(eff_put_back("us", 2))
+            .call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+
+        assert_eq!(state.us.hand.hidden, initial + 1, "Brainstorm nets +1 card");
+    }
+
+    #[test]
+    fn test_brainstorm_fires_three_draw_events() {
+        // All three draws queue triggers; OBM (controlled by opp) should see all three.
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        eff_draw("us", 3).then(eff_put_back("us", 2))
+            .call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+
+        // Three Draw events queued → three OBM triggers pending (all non-natural draws).
+        let bowmasters_triggers = state.pending_triggers.iter()
+            .filter(|tc| tc.kind == "BowmastersDrawTrigger")
+            .count();
+        assert_eq!(bowmasters_triggers, 3, "OBM pings for each of the 3 Brainstorm draws");
+    }
+
+    #[test]
+    fn test_brainstorm_flips_tamiyo_on_second_draw_of_three() {
+        // Turn context: natural draw already happened (draw_index=1).
+        // Brainstorm's 2nd draw = draw_index=3 → Tamiyo flips.
+        let mut state = make_state();
+        state.us.permanents.push(SimPermanent::new("Tamiyo, Inquisitive Student"));
+        state.us.draws_this_turn = 1; // simulate having already drawn naturally
+        eff_draw("us", 3).then(eff_put_back("us", 2))
+            .call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+
+        let flip_triggers = state.pending_triggers.iter()
+            .filter(|tc| tc.kind == "TamiyoFlip")
+            .count();
+        assert_eq!(flip_triggers, 1, "Tamiyo flips exactly once on the 3rd draw of the turn");
     }
 
     #[test]
     fn test_effect_life_loss_reduces_caster_life() {
         let mut state = make_state();
         let initial = state.us.life;
-        // life_loss:N reduces the caster's life
-        let def: CardDef = toml::from_str(r#"
-            name = "Dark Confidant"
-            card_type = "creature"
-            mana_cost = "1B"
-            effects = ["life_loss:2"]
-        "#).unwrap();
-        let item = stack_item("Dark Confidant", "us");
-        let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        eff_life_loss("us", 2).call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -4520,17 +5454,7 @@ mod tests {
     #[test]
     fn test_effect_mana_adds_to_pool() {
         let mut state = make_state();
-        let def: CardDef = toml::from_str(r#"
-            name = "Dark Ritual"
-            card_type = "instant"
-            mana_cost = "B"
-            effects = ["mana:BBB"]
-        "#).unwrap();
-        let item = stack_item("Dark Ritual", "us");
-        let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        eff_mana("us", "BBB").call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
 
         assert_eq!(state.us.pool.b, 3, "should add 3 black mana");
         assert_eq!(state.us.pool.total, 3);
@@ -4540,28 +5464,17 @@ mod tests {
     fn test_effect_discard_removes_opp_card() {
         let mut state = make_state();
         state.opp.hand.hidden = 1;
-        let def: CardDef = toml::from_str(r#"
-            name = "Thoughtseize"
-            card_type = "sorcery"
-            mana_cost = "B"
-            effects = ["discard:opp:1"]
-        "#).unwrap();
         let target_card: CardDef = toml::from_str(r#"
             name = "Counterspell"
             card_type = "instant"
             mana_cost = "UU"
         "#).unwrap();
-        let item = stack_item("Thoughtseize", "us");
-        let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let mut us_lib: Vec<(String, CardDef)> = vec![];
-        // other_lib = opp_lib: the card pool to discard from
-        let mut opp_lib: Vec<(String, CardDef)> = vec![("Counterspell".to_string(), target_card)];
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        state.opp.library = vec![("Counterspell".to_string(), target_card)];
+        eff_discard("us", Who::Opp, 1, false).call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
 
         assert_eq!(state.opp.hand.hidden, 0, "opp hand decremented");
         assert!(state.opp.graveyard.visible.contains(&"Counterspell".to_string()));
-        assert!(opp_lib.is_empty(), "card removed from opp library");
+        assert!(state.opp.library.is_empty(), "card removed from opp library");
     }
 
     // ── Section 7: Ability Activation ─────────────────────────────────────────
@@ -4621,21 +5534,8 @@ mod tests {
     fn test_effect_destroy_spell_removes_opp_land() {
         let mut state = make_state();
         state.opp.lands.push(make_land("Bayou", false));
-        let def: CardDef = toml::from_str(r#"
-            name = "Sinkhole"
-            card_type = "sorcery"
-            mana_cost = "BB"
-            target = "opp:land"
-            effects = ["destroy"]
-        "#).unwrap();
-        let item = StackItem {
-            permanent_target: Some(("opp".to_string(), "Bayou".to_string())),
-            ..stack_item("Sinkhole", "us")
-        };
-        let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        let target = Target::Permanent { name: "Bayou".to_string(), id: ObjId::UNSET, controller: "opp".to_string() };
+        eff_destroy_target("us").call(&mut state, 1, &[target], &HashMap::new(), &mut seeded_rng());
 
         assert!(state.opp.lands.is_empty(), "Bayou should be destroyed");
         assert!(state.opp.graveyard.visible.contains(&"Bayou".to_string()));
@@ -4645,22 +5545,8 @@ mod tests {
     fn test_effect_destroy_spell_removes_opp_creature() {
         let mut state = make_state();
         state.opp.permanents.push(SimPermanent::new("Troll"));
-        let troll_def = creature("Troll", 2, 2);
-        let swords_def: CardDef = toml::from_str(r#"
-            name = "Swords to Plowshares"
-            card_type = "instant"
-            mana_cost = "W"
-            target = "opp:creature"
-            effects = ["destroy"]
-        "#).unwrap();
-        let item = StackItem {
-            permanent_target: Some(("opp".to_string(), "Troll".to_string())),
-            ..stack_item("Swords to Plowshares", "us")
-        };
-        let catalog = vec![swords_def, troll_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        let target = Target::Permanent { name: "Troll".to_string(), id: ObjId::UNSET, controller: "opp".to_string() };
+        eff_destroy_target("us").call(&mut state, 1, &[target], &HashMap::new(), &mut seeded_rng());
 
         assert!(state.opp.permanents.is_empty(), "Troll should be destroyed");
         assert!(state.opp.graveyard.visible.contains(&"Troll".to_string()));
@@ -4679,7 +5565,7 @@ mod tests {
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         let (mut us_lib, mut _opp_lib) = empty_libs();
-        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng());
+        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
 
         assert!(state.opp.lands.is_empty(), "Bayou should be destroyed");
         assert!(state.opp.graveyard.visible.contains(&"Bayou".to_string()));
@@ -4696,7 +5582,7 @@ mod tests {
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         let (mut us_lib, mut _opp_lib) = empty_libs();
-        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng());
+        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
 
         assert!(!state.opp.lands.is_empty(), "basic Forest should survive");
         assert!(state.opp.graveyard.visible.is_empty());
@@ -4714,7 +5600,6 @@ mod tests {
             card_type = "instant"
             mana_cost = "7U"
             delve = true
-            effects = ["cantrip"]
         "#).unwrap();
         state.us.graveyard.visible = vec!["A".into(), "B".into(), "C".into(),
                                           "D".into(), "E".into(), "F".into(), "G".into()];
@@ -4743,7 +5628,6 @@ mod tests {
             card_type = "sorcery"
             mana_cost = "3"
             delve = true
-            effects = ["destroy"]
         "#).unwrap();
         state.us.graveyard.visible = vec!["Ritual".into(), "Ponder".into()];
         state.us.pool.total = 1; // covers the 1 remaining generic after delve
@@ -4771,7 +5655,6 @@ mod tests {
             delve = true
             power = 3
             toughness = 3
-            effects = ["permanent"]
         "#).unwrap();
         let ritual_def: CardDef   = toml::from_str("name = \"Dark Ritual\"\ncard_type = \"instant\"\nmana_cost = \"B\"").unwrap();
         let ponder_def: CardDef   = toml::from_str("name = \"Ponder\"\ncard_type = \"sorcery\"\nmana_cost = \"U\"").unwrap();
@@ -4793,9 +5676,9 @@ mod tests {
         // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
         assert_eq!(item.annotation.as_deref(), Some("+3"));
 
-        // Resolve and check permanent
-        let (mut us_lib2, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib2, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        // Resolve via Effect path
+        let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
+        item.effect.as_ref().unwrap().call(&mut state, 1, &item.chosen_targets, &catalog_map, rng_dyn);
 
         let murktide = &state.us.permanents[0];
         assert_eq!(murktide.counters, 3, "3 instants/sorceries exiled → 3 counters");
@@ -4817,7 +5700,6 @@ mod tests {
             delve = true
             power = 3
             toughness = 3
-            effects = ["permanent"]
         "#).unwrap();
         let ragavan_def = creature("Ragavan", 2, 1);
 
@@ -4833,8 +5715,8 @@ mod tests {
         let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
         assert!(item.annotation.is_none(), "no instants/sorceries → no counter annotation");
 
-        let (mut us_lib2, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib2, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
+        item.effect.as_ref().unwrap().call(&mut state, 1, &item.chosen_targets, &catalog_map, rng_dyn);
 
         let murktide = &state.us.permanents[0];
         assert_eq!(murktide.counters, 0);
@@ -4875,7 +5757,6 @@ mod tests {
             card_type = "sorcery"
             mana_cost = "3"
             delve = true
-            effects = ["destroy"]
         "#).unwrap();
         state.us.graveyard.visible = vec!["Ritual".into(), "Ponder".into()];
         // no mana
@@ -4904,7 +5785,7 @@ mod tests {
         let catalog = vec![troll_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         let (mut us_lib, mut _opp_lib) = empty_libs();
-        apply_ability_effect(&mut state, 1, "us", "Karakas", &ability, &mut us_lib, &catalog_map, &mut seeded_rng());
+        apply_ability_effect(&mut state, 1, "us", "Karakas", &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
 
         assert!(state.opp.permanents.is_empty(), "Troll should be exiled");
         assert!(state.opp.exile.visible.contains(&"Troll".to_string()));
@@ -4919,7 +5800,6 @@ mod tests {
             card_type = "creature"
             power = 2
             toughness = 1
-            effects = ["permanent"]
             ninjutsu = {mana_cost = "U"}
         "#).unwrap()
     }
@@ -5101,7 +5981,7 @@ mod tests {
         let initial = state.us.hand.hidden;
         let ability: AbilityDef = toml::from_str(r#"effect = "draw:1""#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        apply_ability_effect(&mut state, 1, "us", "Street Wraith", &ability, &mut vec![], &catalog_map, &mut seeded_rng());
+        apply_ability_effect(&mut state, 1, "us", "Street Wraith", &ability, &mut vec![], &catalog_map, &mut seeded_rng(), None);
         assert_eq!(state.us.hand.hidden, initial + 1, "cycling draws one card");
     }
 
@@ -5203,7 +6083,6 @@ mod tests {
             blue = true
             power = 3
             toughness = 1
-            effects = ["permanent"]
         "#).unwrap();
         let catalog = vec![borrower_def.clone()];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5323,7 +6202,6 @@ mod tests {
             mana_cost = "1B"
             power = 1
             toughness = 1
-            effects = ["permanent"]
         "#).unwrap()
     }
 
@@ -5335,7 +6213,6 @@ mod tests {
             power = 3
             toughness = 3
             delve = true
-            effects = ["permanent"]
             keywords = ["flying"]
         "#).unwrap()
     }
@@ -5351,12 +6228,10 @@ mod tests {
             from: ZoneId::Stack,
             to: ZoneId::Battlefield,
             controller: "opp".to_string(),
-            draw_index: None,
-            is_natural_draw: false,
         };
         let result = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
-        assert!(matches!(result[0].payload, TriggerPayload::BowmastersEtb));
+        assert_eq!(result[0].kind, "BowmastersEtb");
     }
 
     #[test]
@@ -5368,11 +6243,31 @@ mod tests {
             from: ZoneId::Stack,
             to: ZoneId::Battlefield,
             controller: "opp".to_string(),
-            draw_index: None,
-            is_natural_draw: false,
         };
         let result = fire_triggers(&ev, &state);
         assert!(result.is_empty());
+    }
+
+    /// Fire a Bowmasters ETB trigger for `controller` and return the TriggerContext.
+    fn bowmasters_etb_ctx(controller: &str) -> TriggerContext {
+        let ev = GameEvent::ZoneChange {
+            card: "Orcish Bowmasters".into(),
+            card_type: "creature".into(),
+            from: ZoneId::Hand,
+            to: ZoneId::Battlefield,
+            controller: controller.to_string(),
+        };
+        let mut pending = Vec::new();
+        bowmasters_check(&ev, controller, &mut pending);
+        pending.remove(0)
+    }
+
+    /// Fire a Bowmasters ETB trigger for `controller`, choose its target, and apply it.
+    fn fire_bowmasters_etb(controller: &str, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
+        let ctx = bowmasters_etb_ctx(controller);
+        let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state, catalog_map)
+            .into_iter().collect();
+        apply_trigger(&ctx, &targets, state, 1, catalog_map);
     }
 
     #[test]
@@ -5380,14 +6275,7 @@ mod tests {
         let mut state = make_state();
         state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
         let initial_life = state.us.life;
-
-        let ctx = TriggerContext {
-            source: "Orcish Bowmasters".into(),
-            controller: "opp".into(),
-            payload: TriggerPayload::BowmastersEtb,
-        };
-        apply_trigger(&ctx, &mut state, 1, &mut seeded_rng());
-
+        fire_bowmasters_etb("opp", &mut state, &HashMap::new());
         assert_eq!(state.us.life, initial_life - 1, "ETB deals 1 to us");
         assert!(state.opp.permanents.iter().any(|p| p.name == "Orc Army"), "Orc Army token created");
         let army = state.opp.permanents.iter().find(|p| p.name == "Orc Army").unwrap();
@@ -5401,72 +6289,84 @@ mod tests {
         let mut army = SimPermanent::new("Orc Army");
         army.counters = 2;
         state.opp.permanents.push(army);
-
-        let ctx = TriggerContext {
-            source: "Orcish Bowmasters".into(),
-            controller: "opp".into(),
-            payload: TriggerPayload::BowmastersEtb,
-        };
-        apply_trigger(&ctx, &mut state, 1, &mut seeded_rng());
-
+        fire_bowmasters_etb("opp", &mut state, &HashMap::new());
         let army = state.opp.permanents.iter().find(|p| p.name == "Orc Army").unwrap();
         assert_eq!(army.counters, 3, "Orc Army grows from 2 to 3");
     }
 
     #[test]
+    fn test_bowmasters_ping_hits_face_when_no_killable_creature() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let initial_life = state.us.life;
+        state.us.permanents.push(SimPermanent::new("Troll"));
+        let catalog = vec![creature("Troll", 3, 3)];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        fire_bowmasters_etb("opp", &mut state, &catalog_map);
+        assert_eq!(state.us.life, initial_life - 1, "damage hits face when no killable creature");
+        assert!(state.us.permanents.iter().any(|p| p.name == "Troll"), "Troll survives");
+    }
+
+    #[test]
+    fn test_bowmasters_ping_kills_1_1_creature() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let initial_life = state.us.life;
+        state.us.permanents.push(SimPermanent::new("Ragavan, Nimble Pilferer"));
+        let catalog = vec![creature("Ragavan, Nimble Pilferer", 2, 1)];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        fire_bowmasters_etb("opp", &mut state, &catalog_map);
+        check_lethal_damage("us", &mut state, 1, &catalog_map);
+        assert_eq!(state.us.life, initial_life, "life total unchanged when creature is targeted");
+        assert!(!state.us.permanents.iter().any(|p| p.name == "Ragavan, Nimble Pilferer"),
+            "Ragavan dies to 1 damage");
+        assert!(state.us.graveyard.visible.contains(&"Ragavan, Nimble Pilferer".to_string()),
+            "Ragavan goes to graveyard");
+    }
+
+    #[test]
+    fn test_bowmasters_ping_prioritises_opposing_bowmasters() {
+        let mut state = make_state();
+        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        state.us.permanents.push(SimPermanent::new("Troll"));
+        state.us.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let catalog = vec![creature("Troll", 3, 3), creature("Orcish Bowmasters", 1, 1)];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        fire_bowmasters_etb("opp", &mut state, &catalog_map);
+        check_lethal_damage("us", &mut state, 1, &catalog_map);
+        assert!(!state.us.permanents.iter().any(|p| p.name == "Orcish Bowmasters"),
+            "opposing Bowmasters is killed");
+        assert!(state.us.permanents.iter().any(|p| p.name == "Troll"), "Troll survives");
+    }
+
+    #[test]
     fn test_bowmasters_no_trigger_on_natural_first_draw() {
-        // Natural draw step draw (draw_index=1, is_natural_draw=true) should NOT trigger.
         let mut state = make_state();
         state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
 
-        let ev = GameEvent::ZoneChange {
-            card: String::new(),
-            card_type: String::new(),
-            from: ZoneId::Library,
-            to: ZoneId::Hand,
-            controller: "us".to_string(), // us draws
-            draw_index: Some(1),
-            is_natural_draw: true,
-        };
+        let ev = GameEvent::Draw { controller: "us".to_string(), draw_index: 1, is_natural: true };
         let result = fire_triggers(&ev, &state);
         assert!(result.is_empty(), "no trigger on first natural draw");
     }
 
     #[test]
     fn test_bowmasters_triggers_on_second_natural_draw() {
-        // Natural draw step draw (is_natural_draw=true) beyond the first triggers Bowmasters.
         let mut state = make_state();
         state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
 
-        let ev = GameEvent::ZoneChange {
-            card: String::new(),
-            card_type: String::new(),
-            from: ZoneId::Library,
-            to: ZoneId::Hand,
-            controller: "us".to_string(),
-            draw_index: Some(2),
-            is_natural_draw: true,
-        };
+        let ev = GameEvent::Draw { controller: "us".to_string(), draw_index: 2, is_natural: true };
         let result = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
-        assert!(matches!(&result[0].payload, TriggerPayload::BowmastersDrawTrigger { drawing_player } if drawing_player == "us"));
+        assert_eq!(result[0].kind, "BowmastersDrawTrigger");
+        assert_eq!(result[0].controller, "opp");
     }
 
     #[test]
     fn test_bowmasters_triggers_on_cantrip_draw() {
-        // Non-natural draw (cantrip) always triggers Bowmasters (draw_index=1, is_natural_draw=false).
         let mut state = make_state();
         state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
 
-        let ev = GameEvent::ZoneChange {
-            card: String::new(),
-            card_type: String::new(),
-            from: ZoneId::Library,
-            to: ZoneId::Hand,
-            controller: "us".to_string(),
-            draw_index: Some(1),
-            is_natural_draw: false, // cantrip
-        };
+        let ev = GameEvent::Draw { controller: "us".to_string(), draw_index: 1, is_natural: false };
         let result = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1, "cantrip draw triggers Bowmasters");
     }
@@ -5484,15 +6384,13 @@ mod tests {
             from: ZoneId::Graveyard,
             to: ZoneId::Exile,
             controller: "us".to_string(),
-            draw_index: None,
-            is_natural_draw: false,
         };
         let result = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
-        assert!(matches!(result[0].payload, TriggerPayload::MurktideExile));
+        assert_eq!(result[0].kind, "MurktideExile");
 
         let mut state2 = state;
-        apply_trigger(&result[0], &mut state2, 1, &mut seeded_rng());
+        apply_trigger(&result[0], &[], &mut state2, 1, &HashMap::new());
         let murktide = state2.us.permanents.iter().find(|p| p.name == "Murktide Regent").unwrap();
         assert_eq!(murktide.counters, 1, "Murktide gains +1/+1 counter");
     }
@@ -5508,8 +6406,6 @@ mod tests {
             from: ZoneId::Graveyard,
             to: ZoneId::Exile,
             controller: "us".to_string(),
-            draw_index: None,
-            is_natural_draw: false,
         };
         let result = fire_triggers(&ev, &state);
         assert!(result.is_empty(), "land exile does not trigger Murktide");
@@ -5518,7 +6414,7 @@ mod tests {
     #[test]
     fn test_tamiyo_clue_when_attacking() {
         let mut state = make_state();
-        let mut tamiyo = SimPermanent::new("Tamiyo, the Enigma Scroll");
+        let mut tamiyo = SimPermanent::new("Tamiyo, Inquisitive Student");
         tamiyo.attacking = true;
         state.us.permanents.push(tamiyo);
 
@@ -5528,10 +6424,10 @@ mod tests {
         };
         let result = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
-        assert!(matches!(result[0].payload, TriggerPayload::TamiyoClue));
+        assert_eq!(result[0].kind, "TamiyoClue");
 
         let mut state2 = state;
-        apply_trigger(&result[0], &mut state2, 1, &mut seeded_rng());
+        apply_trigger(&result[0], &[], &mut state2, 1, &HashMap::new());
         assert!(state2.us.permanents.iter().any(|p| p.name == "Clue Token"),
             "Clue Token created when Tamiyo attacks");
     }
@@ -5539,7 +6435,7 @@ mod tests {
     #[test]
     fn test_tamiyo_no_clue_when_not_attacking() {
         let mut state = make_state();
-        let tamiyo = SimPermanent::new("Tamiyo, the Enigma Scroll"); // attacking = false
+        let tamiyo = SimPermanent::new("Tamiyo, Inquisitive Student"); // attacking = false
         state.us.permanents.push(tamiyo);
 
         let ev = GameEvent::EnteredStep {
@@ -5550,7 +6446,7 @@ mod tests {
         // Trigger queues (Tamiyo is in play), but resolves to nothing (not attacking).
         if let Some(ctx) = result.first() {
             let mut state2 = state;
-            apply_trigger(ctx, &mut state2, 1, &mut seeded_rng());
+            apply_trigger(ctx, &[], &mut state2, 1, &HashMap::new());
             assert!(!state2.us.permanents.iter().any(|p| p.name == "Clue Token"),
                 "no Clue Token if Tamiyo is not attacking");
         }
@@ -5559,27 +6455,90 @@ mod tests {
     #[test]
     fn test_tamiyo_flip_on_third_draw() {
         let mut state = make_state();
-        state.us.permanents.push(SimPermanent::new("Tamiyo, the Enigma Scroll"));
+        state.us.permanents.push(SimPermanent::new("Tamiyo, Inquisitive Student"));
 
-        let ev = GameEvent::ZoneChange {
-            card: String::new(),
-            card_type: String::new(),
-            from: ZoneId::Library,
-            to: ZoneId::Hand,
-            controller: "us".to_string(),
-            draw_index: Some(3),
-            is_natural_draw: false,
-        };
+        let ev = GameEvent::Draw { controller: "us".to_string(), draw_index: 3, is_natural: false };
         let result = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
-        assert!(matches!(result[0].payload, TriggerPayload::TamiyoFlip));
+        assert_eq!(result[0].kind, "TamiyoFlip");
 
         let mut state2 = state;
-        apply_trigger(&result[0], &mut state2, 1, &mut seeded_rng());
-        assert!(!state2.us.permanents.iter().any(|p| p.name == "Tamiyo, the Enigma Scroll"),
+        apply_trigger(&result[0], &[], &mut state2, 1, &HashMap::new());
+        assert!(!state2.us.permanents.iter().any(|p| p.name == "Tamiyo, Inquisitive Student"),
             "original Tamiyo removed");
         assert!(state2.us.permanents.iter().any(|p| p.name == "Tamiyo, Seasoned Scholar"),
             "Tamiyo, Seasoned Scholar enters");
+    }
+
+    #[test]
+    fn test_tamiyo_plus_two_applies_power_mod_to_attackers() {
+        let mut state = make_state();
+        // Register the +2 effect for "us" (as if us activated it last turn).
+        state.active_effects.push(tamiyo_plus_two_effect("us"));
+        // Opp has a 3/3 attacker.
+        let atk_def = creature("Dragon", 3, 3);
+        let mut atk = SimPermanent::new("Dragon");
+        atk.entered_this_turn = false;
+        state.opp.permanents.push(atk);
+        state.us.permanents.push(SimPermanent::new("Wall")); // blocker-sized (no block in this test)
+
+        let catalog = vec![atk_def, creature("Wall", 0, 4)];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let mut rng = seeded_rng();
+        do_step(&mut state, 1, "opp", &Step { kind: StepKind::DeclareAttackers, prio: true },
+            3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut rng);
+
+        let dragon = state.opp.permanents.iter().find(|p| p.name == "Dragon").unwrap();
+        assert_eq!(dragon.power_mod, -1, "Dragon gets -1 power from Tamiyo +2");
+        // creature_stats should reflect the mod.
+        let (pow, _) = creature_stats(dragon, catalog_map.get("Dragon").copied());
+        assert_eq!(pow, 2, "Dragon's effective power is 3 + (-1) = 2");
+    }
+
+    #[test]
+    fn test_tamiyo_plus_two_expires_at_controller_untap() {
+        let mut state = make_state();
+        state.active_effects.push(tamiyo_plus_two_effect("us"));
+        assert_eq!(state.active_effects.len(), 1);
+
+        // Untap step for "us" should expire the effect.
+        let step = Step { kind: StepKind::Untap, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        do_step(&mut state, 2, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        assert!(state.active_effects.is_empty(), "Effect expires at controller's next Untap");
+    }
+
+    #[test]
+    fn test_stat_mod_reversed_at_cleanup() {
+        // A StatMod effect with EndOfTurn expiry should undo power_mod during Cleanup.
+        let mut state = make_state();
+        let mut atk = SimPermanent::new("Dragon");
+        atk.power_mod = -1;
+        state.opp.permanents.push(atk);
+        // Register the StatMod effect that will be unwound.
+        state.active_effects.push(ContinuousEffect {
+            controller: "us".to_string(),
+            expires: EffectExpiry::EndOfTurn,
+            on_event: None,
+            stat_mod: Some(StatModData {
+                target_name: "Dragon".to_string(),
+                target_controller: "opp".to_string(),
+                power_delta: -1,
+                toughness_delta: 0,
+            }),
+        });
+
+        let step = Step { kind: StepKind::Cleanup, prio: false };
+        let (mut us_lib, mut opp_lib) = empty_libs();
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        do_step(&mut state, 1, "opp", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        let dragon = state.opp.permanents.iter().find(|p| p.name == "Dragon").unwrap();
+        assert_eq!(dragon.power_mod, 0, "power_mod reversed by StatMod expiry in Cleanup");
+        assert!(state.active_effects.is_empty(), "EndOfTurn effect removed");
     }
 }
 
