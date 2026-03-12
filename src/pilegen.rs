@@ -621,6 +621,10 @@ struct StackAbility {
 struct StackItem {
     name: String,
     owner: String,
+    /// Stable ObjId of the physical card this stack item represents.
+    /// Matches the id assigned when the card was placed in the library.
+    /// ObjId::UNSET for ability stack items (not a card).
+    card_id: ObjId,
     /// True for activated abilities; NAP skips countering these.
     is_ability: bool,
     /// For activated abilities: the ability definition, used to apply the effect at resolution.
@@ -2842,8 +2846,9 @@ fn cast_spell(
     let permanent_target = def.target()
         .and_then(|tgt| choose_permanent_target(tgt, who, state, catalog_map, rng));
 
-    // Remove the spell from library.
+    // Remove the spell from library, capturing its stable ObjId.
     let pos = library.iter().position(|(_, n, _)| n.as_str() == name)?;
+    let card_id = library[pos].0;
     library.remove(pos);
 
     // Pay cost and build a log label.
@@ -2906,6 +2911,7 @@ fn cast_spell(
     Some(StackItem {
         name: name.to_string(),
         owner: who.to_string(),
+        card_id,
         is_ability: false,
         ability_def: None,
         counters: None,
@@ -2991,7 +2997,7 @@ fn apply_spell_effects(
         let pw_loyalty = if let Some(d) = catalog_map.get(item.name.as_str()) {
             if let CardKind::Planeswalker(ref p) = d.kind { p.loyalty } else { 0 }
         } else { 0 };
-        let new_id = state.alloc_id();
+        let new_id = if item.card_id.is_set() { item.card_id } else { state.alloc_id() };
         state.cards.insert(new_id, CardObject::new(new_id, item.name.clone(), &item.owner));
         state.player_mut(&item.owner).permanents.push(SimPermanent {
             id: new_id,
@@ -3412,6 +3418,7 @@ fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>, stat
         stack.push(StackItem {
             name: format!("{} trigger", ctx.source),
             owner: ctx.controller.clone(),
+            card_id: ObjId::UNSET,
             is_ability: true,       // NAP skips countering triggered abilities
             ability_def: None,
             counters: None,
@@ -3974,6 +3981,7 @@ fn handle_priority_round(
                 stack.push(StackItem {
                     name: source_name.clone(),
                     owner: who.clone(),
+                    card_id: ObjId::UNSET,
                     is_ability: true,
                     ability_def: Some(ability.clone()),
                     counters: None,
@@ -4016,6 +4024,7 @@ fn handle_priority_round(
                     priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
                     continue;
                 };
+                let adv_card_id = actor_lib[pos].0;
                 actor_lib.remove(pos);
                 // Pay mana.
                 if !face.mana_cost.is_empty() {
@@ -4032,6 +4041,7 @@ fn handle_priority_round(
                 stack.push(StackItem {
                     name: face.name.clone(),
                     owner: who.clone(),
+                    card_id: adv_card_id,
                     is_ability: false,
                     ability_def: None,
                     counters: None,
@@ -4083,6 +4093,7 @@ fn handle_priority_round(
                 stack.push(StackItem {
                     name: card_name.clone(),
                     owner: who.clone(),
+                    card_id: ObjId::UNSET, // TODO: look up from state.cards when zone tracking is complete
                     is_ability: false,
                     ability_def: None,
                     counters: None,
@@ -4965,6 +4976,7 @@ mod tests {
         StackItem {
             name: name.to_string(),
             owner: owner.to_string(),
+            card_id: ObjId::UNSET,
             is_ability: false,
             ability_def: None,
             counters: None,
