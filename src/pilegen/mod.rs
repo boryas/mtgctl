@@ -210,9 +210,15 @@ enum GameEvent {
         is_natural: bool,
     },
     /// Fired after step-specific actions complete and before priority begins.
+    /// Only fires for named steps that have a priority round (not Untap or Cleanup).
     /// `active_player` is the player whose turn it is.
     EnteredStep {
         step: StepKind,
+        active_player: String,
+    },
+    /// Fired at the start of a phase-level priority window (main phases, which have no named steps).
+    EnteredPhase {
+        phase: PhaseKind,
         active_player: String,
     },
     /// A creature was declared as an attacker.
@@ -310,7 +316,6 @@ enum StepKind {
     Untap,
     Upkeep,
     Draw,
-    Main,   // pre- and post-combat main phase priority window
     BeginCombat,
     DeclareAttackers,
     DeclareBlockers,
@@ -2702,7 +2707,7 @@ fn do_step(
         StepKind::Untap            => "Untap",
         StepKind::Upkeep           => "Upkeep",
         StepKind::Draw             => "Draw",
-        StepKind::Main             => "Main",
+
         StepKind::BeginCombat      => "BeginCombat",
         StepKind::DeclareAttackers => "DeclareAttackers",
         StepKind::DeclareBlockers  => "DeclareBlockers",
@@ -2999,7 +3004,7 @@ fn do_step(
             for p in state.us.permanents.iter_mut() { p.attacking = false; p.unblocked = false; }
             for p in state.opp.permanents.iter_mut() { p.attacking = false; p.unblocked = false; }
         }
-        StepKind::Upkeep | StepKind::BeginCombat | StepKind::End | StepKind::Main => {
+        StepKind::Upkeep | StepKind::BeginCombat | StepKind::End => {
             // No automatic actions.
         }
     }
@@ -3083,11 +3088,11 @@ fn do_phase(
     }
     if phase.is_main_phase() {
         state.current_phase = "Main".to_string();
-        let step_ev = GameEvent::EnteredStep {
-            step: StepKind::Main,
+        let phase_ev = GameEvent::EnteredPhase {
+            phase: phase.kind,
             active_player: ap.to_string(),
         };
-        state.queue_triggers(&step_ev);
+        state.queue_triggers(&phase_ev);
         let on_board = collect_on_board_actions(state, ap, t, dd_turn, catalog_map, rng);
         state.player_mut(ap).pending_actions = on_board;
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);

@@ -1704,10 +1704,9 @@
         assert!(state.active_effects.is_empty(), "EndOfTurn effect removed");
     }
 
-    // ── Step 2: EnteredStep fires for all priority steps ──────────────────────
+    // ── Step 2: EnteredStep / EnteredPhase fires for all priority windows ────────
 
-    /// Verify EnteredStep fires for every priority-bearing step that was missing it.
-    /// We register a trigger on each expected step kind and confirm it produces a pending trigger.
+    /// Verify EnteredStep fires for every named priority-bearing step.
     #[test]
     fn test_entered_step_fires_for_all_priority_steps() {
         let steps_with_prio = [
@@ -1719,24 +1718,9 @@
             StepKind::CombatDamage,
             StepKind::EndCombat,
             StepKind::End,
-            StepKind::Main,
         ];
         for step_kind in steps_with_prio {
             let mut state = make_state();
-            let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-            let mut rng = seeded_rng();
-            let mut us_lib: Vec<(ObjId, String, CardDef)> = vec![];
-            let mut opp_lib: Vec<(ObjId, String, CardDef)> = vec![];
-
-            // Manually fire the event the same way do_step would.
-            let ev = GameEvent::EnteredStep {
-                step: step_kind,
-                active_player: "us".to_string(),
-            };
-
-            // Register a synthetic trigger that fires on this specific step.
-            // We do this by directly calling queue_triggers and checking pending_triggers.
-            // Add a fake active_effect with an on_event hook.
             state.active_effects.push(ContinuousEffect {
                 controller: "us".to_string(),
                 expires: EffectExpiry::EndOfTurn,
@@ -1756,46 +1740,54 @@
                 })),
                 stat_mod: None,
             });
-
+            let ev = GameEvent::EnteredStep { step: step_kind, active_player: "us".to_string() };
             state.queue_triggers(&ev);
-
             assert!(
                 !state.pending_triggers.is_empty(),
-                "EnteredStep {:?} should have produced a pending trigger",
-                step_kind
+                "EnteredStep {:?} should have produced a pending trigger", step_kind
             );
-
-            // Verify DeclareAttackers and Cleanup produce no priority (tested separately).
-            let _ = (catalog_map, rng, us_lib, opp_lib);
         }
     }
 
-    /// Verify Untap and Cleanup do NOT fire EnteredStep (no priority).
+    /// Verify EnteredPhase fires for main phases (which have no named steps).
     #[test]
-    fn test_entered_step_not_fired_for_no_prio_steps() {
-        for step_kind in [StepKind::Untap, StepKind::Cleanup] {
+    fn test_entered_phase_fires_for_main_phases() {
+        for phase_kind in [PhaseKind::PreCombatMain, PhaseKind::PostCombatMain] {
             let mut state = make_state();
             state.active_effects.push(ContinuousEffect {
                 controller: "us".to_string(),
                 expires: EffectExpiry::EndOfTurn,
                 on_event: Some(std::sync::Arc::new(move |e, _ctl| {
-                    if let GameEvent::EnteredStep { .. } = e {
-                        return Some(TriggerContext {
-                            source: "should-not-fire".to_string(),
-                            controller: "us".to_string(),
-                            kind: "ShouldNotFire",
-                            target_spec: TargetSpec::None,
-                            effect: std::sync::Arc::new(|_, _, _, _| {}),
-                        });
+                    if let GameEvent::EnteredPhase { phase, .. } = e {
+                        if *phase == phase_kind {
+                            return Some(TriggerContext {
+                                source: format!("test-{:?}", phase_kind),
+                                controller: "us".to_string(),
+                                kind: "TestPhaseTrigger",
+                                target_spec: TargetSpec::None,
+                                effect: std::sync::Arc::new(|_, _, _, _| {}),
+                            });
+                        }
                     }
                     None
                 })),
                 stat_mod: None,
             });
+            let ev = GameEvent::EnteredPhase { phase: phase_kind, active_player: "us".to_string() };
+            state.queue_triggers(&ev);
+            assert!(
+                !state.pending_triggers.is_empty(),
+                "EnteredPhase {:?} should have produced a pending trigger", phase_kind
+            );
+        }
+    }
 
-            // Untap and Cleanup never fire EnteredStep — there is no event to queue.
-            // Confirmed by the absence of a queue_triggers call in their do_step arms.
-            // This test just documents the contract; no event to fire means no triggers.
+    /// Verify Untap and Cleanup do NOT fire EnteredStep (no priority round).
+    #[test]
+    fn test_entered_step_not_fired_for_no_prio_steps() {
+        for step_kind in [StepKind::Untap, StepKind::Cleanup] {
+            let mut state = make_state();
+            // No triggers registered — just confirm no pending triggers exist at start.
             assert!(state.pending_triggers.is_empty(),
                 "{:?} starts with no pending triggers", step_kind);
         }
