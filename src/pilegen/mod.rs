@@ -856,6 +856,9 @@ pub(crate) struct SimState {
     pending_triggers: Vec<TriggerContext>,
     /// Active continuous effects (from loyalty abilities, spells, etc.).
     active_effects: Vec<ContinuousEffect>,
+    /// Spell/ability stack. Items are resolved last-in-first-out. Populated by
+    /// handle_priority_round; empty between priority rounds.
+    pub(crate) stack: Vec<StackItem>,
     /// All cards in all zones, keyed by stable ObjId. Added as part of staged object model migration.
     cards: HashMap<ObjId, CardObject>,
     /// Activated/triggered abilities currently on the stack, keyed by ObjId.
@@ -880,6 +883,7 @@ impl SimState {
             combat_blocks: Vec::new(),
             pending_triggers: Vec::new(),
             active_effects: Vec::new(),
+            stack: Vec::new(),
             cards: HashMap::new(),
             abilities: HashMap::new(),
             next_id: 0,
@@ -1397,7 +1401,7 @@ fn ability_available(
         }
     }
     if let Some(tgt) = &ability.target {
-        if !has_valid_target(tgt, state, who, catalog_map, &[]) {
+        if !has_valid_target(tgt, state, who, catalog_map) {
             return false;
         }
     }
@@ -1442,7 +1446,6 @@ fn collect_hand_actions(
     who: &str,
     library: &[(ObjId, String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
-    stack: &[StackItem],
 ) -> Vec<PriorityAction> {
     if state.player(who).hand.hidden <= 0 {
         return Vec::new();
@@ -1463,7 +1466,7 @@ fn collect_hand_actions(
                 return None;
             }
             if let Some(tgt) = def.target() {
-                if !has_valid_target(tgt, state, who, catalog_map, stack) {
+                if !has_valid_target(tgt, state, who, catalog_map) {
                     return None;
                 }
             }
@@ -1498,7 +1501,7 @@ fn collect_hand_actions(
             if !state.player(who).potential_mana().can_pay(&cost) { continue; }
         }
         if let Some(ref tgt) = face.target {
-            if !has_valid_target(tgt, state, who, catalog_map, stack) { continue; }
+            if !has_valid_target(tgt, state, who, catalog_map) { continue; }
         }
         actions.push(PriorityAction::CastAdventure { card_name: name.clone() });
     }
@@ -1915,7 +1918,6 @@ fn cast_spell(
     preferred_cost: Option<&AlternateCost>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
-    stack: &[StackItem],
 ) -> Option<StackItem> {
     let def = *catalog_map.get(name)?;
     let mut cost = parse_mana_cost(def.mana_cost());
@@ -2018,7 +2020,7 @@ fn cast_spell(
     state.log(t, who, format!("Cast {} ({}{})", name, cast_label, delve_label));
 
     let (spell_target_spec, spell_eff) = spell_effect(name, who, annotation.clone(), catalog_map);
-    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, catalog_map, stack)
+    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, catalog_map)
         .into_iter()
         .collect::<Vec<_>>();
 
@@ -2090,6 +2092,13 @@ fn spell_effect(
         // ── Permanents (catch-all: any creature / artifact / planeswalker / enchantment) ──
         _ => {
             if let Some(def) = catalog_map.get(name) {
+                // Stack-targeting spells (counterspells): target = "stack:<filter>"
+                if let Some(filter) = def.target().and_then(|t| t.strip_prefix("stack:")) {
+                    return (
+                        TargetSpec::StackEntry { filter: filter.to_string() },
+                        eff_counter_target(w),
+                    );
+                }
                 match &def.kind {
                     CardKind::Creature(_) | CardKind::Artifact(_)
                     | CardKind::Planeswalker(_) | CardKind::Enchantment => {
@@ -2138,7 +2147,6 @@ fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
 /// No resources are spent; the caller (`handle_priority_round`) commits the action.
 fn respond_with_counter(
     state: &SimState,
-    stack: &[StackItem],
     target_idx: usize,
     responding_who: &str,
     responding_library: &[(ObjId, String, CardDef)],
@@ -2147,12 +2155,12 @@ fn respond_with_counter(
     probabilistic: bool,
 ) -> Option<PriorityAction> {
     let default_kind;
-    let target_kind: &CardKind = match catalog_map.get(stack[target_idx].name.as_str()) {
+    let target_kind: &CardKind = match catalog_map.get(state.stack[target_idx].name.as_str()) {
         Some(d) => &d.kind,
         None => { default_kind = CardKind::Sorcery(SpellData::default()); &default_kind }
     };
 
-    let target_has_untapped_lands = state.player(state.who_str(stack[target_idx].owner)).lands.iter().any(|l| !l.tapped);
+    let target_has_untapped_lands = state.player(state.who_str(state.stack[target_idx].owner)).lands.iter().any(|l| !l.tapped);
 
     // Deduplicate counterspell names so each spell is evaluated once.
     let mut seen = std::collections::HashSet::new();
@@ -2365,7 +2373,6 @@ fn handle_priority_round(
     let nap = if ap == "us" { "opp" } else { "us" };
     let mut priority_holder = ap.to_string();
     let mut last_passer: Option<String> = None;
-    let mut stack: Vec<StackItem> = Vec::new();
     // What the *other* player did on their last priority window.
     let mut last_action: PriorityAction = PriorityAction::Pass;
 
@@ -2376,13 +2383,13 @@ fn handle_priority_round(
         // fire during Untap or Cleanup steps.
         // Drain pending triggers onto the stack, then check SBAs before giving priority.
         let queued = std::mem::take(&mut state.pending_triggers);
-        push_triggers(queued, &mut stack, state, catalog_map);
+        push_triggers(queued, state, catalog_map);
         check_lethal_damage("us",  state, t, catalog_map);
         check_lethal_damage("opp", state, t, catalog_map);
 
         let who = priority_holder.clone();
         let action = decide_action(
-            state, t, ap, &who, dd_turn, &last_action, &stack,
+            state, t, ap, &who, dd_turn, &last_action,
             us_lib, opp_lib, catalog_map, rng,
         );
         last_action = action.clone();
@@ -2398,7 +2405,7 @@ fn handle_priority_round(
             }
             PriorityAction::ActivateAbility(source_id, ref ability) => {
                 // For loyalty abilities: sorcery-speed check.
-                if ability.loyalty_cost.is_some() && !stack.is_empty() {
+                if ability.loyalty_cost.is_some() && !state.stack.is_empty() {
                     last_passer = Some(who.clone());
                     priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
                     continue;
@@ -2418,7 +2425,7 @@ fn handle_priority_round(
                 // Pay costs now; effect is deferred until the ability resolves.
                 let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
                 pay_activation_cost(state, t, &who, source_id, ability, actor_lib, catalog_map);
-                stack.push(StackItem {
+                state.stack.push(StackItem {
                     id: ObjId::UNSET,
                     name: source_name_for_stack,
                     owner: state.player_id(&who),
@@ -2450,7 +2457,7 @@ fn handle_priority_round(
                 };
                 // Sorcery-speed check.
                 let is_sorcery = face.card_type == "sorcery";
-                if is_sorcery && !stack.is_empty() {
+                if is_sorcery && !state.stack.is_empty() {
                     eprintln!("[priority] adventure sorcery {} on non-empty stack, treating as Pass", face.name);
                     last_passer = Some(who.clone());
                     priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
@@ -2474,14 +2481,16 @@ fn handle_priority_round(
                 state.player_mut(&who).hand.hidden -= 1;
                 // Build effect and choose target using the same Effect system as non-adventure spells.
                 let (adv_spec, adv_eff) = spell_effect(&face.name, &who, None, catalog_map);
-                let adv_targets = choose_spell_target(&adv_spec, &who, state, catalog_map, &stack)
+                let adv_targets = choose_spell_target(&adv_spec, &who, state, catalog_map)
                     .into_iter().collect::<Vec<_>>();
                 state.log(t, &who, format!("Cast {} (adventure, {})", face.name, face.mana_cost));
                 // Push StackItem.
-                stack.push(StackItem {
-                    id: state.alloc_id(),
+                let item_id = state.alloc_id();
+                let item_owner = state.player_id(&who);
+                state.stack.push(StackItem {
+                    id: item_id,
                     name: face.name.clone(),
-                    owner: state.player_id(&who),
+                    owner: item_owner,
                     card_id: adv_card_id,
                     is_ability: false,
                     ability_def: None,
@@ -2526,13 +2535,15 @@ fn handle_priority_round(
                 state.log_mana_activations(t, &who, mana_log);
                 state.log(t, &who, format!("Cast {} from adventure ({})", card_name, def.mana_cost()));
                 let (from_adv_spec, from_adv_eff) = spell_effect(card_name, &who, None, catalog_map);
-                let from_adv_targets = choose_spell_target(&from_adv_spec, &who, state, catalog_map, &stack)
+                let from_adv_targets = choose_spell_target(&from_adv_spec, &who, state, catalog_map)
                     .into_iter()
                     .collect::<Vec<_>>();
-                stack.push(StackItem {
-                    id: state.alloc_id(),
+                let item_id = state.alloc_id();
+                let item_owner = state.player_id(&who);
+                state.stack.push(StackItem {
+                    id: item_id,
                     name: card_name.clone(),
-                    owner: state.player_id(&who),
+                    owner: item_owner,
                     card_id: ObjId::UNSET, // TODO: look up from state.cards when zone tracking is complete
                     is_ability: false,
                     ability_def: None,
@@ -2556,9 +2567,9 @@ fn handle_priority_round(
                 let is_instant = catalog_map.get(name.as_str())
                     .map(|d| d.is_instant())
                     .unwrap_or(false);
-                if !is_instant && !stack.is_empty() {
+                if !is_instant && !state.stack.is_empty() {
                     eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack (stack={}), treating as Pass", name,
-                        stack.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
+                        state.stack.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     // Treat as Pass — no resources spent, no card removed.
                     last_passer = Some(who.clone());
@@ -2568,11 +2579,11 @@ fn handle_priority_round(
                     // Commit: pay costs and create the StackItem.
                     let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
                     if let Some(item) = cast_spell(state, t, &who, name, actor_lib,
-                                                   preferred_cost.as_ref(), catalog_map, rng, &stack) {
+                                                   preferred_cost.as_ref(), catalog_map, rng) {
                         // Bookkeeping that was previously in the decision functions.
                         if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
                         state.player_mut(&who).spells_cast_this_turn += 1;
-                        stack.push(item);
+                        state.stack.push(item);
                         let next = if who == ap { nap } else { ap };
                         priority_holder = next.to_string();
                         last_passer = None;
@@ -2593,35 +2604,14 @@ fn handle_priority_round(
                 let other = if who == ap { nap } else { ap };
                 if last_passer.as_deref() == Some(other) {
                     // Both players passed consecutively.
-                    if stack.is_empty() {
+                    if state.stack.is_empty() {
                         // Empty stack — priority round ends.
                         break;
                     } else {
                         // Resolve top item only, then AP gets priority again.
-                        let top = stack.pop().unwrap();
+                        let top = state.stack.pop().unwrap();
                         let top_owner_str = state.who_str(top.owner).to_string();
-                        // Counterspell detection: spell targets the stack (target = "stack:...").
-                        let is_counter = catalog_map.get(top.name.as_str())
-                            .and_then(|d| d.target())
-                            .is_some_and(|t| t.starts_with("stack:"));
-                        if is_counter {
-                            let target_pos = top.chosen_targets.first().and_then(|t| {
-                                if let Target::Object(id) = t { stack.iter().position(|s| s.id == *id) }
-                                else { None }
-                            });
-                            if let Some(pos) = target_pos {
-                                // Target still on stack — counter resolves.
-                                let target = stack.remove(pos);
-                                let target_owner_str = state.who_str(target.owner).to_string();
-                                state.log(t, &top_owner_str, &format!("{} counters {}", top.name, target.name));
-                                state.player_mut(&target_owner_str).graveyard.visible.push(target.name);
-                                state.player_mut(&top_owner_str).graveyard.visible.push(top.name);
-                            } else {
-                                // Target already gone — counter fizzles.
-                                state.player_mut(&top_owner_str).graveyard.visible.push(top.name.clone());
-                                state.log(t, &top_owner_str, &format!("{} fizzles (target already resolved)", top.name));
-                            }
-                        } else if top.is_ability {
+                        if top.is_ability {
                             // Triggered ability resolves.
                             if let Some(ref ctx) = top.trigger_context.clone() {
                                 apply_trigger(ctx, &top.chosen_targets, state, t, catalog_map);

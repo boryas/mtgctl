@@ -648,11 +648,11 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
 
 /// Push a vec of `TriggerContext`s onto the stack as uncounterable triggered ability items.
 /// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
-pub(super) fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>, state: &SimState, catalog_map: &HashMap<&str, &CardDef>) {
+pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
     for ctx in triggers {
-        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map, stack)
+        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map)
             .into_iter().collect();
-        stack.push(StackItem {
+        state.stack.push(StackItem {
             id: ObjId::UNSET,
             name: format!("{} trigger", ctx.source_name),
             owner: state.player_id(&ctx.controller),

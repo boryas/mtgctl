@@ -47,7 +47,6 @@ pub(crate) fn choose_trigger_target(
     controller: &str,
     state: &SimState,
     catalog_map: &HashMap<&str, &CardDef>,
-    stack: &[StackItem],
 ) -> Option<Target> {
     let opp = opp_of(controller);
     match spec {
@@ -104,7 +103,7 @@ pub(crate) fn choose_trigger_target(
         TargetSpec::StackEntry { filter } => {
             let caster_id = state.player_id(controller);
             // Pick the topmost opposing non-ability spell matching the filter.
-            stack.iter().rev()
+            state.stack.iter().rev()
                 .find(|item| {
                     if item.owner == caster_id || item.is_ability { return false; }
                     match catalog_map.get(item.name.as_str()) {
@@ -123,9 +122,8 @@ pub(crate) fn choose_spell_target(
     caster: &str,
     state: &SimState,
     catalog_map: &HashMap<&str, &CardDef>,
-    stack: &[StackItem],
 ) -> Option<Target> {
-    choose_trigger_target(spec, caster, state, catalog_map, stack)
+    choose_trigger_target(spec, caster, state, catalog_map)
 }
 
 /// Check whether `type_str` matches a permanent. `def` is the target card's definition,
@@ -166,11 +164,10 @@ pub(crate) fn has_valid_target(
     state: &SimState,
     actor: &str,
     catalog_map: &HashMap<&str, &CardDef>,
-    stack: &[StackItem],
 ) -> bool {
     if let Some(filter) = target_str.strip_prefix("stack:") {
         let actor_id = state.player_id(actor);
-        return stack.iter().any(|item| {
+        return state.stack.iter().any(|item| {
             if item.owner == actor_id || item.is_ability { return false; }
             match catalog_map.get(item.name.as_str()) {
                 Some(d) => stack_filter_matches(filter, &d.kind),

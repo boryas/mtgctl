@@ -471,7 +471,7 @@
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let item = cast_spell(&mut state, 1, "us", "Dark Ritual", &mut us_lib, None, &catalog_map, &mut seeded_rng(), &[]);
+        let item = cast_spell(&mut state, 1, "us", "Dark Ritual", &mut us_lib, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_some(), "spell should be cast");
         let item = item.unwrap();
@@ -494,7 +494,7 @@
 
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let item = cast_spell(&mut state, 1, "us", "Doomsday", &mut us_lib, None, &catalog_map, &mut seeded_rng(), &[]);
+        let item = cast_spell(&mut state, 1, "us", "Doomsday", &mut us_lib, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast with no mana");
     }
@@ -527,7 +527,7 @@
         let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
-        let item = cast_spell(&mut state, 1, "us", "Force of Will", &mut us_lib, Some(alt_cost), &catalog_map, &mut seeded_rng(), &[]);
+        let item = cast_spell(&mut state, 1, "us", "Force of Will", &mut us_lib, Some(alt_cost), &catalog_map, &mut seeded_rng());
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
@@ -771,7 +771,7 @@
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let item = cast_spell(&mut state, 1, "us", "Treasure Cruise", &mut us_lib, None, &catalog_map, &mut seeded_rng(), &[]);
+        let item = cast_spell(&mut state, 1, "us", "Treasure Cruise", &mut us_lib, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.us.graveyard.visible.len(), 0, "all 7 graveyard cards exiled");
@@ -797,7 +797,7 @@
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let item = cast_spell(&mut state, 1, "us", "Dead Drop", &mut us_lib, None, &catalog_map, &mut seeded_rng(), &[]);
+        let item = cast_spell(&mut state, 1, "us", "Dead Drop", &mut us_lib, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.us.graveyard.visible.len(), 0, "both graveyard cards exiled");
@@ -833,7 +833,7 @@
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         let mut us_lib = vec![(ObjId::UNSET, "Murktide Regent".to_string(), murktide_def)];
 
-        let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng(), &[]).unwrap();
+        let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
         // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
         assert_eq!(item.annotation.as_deref(), Some("+3"));
 
@@ -873,7 +873,7 @@
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         let mut us_lib = vec![(ObjId::UNSET, "Murktide Regent".to_string(), murktide_def)];
 
-        let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng(), &[]).unwrap();
+        let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
         assert!(item.annotation.is_none(), "no instants/sorceries → no counter annotation");
 
         let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
@@ -928,7 +928,7 @@
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let item = cast_spell(&mut state, 1, "us", "Dead Drop", &mut us_lib, None, &catalog_map, &mut seeded_rng(), &[]);
+        let item = cast_spell(&mut state, 1, "us", "Dead Drop", &mut us_lib, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast — 1 generic still unpaid");
         assert_eq!(state.us.graveyard.visible.len(), 2, "graveyard unchanged on failed cast");
@@ -1431,7 +1431,7 @@
     /// Fire a Bowmasters ETB trigger for `controller`, choose its target, and apply it.
     fn fire_bowmasters_etb(controller: &str, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
         let ctx = bowmasters_etb_ctx(controller);
-        let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state, catalog_map, &[])
+        let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state, catalog_map)
             .into_iter().collect();
         apply_trigger(&ctx, &targets, state, 1, catalog_map);
     }

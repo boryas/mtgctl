@@ -212,6 +212,25 @@ pub(crate) fn eff_enter_permanent(
     }))
 }
 
+/// Counter the spell in `targets[0]` (a stack ObjId). Removes it from `state.stack` and
+/// puts it in the owner's graveyard. If the target is no longer on the stack, fizzles.
+pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
+    let caster = caster.into();
+    Effect(Arc::new(move |state, t, targets, _catalog, _rng| {
+        let Some(Target::Object(target_id)) = targets.first() else { return; };
+        let target_id = *target_id;
+        let pos = state.stack.iter().position(|s| s.id == target_id);
+        if let Some(pos) = pos {
+            let target = state.stack.remove(pos);
+            let target_owner = state.who_str(target.owner).to_string();
+            state.player_mut(&target_owner).graveyard.visible.push(target.name.clone());
+            state.log(t, &caster, format!("→ {} countered", target.name));
+        } else {
+            state.log(t, &caster, "→ fizzled (target already resolved)".to_string());
+        }
+    }))
+}
+
 /// Reanimate a random card of `type_filter` from `target`'s graveyard.
 pub(crate) fn eff_reanimate(actor: impl Into<String>, target: Who, type_filter: impl Into<String>) -> Effect {
     let actor = actor.into();

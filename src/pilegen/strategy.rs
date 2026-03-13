@@ -120,7 +120,6 @@ fn nap_action(
     state: &SimState,
     who: &str,
     last_action: &PriorityAction,
-    stack: &[StackItem],
     us_lib: &mut Vec<(ObjId, String, CardDef)>,
     opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
@@ -129,19 +128,22 @@ fn nap_action(
     let other_acted = matches!(last_action, PriorityAction::CastSpell { .. } | PriorityAction::ActivateAbility(..) | PriorityAction::CastAdventure { .. } | PriorityAction::CastFromAdventure { .. });
     if other_acted {
         let actor_lib: &[_] = if who == "us" { us_lib } else { opp_lib };
-        for idx in (0..stack.len()).rev() {
-            if stack[idx].owner != state.player_id(who) && !stack[idx].is_ability {
-                if !worth_countering(&stack[idx].name, catalog_map) {
-                    eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, stack[idx].name);
+        for idx in (0..state.stack.len()).rev() {
+            let item_owner = state.stack[idx].owner;
+            let item_is_ability = state.stack[idx].is_ability;
+            let item_name = state.stack[idx].name.clone();
+            if item_owner != state.player_id(who) && !item_is_ability {
+                if !worth_countering(&item_name, catalog_map) {
+                    eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, item_name);
                     break;
                 }
-                if let Some(action) = respond_with_counter(state, stack, idx, who, actor_lib, catalog_map, rng, true) {
+                if let Some(action) = respond_with_counter(state, idx, who, actor_lib, catalog_map, rng, true) {
                     if let PriorityAction::CastSpell { ref name, .. } = action {
-                        eprintln!("[decision] {}: NAP counter {} targeting {}", who, name, stack[idx].name);
+                        eprintln!("[decision] {}: NAP counter {} targeting {}", who, name, item_name);
                     }
                     return action;
                 }
-                eprintln!("[decision] {}: NAP passes (no counter available for {})", who, stack[idx].name);
+                eprintln!("[decision] {}: NAP passes (no counter available for {})", who, item_name);
                 break;
             }
         }
@@ -156,27 +158,29 @@ fn ap_react(
     state: &mut SimState,
     t: u8,
     who: &str,
-    stack: &[StackItem],
     us_lib: &[(ObjId, String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
-    if who != "us" || stack.is_empty() {
+    if who != "us" || state.stack.is_empty() {
         return None;
     }
-    let top_idx = stack.len() - 1;
-    let top = &stack[top_idx];
-    let dd_countered = !top.is_ability
-        && top.owner != state.us.id
-        && top.chosen_targets.first()
+    let top_idx = state.stack.len() - 1;
+    let top_is_ability = state.stack[top_idx].is_ability;
+    let top_owner = state.stack[top_idx].owner;
+    let top_chosen = state.stack[top_idx].chosen_targets.clone();
+    let us_id = state.us.id;
+    let dd_countered = !top_is_ability
+        && top_owner != us_id
+        && top_chosen.first()
             .and_then(|t| if let Target::Object(id) = t { Some(id) } else { None })
-            .and_then(|id| stack.iter().find(|s| s.id == *id))
-            .is_some_and(|s| s.name == "Doomsday" && s.owner == state.us.id);
+            .and_then(|id| state.stack.iter().find(|s| s.id == *id))
+            .is_some_and(|s| s.name == "Doomsday" && s.owner == us_id);
     if !dd_countered {
         return None;
     }
     Some(
-        if let Some(action) = respond_with_counter(state, stack, top_idx, "us", us_lib, catalog_map, rng, false) {
+        if let Some(action) = respond_with_counter(state, top_idx, "us", us_lib, catalog_map, rng, false) {
             action
         } else {
             state.log(t, "us", "⚠ Doomsday countered — could not protect");
@@ -193,14 +197,13 @@ fn ap_proactive(
     t: u8,
     who: &str,
     dd_turn: u8,
-    stack: &[StackItem],
     us_lib: &mut Vec<(ObjId, String, CardDef)>,
     opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     // Land drop (sorcery speed: requires empty stack).
-    if stack.is_empty() && state.player(who).land_drop_available {
+    if state.stack.is_empty() && state.player(who).land_drop_available {
         let fateful = who == "us" && t == dd_turn;
         // On the fateful turn, skip the land drop if Doomsday is already castable — playing
         // a land might spend our last card in hand and leave us unable to cast Doomsday.
@@ -232,7 +235,7 @@ fn ap_proactive(
         let still_valid = match &action {
             PriorityAction::ActivateAbility(source_id, ab) => {
                 if let Some(cost) = ab.loyalty_cost {
-                    if !stack.is_empty() { false }
+                    if !state.stack.is_empty() { false }
                     else {
                         let loyalty_ok = if cost < 0 {
                             state.player(who).permanents.iter()
@@ -271,12 +274,12 @@ fn ap_proactive(
     }
 
     // Hand actions: only on empty stack.
-    if !stack.is_empty() {
+    if !state.stack.is_empty() {
         return PriorityAction::Pass;
     }
 
     let actor_lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-    let actions = collect_hand_actions(state, who, actor_lib, catalog_map, stack);
+    let actions = collect_hand_actions(state, who, actor_lib, catalog_map);
     if actions.is_empty() {
         let pool = &state.player(who).pool;
         let hand = state.player(who).hand.hidden;
@@ -327,15 +330,14 @@ pub(super) fn decide_action(
     who: &str,
     dd_turn: u8,
     last_action: &PriorityAction,
-    stack: &[StackItem],
     us_lib: &mut Vec<(ObjId, String, CardDef)>,
     opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     if who != ap {
-        if stack.is_empty() { return PriorityAction::Pass; }
-        return nap_action(state, who, last_action, stack, us_lib, opp_lib, catalog_map, rng);
+        if state.stack.is_empty() { return PriorityAction::Pass; }
+        return nap_action(state, who, last_action, us_lib, opp_lib, catalog_map, rng);
     }
     // Ninjutsu: AP can activate during DeclareBlockers / CombatDamage / EndCombat.
     let in_ninjutsu_step = matches!(state.current_phase.as_str(),
@@ -350,8 +352,8 @@ pub(super) fn decide_action(
     if state.current_phase != "Main" {
         return PriorityAction::Pass;
     }
-    if let Some(action) = ap_react(state, t, who, stack, us_lib, catalog_map, rng) {
+    if let Some(action) = ap_react(state, t, who, us_lib, catalog_map, rng) {
         return action;
     }
-    ap_proactive(state, t, who, dd_turn, stack, us_lib, opp_lib, catalog_map, rng)
+    ap_proactive(state, t, who, dd_turn, us_lib, opp_lib, catalog_map, rng)
 }

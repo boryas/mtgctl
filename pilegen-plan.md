@@ -82,25 +82,67 @@ work (same card, two names, one `ObjId`). Acknowledged by `TODO(ids)` in the cod
 
 ---
 
-## Step 4 — `counter_target` → `SpellFilter`
+## Step 4 — `counter_target` → unified targeting (`TargetSpec::StackEntry`)
 
-**Status: DONE**
+**Status: DONE** (commit 772256c)
 
-**Why:** `counter_target` is currently a `String` matched by a custom
-`matches_counter_target()` function. Making it a typed `SpellFilter` enum
-replaces the ad-hoc string dispatch with a proper predicate.
+**Why:** `counter_target` was a parallel, non-composable field that bypassed the
+targeting system entirely. Counterspells are spells that target something on the
+stack — the same concept as any targeted spell, just with a stack-zone predicate.
 
 **What was done:**
 
-- Added `SpellFilter` enum (`Any`, `Noncreature`, `Nonland`, `InstantOrSorcery`)
-  with `from_str()` and `matches()` methods to `predicates.rs`.
-- Changed `SpellData.counter_target: Option<String>` → `Option<SpellFilter>`.
-- Removed `Deserialize` from `SpellData` (only constructed from `RawCardDef`).
-- `From<RawCardDef>` converts the TOML string → `SpellFilter` at load time.
-- Replaced both `matches_counter_target(ct, &d.kind)` call sites with `ct.matches(&d.kind)`.
-- Deleted `matches_counter_target`.
+- Removed `counter_target` from `SpellData` / `RawCardDef` / TOML entirely.
+- Added `TargetSpec::StackEntry { filter: String }` to `predicates.rs`.
+- Added `stack_filter_matches(filter: &str, kind: &CardKind) -> bool` (replaces
+  `matches_counter_target`).
+- `has_valid_target`, `choose_trigger_target`, `choose_spell_target`, `cast_spell`,
+  and `push_triggers` all take `stack: &[StackItem]` so stack-targeting works.
+- `Force of Will` and `Daze` in TOML now use `target = "stack:any"`.
+- `respond_with_counter` in `strategy.rs` reads `def.target()` starting with
+  `"stack:"` instead of `counter_target()`.
+- `dd_countered` in `strategy.rs` uses `top.chosen_targets` instead of `top.counters`.
 
-**Verification:** `cargo test` passes. `matches_counter_target` is deleted.
+**Known remaining issue:** Resolution in `handle_priority_round` detects counters
+with an `is_counter` check — this violates target opacity (Step 4b below).
+
+**Verification:** 113 tests pass. `counter_target` and `matches_counter_target` deleted.
+
+---
+
+## Step 4b — Move `stack` to `SimState`; implement `eff_counter_target()`
+
+**Status: DONE**
+
+**Why:** `stack` is a local variable in `handle_priority_round`, which prevents
+`Effect` closures from accessing it. This forces the `is_counter` hack in
+resolution. Once `stack` is on `SimState`, counterspells can use a proper
+`eff_counter_target()` closure — resolution becomes truly opaque.
+
+**What to do:**
+
+1. Add `pub(crate) stack: Vec<StackItem>` to `SimState`; initialize to `vec![]`.
+2. Replace all `stack` local uses in `handle_priority_round` with `state.stack`.
+3. Remove `stack: &[StackItem]` parameters from `has_valid_target`,
+   `choose_trigger_target`, `choose_spell_target`, `cast_spell`, `push_triggers`
+   — they all read `state.stack` directly.
+4. Implement `eff_counter_target()` in `effects.rs`:
+   - finds `targets[0]` (an `ObjId`) in `state.stack`
+   - removes it and moves it to the owner's graveyard
+   - if not found, logs a fizzle and does nothing (same as `eff_destroy_target` on
+     a dead permanent — no special-case needed)
+5. In `spell_effect()` catch-all in `catalog.rs`, when `def.target()` starts with
+   `"stack:"`, return `(TargetSpec::StackEntry { filter }, eff_counter_target())`.
+6. Delete the `is_counter` block in resolution — just:
+   ```rust
+   } else if let Some(ref eff) = top.effect {
+       // New Effect path: all non-adventure, non-ability spells including counterspells.
+       ...
+       eff.call(state, t, &top.chosen_targets, catalog_map, rng_dyn);
+   }
+   ```
+
+**Verification:** `cargo test` passes. No `is_counter` in codebase.
 
 ---
 
