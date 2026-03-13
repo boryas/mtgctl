@@ -18,7 +18,8 @@ common_pile_types = [
     "Disruption+Cyclers",
     "Other",
     "Thoughtseize+Cavern",
-    "Cavern+Force"]
+    "Cavern+Force",
+    "Cyclers+Unearth"]
 
 no_doomsday_reasons = [
     "Mana",

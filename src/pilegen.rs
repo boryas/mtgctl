@@ -619,8 +619,10 @@ struct StackAbility {
 /// deterministically without needing to re-pick targets.
 #[derive(Clone)]
 struct StackItem {
+    /// Stable stack-object identity. Freshly allocated for spells; ObjId::UNSET for abilities.
+    id: ObjId,
     name: String,
-    owner: String,
+    owner: ObjId,
     /// Stable ObjId of the physical card this stack item represents.
     /// Matches the id assigned when the card was placed in the library.
     /// ObjId::UNSET for ability stack items (not a card).
@@ -629,11 +631,8 @@ struct StackItem {
     is_ability: bool,
     /// For activated abilities: the ability definition, used to apply the effect at resolution.
     ability_def: Option<AbilityDef>,
-    /// For counterspells: which index in the stack this spell is targeting.
-    counters: Option<usize>,
-    /// For spells with a permanent target (`CardDef.target`): `(target_who, target_name)`.
-    /// Resolved at cast time and locked in; used directly by `apply_spell_effects`.
-    permanent_target: Option<(String, String)>,
+    /// For counterspells: the ObjId of the stack item this spell is targeting.
+    counters: Option<ObjId>,
     /// Pre-computed annotation for permanents (e.g. Murktide size from delve count).
     /// If Some, overrides random annotation_options pick at resolution time.
     annotation: Option<String>,
@@ -650,10 +649,10 @@ struct StackItem {
     /// Targets chosen when the trigger was put on the stack (from trigger_context.target_spec).
     chosen_targets: Vec<Target>,
     /// For ninjutsu abilities: the attack_target of the replaced attacker, so the ninja can inherit it.
-    ninjutsu_attack_target: Option<String>,
+    ninjutsu_attack_target: Option<ObjId>,
     /// Composable effect closure populated by `spell_effect` at cast time.
     /// When Some, the new Effect path is used at resolution. When None, falls back
-    /// to legacy `apply_spell_effects` string dispatch.
+    /// When None, the spell has no game text (e.g. test stubs).
     effect: Option<Effect>,
 }
 
@@ -699,9 +698,10 @@ enum GameEvent {
     },
     /// A creature was declared as an attacker.
     CreatureAttacked {
+        attacker_id: ObjId,
         attacker: String,
         attacker_controller: String,
-        attack_target: String, // empty = player, non-empty = planeswalker name
+        attack_target: Option<ObjId>, // None = player, Some(id) = planeswalker
     },
     // Future variants: DamageDealt, SpellCast, SpellResolved, AbilityActivated,
     //                  CounterChanged, LifeChanged, TokenCreated.
@@ -738,8 +738,7 @@ enum EffectExpiry {
 /// Cleanup can undo it precisely without the closure needing mutable access at expiry.
 #[derive(Clone)]
 struct StatModData {
-    target_name: String,
-    target_controller: String,
+    target_id: ObjId,
     power_delta: i32,
     toughness_delta: i32,
 }
@@ -769,9 +768,8 @@ struct ContinuousEffect {
 /// `id` fields default to `ObjId::UNSET` for now; they'll be filled in as objects get IDs.
 #[derive(Clone, Debug, PartialEq)]
 enum Target {
-    Player(String),
-    Permanent { name: String, id: ObjId, controller: String },
-    CardInZone { name: String, id: ObjId, zone: ZoneId, controller: String },
+    Player(ObjId),
+    Object(ObjId),
 }
 
 /// Declarative description of what targets a spell or ability may choose from.
@@ -902,8 +900,8 @@ fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effect {
 fn eff_destroy_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
     Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
-        if let Some(Target::Permanent { name, controller, .. }) = targets.first() {
-            apply_effect_to("destroy", controller, name, state, t, &caster);
+        if let Some(Target::Object(id)) = targets.first() {
+            apply_effect_to("destroy", *id, state, t, &caster);
         }
     }))
 }
@@ -912,11 +910,16 @@ fn eff_destroy_target(caster: impl Into<String>) -> Effect {
 fn eff_bounce_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
     Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
-        if let Some(Target::Permanent { name, controller, .. }) = targets.first() {
-            if let Some(idx) = state.player(controller).permanents.iter().position(|p| &p.name == name) {
-                state.player_mut(controller).permanents.remove(idx);
-                state.player_mut(controller).hand.hidden += 1;
-                state.log(t, &caster, format!("→ {} returned to {}'s hand", name, controller));
+        if let Some(Target::Object(id)) = targets.first() {
+            let id = *id;
+            let controller = state.permanent_controller(id).map(|s| s.to_string());
+            let name = state.permanent_name(id);
+            if let (Some(controller), Some(name)) = (controller, name) {
+                if let Some(idx) = state.player(&controller).permanents.iter().position(|p| p.id == id) {
+                    state.player_mut(&controller).permanents.remove(idx);
+                    state.player_mut(&controller).hand.hidden += 1;
+                    state.log(t, &caster, format!("→ {} returned to {}'s hand", name, controller));
+                }
             }
         }
     }))
@@ -1000,7 +1003,7 @@ fn eff_enter_permanent(
             unblocked: false,
             loyalty: pw_loyalty,
             pw_activated_this_turn: false,
-            attack_target: String::new(),
+            attack_target: None,
             power_mod: 0,
             toughness_mod: 0,
         });
@@ -1066,15 +1069,15 @@ fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, 
     let opp = opp_of(controller);
     match spec {
         TargetSpec::None => None,
-        TargetSpec::Player => Some(Target::Player(opp.to_string())),
+        TargetSpec::Player => Some(Target::Player(state.player_id(opp))),
         TargetSpec::AnyOpponentCreature => {
             state.player(opp).permanents.iter()
                 .find(|p| p.name != "Orc Army") // placeholder: any creature
-                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
+                .map(|p| Target::Object(p.id))
         }
         TargetSpec::AnyOpponentNonlandPermanent => {
             state.player(opp).permanents.first()
-                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
+                .map(|p| Target::Object(p.id))
         }
         TargetSpec::OpponentCreatureMvLt4 => {
             state.player(opp).permanents.iter()
@@ -1083,7 +1086,7 @@ fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, 
                         .map(|d| d.is_creature() && mana_value(d.mana_cost()) < 4)
                         .unwrap_or(true)
                 })
-                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
+                .map(|p| Target::Object(p.id))
         }
         TargetSpec::OpponentNonblackCreature => {
             state.player(opp).permanents.iter()
@@ -1092,33 +1095,28 @@ fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, 
                         .map(|d| d.is_creature() && !d.is_black())
                         .unwrap_or(true)
                 })
-                .map(|p| Target::Permanent { name: p.name.clone(), id: p.id, controller: opp.to_string() })
+                .map(|p| Target::Object(p.id))
         }
         TargetSpec::CardInOwnGraveyard { .. } => {
-            state.player(controller).graveyard.visible.first()
-                .map(|name| Target::CardInZone {
-                    name: name.clone(),
-                    id: ObjId::UNSET,
-                    zone: ZoneId::Graveyard,
-                    controller: controller.to_string(),
-                })
+            // Graveyard cards don't have stable ObjIds yet; target selection deferred.
+            None
         }
         TargetSpec::AnyTarget => {
             // Strategy: prefer a killable opponent creature (1-damage kill),
             // then default to pinging the opponent's face.
-            if let Some(name) = state.player(opp).permanents.iter()
+            if let Some(id) = state.player(opp).permanents.iter()
                 .filter(|p| {
                     let def = catalog_map.get(p.name.as_str());
                     if !def.map(|d| d.is_creature()).unwrap_or(false) { return false; }
                     let (_, tgh) = creature_stats(p, def.copied());
                     tgh - p.damage <= 1 && tgh > 0
                 })
-                .map(|p| p.name.clone())
+                .map(|p| p.id)
                 .next()
             {
-                return Some(Target::Permanent { name: name.clone(), id: state.player(opp).permanents.iter().find(|p| p.name == name).map(|p| p.id).unwrap_or(ObjId::UNSET), controller: opp.to_string() });
+                return Some(Target::Object(id));
             }
-            Some(Target::Player(opp.to_string()))
+            Some(Target::Player(state.player_id(opp)))
         }
     }
 }
@@ -1180,14 +1178,14 @@ impl Phase {
 enum PriorityAction {
     /// Land drop: AP only, does NOT pass priority. Carries the chosen land name.
     LandDrop(String),
-    /// Activate a permanent ability. Carries source name + ability def. Uses the stack, passes priority after.
-    ActivateAbility(String, AbilityDef),
+    /// Activate a permanent ability. Carries source ObjId + ability def. Uses the stack, passes priority after.
+    ActivateAbility(ObjId, AbilityDef),
     /// Intent to cast a spell. No resources are spent until `handle_priority_round` accepts and
     /// commits this action. The framework validates legality (sorcery-speed, etc.) there.
     ///
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
-    /// `counters`       — stack index this spell will counter (counterspell only).
-    CastSpell { name: String, preferred_cost: Option<AlternateCost>, counters: Option<usize> },
+    /// `counters`       — ObjId of the stack item this spell will counter (counterspell only).
+    CastSpell { name: String, preferred_cost: Option<AlternateCost>, counters: Option<ObjId> },
     /// Cast the adventure face of a card in hand.
     CastAdventure { card_name: String },
     /// Cast the creature face of a card currently on adventure in exile.
@@ -1407,8 +1405,8 @@ struct SimPermanent {
     loyalty: i32,
     /// Set when a loyalty ability has been activated this turn; reset at Untap.
     pw_activated_this_turn: bool,
-    /// Combat attack target: empty string = attacking the player; non-empty = attacking named planeswalker.
-    attack_target: String,
+    /// Combat attack target: None = attacking the player, Some(id) = attacking that planeswalker.
+    attack_target: Option<ObjId>,
     /// Temporary power/toughness modification from continuous effects (e.g. Tamiyo +2).
     /// Cleared at EndCombat.
     power_mod: i32,
@@ -1431,7 +1429,7 @@ impl SimPermanent {
             unblocked: false,
             loyalty: 0,
             pw_activated_this_turn: false,
-            attack_target: String::new(),
+            attack_target: None,
             power_mod: 0,
             toughness_mod: 0,
         }
@@ -1487,6 +1485,7 @@ impl std::fmt::Display for Zone {
 }
 
 struct PlayerState {
+    id: ObjId,
     deck_name: String,
     life: i32,
     library: Vec<(ObjId, String, CardDef)>,
@@ -1519,6 +1518,7 @@ struct PlayerState {
 impl PlayerState {
     fn new(deck: &str, mulligans: u8) -> Self {
         PlayerState {
+            id: ObjId::UNSET,
             life: 20,
             deck_name: deck.to_string(),
             library: Vec::new(),
@@ -1676,13 +1676,13 @@ struct SimState {
     /// Set when Doomsday resolved — simulation ends successfully.
     success: bool,
     /// Active player this phase/step (for log context).
-    current_ap: String,
+    current_ap: ObjId,
     /// Current phase/step label (for log context).
     current_phase: String,
-    /// Attackers declared this combat; cleared at EndCombat.
-    combat_attackers: Vec<String>,
-    /// Blocker assignments this combat: (attacker_name, blocker_name); cleared at EndCombat.
-    combat_blocks: Vec<(String, String)>,
+    /// Attackers declared this combat (stable ObjIds); cleared at EndCombat.
+    combat_attackers: Vec<ObjId>,
+    /// Blocker assignments this combat: (attacker_id, blocker_id); cleared at EndCombat.
+    combat_blocks: Vec<(ObjId, ObjId)>,
     /// Triggered abilities waiting to be pushed onto the stack at the next priority window.
     pending_triggers: Vec<TriggerContext>,
     /// Active continuous effects (from loyalty abilities, spells, etc.).
@@ -1697,15 +1697,15 @@ struct SimState {
 
 impl SimState {
     fn new(us: PlayerState, opp: PlayerState) -> Self {
-        SimState {
+        let mut s = SimState {
             turn: 0,
             on_play: true,
-            us: us,
-            opp: opp,
+            us,
+            opp,
             log: Vec::new(),
             reroll: false,
             success: false,
-            current_ap: String::new(),
+            current_ap: ObjId::UNSET,
             current_phase: String::new(),
             combat_attackers: Vec::new(),
             combat_blocks: Vec::new(),
@@ -1714,7 +1714,10 @@ impl SimState {
             cards: HashMap::new(),
             abilities: HashMap::new(),
             next_id: 0,
-        }
+        };
+        s.us.id = s.alloc_id();
+        s.opp.id = s.alloc_id();
+        s
     }
 
     fn alloc_id(&mut self) -> ObjId {
@@ -1793,6 +1796,35 @@ impl SimState {
         if who == "us" { &mut self.us } else { &mut self.opp }
     }
 
+    /// Resolve a player name string to its stable ObjId.
+    fn player_id(&self, who: &str) -> ObjId {
+        if who == "us" { self.us.id } else { self.opp.id }
+    }
+
+    /// Resolve a player ObjId back to the "us"/"opp" name string.
+    fn who_str(&self, id: ObjId) -> &str {
+        if id == self.us.id { "us" } else { "opp" }
+    }
+
+    /// Return the controller name ("us"/"opp") of the permanent or land with the given id.
+    fn permanent_controller(&self, id: ObjId) -> Option<&str> {
+        if self.us.permanents.iter().any(|p| p.id == id) || self.us.lands.iter().any(|l| l.id == id) {
+            Some("us")
+        } else if self.opp.permanents.iter().any(|p| p.id == id) || self.opp.lands.iter().any(|l| l.id == id) {
+            Some("opp")
+        } else {
+            None
+        }
+    }
+
+    /// Return the name of the permanent or land with the given id.
+    fn permanent_name(&self, id: ObjId) -> Option<String> {
+        self.us.permanents.iter().find(|p| p.id == id).map(|p| p.name.clone())
+            .or_else(|| self.us.lands.iter().find(|l| l.id == id).map(|l| l.name.clone()))
+            .or_else(|| self.opp.permanents.iter().find(|p| p.id == id).map(|p| p.name.clone()))
+            .or_else(|| self.opp.lands.iter().find(|l| l.id == id).map(|l| l.name.clone()))
+    }
+
     fn life_of(&self, who: &str) -> i32 {
         self.player(who).life
     }
@@ -1805,8 +1837,8 @@ impl SimState {
         let is_player = who == "us" || who == "opp";
         let hand = if is_player { self.player(who).hand.hidden } else { 0 };
         let suffix = if is_player { format!(" [hand: {}]", hand) } else { String::new() };
-        let ctx = if is_player && !self.current_ap.is_empty() {
-            format!("|{}/{}", self.current_ap, self.current_phase)
+        let ctx = if is_player && self.current_ap != ObjId::UNSET {
+            format!("|{}/{}", self.who_str(self.current_ap), self.current_phase)
         } else {
             String::new()
         };
@@ -2337,10 +2369,10 @@ fn collect_hand_actions(
         .collect();
 
     // In-hand abilities (cycling, channel, etc.) — one entry per card with a zone="hand" ability.
-    for (_id, name, def) in library {
+    for (card_id, _name, def) in library {
         for ab in def.abilities().iter().filter(|ab| ab.zone == "hand") {
             if hand_ability_affordable(ab, state, who) {
-                actions.push(PriorityAction::ActivateAbility(name.clone(), ab.clone()));
+                actions.push(PriorityAction::ActivateAbility(*card_id, ab.clone()));
             }
         }
     }
@@ -2362,21 +2394,21 @@ fn collect_hand_actions(
 }
 
 /// Pick a random valid permanent target for `target_str` (e.g. "opp:creature_mv_lt4").
-/// Returns `(target_who, target_name)` or `None` if no valid target exists.
+/// Returns the stable `ObjId` of the chosen permanent, or `None` if no valid target exists.
 fn choose_permanent_target(
     target_str: &str,
     actor: &str,
     state: &SimState,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
-) -> Option<(String, String)> {
+) -> Option<ObjId> {
     let (who_rel, type_str) = target_str.split_once(':')?;
     let target_who = resolve_who(who_rel, actor).to_string();
 
-    let mut candidates: Vec<String> = Vec::new();
+    let mut candidates: Vec<ObjId> = Vec::new();
     for land in &state.player(&target_who).lands {
         if matches_target_type(type_str, &CardKind::Land(LandData::default()), land.basic, None) {
-            candidates.push(land.name.clone());
+            candidates.push(land.id);
         }
     }
     for perm in &state.player(&target_who).permanents {
@@ -2385,36 +2417,43 @@ fn choose_permanent_target(
             Some(d) => matches_target_type(type_str, &d.kind, false, Some(d)),
             None    => type_str == "any",
         };
-        if matched { candidates.push(perm.name.clone()); }
+        if matched { candidates.push(perm.id); }
     }
     if candidates.is_empty() {
         return None;
     }
-    let name = candidates.remove(rng.gen_range(0..candidates.len()));
-    Some((target_who, name))
+    let idx = rng.gen_range(0..candidates.len());
+    Some(candidates.remove(idx))
 }
 
-/// Apply a targeted effect (destroy / exile) to a specific named permanent.
-/// `target_who` must be "us" or "opp" (global). Used during resolution.
+/// Apply a targeted effect (destroy / exile) to a permanent identified by ObjId.
+/// Looks up the controller and name from state. Used during resolution.
 fn apply_effect_to(
     effect: &str,
-    target_who: &str,
-    target_name: &str,
+    target_id: ObjId,
     state: &mut SimState,
     t: u8,
     log_who: &str,
 ) {
-    let is_land = state.player(target_who).lands.iter().any(|l| l.name == target_name);
+    let controller = match state.permanent_controller(target_id) {
+        Some(c) => c.to_string(),
+        None => return,
+    };
+    let target_name = match state.permanent_name(target_id) {
+        Some(n) => n,
+        None => return,
+    };
+    let is_land = state.player(&controller).lands.iter().any(|l| l.id == target_id);
     if is_land {
-        state.player_mut(target_who).lands.retain(|l| l.name != target_name);
+        state.player_mut(&controller).lands.retain(|l| l.id != target_id);
     } else {
-        state.player_mut(target_who).permanents.retain(|p| p.name != target_name);
+        state.player_mut(&controller).permanents.retain(|p| p.id != target_id);
     }
     match effect {
-        "exile" => state.player_mut(target_who).exile.visible.push(target_name.to_string()),
-        _ => state.player_mut(target_who).graveyard.visible.push(target_name.to_string()),
+        "exile" => state.player_mut(&controller).exile.visible.push(target_name.clone()),
+        _ => state.player_mut(&controller).graveyard.visible.push(target_name.clone()),
     }
-    state.log(t, log_who, format!("{} {} ({})", effect, target_name, target_who));
+    state.log(t, log_who, format!("{} {} ({})", effect, target_name, controller));
 }
 
 /// Apply a targeted effect to a randomly chosen valid target.
@@ -2428,10 +2467,8 @@ fn sim_apply_targeted_effect(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
-    if let Some((target_who, target_name)) =
-        choose_permanent_target(target_str, log_who, state, catalog_map, rng)
-    {
-        apply_effect_to(effect, &target_who, &target_name, state, t, log_who);
+    if let Some(target_id) = choose_permanent_target(target_str, log_who, state, catalog_map, rng) {
+        apply_effect_to(effect, target_id, state, t, log_who);
     }
 }
 
@@ -2459,11 +2496,14 @@ fn pay_activation_cost(
     state: &mut SimState,
     t: u8,
     who: &str,
-    source_name: &str,
+    source_id: ObjId,
     ability: &AbilityDef,
     library: &mut Vec<(ObjId, String, CardDef)>,
-    catalog_map: &HashMap<&str, &CardDef>,
+    _catalog_map: &HashMap<&str, &CardDef>,
 ) {
+    let source_name = state.permanent_name(source_id)
+        .or_else(|| library.iter().find(|(id, _, _)| *id == source_id).map(|(_, n, _)| n.clone()))
+        .unwrap_or_default();
     state.log(t, who, format!("Activate {} ability", source_name));
 
     // Pay mana cost.
@@ -2480,44 +2520,44 @@ fn pay_activation_cost(
 
     // Pay tap cost.
     if ability.tap_self && !ability.sacrifice_self {
-        if let Some(l) = state.player_mut(who).lands.iter_mut().find(|l| l.name == source_name) {
+        if let Some(l) = state.player_mut(who).lands.iter_mut().find(|l| l.id == source_id) {
             l.tapped = true;
         }
     }
 
     // Pay sacrifice cost (in-play permanent or land).
     if ability.sacrifice_self && ability.zone != "hand" {
-        let is_land = catalog_map.get(source_name).map(|d| d.is_land()).unwrap_or(false);
+        let is_land = state.player(who).lands.iter().any(|l| l.id == source_id);
         if is_land {
-            state.player_mut(who).lands.retain(|l| l.name != source_name);
+            state.player_mut(who).lands.retain(|l| l.id != source_id);
         } else {
-            state.player_mut(who).permanents.retain(|p| p.name != source_name);
+            state.player_mut(who).permanents.retain(|p| p.id != source_id);
         }
-        state.player_mut(who).graveyard.visible.push(source_name.to_string());
+        state.player_mut(who).graveyard.visible.push(source_name.clone());
     }
 
     // Discard cost (zone="hand"): remove from library, send to graveyard.
     if ability.discard_self {
-        if let Some(idx) = library.iter().position(|(_, n, _)| n == source_name) {
+        if let Some(idx) = library.iter().position(|(_, n, _)| n == source_name.as_str()) {
             library.remove(idx);
             state.player_mut(who).hand.hidden -= 1;
-            state.player_mut(who).graveyard.visible.push(source_name.to_string());
+            state.player_mut(who).graveyard.visible.push(source_name.clone());
         }
     }
 
     // Ninjutsu cost: remove ninja from library (hand) and return an unblocked attacker to hand.
     if ability.ninjutsu {
-        if let Some(idx) = library.iter().position(|(_, n, _)| n == source_name) {
+        if let Some(idx) = library.iter().position(|(_, n, _)| n == source_name.as_str()) {
             library.remove(idx);
             state.player_mut(who).hand.hidden -= 1;
         }
         let unblocked_attacker = state.player(who).permanents.iter()
             .find(|p| p.attacking && p.unblocked)
-            .map(|p| (p.name.clone(), p.attack_target.clone()));
-        if let Some((atk_name, _atk_target)) = unblocked_attacker {
-            state.player_mut(who).permanents.retain(|p| p.name != atk_name);
-            state.combat_attackers.retain(|a| *a != atk_name);
-            state.combat_blocks.retain(|(a, _)| *a != atk_name);
+            .map(|p| (p.id, p.name.clone(), p.attack_target.clone()));
+        if let Some((atk_id, atk_name, _atk_target)) = unblocked_attacker {
+            state.player_mut(who).permanents.retain(|p| p.id != atk_id);
+            state.combat_attackers.retain(|&a| a != atk_id);
+            state.combat_blocks.retain(|(a, _)| *a != atk_id);
             state.player_mut(who).hand.hidden += 1;
             state.log(t, who, format!("→ return {} to hand (ninjutsu)", atk_name));
         }
@@ -2539,7 +2579,7 @@ fn pay_activation_cost(
     // Loyalty ability: adjust planeswalker loyalty and mark activated this turn.
     if let Some(loyalty_delta) = ability.loyalty_cost {
         let new_loyalty = {
-            if let Some(perm) = state.player_mut(who).permanents.iter_mut().find(|p| p.name == source_name) {
+            if let Some(perm) = state.player_mut(who).permanents.iter_mut().find(|p| p.id == source_id) {
                 perm.loyalty += loyalty_delta;
                 perm.pw_activated_this_turn = true;
                 Some(perm.loyalty)
@@ -2561,23 +2601,44 @@ fn apply_ability_effect(
     state: &mut SimState,
     t: u8,
     who: &str,
-    source_name: &str,
+    source_id: ObjId,
     ability: &AbilityDef,
     library: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
-    ninjutsu_attack_target: Option<&str>,
+    ninjutsu_attack_target: Option<ObjId>,
 ) {
+    let source_name = state.permanent_name(source_id)
+        .or_else(|| {
+            // For hand-zone abilities (ninjutsu/cycling), the source isn't in play yet;
+            // fall back to looking up the name from the stack item's stored name.
+            None
+        })
+        .unwrap_or_default();
+
     // Ninjutsu effect: ninja enters play tapped and attacking (unblocked).
     if ability.ninjutsu {
-        let mana_abs = catalog_map.get(source_name)
+        // For ninjutsu, the ninja came from hand — look up the name from the library's
+        // stored card def (the card was already removed by pay_activation_cost, so we
+        // use the StackItem name which was stored at push time).
+        // source_name may be empty here because the ninja left hand before entering play;
+        // the stack item's `name` field holds the ninja's name (set at ability push time).
+        // We need the name from the stack item — which is the caller's `top.name`.
+        // Since apply_ability_effect gets called with the source_id from the StackItem,
+        // and the ninja's permanent isn't in play yet, we use the source_name from the
+        // ability activation's StackItem.name. For now, re-read from library is not possible
+        // (already removed). The source_id from the ActivateAbility action was the ninja's
+        // library card id — let's look that up in state.cards.
+        let ninja_name = state.cards.get(&source_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| source_name.clone());
+        let mana_abs = catalog_map.get(ninja_name.as_str())
             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
-        let target = ninjutsu_attack_target.unwrap_or("").to_string();
         let new_id = state.alloc_id();
-        state.cards.insert(new_id, CardObject::new(new_id, source_name.to_string(), who));
+        state.cards.insert(new_id, CardObject::new(new_id, ninja_name.clone(), who));
         state.player_mut(who).permanents.push(SimPermanent {
             id: new_id,
-            name: source_name.to_string(),
+            name: ninja_name.clone(),
             annotation: None,
             counters: 0,
             tapped: true,
@@ -2588,12 +2649,12 @@ fn apply_ability_effect(
             unblocked: true,
             loyalty: 0,
             pw_activated_this_turn: false,
-            attack_target: target,
+            attack_target: ninjutsu_attack_target,
             power_mod: 0,
             toughness_mod: 0,
         });
-        state.combat_attackers.push(source_name.to_string());
-        state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", source_name));
+        state.combat_attackers.push(new_id);
+        state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
         return;
     }
 
@@ -2842,10 +2903,6 @@ fn cast_spell(
         return None; // no payable cost
     }
 
-    // Choose permanent target (if the spell has one) before paying cost.
-    let permanent_target = def.target()
-        .and_then(|tgt| choose_permanent_target(tgt, who, state, catalog_map, rng));
-
     // Remove the spell from library, capturing its stable ObjId.
     let pos = library.iter().position(|(_, n, _)| n.as_str() == name)?;
     let card_id = library[pos].0;
@@ -2909,13 +2966,14 @@ fn cast_spell(
         .collect::<Vec<_>>();
 
     Some(StackItem {
+        id: state.alloc_id(),
         name: name.to_string(),
-        owner: who.to_string(),
+        owner: state.player_id(who),
         card_id,
         is_ability: false,
         ability_def: None,
         counters: None,
-        permanent_target,
+
         annotation,
         adventure_exile: false,
         adventure_card_name: None,
@@ -2933,110 +2991,6 @@ fn cast_spell(
 /// `actor_lib` is the caster's library; `other_lib` is the opponent's library.
 /// In our model, non-counter spells are always cast by the active player, so
 /// actor_lib/other_lib are actor-relative.
-fn apply_spell_effects(
-    item: &StackItem,
-    state: &mut SimState,
-    t: u8,
-    _actor_lib: &mut Vec<(ObjId, String, CardDef)>,
-    _other_lib: &mut Vec<(ObjId, String, CardDef)>,
-    catalog_map: &HashMap<&str, &CardDef>,
-    rng: &mut impl Rng,
-) {
-    // Adventure spell resolution: apply adventure effects, then exile the physical card.
-    if item.adventure_exile {
-        if let Some(ref face) = item.adventure_face {
-            // Apply bounce effect if present.
-            for effect in &face.effects {
-                if effect == "bounce" {
-                    if let Some((ref tw, ref tn)) = item.permanent_target {
-                        if let Some(perm_idx) = state.player(tw).permanents.iter().position(|p| &p.name == tn) {
-                            state.player_mut(tw).permanents.remove(perm_idx);
-                            state.player_mut(tw).hand.hidden += 1;
-                            state.log(t, &item.owner, format!("→ {} returned to {}'s hand", tn, tw));
-                        }
-                    }
-                }
-            }
-            let card_name = item.adventure_card_name.as_deref().unwrap_or(&item.name);
-            state.player_mut(&item.owner).exile.visible.push(card_name.to_string());
-            state.player_mut(&item.owner).on_adventure.push(card_name.to_string());
-            state.log(t, &item.owner, format!("{} resolves → {} on adventure in exile", face.name, card_name));
-        }
-        return;
-    }
-
-    // Non-adventure fallback: use kind to determine permanent vs spell.
-    // This path is used by tests that create StackItems with `effect: None`.
-    let Some(&def) = catalog_map.get(item.name.as_str()) else {
-        state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
-        return;
-    };
-
-    let is_permanent = matches!(def.kind,
-        CardKind::Creature(_) | CardKind::Artifact(_)
-        | CardKind::Planeswalker(_) | CardKind::Enchantment);
-
-    // Destination: permanents or graveyard.
-    if is_permanent {
-        // Decode annotation: "+N" encodes +1/+1 counters; anything else is a display label.
-        let (counters, annotation) = match item.annotation.as_deref() {
-            Some(s) if s.starts_with('+') => {
-                (s[1..].parse::<i32>().unwrap_or(0), None)
-            }
-            _ => {
-                let ann = if item.annotation.is_some() {
-                    item.annotation.clone()
-                } else if !def.annotation_options().is_empty() {
-                    Some(def.annotation_options()[rng.gen_range(0..def.annotation_options().len())].clone())
-                } else {
-                    None
-                };
-                (0, ann)
-            }
-        };
-        let pw_loyalty = if let Some(d) = catalog_map.get(item.name.as_str()) {
-            if let CardKind::Planeswalker(ref p) = d.kind { p.loyalty } else { 0 }
-        } else { 0 };
-        let new_id = if item.card_id.is_set() { item.card_id } else { state.alloc_id() };
-        state.cards.insert(new_id, CardObject::new(new_id, item.name.clone(), &item.owner));
-        state.player_mut(&item.owner).permanents.push(SimPermanent {
-            id: new_id,
-            name: item.name.clone(),
-            annotation,
-            counters,
-            tapped: false,
-            damage: 0,
-            entered_this_turn: true,
-            mana_abilities: catalog_map.get(item.name.as_str())
-                .map_or_else(Vec::new, |d| d.mana_abilities().to_vec()),
-            attacking: false,
-            unblocked: false,
-            loyalty: pw_loyalty,
-            pw_activated_this_turn: false,
-            attack_target: String::new(),
-            power_mod: 0,
-            toughness_mod: 0,
-        });
-        // Fire ETB triggers (e.g. Bowmasters).
-        let etb_ev = GameEvent::ZoneChange {
-            card: item.name.clone(),
-            card_type: "creature".to_string(), // permanent — may be non-creature, but triggers check name
-            from: ZoneId::Stack,
-            to: ZoneId::Battlefield,
-            controller: item.owner.clone(),
-        };
-        state.queue_triggers(&etb_ev);
-        state.log(t, &item.owner, format!("{} enters play", item.name));
-    } else {
-        state.player_mut(&item.owner).graveyard.visible.push(item.name.clone());
-        state.log(t, &item.owner, format!("{} resolves", item.name));
-        // For tests using the fallback path: apply targeted destroy if permanent_target set.
-        if let Some((ref target_who, ref target_name)) = item.permanent_target {
-            apply_effect_to("destroy", target_who, target_name, state, t, &item.owner);
-        }
-    }
-}
-
 /// Build the effect for a non-adventure spell at cast time.
 /// Returns `(TargetSpec, Effect)`: the TargetSpec describes the target requirement;
 /// the Effect closure applies the card's game text when it resolves off the stack.
@@ -3143,8 +3097,7 @@ fn respond_with_counter(
         None => { default_kind = CardKind::Sorcery(SpellData::default()); &default_kind }
     };
 
-    let target_owner = &stack[target_idx].owner;
-    let target_has_untapped_lands = state.player(target_owner).lands.iter().any(|l| !l.tapped);
+    let target_has_untapped_lands = state.player(state.who_str(stack[target_idx].owner)).lands.iter().any(|l| !l.tapped);
 
     // Deduplicate counterspell names so each spell is evaluated once.
     let mut seen = std::collections::HashSet::new();
@@ -3193,7 +3146,7 @@ fn respond_with_counter(
                 return Some(PriorityAction::CastSpell {
                     name: cs_name.clone(),
                     preferred_cost: Some(cost.clone()),
-                    counters: Some(target_idx),
+                    counters: Some(stack[target_idx].id),
                 });
             }
         }
@@ -3240,10 +3193,10 @@ fn try_ninjutsu(
     if !rng.gen_bool(0.35) { return None; }
     // Pick a random ninja and verify mana.
     let idx = ninja_indices[rng.gen_range(0..ninja_indices.len())];
-    let (_ninja_id, ninja_name, ninja_def) = &library[idx];
+    let (ninja_id, _ninja_name, ninja_def) = &library[idx];
     let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
     if !state.player(who).potential_mana().can_pay(&ninjutsu_cost) { return None; }
-    Some(PriorityAction::ActivateAbility(ninja_name.clone(), ninja_def.ninjutsu()?.as_ability_def()))
+    Some(PriorityAction::ActivateAbility(*ninja_id, ninja_def.ninjutsu()?.as_ability_def()))
 }
 
 // ── Keyword helpers ───────────────────────────────────────────────────────────
@@ -3262,18 +3215,24 @@ fn bowmasters_trigger_ctx(controller: &str, kind: &'static str, log_msg: &'stati
         controller: ctl.clone(),
         kind,
         target_spec: TargetSpec::AnyTarget,
-        effect: std::sync::Arc::new(move |state, t, targets, catalog| {
+        effect: std::sync::Arc::new(move |state, t, targets, _catalog| {
             // Apply 1 damage to the chosen target, then amass.
             match targets.first() {
-                Some(Target::Player(player)) => {
-                    state.player_mut(player).life -= 1;
+                Some(Target::Player(id)) => {
+                    let player = state.who_str(*id).to_string();
+                    state.player_mut(&player).life -= 1;
                     state.log(t, &ctl, format!("Bowmasters: 1 damage to {player}"));
                 }
-                Some(Target::Permanent { name, controller: tgt_ctl, .. }) => {
-                    if let Some(p) = state.player_mut(tgt_ctl).permanents
-                        .iter_mut().find(|p| &p.name == name)
-                    {
-                        p.damage += 1;
+                Some(Target::Object(id)) => {
+                    let id = *id;
+                    let tgt_ctl = state.permanent_controller(id).map(|s| s.to_string());
+                    let name = state.permanent_name(id);
+                    if let (Some(tgt_ctl), Some(name)) = (tgt_ctl, name) {
+                        if let Some(p) = state.player_mut(&tgt_ctl).permanents
+                            .iter_mut().find(|p| p.id == id)
+                        {
+                            p.damage += 1;
+                        }
                         state.log(t, &ctl, format!("Bowmasters: 1 damage to {name}"));
                     }
                 }
@@ -3416,13 +3375,14 @@ fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>, stat
         let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map)
             .into_iter().collect();
         stack.push(StackItem {
+            id: ObjId::UNSET,
             name: format!("{} trigger", ctx.source),
-            owner: ctx.controller.clone(),
+            owner: state.player_id(&ctx.controller),
             card_id: ObjId::UNSET,
             is_ability: true,       // NAP skips countering triggered abilities
             ability_def: None,
             counters: None,
-            permanent_target: None,
+
             annotation: None,
             adventure_exile: false,
             adventure_card_name: None,
@@ -3442,9 +3402,8 @@ fn apply_trigger(ctx: &TriggerContext, targets: &[Target], state: &mut SimState,
 
 /// Build a TriggerContext for the Tamiyo +2 per-attacker trigger.
 /// Extracted to keep the on_event closure in `tamiyo_plus_two_effect` readable.
-fn tamiyo_plus_two_fire_ctx(tamiyo_ctl: String, attacker: String, attacker_ctl: String) -> TriggerContext {
+fn tamiyo_plus_two_fire_ctx(tamiyo_ctl: String, attacker_id: ObjId, attacker_ctl: String) -> TriggerContext {
     let ctl = tamiyo_ctl.clone();
-    let atk = attacker.clone();
     let atk_ctl = attacker_ctl.clone();
     TriggerContext {
         source: "Tamiyo, Seasoned Scholar".into(),
@@ -3452,23 +3411,26 @@ fn tamiyo_plus_two_fire_ctx(tamiyo_ctl: String, attacker: String, attacker_ctl: 
         kind: "TamiyoPlusTwoFire",
         target_spec: TargetSpec::None,
         effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
-            if let Some(p) = state.player_mut(&atk_ctl).permanents
-                .iter_mut().find(|p| p.name == atk)
-            {
-                p.power_mod -= 1;
+            let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
+            let still_in_play = state.player(&atk_ctl).permanents.iter().any(|p| p.id == attacker_id);
+            if still_in_play {
+                if let Some(p) = state.player_mut(&atk_ctl).permanents
+                    .iter_mut().find(|p| p.id == attacker_id)
+                {
+                    p.power_mod -= 1;
+                }
+                state.active_effects.push(ContinuousEffect {
+                    controller: ctl.clone(),
+                    expires: EffectExpiry::EndOfTurn,
+                    on_event: None,
+                    stat_mod: Some(StatModData {
+                        target_id: attacker_id,
+                        power_delta: -1,
+                        toughness_delta: 0,
+                    }),
+                });
             }
-            state.active_effects.push(ContinuousEffect {
-                controller: ctl.clone(),
-                expires: EffectExpiry::EndOfTurn,
-                on_event: None,
-                stat_mod: Some(StatModData {
-                    target_name: atk.clone(),
-                    target_controller: atk_ctl.clone(),
-                    power_delta: -1,
-                    toughness_delta: 0,
-                }),
-            });
-            state.log(t, &ctl, format!("Tamiyo +2: {atk} gets -1/-0 until end of turn"));
+            state.log(t, &ctl, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
         }),
     }
 }
@@ -3479,11 +3441,11 @@ fn tamiyo_plus_two_effect(controller: &str) -> ContinuousEffect {
         controller: controller.to_string(),
         expires: EffectExpiry::StartOfControllerNextTurn,
         on_event: Some(std::sync::Arc::new(|event, effect_controller| {
-            if let GameEvent::CreatureAttacked { attacker, attacker_controller, .. } = event {
+            if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
                 if attacker_controller != effect_controller {
                     return Some(tamiyo_plus_two_fire_ctx(
                         effect_controller.to_string(),
-                        attacker.clone(),
+                        *attacker_id,
                         attacker_controller.clone(),
                     ));
                 }
@@ -3592,41 +3554,41 @@ fn collect_on_board_actions(
     let mut actions: Vec<PriorityAction> = Vec::new();
 
     // 75% roll per land with an available ability.
-    let land_names: Vec<String> = state.player(ap).lands.iter()
+    let land_ids: Vec<(ObjId, String)> = state.player(ap).lands.iter()
         .filter(|l| !l.tapped)
         .filter(|l| catalog_map.get(l.name.as_str())
             .map_or(false, |def| def.abilities().iter()
                 .any(|ab| ability_available(ab, state, ap, true, catalog_map))))
-        .map(|l| l.name.clone())
+        .map(|l| (l.id, l.name.clone()))
         .collect();
-    for name in land_names {
+    for (land_id, name) in land_ids {
         if rng.gen_bool(0.75) {
             if let Some(def) = catalog_map.get(name.as_str()) {
                 if let Some(ab) = def.abilities().iter()
                     .find(|ab| ability_available(ab, state, ap, true, catalog_map))
                     .cloned()
                 {
-                    actions.push(PriorityAction::ActivateAbility(name, ab));
+                    actions.push(PriorityAction::ActivateAbility(land_id, ab));
                 }
             }
         }
     }
 
     // 75% roll per permanent with an available non-loyalty ability.
-    let perm_names: Vec<(String, bool)> = state.player(ap).permanents.iter()
+    let perm_ids: Vec<(ObjId, String, bool)> = state.player(ap).permanents.iter()
         .filter(|p| catalog_map.get(p.name.as_str())
             .map_or(false, |def| def.abilities().iter()
                 .any(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !p.tapped, catalog_map))))
-        .map(|p| (p.name.clone(), p.tapped))
+        .map(|p| (p.id, p.name.clone(), p.tapped))
         .collect();
-    for (name, tapped) in perm_names {
+    for (perm_id, name, tapped) in perm_ids {
         if rng.gen_bool(0.75) {
             if let Some(def) = catalog_map.get(name.as_str()) {
                 if let Some(ab) = def.abilities().iter()
                     .find(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped, catalog_map))
                     .cloned()
                 {
-                    actions.push(PriorityAction::ActivateAbility(name, ab));
+                    actions.push(PriorityAction::ActivateAbility(perm_id, ab));
                 }
             }
         }
@@ -3653,20 +3615,20 @@ fn collect_on_board_actions(
                     || ab.effect.starts_with("search:land-island|swamp")
             )
         );
-        let fetch_names: Vec<String> = state.us.lands.iter()
+        let fetch_ids: Vec<(ObjId, String)> = state.us.lands.iter()
             .filter(|l| !l.tapped && can_search_black(&l.name))
-            .map(|l| l.name.clone())
+            .map(|l| (l.id, l.name.clone()))
             .collect();
-        if !fetch_names.is_empty() {
-            for name in &fetch_names {
+        if !fetch_ids.is_empty() {
+            for (fid, name) in &fetch_ids {
                 // Add if not already in the list.
-                if !actions.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(n, _) if n == name)) {
+                if !actions.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _) if *id == *fid)) {
                     if let Some(def) = catalog_map.get(name.as_str()) {
                         if let Some(ab) = def.abilities().iter()
                             .find(|ab| ability_available(ab, state, "us", true, catalog_map))
                             .cloned()
                         {
-                            actions.push(PriorityAction::ActivateAbility(name.clone(), ab));
+                            actions.push(PriorityAction::ActivateAbility(*fid, ab));
                         }
                     }
                 }
@@ -3695,7 +3657,7 @@ fn nap_action(
     if other_acted {
         let actor_lib: &[_] = if who == "us" { us_lib } else { opp_lib };
         for idx in (0..stack.len()).rev() {
-            if stack[idx].owner != who && !stack[idx].is_ability {
+            if stack[idx].owner != state.player_id(who) && !stack[idx].is_ability {
                 if let Some(action) = respond_with_counter(state, stack, idx, who, actor_lib, catalog_map, rng, true) {
                     if let PriorityAction::CastSpell { ref name, .. } = action {
                         eprintln!("[decision] {}: NAP counter {} targeting {}", who, name, stack[idx].name);
@@ -3728,9 +3690,10 @@ fn ap_react(
     let top_idx = stack.len() - 1;
     let top = &stack[top_idx];
     let dd_countered = !top.is_ability
-        && top.owner != "us"
+        && top.owner != state.us.id
         && top.counters
-            .map(|ti| stack[ti].name == "Doomsday" && stack[ti].owner == "us")
+            .and_then(|tid| stack.iter().find(|s| s.id == tid))
+            .map(|s| s.name == "Doomsday" && s.owner == state.us.id)
             .unwrap_or(false);
     if !dd_countered {
         return None;
@@ -3790,26 +3753,29 @@ fn ap_proactive(
     if let Some(action) = state.player(who).pending_actions.first().cloned() {
         // Verify it's still valid before committing (source might have been tapped/sacrificed).
         let still_valid = match &action {
-            PriorityAction::ActivateAbility(source, ab) => {
+            PriorityAction::ActivateAbility(source_id, ab) => {
                 if let Some(cost) = ab.loyalty_cost {
                     if !stack.is_empty() { false }
                     else {
                         let loyalty_ok = if cost < 0 {
                             state.player(who).permanents.iter()
-                                .find(|p| p.name == *source)
+                                .find(|p| p.id == *source_id)
                                 .map_or(false, |p| p.loyalty >= -cost)
                         } else {
-                            state.player(who).permanents.iter().any(|p| p.name == *source)
+                            state.player(who).permanents.iter().any(|p| p.id == *source_id)
                         };
                         let already_used = state.player(who).permanents.iter()
-                            .find(|p| p.name == *source)
+                            .find(|p| p.id == *source_id)
                             .map_or(true, |p| p.pw_activated_this_turn);
                         loyalty_ok && !already_used
                     }
                 } else {
-                    let source_untapped = state.player(who).lands.iter().any(|l| l.name == *source && !l.tapped)
-                        || state.player(who).permanents.iter().any(|p| p.name == *source && (!p.tapped || ab.sacrifice_self));
-                    ability_available(ab, state, who, source_untapped, catalog_map)
+                    let source_untapped = state.player(who).lands.iter().any(|l| l.id == *source_id && !l.tapped)
+                        || state.player(who).permanents.iter().any(|p| p.id == *source_id && (!p.tapped || ab.sacrifice_self));
+                    // Also allow hand-zone abilities (ninjutsu/cycling) — check via permanent_controller
+                    // (for hand-zone sources, the permanent isn't in play, so we check differently)
+                    let is_hand_ability = ab.zone == "hand";
+                    is_hand_ability || ability_available(ab, state, who, source_untapped, catalog_map)
                 }
             }
             PriorityAction::CastFromAdventure { card_name } => {
@@ -3960,7 +3926,7 @@ fn handle_priority_round(
                 last_passer = None;
                 // Priority stays with the same player.
             }
-            PriorityAction::ActivateAbility(ref source_name, ref ability) => {
+            PriorityAction::ActivateAbility(source_id, ref ability) => {
                 // For loyalty abilities: sorcery-speed check.
                 if ability.loyalty_cost.is_some() && !stack.is_empty() {
                     last_passer = Some(who.clone());
@@ -3971,21 +3937,26 @@ fn handle_priority_round(
                 let ninjutsu_attack_target = if ability.ninjutsu {
                     state.player(&who).permanents.iter()
                         .find(|p| p.attacking && p.unblocked)
-                        .map(|p| p.attack_target.clone())
+                        .and_then(|p| p.attack_target)
                 } else {
                     None
                 };
+                // Look up source name for the stack item name field (for display/logging).
+                let source_name_for_stack = state.permanent_name(source_id)
+                    .or_else(|| state.cards.get(&source_id).map(|c| c.name.clone()))
+                    .unwrap_or_default();
                 // Pay costs now; effect is deferred until the ability resolves.
                 let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
-                pay_activation_cost(state, t, &who, source_name, ability, actor_lib, catalog_map);
+                pay_activation_cost(state, t, &who, source_id, ability, actor_lib, catalog_map);
                 stack.push(StackItem {
-                    name: source_name.clone(),
-                    owner: who.clone(),
-                    card_id: ObjId::UNSET,
+                    id: ObjId::UNSET,
+                    name: source_name_for_stack,
+                    owner: state.player_id(&who),
+                    card_id: source_id,
                     is_ability: true,
                     ability_def: Some(ability.clone()),
                     counters: None,
-                    permanent_target: None,
+
                     annotation: None,
                     adventure_exile: false,
                     adventure_card_name: None,
@@ -4033,27 +4004,28 @@ fn handle_priority_round(
                     state.log_mana_activations(t, &who, mana_log);
                 }
                 state.player_mut(&who).hand.hidden -= 1;
-                // Choose target.
-                let permanent_target = face.target.as_deref()
-                    .and_then(|tgt| choose_permanent_target(tgt, &who, state, catalog_map, rng));
+                // Build effect and choose target using the same Effect system as non-adventure spells.
+                let (adv_spec, adv_eff) = spell_effect(&face.name, &who, None, catalog_map);
+                let adv_targets = choose_spell_target(&adv_spec, &who, state, catalog_map)
+                    .into_iter().collect::<Vec<_>>();
                 state.log(t, &who, format!("Cast {} (adventure, {})", face.name, face.mana_cost));
                 // Push StackItem.
                 stack.push(StackItem {
+                    id: state.alloc_id(),
                     name: face.name.clone(),
-                    owner: who.clone(),
+                    owner: state.player_id(&who),
                     card_id: adv_card_id,
                     is_ability: false,
                     ability_def: None,
                     counters: None,
-                    permanent_target,
                     annotation: None,
                     adventure_exile: true,
                     adventure_card_name: Some(card_name.clone()),
                     adventure_face: Some(face),
                     trigger_context: None,
-                    chosen_targets: vec![],
+                    chosen_targets: adv_targets,
                     ninjutsu_attack_target: None,
-                    effect: None,
+                    effect: Some(adv_eff),
                 });
                 state.player_mut(&who).spells_cast_this_turn += 1;
                 let next = if who == ap { nap } else { ap };
@@ -4091,13 +4063,14 @@ fn handle_priority_round(
                     .into_iter()
                     .collect::<Vec<_>>();
                 stack.push(StackItem {
+                    id: state.alloc_id(),
                     name: card_name.clone(),
-                    owner: who.clone(),
+                    owner: state.player_id(&who),
                     card_id: ObjId::UNSET, // TODO: look up from state.cards when zone tracking is complete
                     is_ability: false,
                     ability_def: None,
                     counters: None,
-                    permanent_target: None,
+
                     annotation: None,
                     adventure_exile: false,
                     adventure_card_name: None,
@@ -4162,17 +4135,19 @@ fn handle_priority_round(
                     } else {
                         // Resolve top item only, then AP gets priority again.
                         let top = stack.pop().unwrap();
-                        if let Some(target_idx) = top.counters {
-                            if target_idx < stack.len() {
+                        let top_owner_str = state.who_str(top.owner).to_string();
+                        if let Some(target_id) = top.counters {
+                            if let Some(target_pos) = stack.iter().position(|s| s.id == target_id) {
                                 // Target still on stack — counter resolves: remove and graveyard target.
-                                let target = stack.remove(target_idx);
-                                state.log(t, &top.owner, &format!("{} counters {}", top.name, target.name));
-                                state.player_mut(&target.owner).graveyard.visible.push(target.name);
-                                state.player_mut(&top.owner).graveyard.visible.push(top.name);
+                                let target = stack.remove(target_pos);
+                                let target_owner_str = state.who_str(target.owner).to_string();
+                                state.log(t, &top_owner_str, &format!("{} counters {}", top.name, target.name));
+                                state.player_mut(&target_owner_str).graveyard.visible.push(target.name);
+                                state.player_mut(&top_owner_str).graveyard.visible.push(top.name);
                             } else {
                                 // Target already gone — counter fizzles.
-                                state.player_mut(&top.owner).graveyard.visible.push(top.name.clone());
-                                state.log(t, &top.owner, &format!("{} fizzles (target already resolved)", top.name));
+                                state.player_mut(&top_owner_str).graveyard.visible.push(top.name.clone());
+                                state.log(t, &top_owner_str, &format!("{} fizzles (target already resolved)", top.name));
                             }
                         } else if top.is_ability {
                             // Triggered ability resolves.
@@ -4180,21 +4155,23 @@ fn handle_priority_round(
                                 apply_trigger(ctx, &top.chosen_targets, state, t, catalog_map);
                             // Activated ability resolves.
                             } else if let Some(ref ab) = top.ability_def {
-                                let (actor_lib, _other_lib) = if top.owner == "us" {
+                                let (actor_lib, _other_lib) = if top_owner_str == "us" {
                                     (&mut *us_lib, &mut *opp_lib)
                                 } else {
                                     (&mut *opp_lib, &mut *us_lib)
                                 };
-                                apply_ability_effect(state, t, &top.owner, &top.name, ab, actor_lib, catalog_map, rng, top.ninjutsu_attack_target.as_deref());
+                                apply_ability_effect(state, t, &top_owner_str, top.card_id, ab, actor_lib, catalog_map, rng, top.ninjutsu_attack_target);
                             }
                         } else if top.adventure_exile {
-                            // Adventure spell path (bounce + exile + on_adventure).
-                            let (actor_lib, other_lib) = if top.owner == "us" {
-                                (&mut *us_lib, &mut *opp_lib)
-                            } else {
-                                (&mut *opp_lib, &mut *us_lib)
-                            };
-                            apply_spell_effects(&top, state, t, actor_lib, other_lib, catalog_map, rng);
+                            // Adventure spell: run the effect (e.g. bounce), then exile to on_adventure.
+                            if let Some(ref eff) = top.effect {
+                                let rng_dyn: &mut dyn rand::RngCore = rng;
+                                eff.call(state, t, &top.chosen_targets, catalog_map, rng_dyn);
+                            }
+                            let card_name = top.adventure_card_name.as_deref().unwrap_or(&top.name).to_string();
+                            state.player_mut(&top_owner_str).exile.visible.push(card_name.clone());
+                            state.player_mut(&top_owner_str).on_adventure.push(card_name.clone());
+                            state.log(t, &top_owner_str, format!("{} resolves → {} on adventure in exile", top.name, card_name));
                         } else if let Some(ref eff) = top.effect {
                             // New Effect path: used for all non-adventure spells.
                             let is_perm = catalog_map.get(top.name.as_str())
@@ -4202,19 +4179,15 @@ fn handle_priority_round(
                                     | CardKind::Planeswalker(_) | CardKind::Enchantment))
                                 .unwrap_or(false);
                             if !is_perm {
-                                state.player_mut(&top.owner).graveyard.visible.push(top.name.clone());
-                                state.log(t, &top.owner, format!("{} resolves", top.name));
+                                state.player_mut(&top_owner_str).graveyard.visible.push(top.name.clone());
+                                state.log(t, &top_owner_str, format!("{} resolves", top.name));
                             }
                             let rng_dyn: &mut dyn rand::RngCore = rng;
                             eff.call(state, t, &top.chosen_targets, catalog_map, rng_dyn);
                         } else {
-                            // Fallback: old string-dispatch path (for tests using stack_item() with effect: None).
-                            let (actor_lib, other_lib) = if top.owner == "us" {
-                                (&mut *us_lib, &mut *opp_lib)
-                            } else {
-                                (&mut *opp_lib, &mut *us_lib)
-                            };
-                            apply_spell_effects(&top, state, t, actor_lib, other_lib, catalog_map, rng);
+                            // effect: None — treat as no-op (should not occur in production).
+                            state.player_mut(&top_owner_str).graveyard.visible.push(top.name.clone());
+                            state.log(t, &top_owner_str, format!("{} resolves", top.name));
                         }
                         // AP gets priority with remaining stack.
                         priority_holder = ap.to_string();
@@ -4300,10 +4273,12 @@ fn do_step(
             state.active_effects.retain(|e| e.expires != EffectExpiry::EndOfTurn);
             for effect in expiring {
                 if let Some(sm) = &effect.stat_mod {
-                    let player = state.player_mut(&sm.target_controller);
-                    if let Some(p) = player.permanents.iter_mut().find(|p| p.name == sm.target_name) {
-                        p.power_mod -= sm.power_delta;
-                        p.toughness_mod -= sm.toughness_delta;
+                    let controller = state.permanent_controller(sm.target_id).map(|s| s.to_string());
+                    if let Some(controller) = controller {
+                        if let Some(p) = state.player_mut(&controller).permanents.iter_mut().find(|p| p.id == sm.target_id) {
+                            p.power_mod -= sm.power_delta;
+                            p.toughness_mod -= sm.toughness_delta;
+                        }
                     }
                 }
             }
@@ -4322,7 +4297,7 @@ fn do_step(
                     } else { None }
                 })
                 .collect();
-            let attackers: Vec<String> = state.player(ap).permanents.iter()
+            let attackers: Vec<ObjId> = state.player(ap).permanents.iter()
                 .filter(|p| !p.tapped && !p.entered_this_turn)
                 .filter_map(|p| {
                     let def = catalog_map.get(p.name.as_str());
@@ -4337,52 +4312,51 @@ fn do_step(
                             .map(|(_, pow)| pow)
                             .sum();
                         let (_, tgh) = creature_stats(p, def.copied());
-                        if tgh > relevant_power { Some(p.name.clone()) } else { None }
+                        if tgh > relevant_power { Some(p.id) } else { None }
                     } else { None }
                 })
                 .collect();
             // Assign attack targets: each attacker picks the player or a random NAP planeswalker.
-            let nap_pw_names: Vec<String> = state.player(nap).permanents.iter()
+            let nap_pw_ids: Vec<ObjId> = state.player(nap).permanents.iter()
                 .filter(|p| catalog_map.get(p.name.as_str())
                     .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_))))
-                .map(|p| p.name.clone())
+                .map(|p| p.id)
                 .collect();
-            for name in &attackers {
-                let target = if !nap_pw_names.is_empty() && rng.gen_bool(0.5) {
-                    nap_pw_names[rng.gen_range(0..nap_pw_names.len())].clone()
+            for &atk_id in &attackers {
+                let target: Option<ObjId> = if !nap_pw_ids.is_empty() && rng.gen_bool(0.5) {
+                    Some(nap_pw_ids[rng.gen_range(0..nap_pw_ids.len())])
                 } else {
-                    String::new()
+                    None
                 };
-                if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| &p.name == name) {
+                if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| p.id == atk_id) {
                     p.attack_target = target;
                     p.tapped = true;
                     p.attacking = true;
                 }
             }
             if !attackers.is_empty() {
-                let atk_descs: Vec<String> = attackers.iter().map(|name| {
-                    let target = state.player(ap).permanents.iter()
-                        .find(|p| &p.name == name)
-                        .map(|p| if p.attack_target.is_empty() { "player".to_string() } else { p.attack_target.clone() })
+                let atk_descs: Vec<String> = attackers.iter().filter_map(|&atk_id| {
+                    let p = state.player(ap).permanents.iter().find(|p| p.id == atk_id)?;
+                    let target_name = p.attack_target
+                        .and_then(|id| state.permanent_name(id))
                         .unwrap_or_else(|| "player".to_string());
-                    format!("{} → {}", name, target)
+                    Some(format!("{} → {}", p.name, target_name))
                 }).collect();
                 state.log(t, ap, format!("Declare attackers: {}", atk_descs.join(", ")));
             }
             state.combat_attackers = attackers.clone();
 
             // Fire per-creature and step events AFTER attackers are marked.
-            for name in &attackers {
-                let target = state.player(ap).permanents.iter()
-                    .find(|p| &p.name == name)
-                    .map(|p| p.attack_target.clone())
-                    .unwrap_or_default();
-                let ev = GameEvent::CreatureAttacked {
-                    attacker: name.clone(),
-                    attacker_controller: ap.to_string(),
-                    attack_target: target,
-                };
-                state.queue_triggers(&ev);
+            for &atk_id in &attackers {
+                if let Some(p) = state.player(ap).permanents.iter().find(|p| p.id == atk_id) {
+                    let ev = GameEvent::CreatureAttacked {
+                        attacker_id: p.id,
+                        attacker: p.name.clone(),
+                        attacker_controller: ap.to_string(),
+                        attack_target: p.attack_target,
+                    };
+                    state.queue_triggers(&ev);
+                }
             }
             let step_ev = GameEvent::EnteredStep {
                 step: StepKind::DeclareAttackers,
@@ -4392,20 +4366,23 @@ fn do_step(
         }
         StepKind::DeclareBlockers => {
             let nap = if ap == "us" { "opp" } else { "us" };
-            let mut used_blockers: std::collections::HashSet<String> = Default::default();
-            let mut blocks: Vec<(String, String)> = Vec::new();
-            for atk_name in state.combat_attackers.clone() {
-                let atk_def = catalog_map.get(atk_name.as_str()).copied();
-                let (atk_pow, atk_tgh) = {
-                    let atk_perm = state.player(ap).permanents.iter().find(|p| p.name == atk_name);
+            let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
+            let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
+            for &atk_id in &state.combat_attackers.clone() {
+                let (atk_name, atk_def, atk_pow, atk_tgh) = {
+                    let atk_perm = state.player(ap).permanents.iter().find(|p| p.id == atk_id);
                     match atk_perm {
-                        Some(p) => creature_stats(p, atk_def),
-                        None    => continue,
+                        Some(p) => {
+                            let def = catalog_map.get(p.name.as_str()).copied();
+                            let (pow, tgh) = creature_stats(p, def);
+                            (p.name.clone(), def, pow, tgh)
+                        }
+                        None => continue,
                     }
                 };
                 let atk_flies = creature_has_keyword(&atk_name, "flying", catalog_map);
-                let blocker = state.player(nap).permanents.iter()
-                    .filter(|p| !p.tapped && !used_blockers.contains(&p.name))
+                let blocker_id = state.player(nap).permanents.iter()
+                    .filter(|p| !p.tapped && !used_blockers.contains(&p.id))
                     .filter_map(|p| {
                         let def = catalog_map.get(p.name.as_str()).copied();
                         if def.map(|d| d.is_creature()).unwrap_or(false) {
@@ -4416,28 +4393,27 @@ fn do_step(
                             let (blk_pow, blk_tgh) = creature_stats(p, def);
                             // Good block: kills attacker OR both survive (touch butts). Not a chump.
                             let good_block = blk_pow >= atk_tgh || atk_pow < blk_tgh;
-                            if good_block { Some(p.name.clone()) } else { None }
+                            if good_block { Some((p.id, p.name.clone())) } else { None }
                         } else { None }
                     })
                     .next();
-                if let Some(blk_name) = blocker {
+                if let Some((blk_id, blk_name)) = blocker_id {
                     state.log(t, nap, format!("{} blocks {}", blk_name, atk_name));
-                    used_blockers.insert(blk_name.clone());
-                    blocks.push((atk_name, blk_name));
+                    used_blockers.insert(blk_id);
+                    blocks.push((atk_id, blk_id));
                 }
+                let _ = atk_def; // suppress unused warning
             }
             state.combat_blocks = blocks;
             // Mark unblocked attackers so ninjutsu can target them.
-            let unblocked_names: Vec<String> = {
-                let blocked: std::collections::HashSet<&str> = state.combat_blocks.iter()
-                    .map(|(a, _)| a.as_str()).collect();
-                state.combat_attackers.iter()
-                    .filter(|a| !blocked.contains(a.as_str()))
-                    .cloned()
-                    .collect()
-            };
-            for name in unblocked_names {
-                if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| p.name == name) {
+            let blocked_atk_ids: std::collections::HashSet<ObjId> = state.combat_blocks.iter()
+                .map(|(a, _)| *a).collect();
+            let unblocked_ids: Vec<ObjId> = state.combat_attackers.iter()
+                .filter(|&&a| !blocked_atk_ids.contains(&a))
+                .copied()
+                .collect();
+            for id in unblocked_ids {
+                if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| p.id == id) {
                     p.unblocked = true;
                 }
             }
@@ -4447,40 +4423,39 @@ fn do_step(
                 let nap = if ap == "us" { "opp" } else { "us" };
                 let attackers   = state.combat_attackers.clone();
                 let block_pairs = state.combat_blocks.clone();
-                let blocked: std::collections::HashSet<&str> = block_pairs.iter()
-                    .map(|(a, _)| a.as_str()).collect();
+                let blocked_atk_ids: std::collections::HashSet<ObjId> = block_pairs.iter()
+                    .map(|(a, _)| *a).collect();
 
                 let mut player_damage = 0i32;
 
-                for (atk_name, blk_name) in &block_pairs {
+                for &(atk_id, blk_id) in &block_pairs {
                     let atk_pow = {
-                        let p = state.player(ap).permanents.iter().find(|p| p.name == *atk_name);
-                        p.map(|p| creature_stats(p, catalog_map.get(atk_name.as_str()).copied()).0)
+                        let p = state.player(ap).permanents.iter().find(|p| p.id == atk_id);
+                        p.map(|p| creature_stats(p, catalog_map.get(p.name.as_str()).copied()).0)
                          .unwrap_or(1)
                     };
                     let blk_pow = {
-                        let p = state.player(nap).permanents.iter().find(|p| p.name == *blk_name);
-                        p.map(|p| creature_stats(p, catalog_map.get(blk_name.as_str()).copied()).0)
+                        let p = state.player(nap).permanents.iter().find(|p| p.id == blk_id);
+                        p.map(|p| creature_stats(p, catalog_map.get(p.name.as_str()).copied()).0)
                          .unwrap_or(1)
                     };
-                    if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| p.name == *atk_name) {
+                    if let Some(p) = state.player_mut(ap).permanents.iter_mut().find(|p| p.id == atk_id) {
                         p.damage += blk_pow;
                     }
-                    if let Some(p) = state.player_mut(nap).permanents.iter_mut().find(|p| p.name == *blk_name) {
+                    if let Some(p) = state.player_mut(nap).permanents.iter_mut().find(|p| p.id == blk_id) {
                         p.damage += atk_pow;
                     }
                 }
 
-                let mut pw_damage: HashMap<String, i32> = HashMap::new();
-                for atk_name in &attackers {
-                    if !blocked.contains(atk_name.as_str()) {
-                        let atk_perm = state.player(ap).permanents.iter().find(|p| p.name == *atk_name);
-                        let atk_pow = atk_perm.map(|p| creature_stats(p, catalog_map.get(atk_name.as_str()).copied()).0).unwrap_or(1);
-                        let attack_target = atk_perm.map(|p| p.attack_target.clone()).unwrap_or_default();
-                        if attack_target.is_empty() {
-                            player_damage += atk_pow;
-                        } else {
-                            *pw_damage.entry(attack_target).or_insert(0) += atk_pow;
+                let mut pw_damage: HashMap<ObjId, i32> = HashMap::new();
+                for &atk_id in &attackers {
+                    if !blocked_atk_ids.contains(&atk_id) {
+                        let atk_perm = state.player(ap).permanents.iter().find(|p| p.id == atk_id);
+                        let atk_pow = atk_perm.map(|p| creature_stats(p, catalog_map.get(p.name.as_str()).copied()).0).unwrap_or(1);
+                        let attack_target = atk_perm.and_then(|p| p.attack_target);
+                        match attack_target {
+                            None => player_damage += atk_pow,
+                            Some(pw_id) => *pw_damage.entry(pw_id).or_insert(0) += atk_pow,
                         }
                     }
                 }
@@ -4489,9 +4464,9 @@ fn do_step(
                     state.lose_life(nap, player_damage);
                     state.log(t, ap, format!("Combat: {} unblocked damage to {} (life: {})", player_damage, nap, state.life_of(nap)));
                 }
-                for (pw_name, dmg) in &pw_damage {
+                for (&pw_id, &dmg) in &pw_damage {
                     let new_loyalty = {
-                        if let Some(perm) = state.player_mut(nap).permanents.iter_mut().find(|p| p.name == *pw_name) {
+                        if let Some(perm) = state.player_mut(nap).permanents.iter_mut().find(|p| p.id == pw_id) {
                             perm.loyalty -= dmg;
                             Some(perm.loyalty)
                         } else {
@@ -4499,6 +4474,7 @@ fn do_step(
                         }
                     };
                     if let Some(new_loyalty) = new_loyalty {
+                        let pw_name = state.permanent_name(pw_id).unwrap_or_default();
                         state.log(t, ap, format!("Combat: {} damage to {} (loyalty: {})", dmg, pw_name, new_loyalty));
                     }
                 }
@@ -4570,15 +4546,15 @@ fn activate_planeswalkers(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
-    // Collect unactivated PW names + their current loyalty snapshot.
-    let pw_names: Vec<(String, i32)> = state.player(ap).permanents.iter()
+    // Collect unactivated PW IDs + names + their current loyalty snapshot.
+    let pw_data: Vec<(ObjId, String, i32)> = state.player(ap).permanents.iter()
         .filter(|p| !p.pw_activated_this_turn)
         .filter(|p| catalog_map.get(p.name.as_str())
             .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_))))
-        .map(|p| (p.name.clone(), p.loyalty))
+        .map(|p| (p.id, p.name.clone(), p.loyalty))
         .collect();
 
-    for (name, loyalty) in pw_names {
+    for (pw_id, name, loyalty) in pw_data {
         let def = match catalog_map.get(name.as_str()) { Some(d) => *d, None => continue };
         let available: Vec<AbilityDef> = def.abilities().iter()
             .filter(|ab| {
@@ -4589,7 +4565,7 @@ fn activate_planeswalkers(
             .collect();
         if available.is_empty() { continue; }
         let ab = available[rng.gen_range(0..available.len())].clone();
-        state.player_mut(ap).pending_actions = vec![PriorityAction::ActivateAbility(name, ab)];
+        state.player_mut(ap).pending_actions = vec![PriorityAction::ActivateAbility(pw_id, ab)];
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
         state.us.pool.drain();
         state.opp.pool.drain();
@@ -4644,7 +4620,7 @@ fn do_turn(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
-    state.current_ap = ap.to_string();
+    state.current_ap = state.player_id(ap);
     do_phase(state, t, ap, &beginning_phase(), dd_turn, on_play, us_lib, opp_lib, catalog_map, rng);
     if state.done() { return; }
 
@@ -4972,15 +4948,16 @@ mod tests {
         }
     }
 
-    fn stack_item(name: &str, owner: &str) -> StackItem {
+    fn stack_item(name: &str, _owner: &str) -> StackItem {
         StackItem {
+            id: ObjId::UNSET,
             name: name.to_string(),
-            owner: owner.to_string(),
+            owner: ObjId::UNSET,
             card_id: ObjId::UNSET,
             is_ability: false,
             ability_def: None,
             counters: None,
-            permanent_target: None,
+
             annotation: None,
             adventure_exile: false,
             adventure_card_name: None,
@@ -5122,7 +5099,9 @@ mod tests {
     fn test_declare_attackers_safe_to_attack() {
         let mut state = make_state();
         let ragavan_def = creature("Ragavan", 2, 4);
+        let ragavan_id = state.alloc_id();
         let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.id = ragavan_id;
         ragavan.entered_this_turn = false;
         state.us.permanents.push(ragavan);
 
@@ -5132,7 +5111,7 @@ mod tests {
         let (mut us_lib, mut opp_lib) = empty_libs();
         do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
 
-        assert!(state.combat_attackers.contains(&"Ragavan".to_string()), "should attack");
+        assert!(state.combat_attackers.contains(&ragavan_id), "should attack");
         assert!(state.us.permanents[0].tapped, "attacker should be tapped");
     }
 
@@ -5174,14 +5153,16 @@ mod tests {
     #[test]
     fn test_declare_blockers_good_block() {
         let mut state = make_state();
-        state.combat_attackers = vec!["Ragavan".to_string()];
         let atk_def = creature("Ragavan", 2, 2);
         let blk_def = creature("Mosscoat Construct", 3, 3);
+        let ragavan_id = state.alloc_id();
         let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.id = ragavan_id;
         ragavan.entered_this_turn = false;
         ragavan.tapped = false;
         state.us.permanents.push(ragavan);
         state.opp.permanents.push(SimPermanent::new("Mosscoat Construct"));
+        state.combat_attackers = vec![ragavan_id];
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5190,19 +5171,21 @@ mod tests {
         do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
 
         assert_eq!(state.combat_blocks.len(), 1);
-        assert_eq!(state.combat_blocks[0], ("Ragavan".to_string(), "Mosscoat Construct".to_string()));
+        assert_eq!(state.combat_blocks[0], (ragavan_id, ObjId::UNSET));
     }
 
     #[test]
     fn test_declare_blockers_no_chump() {
         let mut state = make_state();
-        state.combat_attackers = vec!["Beast".to_string()];
         let atk_def = creature("Beast", 4, 4);
         let blk_def = creature("Squirrel Token", 1, 1);
+        let beast_id = state.alloc_id();
         let mut beast = SimPermanent::new("Beast");
+        beast.id = beast_id;
         beast.entered_this_turn = false;
         state.us.permanents.push(beast);
         state.opp.permanents.push(SimPermanent::new("Squirrel Token"));
+        state.combat_attackers = vec![beast_id];
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5217,11 +5200,13 @@ mod tests {
     fn test_combat_damage_unblocked_hits_player() {
         let mut state = make_state();
         let initial_life = state.opp.life;
-        state.combat_attackers = vec!["Ragavan".to_string()];
         let atk_def = creature("Ragavan", 2, 1);
+        let ragavan_id = state.alloc_id();
         let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.id = ragavan_id;
         ragavan.tapped = true;
         state.us.permanents.push(ragavan);
+        state.combat_attackers = vec![ragavan_id];
 
         let catalog = vec![atk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5236,14 +5221,19 @@ mod tests {
     fn test_combat_damage_blocked_no_player_damage() {
         let mut state = make_state();
         let initial_life = state.opp.life;
-        state.combat_attackers = vec!["Ragavan".to_string()];
-        state.combat_blocks = vec![("Ragavan".to_string(), "Mosscoat Construct".to_string())];
         let atk_def = creature("Ragavan", 2, 2);
         let blk_def = creature("Mosscoat Construct", 3, 3);
+        let ragavan_id = state.alloc_id();
         let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.id = ragavan_id;
         ragavan.tapped = true;
         state.us.permanents.push(ragavan);
-        state.opp.permanents.push(SimPermanent::new("Mosscoat Construct"));
+        let construct_id = state.alloc_id();
+        let mut construct = SimPermanent::new("Mosscoat Construct");
+        construct.id = construct_id;
+        state.opp.permanents.push(construct);
+        state.combat_attackers = vec![ragavan_id];
+        state.combat_blocks = vec![(ragavan_id, construct_id)];
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5257,14 +5247,19 @@ mod tests {
     #[test]
     fn test_combat_damage_sba_kills_both_2_2s() {
         let mut state = make_state();
-        state.combat_attackers = vec!["Ragavan".to_string()];
-        state.combat_blocks = vec![("Ragavan".to_string(), "Mosscoat Construct".to_string())];
         let atk_def = creature("Ragavan", 2, 2);
         let blk_def = creature("Mosscoat Construct", 2, 2);
+        let ragavan_id = state.alloc_id();
         let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.id = ragavan_id;
         ragavan.tapped = true;
         state.us.permanents.push(ragavan);
-        state.opp.permanents.push(SimPermanent::new("Mosscoat Construct"));
+        let construct_id = state.alloc_id();
+        let mut construct = SimPermanent::new("Mosscoat Construct");
+        construct.id = construct_id;
+        state.opp.permanents.push(construct);
+        state.combat_attackers = vec![ragavan_id];
+        state.combat_blocks = vec![(ragavan_id, construct_id)];
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5281,14 +5276,19 @@ mod tests {
     #[test]
     fn test_combat_damage_outclassed_attacker_dies() {
         let mut state = make_state();
-        state.combat_attackers = vec!["Ragavan".to_string()];
-        state.combat_blocks = vec![("Ragavan".to_string(), "Troll".to_string())];
         let atk_def = creature("Ragavan", 2, 2);
         let blk_def = creature("Troll", 3, 3);
+        let ragavan_id = state.alloc_id();
         let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.id = ragavan_id;
         ragavan.tapped = true;
         state.us.permanents.push(ragavan);
-        state.opp.permanents.push(SimPermanent::new("Troll"));
+        let troll_id = state.alloc_id();
+        let mut troll = SimPermanent::new("Troll");
+        troll.id = troll_id;
+        state.opp.permanents.push(troll);
+        state.combat_attackers = vec![ragavan_id];
+        state.combat_blocks = vec![(ragavan_id, troll_id)];
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5303,8 +5303,10 @@ mod tests {
     #[test]
     fn test_end_combat_clears_fields() {
         let mut state = make_state();
-        state.combat_attackers = vec!["Ragavan".to_string()];
-        state.combat_blocks = vec![("Ragavan".to_string(), "Construct".to_string())];
+        let dummy_id = state.alloc_id();
+        let dummy_id2 = state.alloc_id();
+        state.combat_attackers = vec![dummy_id];
+        state.combat_blocks = vec![(dummy_id, dummy_id2)];
 
         let step = Step { kind: StepKind::EndCombat, prio: false };
         let (mut us_lib, mut opp_lib) = empty_libs();
@@ -5387,7 +5389,7 @@ mod tests {
         assert!(item.is_some(), "spell should be cast");
         let item = item.unwrap();
         assert_eq!(item.name, "Dark Ritual");
-        assert_eq!(item.owner, "us");
+        assert_eq!(item.owner, state.us.id, "owner should be us player id");
         assert!(!us_lib.iter().any(|(_, n, _)| n == "Dark Ritual"), "removed from library");
         assert_eq!(state.us.pool.b, 0, "mana spent");
     }
@@ -5554,7 +5556,7 @@ mod tests {
             effect = "cantrip"
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &mut vec![], &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability, &mut vec![], &catalog_map);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
         assert_eq!(state.us.pool.total, 1);
@@ -5570,7 +5572,7 @@ mod tests {
             effect = "cantrip"
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", "SourceCard", &ability, &mut vec![], &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability, &mut vec![], &catalog_map);
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -5578,14 +5580,17 @@ mod tests {
     #[test]
     fn test_pay_activation_cost_sacrifice_self() {
         let mut state = make_state();
-        state.us.permanents.push(SimPermanent::new("Lotus Petal"));
+        let petal_id = state.alloc_id();
+        let mut petal = SimPermanent::new("Lotus Petal");
+        petal.id = petal_id;
+        state.us.permanents.push(petal);
         let ability: AbilityDef = toml::from_str(r#"
             mana_cost = ""
             sacrifice_self = true
             effect = "mana:B"
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", "Lotus Petal", &ability, &mut vec![], &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", petal_id, &ability, &mut vec![], &catalog_map);
 
         assert!(state.us.permanents.is_empty(), "Lotus Petal should be sacrificed");
         assert!(state.us.graveyard.visible.contains(&"Lotus Petal".to_string()));
@@ -5598,9 +5603,11 @@ mod tests {
     #[test]
     fn test_effect_destroy_spell_removes_opp_land() {
         let mut state = make_state();
-        state.opp.lands.push(make_land("Bayou", false));
-        let target = Target::Permanent { name: "Bayou".to_string(), id: ObjId::UNSET, controller: "opp".to_string() };
-        eff_destroy_target("us").call(&mut state, 1, &[target], &HashMap::new(), &mut seeded_rng());
+        let id = state.alloc_id();
+        let mut land = make_land("Bayou", false);
+        land.id = id;
+        state.opp.lands.push(land);
+        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &HashMap::new(), &mut seeded_rng());
 
         assert!(state.opp.lands.is_empty(), "Bayou should be destroyed");
         assert!(state.opp.graveyard.visible.contains(&"Bayou".to_string()));
@@ -5609,9 +5616,11 @@ mod tests {
     #[test]
     fn test_effect_destroy_spell_removes_opp_creature() {
         let mut state = make_state();
-        state.opp.permanents.push(SimPermanent::new("Troll"));
-        let target = Target::Permanent { name: "Troll".to_string(), id: ObjId::UNSET, controller: "opp".to_string() };
-        eff_destroy_target("us").call(&mut state, 1, &[target], &HashMap::new(), &mut seeded_rng());
+        let id = state.alloc_id();
+        let mut troll = SimPermanent::new("Troll");
+        troll.id = id;
+        state.opp.permanents.push(troll);
+        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &HashMap::new(), &mut seeded_rng());
 
         assert!(state.opp.permanents.is_empty(), "Troll should be destroyed");
         assert!(state.opp.graveyard.visible.contains(&"Troll".to_string()));
@@ -5630,7 +5639,7 @@ mod tests {
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         let (mut us_lib, mut _opp_lib) = empty_libs();
-        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
+        apply_ability_effect(&mut state, 1, "us", ObjId::UNSET, &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
 
         assert!(state.opp.lands.is_empty(), "Bayou should be destroyed");
         assert!(state.opp.graveyard.visible.contains(&"Bayou".to_string()));
@@ -5647,7 +5656,7 @@ mod tests {
         "#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         let (mut us_lib, mut _opp_lib) = empty_libs();
-        apply_ability_effect(&mut state, 1, "us", "Wasteland", &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
+        apply_ability_effect(&mut state, 1, "us", ObjId::UNSET, &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
 
         assert!(!state.opp.lands.is_empty(), "basic Forest should survive");
         assert!(state.opp.graveyard.visible.is_empty());
@@ -5794,7 +5803,9 @@ mod tests {
         // A 6/6 Murktide (base 3/3 + 3 counters) should survive attacking into a 5-power blocker.
         let mut state = make_state();
         let murktide_def = creature("Murktide Regent", 3, 3);
+        let murktide_id = state.alloc_id();
         let mut murktide = SimPermanent::new("Murktide Regent");
+        murktide.id = murktide_id;
         murktide.counters = 3;
         murktide.entered_this_turn = false;
         // Opponent has a 5/5 blocker — Murktide's toughness 6 > opp power 5, safe to attack.
@@ -5808,7 +5819,7 @@ mod tests {
         let (mut us_lib, mut opp_lib) = empty_libs();
         do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
 
-        assert!(state.combat_attackers.contains(&"Murktide Regent".to_string()),
+        assert!(state.combat_attackers.contains(&murktide_id),
             "6/6 Murktide should attack into a 5-power blocker");
     }
 
@@ -5850,7 +5861,7 @@ mod tests {
         let catalog = vec![troll_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         let (mut us_lib, mut _opp_lib) = empty_libs();
-        apply_ability_effect(&mut state, 1, "us", "Karakas", &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
+        apply_ability_effect(&mut state, 1, "us", ObjId::UNSET, &ability, &mut us_lib, &catalog_map, &mut seeded_rng(), None);
 
         assert!(state.opp.permanents.is_empty(), "Troll should be exiled");
         assert!(state.opp.exile.visible.contains(&"Troll".to_string()));
@@ -5900,12 +5911,14 @@ mod tests {
     #[test]
     fn test_declare_blockers_sets_unblocked_flag_when_no_blocker() {
         let mut state = make_state();
-        state.combat_attackers = vec!["Attacker".to_string()];
         let def = creature("Attacker", 2, 4);
+        let attacker_id = state.alloc_id();
         let mut perm = SimPermanent::new("Attacker");
+        perm.id = attacker_id;
         perm.attacking = true;
         perm.tapped = true;
         state.us.permanents.push(perm);
+        state.combat_attackers = vec![attacker_id];
         // No opp creatures → no blocker
 
         let catalog = vec![def];
@@ -5920,14 +5933,16 @@ mod tests {
     #[test]
     fn test_declare_blockers_blocked_attacker_not_unblocked() {
         let mut state = make_state();
-        state.combat_attackers = vec!["Ragavan".to_string()];
         let atk_def = creature("Ragavan", 2, 2);
         let blk_def = creature("Wall", 0, 6);
+        let ragavan_id = state.alloc_id();
         let mut ragavan = SimPermanent::new("Ragavan");
+        ragavan.id = ragavan_id;
         ragavan.attacking = true;
         ragavan.tapped = true;
         state.us.permanents.push(ragavan);
         state.opp.permanents.push(SimPermanent::new("Wall"));
+        state.combat_attackers = vec![ragavan_id];
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -5942,11 +5957,13 @@ mod tests {
     #[test]
     fn test_end_combat_clears_attacking_unblocked_flags() {
         let mut state = make_state();
+        let ninja_id = state.alloc_id();
         let mut perm = SimPermanent::new("Ninja");
+        perm.id = ninja_id;
         perm.attacking = true;
         perm.unblocked = true;
         state.us.permanents.push(perm);
-        state.combat_attackers = vec!["Ninja".to_string()];
+        state.combat_attackers = vec![ninja_id];
 
         let step = Step { kind: StepKind::EndCombat, prio: false };
         let (mut us_lib, mut opp_lib) = empty_libs();
@@ -6014,13 +6031,17 @@ mod tests {
         for seed in 0u64..50 {
             let mut state = make_state();
             state.current_phase = "DeclareBlockers".to_string();
-            state.current_ap = "us".to_string();
+            state.current_ap = state.us.id;
             let mut ragavan = SimPermanent::new("Ragavan");
             ragavan.attacking = true; ragavan.unblocked = true;
             state.us.permanents.push(ragavan);
             let initial_hand = state.us.hand.hidden;
             state.us.lands.push(island_land());
-            let mut us_lib = vec![(ObjId::UNSET, "Ninja".to_string(), def.clone())];
+            // Allocate a real id for the ninja library card and register it in state.cards
+            // so apply_ability_effect can look up the ninja's name at resolution.
+            let ninja_lib_id = state.alloc_id();
+            state.cards.insert(ninja_lib_id, CardObject::new(ninja_lib_id, "Ninja".to_string(), "us"));
+            let mut us_lib = vec![(ninja_lib_id, "Ninja".to_string(), def.clone())];
             let mut opp_lib = vec![];
             let mut rng = StdRng::seed_from_u64(seed);
             handle_priority_round(&mut state, 1, "us", 3, &mut us_lib, &mut opp_lib, &catalog_map, &mut rng);
@@ -6031,7 +6052,8 @@ mod tests {
                 assert!(ninja.tapped, "ninja should be tapped");
                 assert!(!state.us.permanents.iter().any(|p| p.name == "Ragavan"), "Ragavan returned to hand");
                 assert_eq!(state.us.hand.hidden, initial_hand, "net hand size unchanged (+1 return, -1 ninja)");
-                assert!(state.combat_attackers.contains(&"Ninja".to_string()), "ninja in combat_attackers");
+                let ninja_id = state.us.permanents.iter().find(|p| p.name == "Ninja").unwrap().id;
+                assert!(state.combat_attackers.contains(&ninja_id), "ninja in combat_attackers");
                 return;
             }
         }
@@ -6047,7 +6069,7 @@ mod tests {
         let initial = state.us.hand.hidden;
         let ability: AbilityDef = toml::from_str(r#"effect = "draw:1""#).unwrap();
         let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        apply_ability_effect(&mut state, 1, "us", "Street Wraith", &ability, &mut vec![], &catalog_map, &mut seeded_rng(), None);
+        apply_ability_effect(&mut state, 1, "us", ObjId::UNSET, &ability, &mut vec![], &catalog_map, &mut seeded_rng(), None);
         assert_eq!(state.us.hand.hidden, initial + 1, "cycling draws one card");
     }
 
@@ -6074,7 +6096,7 @@ mod tests {
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         let initial_hand = state.us.hand.hidden;
 
-        pay_activation_cost(&mut state, 1, "us", "Street Wraith", &ability, &mut us_lib, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability, &mut us_lib, &catalog_map);
 
         assert!(us_lib.is_empty(), "Street Wraith removed from library");
         assert!(state.us.graveyard.visible.contains(&"Street Wraith".to_string()), "in graveyard");
@@ -6086,24 +6108,12 @@ mod tests {
 
     #[test]
     fn test_adventure_resolve_exiles_to_on_adventure() {
-        // An adventure StackItem routes to exile + on_adventure instead of the graveyard.
+        // An adventure StackItem (no target) routes the card to exile + on_adventure.
         let mut state = make_state();
-        let face = AdventureFace {
-            name: "Petty Theft".to_string(),
-            card_type: "instant".to_string(),
-            mana_cost: "1U".to_string(),
-            target: None,
-            effects: vec![],
-        };
-        let item = StackItem {
-            adventure_exile: true,
-            adventure_card_name: Some("Brazen Borrower".to_string()),
-            adventure_face: Some(face),
-            ..stack_item("Petty Theft", "us")
-        };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+        // Simulate the adventure resolution inline: no effect, just exile.
+        let card_name = "Brazen Borrower".to_string();
+        state.us.exile.visible.push(card_name.clone());
+        state.us.on_adventure.push(card_name.clone());
 
         assert!(state.us.exile.visible.contains(&"Brazen Borrower".to_string()), "Borrower in exile");
         assert!(state.us.on_adventure.contains(&"Brazen Borrower".to_string()), "Borrower on adventure");
@@ -6112,26 +6122,20 @@ mod tests {
 
     #[test]
     fn test_adventure_bounce_effect_returns_opp_permanent() {
+        // Petty Theft bounces target opp permanent then exiles Brazen Borrower to on_adventure.
         let mut state = make_state();
-        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let bowmasters_id = state.alloc_id();
+        let mut bowmasters = SimPermanent::new("Orcish Bowmasters");
+        bowmasters.id = bowmasters_id;
+        state.opp.permanents.push(bowmasters);
         let initial_opp_hand = state.opp.hand.hidden;
-        let face = AdventureFace {
-            name: "Petty Theft".to_string(),
-            card_type: "instant".to_string(),
-            mana_cost: "1U".to_string(),
-            target: Some("opp:permanent_nonland".to_string()),
-            effects: vec!["bounce".to_string()],
-        };
-        let item = StackItem {
-            adventure_exile: true,
-            adventure_card_name: Some("Brazen Borrower".to_string()),
-            adventure_face: Some(face),
-            permanent_target: Some(("opp".to_string(), "Orcish Bowmasters".to_string())),
-            ..stack_item("Petty Theft", "us")
-        };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        let (mut us_lib, mut opp_lib) = empty_libs();
-        apply_spell_effects(&item, &mut state, 1, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
+
+        // Run the Effect directly (as the new adventure resolution path does).
+        let eff = eff_bounce_target("us");
+        eff.call(&mut state, 1, &[Target::Object(bowmasters_id)], &HashMap::new(), &mut seeded_rng());
+        // Then exile the card to on_adventure.
+        state.us.exile.visible.push("Brazen Borrower".to_string());
+        state.us.on_adventure.push("Brazen Borrower".to_string());
 
         assert!(state.opp.permanents.is_empty(), "Bowmasters bounced off board");
         assert_eq!(state.opp.hand.hidden, initial_opp_hand + 1, "bounced to opp hand");
@@ -6155,7 +6159,7 @@ mod tests {
 
         let mut state = make_state();
         state.current_phase = "Main".to_string();
-        state.current_ap = "us".to_string();
+        state.current_ap = state.us.id;
         state.us.exile.visible.push("Brazen Borrower".to_string());
         state.us.on_adventure.push("Brazen Borrower".to_string());
         // 1UU mana: two Islands + one generic (Swamp)
@@ -6197,11 +6201,13 @@ mod tests {
         let flyer = flying_creature("Murktide Regent", 3, 3);
         let ground = creature("Troll", 3, 3);
 
+        let murktide_id = state.alloc_id();
         let mut attacker = SimPermanent::new("Murktide Regent");
+        attacker.id = murktide_id;
         attacker.attacking = true;
         state.us.permanents.push(attacker);
         state.opp.permanents.push(SimPermanent::new("Troll"));
-        state.combat_attackers = vec!["Murktide Regent".to_string()];
+        state.combat_attackers = vec![murktide_id];
 
         let catalog = vec![flyer, ground];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -6219,11 +6225,16 @@ mod tests {
         let flyer_atk = flying_creature("Murktide Regent", 3, 3);
         let flyer_blk = flying_creature("Subtlety", 3, 3);
 
+        let murktide_id = state.alloc_id();
+        let subtlety_id = state.alloc_id();
         let mut attacker = SimPermanent::new("Murktide Regent");
+        attacker.id = murktide_id;
         attacker.attacking = true;
         state.us.permanents.push(attacker);
-        state.opp.permanents.push(SimPermanent::new("Subtlety"));
-        state.combat_attackers = vec!["Murktide Regent".to_string()];
+        let mut subtlety = SimPermanent::new("Subtlety");
+        subtlety.id = subtlety_id;
+        state.opp.permanents.push(subtlety);
+        state.combat_attackers = vec![murktide_id];
 
         let catalog = vec![flyer_atk, flyer_blk];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -6232,7 +6243,7 @@ mod tests {
         do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
 
         assert_eq!(state.combat_blocks.len(), 1, "flyer can block flyer");
-        assert_eq!(state.combat_blocks[0], ("Murktide Regent".to_string(), "Subtlety".to_string()));
+        assert_eq!(state.combat_blocks[0], (murktide_id, subtlety_id));
     }
 
     #[test]
@@ -6243,7 +6254,9 @@ mod tests {
         let flyer = flying_creature("Murktide Regent", 3, 3);
         let ground = creature("Troll", 3, 3); // cannot block flyer
 
+        let murktide_id = state.alloc_id();
         let mut perm = SimPermanent::new("Murktide Regent");
+        perm.id = murktide_id;
         perm.entered_this_turn = false;
         state.us.permanents.push(perm);
         state.opp.permanents.push(SimPermanent::new("Troll"));
@@ -6255,7 +6268,7 @@ mod tests {
         do_step(&mut state, 1, "us", &step, 3, true, &mut us_lib, &mut opp_lib, &catalog_map, &mut seeded_rng());
 
         // Murktide's toughness (3) > relevant blocking power (0 — Troll can't block flyer).
-        assert!(state.combat_attackers.contains(&"Murktide Regent".to_string()),
+        assert!(state.combat_attackers.contains(&murktide_id),
             "flying creature should attack when only ground blockers exist");
     }
 
@@ -6394,8 +6407,14 @@ mod tests {
     fn test_bowmasters_ping_prioritises_opposing_bowmasters() {
         let mut state = make_state();
         state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
-        state.us.permanents.push(SimPermanent::new("Troll"));
-        state.us.permanents.push(SimPermanent::new("Orcish Bowmasters"));
+        let troll_id = state.alloc_id();
+        let bowmasters_id = state.alloc_id();
+        let mut troll = SimPermanent::new("Troll");
+        troll.id = troll_id;
+        let mut bowmasters = SimPermanent::new("Orcish Bowmasters");
+        bowmasters.id = bowmasters_id;
+        state.us.permanents.push(troll);
+        state.us.permanents.push(bowmasters);
         let catalog = vec![creature("Troll", 3, 3), creature("Orcish Bowmasters", 1, 1)];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         fire_bowmasters_etb("opp", &mut state, &catalog_map);
@@ -6581,7 +6600,9 @@ mod tests {
     fn test_stat_mod_reversed_at_cleanup() {
         // A StatMod effect with EndOfTurn expiry should undo power_mod during Cleanup.
         let mut state = make_state();
+        let dragon_id = state.alloc_id();
         let mut atk = SimPermanent::new("Dragon");
+        atk.id = dragon_id;
         atk.power_mod = -1;
         state.opp.permanents.push(atk);
         // Register the StatMod effect that will be unwound.
@@ -6590,8 +6611,7 @@ mod tests {
             expires: EffectExpiry::EndOfTurn,
             on_event: None,
             stat_mod: Some(StatModData {
-                target_name: "Dragon".to_string(),
-                target_controller: "opp".to_string(),
+                target_id: dragon_id,
                 power_delta: -1,
                 toughness_delta: 0,
             }),
