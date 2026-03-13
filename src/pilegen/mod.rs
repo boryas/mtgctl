@@ -2,7 +2,6 @@ use clap::Args;
 use dialoguer::Confirm;
 use diesel::prelude::*;
 use rand::Rng;
-use serde::Deserialize;
 use skim::prelude::*;
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -13,10 +12,11 @@ use crate::db::{establish_connection, models::*};
 mod catalog;
 pub(crate) use catalog::*;
 
-mod display;
-use display::stage_label;
-mod triggers;
-use triggers::{fire_triggers, push_triggers, apply_trigger, tamiyo_plus_two_effect, bowmasters_check};
+mod effects;
+pub(crate) use effects::*;
+
+mod predicates;
+pub(crate) use predicates::*;
 
 mod strategy;
 use strategy::{decide_action, collect_on_board_actions};
@@ -35,7 +35,7 @@ mod tests;
 /// Opaque game object identifier. Every player, card, token, and stack ability
 /// gets one at construction time and keeps it through all zone changes.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
-struct ObjId(u64);
+pub(crate) struct ObjId(u64);
 
 impl ObjId {
     const UNSET: ObjId = ObjId(0);
@@ -277,35 +277,8 @@ struct ContinuousEffect {
 
 // ── Effect system (new) ───────────────────────────────────────────────────────
 //
-// Long-term goal: replace TriggerPayload, ContinuousEffectKind, and the
-// string-dispatched apply_ability_effect / apply_spell_effects with this system.
-//
-// Migration is staged: new card logic is written in terms of these types;
-// existing named variants are converted one at a time under test.
-
-/// A concrete, resolved reference to a game object that can be targeted.
-/// `id` fields default to `ObjId::UNSET` for now; they'll be filled in as objects get IDs.
-#[derive(Clone, Debug, PartialEq)]
-enum Target {
-    Player(ObjId),
-    Object(ObjId),
-}
-
-/// Declarative description of what targets a spell or ability may choose from.
-/// Used both to enumerate legal choices and to re-validate at resolution.
-#[derive(Clone, Debug)]
-enum TargetSpec {
-    None,
-    Player,
-    AnyOpponentCreature,
-    AnyOpponentNonlandPermanent,
-    OpponentCreatureMvLt4,
-    OpponentNonblackCreature,
-    CardInOwnGraveyard { card_type: Option<String> },
-    /// Any player or creature — used by Orcish Bowmasters ping.
-    AnyTarget,
-    // Extend as new cards require it.
-}
+// Target, TargetSpec, Who, Effect, and eff_* primitives live in effects.rs and predicates.rs,
+// re-exported via `pub(crate) use effects::*` and `pub(crate) use predicates::*` above.
 
 /// The closure type for all resolved effects: spells, abilities, and triggered abilities.
 /// Targets were chosen at stack-push time and are passed in at resolution.
@@ -319,336 +292,7 @@ fn no_effect() -> EffectFn {
     std::sync::Arc::new(|_state, _t, _targets, _catalog| {})
 }
 
-// ── Effect newtype (composable spell/ability effects) ─────────────────────────
-//
-// `Effect` wraps a closure that applies a game effect. Unlike the existing
-// `EffectFn` (used by triggered abilities), Effect includes an RngCore reference
-// for effects that need randomness at resolution time (discard, reanimate, etc.).
-//
-// Compose effects with `.then()`:
-//   eff_draw(who, 3).then(eff_put_back(who, 2))  // Brainstorm
-
-/// Actor-relative player reference used in effect primitives.
-/// `Actor` = the spell's controller; `Opp` = their opponent.
-#[derive(Clone, Copy)]
-enum Who { Actor, Opp }
-
-impl Who {
-    fn resolve<'a>(&self, actor: &'a str) -> &'a str {
-        match self { Who::Actor => actor, Who::Opp => opp_of(actor) }
-    }
-}
-
-/// A composable game effect. Wraps a closure that mutates SimState.
-/// Built from primitives (eff_draw, eff_destroy_target, etc.) and chained with `.then()`.
-struct Effect(std::sync::Arc<dyn Fn(&mut SimState, u8, &[Target], &HashMap<&str, &CardDef>, &mut dyn rand::RngCore) + Send + Sync>);
-
-impl Clone for Effect {
-    fn clone(&self) -> Self { Effect(std::sync::Arc::clone(&self.0)) }
-}
-
-impl Effect {
-    fn call(
-        &self,
-        state: &mut SimState,
-        t: u8,
-        targets: &[Target],
-        catalog: &HashMap<&str, &CardDef>,
-        rng: &mut dyn rand::RngCore,
-    ) {
-        (self.0)(state, t, targets, catalog, rng);
-    }
-
-    /// Chain two effects: `self` runs first, then `next`.
-    fn then(self, next: Effect) -> Effect {
-        let a = self.0;
-        let b = next.0;
-        Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
-            a(state, t, targets, catalog, rng);
-            b(state, t, targets, catalog, rng);
-        }))
-    }
-}
-
-// ── Effect primitives ─────────────────────────────────────────────────────────
-
-/// Draw `n` cards for `who`.
-fn eff_draw(who: impl Into<String>, n: usize) -> Effect {
-    let who = who.into();
-    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
-        for _ in 0..n {
-            state.sim_draw(&who, t, false);
-        }
-    }))
-}
-
-/// Put `n` cards back from `who`'s hand (Brainstorm put-back).
-fn eff_put_back(who: impl Into<String>, n: usize) -> Effect {
-    let who = who.into();
-    Effect(std::sync::Arc::new(move |state, _t, _targets, _catalog, _rng| {
-        let actual = (n as i32).min(state.player(&who).hand.hidden);
-        state.player_mut(&who).hand.hidden -= actual;
-    }))
-}
-
-/// `who` loses `n` life, with a log line.
-fn eff_life_loss(who: impl Into<String>, n: i32) -> Effect {
-    let who = who.into();
-    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
-        state.lose_life(&who, n);
-        let life = state.life_of(&who);
-        state.log(t, &who, format!("→ lose {} life (now {})", n, life));
-    }))
-}
-
-/// Add mana per `spec` (e.g. `"BBB"`) to `who`'s pool.
-fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effect {
-    let who = who.into();
-    let spec = spec.into();
-    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
-        let mc = parse_mana_cost(&spec);
-        let pool = &mut state.player_mut(&who).pool;
-        pool.w += mc.w; pool.u += mc.u; pool.b += mc.b;
-        pool.r += mc.r; pool.g += mc.g; pool.c += mc.c;
-        pool.total += mc.mana_value();
-        state.log(t, &who, format!("→ add {} to pool", spec));
-    }))
-}
-
-/// Destroy the permanent in `targets[0]`. `caster` used for logging.
-fn eff_destroy_target(caster: impl Into<String>) -> Effect {
-    let caster = caster.into();
-    Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
-        if let Some(Target::Object(id)) = targets.first() {
-            apply_effect_to("destroy", *id, state, t, &caster);
-        }
-    }))
-}
-
-/// Bounce the permanent in `targets[0]` to its controller's hand.
-fn eff_bounce_target(caster: impl Into<String>) -> Effect {
-    let caster = caster.into();
-    Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
-        if let Some(Target::Object(id)) = targets.first() {
-            let id = *id;
-            let controller = state.permanent_controller(id).map(|s| s.to_string());
-            let name = state.permanent_name(id);
-            if let (Some(controller), Some(name)) = (controller, name) {
-                if let Some(idx) = state.player(&controller).permanents.iter().position(|p| p.id == id) {
-                    state.player_mut(&controller).permanents.remove(idx);
-                    state.player_mut(&controller).hand.hidden += 1;
-                    state.log(t, &caster, format!("→ {} returned to {}'s hand", name, controller));
-                }
-            }
-        }
-    }))
-}
-
-/// Set `state.success = true` (Doomsday resolved).
-fn eff_doomsday() -> Effect {
-    Effect(std::sync::Arc::new(|state, _t, _targets, _catalog, _rng| {
-        state.success = true;
-    }))
-}
-
-/// Discard `n` random cards from `target`'s hand. `nonland=true` skips lands.
-fn eff_discard(caster: impl Into<String>, target: Who, n: usize, nonland: bool) -> Effect {
-    let caster = caster.into();
-    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, rng| {
-        use rand::Rng;
-        let target_who = target.resolve(&caster).to_string();
-        let mut lib = std::mem::take(&mut state.player_mut(&target_who).library);
-        let mut discarded: Vec<String> = Vec::new();
-        for _ in 0..n {
-            if state.player(&target_who).hand.hidden <= 0 { break; }
-            let candidates: Vec<usize> = lib.iter().enumerate()
-                .filter(|(_, (_, _, d))| !nonland || !d.is_land())
-                .map(|(i, _)| i)
-                .collect();
-            if candidates.is_empty() { break; }
-            let idx = candidates[rng.gen_range(0..candidates.len())];
-            let (_id, card, _) = lib.remove(idx);
-            state.player_mut(&target_who).hand.hidden -= 1;
-            state.player_mut(&target_who).graveyard.visible.push(card.clone());
-            discarded.push(card);
-        }
-        state.player_mut(&target_who).library = lib;
-        if !discarded.is_empty() {
-            state.log(t, &caster, format!("→ {} discards: {}", target_who, discarded.join(", ")));
-        }
-    }))
-}
-
-/// Put `card_name` onto the battlefield as a permanent for `owner`. Fires ETB triggers.
-fn eff_enter_permanent(
-    owner: impl Into<String>,
-    card_name: impl Into<String>,
-    annotation: Option<String>,
-) -> Effect {
-    let owner = owner.into();
-    let card_name = card_name.into();
-    Effect(std::sync::Arc::new(move |state, t, _targets, catalog, rng| {
-        use rand::Rng;
-        let (counters, ann) = match annotation.as_deref() {
-            Some(s) if s.starts_with('+') => (s[1..].parse::<i32>().unwrap_or(0), None),
-            _ => {
-                let ann = if annotation.is_some() {
-                    annotation.clone()
-                } else if let Some(d) = catalog.get(card_name.as_str()) {
-                    if !d.annotation_options().is_empty() {
-                        Some(d.annotation_options()[rng.gen_range(0..d.annotation_options().len())].clone())
-                    } else { None }
-                } else { None };
-                (0, ann)
-            }
-        };
-        let pw_loyalty = catalog.get(card_name.as_str())
-            .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
-            .unwrap_or(0);
-        let mana_abs = catalog.get(card_name.as_str())
-            .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
-        let new_id = state.alloc_id();
-        state.cards.insert(new_id, CardObject::new(new_id, card_name.clone(), &owner));
-        state.player_mut(&owner).permanents.push(SimPermanent {
-            id: new_id,
-            name: card_name.clone(),
-            annotation: ann,
-            counters,
-            tapped: false,
-            damage: 0,
-            entered_this_turn: true,
-            mana_abilities: mana_abs,
-            attacking: false,
-            unblocked: false,
-            loyalty: pw_loyalty,
-            pw_activated_this_turn: false,
-            attack_target: None,
-            power_mod: 0,
-            toughness_mod: 0,
-        });
-        let etb_ev = GameEvent::ZoneChange {
-            card: card_name.clone(),
-            card_type: "creature".to_string(),
-            from: ZoneId::Stack,
-            to: ZoneId::Battlefield,
-            controller: owner.clone(),
-        };
-        state.queue_triggers(&etb_ev);
-        state.log(t, &owner, format!("{} enters play", card_name));
-    }))
-}
-
-/// Reanimate a random card of `type_filter` from `target`'s graveyard.
-fn eff_reanimate(actor: impl Into<String>, target: Who, type_filter: impl Into<String>) -> Effect {
-    let actor = actor.into();
-    let type_filter = type_filter.into();
-    Effect(std::sync::Arc::new(move |state, t, _targets, catalog, rng| {
-        use rand::Rng;
-        let target_who = target.resolve(&actor).to_string();
-        let candidates: Vec<String> = state.player(&target_who).graveyard.visible.iter()
-            .filter(|n| catalog.get(n.as_str())
-                .map(|d| matches_target_type(&type_filter, &d.kind, false, Some(*d)))
-                .unwrap_or(false))
-            .cloned()
-            .collect();
-        if candidates.is_empty() { return; }
-        let chosen = candidates[rng.gen_range(0..candidates.len())].clone();
-        state.player_mut(&target_who).graveyard.visible.retain(|n| n != &chosen);
-        let mana_abs = catalog.get(chosen.as_str()).map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
-        let new_id = state.alloc_id();
-        state.cards.insert(new_id, CardObject::new(new_id, chosen.clone(), &target_who));
-        state.player_mut(&target_who).permanents.push(SimPermanent {
-            id: new_id,
-            name: chosen.clone(),
-            mana_abilities: mana_abs,
-            ..SimPermanent::new(&chosen)
-        });
-        state.log(t, &actor, format!("→ {} returns from graveyard", chosen));
-    }))
-}
-
-/// Describes a triggered ability at the moment it wants to go on the stack:
-/// what card triggered it, who controls it, what targets it may choose, and
-/// how to build the EffectFn once a target is chosen.
-/// TODO(ids): source should be a permanent ID, not a name string.
-struct TriggerDef {
-    /// Card name of the permanent that triggered.
-    source: String,
-    /// Player who controls that permanent.
-    controller: String,
-    /// Legal target specification. `TargetSpec::None` means no target required.
-    target_spec: TargetSpec,
-    /// Given the chosen target (None iff target_spec is None), produce the effect closure.
-    make_effect: std::sync::Arc<dyn Fn(Option<Target>) -> EffectFn + Send + Sync>,
-}
-
-/// Choose a target for a trigger according to its spec and current game state.
-/// Returns None if the spec is None or no legal targets exist.
-fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, catalog_map: &HashMap<&str, &CardDef>) -> Option<Target> {
-    let opp = opp_of(controller);
-    match spec {
-        TargetSpec::None => None,
-        TargetSpec::Player => Some(Target::Player(state.player_id(opp))),
-        TargetSpec::AnyOpponentCreature => {
-            state.player(opp).permanents.iter()
-                .find(|p| p.name != "Orc Army") // placeholder: any creature
-                .map(|p| Target::Object(p.id))
-        }
-        TargetSpec::AnyOpponentNonlandPermanent => {
-            state.player(opp).permanents.first()
-                .map(|p| Target::Object(p.id))
-        }
-        TargetSpec::OpponentCreatureMvLt4 => {
-            state.player(opp).permanents.iter()
-                .find(|p| {
-                    catalog_map.get(p.name.as_str())
-                        .map(|d| d.is_creature() && mana_value(d.mana_cost()) < 4)
-                        .unwrap_or(true)
-                })
-                .map(|p| Target::Object(p.id))
-        }
-        TargetSpec::OpponentNonblackCreature => {
-            state.player(opp).permanents.iter()
-                .find(|p| {
-                    catalog_map.get(p.name.as_str())
-                        .map(|d| d.is_creature() && !d.is_black())
-                        .unwrap_or(true)
-                })
-                .map(|p| Target::Object(p.id))
-        }
-        TargetSpec::CardInOwnGraveyard { .. } => {
-            // Graveyard cards don't have stable ObjIds yet; target selection deferred.
-            None
-        }
-        TargetSpec::AnyTarget => {
-            // Strategy: prefer a killable opponent creature (1-damage kill),
-            // then default to pinging the opponent's face.
-            if let Some(id) = state.player(opp).permanents.iter()
-                .filter(|p| {
-                    let def = catalog_map.get(p.name.as_str());
-                    if !def.map(|d| d.is_creature()).unwrap_or(false) { return false; }
-                    let (_, tgh) = creature_stats(p, def.copied());
-                    tgh - p.damage <= 1 && tgh > 0
-                })
-                .map(|p| p.id)
-                .next()
-            {
-                return Some(Target::Object(id));
-            }
-            Some(Target::Player(state.player_id(opp)))
-        }
-    }
-}
-
-/// Choose a target for a spell using the same TargetSpec logic as trigger target selection.
-fn choose_spell_target(
-    spec: &TargetSpec,
-    caster: &str,
-    state: &SimState,
-    catalog_map: &HashMap<&str, &CardDef>,
-) -> Option<Target> {
-    choose_trigger_target(spec, caster, state, catalog_map)
-}
+// ── Effect primitives and predicate functions are in effects.rs and predicates.rs ──
 
 // ── Turn structure ────────────────────────────────────────────────────────────
 
@@ -1184,7 +828,7 @@ impl PlayerState {
     }
 }
 
-struct SimState {
+pub(crate) struct SimState {
     turn: u8,
     on_play: bool,
     us: PlayerState,
@@ -1372,6 +1016,127 @@ impl SimState {
     }
 }
 
+
+// ── Display ───────────────────────────────────────────────────────────────────
+
+fn stage_label(turn: u8) -> &'static str {
+    match turn {
+        0..=3 => "Early",
+        4..=5 => "Mid",
+        _ => "Late",
+    }
+}
+
+fn sec(label: &str) -> String {
+    let total = 50usize;
+    let label_with_spaces = format!(" {} ", label);
+    let padding = total.saturating_sub(label_with_spaces.chars().count() + 2);
+    format!("  ──{}{}", label_with_spaces, "─".repeat(padding))
+}
+
+impl std::fmt::Display for SimLand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.tapped {
+            write!(f, "{} (tapped)", self.name)
+        } else {
+            write!(f, "{}", self.name)
+        }
+    }
+}
+
+impl std::fmt::Display for PlayerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.lands.is_empty() {
+            writeln!(f, "  Lands      :")?;
+            for land in &self.lands {
+                writeln!(f, "    * {}", land)?;
+            }
+        }
+
+        if !self.permanents.is_empty() {
+            writeln!(f, "  Permanents :")?;
+            for p in &self.permanents {
+                let mut tags: Vec<String> = Vec::new();
+                if let Some(ann) = &p.annotation { tags.push(ann.clone()); }
+                if p.counters > 0 { tags.push(format!("+{} counters", p.counters)); }
+                if p.loyalty > 0 { tags.push(format!("loyalty: {}", p.loyalty)); }
+                let suffix = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", tags.join(", "))
+                };
+                writeln!(f, "    * {}{}", p.name, suffix)?;
+            }
+        }
+
+        if !self.hand.is_empty() {
+            writeln!(f, "  Hand       :")?;
+            write!(f, "{}", self.hand)?;
+        }
+
+        if !self.graveyard.is_empty() {
+            writeln!(f, "  Graveyard  :")?;
+            write!(f, "{}", self.graveyard)?;
+        }
+
+        if !self.exile.is_empty() {
+            writeln!(f, "  Exile      :")?;
+            for card in &self.exile.visible {
+                let tag = if self.on_adventure.contains(card) { " [on adventure]" } else { "" };
+                writeln!(f, "    * {}{}", card, tag)?;
+            }
+            if self.exile.hidden > 0 {
+                writeln!(f, "    * ({} hidden)", self.exile.hidden)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for SimState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let dbar = "═".repeat(50);
+        writeln!(f)?;
+        writeln!(f, "  ╔{}╗", dbar)?;
+        writeln!(f, "  ║{:^50}║", " DOOMSDAY PILE SCENARIO ")?;
+        writeln!(f, "  ╚{}╝", dbar)?;
+        writeln!(f)?;
+        writeln!(f, "  Deck    : {}", self.us.deck_name)?;
+        writeln!(f, "  Opponent: {}", self.opp.deck_name)?;
+        writeln!(
+            f,
+            "  Turn    : {} ({}, {})",
+            self.turn,
+            stage_label(self.turn),
+            if self.on_play { "on the play" } else { "on the draw" }
+        )?;
+
+        if !self.log.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "{}", sec("TURN LOG"))?;
+            writeln!(f)?;
+            for entry in &self.log {
+                writeln!(f, "  {}", entry)?;
+            }
+        }
+
+        writeln!(f)?;
+        writeln!(f, "{}", sec("MY BOARD"))?;
+        writeln!(f)?;
+        writeln!(f, "  Life       : {} -> {}", self.us.life, self.us.life / 2)?;
+        write!(f, "{}", self.us)?;
+        writeln!(f)?;
+
+        let opp_label = format!("OPPONENT: {}", self.opp.deck_name);
+        writeln!(f, "{}", sec(&opp_label))?;
+        writeln!(f)?;
+        writeln!(f, "  Life       : {}", self.opp.life)?;
+        write!(f, "{}", self.opp)?;
+
+        Ok(())
+    }
+}
 
 // ── Clap args ─────────────────────────────────────────────────────────────────
 
@@ -1605,73 +1370,7 @@ fn sim_discard_to_limit(state: &mut SimState, t: u8, who: &str) {
 
 // ── Action system ─────────────────────────────────────────────────────────────
 
-/// Resolve `"<who>"` relative to the acting player.
-fn resolve_who<'a>(who_rel: &str, actor: &'a str) -> &'a str {
-    if who_rel == "opp" {
-        if actor == "us" {
-            "opp"
-        } else {
-            "us"
-        }
-    } else {
-        actor
-    }
-}
-
-/// Check whether `type_str` matches a permanent. `def` is the target card's definition,
-/// required for MV and color checks (may be None for lands or unknown cards).
-fn matches_target_type(
-    type_str: &str,
-    kind: &CardKind,
-    basic: bool,
-    def: Option<&CardDef>,
-) -> bool {
-    match type_str {
-        "nonbasic_land" => matches!(kind, CardKind::Land(_)) && !basic,
-        "land"          => matches!(kind, CardKind::Land(_)),
-        "creature"      => matches!(kind, CardKind::Creature(_)),
-        "planeswalker"  => matches!(kind, CardKind::Planeswalker(_)),
-        "artifact"      => matches!(kind, CardKind::Artifact(_)),
-        "any"           => true,
-        "creature_mv_lt4" => {
-            matches!(kind, CardKind::Creature(_))
-                && def.map(|d| mana_value(d.mana_cost()) < 4).unwrap_or(true)
-        }
-        "creature_nonblack" => {
-            matches!(kind, CardKind::Creature(_))
-                && def.map(|d| !d.is_black()).unwrap_or(true)
-        }
-        // Non-land permanent: since all entries in `permanents` are already non-land,
-        // this is true for any permanent (lands are in `lands`, not `permanents`).
-        "permanent_nonland" => !matches!(kind, CardKind::Land(_)),
-        _ => false,
-    }
-}
-
-/// Return true if at least one valid target exists for `target_str`.
-fn has_valid_target(
-    target_str: &str,
-    state: &SimState,
-    actor: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
-) -> bool {
-    let (who_rel, type_str) = match target_str.split_once(':') {
-        Some(pair) => pair,
-        None => return false,
-    };
-    let target_who = resolve_who(who_rel, actor);
-    let player = state.player(target_who);
-    player
-        .lands
-        .iter()
-        .any(|l| matches_target_type(type_str, &CardKind::Land(LandData::default()), l.basic, None))
-        || player.permanents.iter().any(|p| {
-            match catalog_map.get(p.name.as_str()).copied() {
-                Some(d) => matches_target_type(type_str, &d.kind, false, Some(d)),
-                None    => type_str == "any",
-            }
-        })
-}
+// resolve_who, matches_target_type, has_valid_target are defined in predicates.rs
 
 /// Check whether an ability can be activated (cost payable + valid target exists).
 /// `source_untapped` must be true when the source is an untapped land/permanent.
@@ -1812,38 +1511,7 @@ fn collect_hand_actions(
     actions
 }
 
-/// Pick a random valid permanent target for `target_str` (e.g. "opp:creature_mv_lt4").
-/// Returns the stable `ObjId` of the chosen permanent, or `None` if no valid target exists.
-fn choose_permanent_target(
-    target_str: &str,
-    actor: &str,
-    state: &SimState,
-    catalog_map: &HashMap<&str, &CardDef>,
-    rng: &mut impl Rng,
-) -> Option<ObjId> {
-    let (who_rel, type_str) = target_str.split_once(':')?;
-    let target_who = resolve_who(who_rel, actor).to_string();
-
-    let mut candidates: Vec<ObjId> = Vec::new();
-    for land in &state.player(&target_who).lands {
-        if matches_target_type(type_str, &CardKind::Land(LandData::default()), land.basic, None) {
-            candidates.push(land.id);
-        }
-    }
-    for perm in &state.player(&target_who).permanents {
-        let def = catalog_map.get(perm.name.as_str()).copied();
-        let matched = match def {
-            Some(d) => matches_target_type(type_str, &d.kind, false, Some(d)),
-            None    => type_str == "any",
-        };
-        if matched { candidates.push(perm.id); }
-    }
-    if candidates.is_empty() {
-        return None;
-    }
-    let idx = rng.gen_range(0..candidates.len());
-    Some(candidates.remove(idx))
-}
+// choose_permanent_target is defined in predicates.rs
 
 /// Apply a targeted effect (destroy / exile) to a permanent identified by ObjId.
 /// Looks up the controller and name from state. Used during resolution.
@@ -1891,23 +1559,7 @@ fn sim_apply_targeted_effect(
     }
 }
 
-/// Match a search filter string against a card definition.
-/// Filter syntax: `"land"`, `"land-island"`, `"land-swamp"`, `"land-island|swamp"`.
-fn matches_search_filter(filter: &str, def: &CardDef) -> bool {
-    let Some(land) = def.as_land() else { return false; };
-    if filter == "land" { return true; }
-    if let Some(types_str) = filter.strip_prefix("land-") {
-        return types_str.split('|').any(|t| match t {
-            "island"   => land.land_types.island,
-            "swamp"    => land.land_types.swamp,
-            "plains"   => land.land_types.plains,
-            "mountain" => land.land_types.mountain,
-            "forest"   => land.land_types.forest,
-            _          => false,
-        });
-    }
-    false
-}
+// matches_search_filter is defined in predicates.rs
 
 /// Pay the activation cost of an ability: mana, life, tap, and/or sacrifice.
 /// Effects are NOT applied here — they happen when the ability resolves off the stack.
@@ -2158,16 +1810,7 @@ fn apply_ability_effect(
     state.log(t, who, format!("{} ability resolves", source_name));
 }
 
-/// Return true if `spell_kind` is a valid target for a counterspell with `counter_target`.
-fn matches_counter_target(counter_target: &str, spell_kind: &CardKind) -> bool {
-    match counter_target {
-        "any"              => true,
-        "noncreature"      => !matches!(spell_kind, CardKind::Creature(_)),
-        "nonland"          => !matches!(spell_kind, CardKind::Land(_)),
-        "instant_or_sorcery" => matches!(spell_kind, CardKind::Instant(_) | CardKind::Sorcery(_)),
-        _ => false,
-    }
-}
+// matches_counter_target is defined in predicates.rs
 
 /// Check whether `cost` can be paid by `who` given current state.
 /// `source_name` is the counterspell card name (excluded from blue pitch candidates).
