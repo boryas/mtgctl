@@ -1,0 +1,490 @@
+use serde::Deserialize;
+// ── Config deserialization ────────────────────────────────────────────────────
+
+#[derive(Deserialize, Default)]
+pub(crate) struct PilegenConfig {
+    #[serde(default)]
+    pub(crate) cards: Vec<CardDef>,
+}
+
+/// One way to pay for a counterspell. Each option is tried in order; the first
+/// affordable one is taken.
+///
+/// Components (all optional, combined additively):
+///   mana_cost           — standard mana (e.g. "3UU" for FoW hard cost)
+///   exile_blue_from_hand — exile another blue card from hand as pitch cost
+///   life_cost           — life paid alongside (e.g. 1 for FoW alternate)
+///   bounce_island       — return any blue-producing land from play to hand
+///   hand_min            — minimum hand size required (inclusive of this spell)
+///   prob                — probability this option is even attempted (default 1.0)
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct AlternateCost {
+    #[serde(default)]
+    pub(crate) mana_cost: String,
+    #[serde(default)]
+    pub(crate) exile_blue_from_hand: bool,
+    #[serde(default)]
+    pub(crate) life_cost: i32,
+    #[serde(default)]
+    pub(crate) bounce_island: bool,
+    #[serde(default)]
+    pub(crate) hand_min: i32,
+    #[serde(default)]
+    pub(crate) prob: Option<f64>,
+}
+
+/// An activated ability a permanent can use during its controller's turn.
+///
+/// Preconditions are derived automatically: ability is available iff
+/// the cost can be paid and a valid target exists (if one is required).
+///
+/// target syntax: "<who>:<type>"
+///   who  ∈ { opp, us }
+///   type ∈ { nonbasic_land, land, creature, planeswalker, artifact, any }
+///
+/// effect ∈ { destroy, bounce, exile, fetch_land }
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct AbilityDef {
+    // ── Cost ──────────────────────────────────────────────────────────────────
+    /// Mana cost to activate (empty = no mana required).
+    #[serde(default)]
+    pub(crate) mana_cost: String,
+    /// Whether the source is tapped as part of the cost.
+    #[serde(default)]
+    pub(crate) tap_self: bool,
+    /// Whether the source is sacrificed as part of the cost.
+    #[serde(default)]
+    pub(crate) sacrifice_self: bool,
+    /// Life paid as part of the cost (e.g. 1 for fetchlands).
+    #[serde(default)]
+    pub(crate) life_cost: i32,
+
+    // ── Target (optional) ─────────────────────────────────────────────────────
+    /// If set, a valid target must exist for the ability to be available,
+    /// and the effect is applied to a randomly chosen valid target.
+    #[serde(default)]
+    pub(crate) target: Option<String>,
+
+    // ── Zone ──────────────────────────────────────────────────────────────────
+    /// Zone the card must be in for this ability. Default "" / "play" = in play.
+    /// Use "hand" for cycling/channel abilities.
+    #[serde(default)]
+    pub(crate) zone: String,
+    /// Discard this card as part of the cost (zone="hand" abilities).
+    #[serde(default)]
+    pub(crate) discard_self: bool,
+    /// Sacrifice a land you control as part of the cost (e.g. Edge of Autumn cycling).
+    #[serde(default)]
+    pub(crate) sacrifice_land: bool,
+
+    // ── Effect ────────────────────────────────────────────────────────────────
+    #[serde(default)]
+    pub(crate) effect: String,
+    /// If true, this is a ninjutsu activation: cost includes returning an unblocked attacker to
+    /// hand, and the effect puts the ninja into play tapped and attacking.
+    #[serde(default)]
+    pub(crate) ninjutsu: bool,
+    /// If Some, this is a loyalty ability with the given loyalty adjustment
+    /// (positive = gain loyalty, negative = spend loyalty, 0 = 0-loyalty ability).
+    /// Loyalty abilities are sorcery-speed and can only be activated once per turn per planeswalker.
+    #[serde(default)]
+    pub(crate) loyalty_cost: Option<i32>,
+}
+
+// ── Mana ability types ────────────────────────────────────────────────────────
+
+/// How a permanent produces mana. `produces` is a string of color chars (e.g. "B", "U", "BU").
+/// Empty produces → contributes to generic total only (e.g. Cavern of Souls).
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct ManaAbility {
+    #[serde(default)] pub(crate) tap_self: bool,
+    #[serde(default)] pub(crate) sacrifice_self: bool,
+    #[serde(default)] pub(crate) produces: String,
+}
+
+/// The five basic land subtypes.
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct LandTypes {
+    #[serde(default)] pub(crate) plains: bool,
+    #[serde(default)] pub(crate) island: bool,
+    #[serde(default)] pub(crate) swamp: bool,
+    #[serde(default)] pub(crate) mountain: bool,
+    #[serde(default)] pub(crate) forest: bool,
+}
+
+// ── Per-variant data structs ──────────────────────────────────────────────────
+
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct LandData {
+    #[serde(default)] pub(crate) basic: bool,
+    #[serde(default)] pub(crate) land_types: LandTypes,
+    #[serde(default)] pub(crate) enters_tapped: bool,
+    #[serde(default)] pub(crate) annotation_options: Vec<String>,
+    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
+    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
+}
+
+#[derive(Deserialize, Clone)]
+pub(crate) struct CreatureData {
+    #[serde(default)] pub(crate) mana_cost: String,
+    pub(crate) power: i32,
+    pub(crate) toughness: i32,
+    #[serde(default)] pub(crate) black: bool,
+    #[serde(default)] pub(crate) blue: bool,
+    #[allow(dead_code)]
+    #[serde(default)] pub(crate) exileable: bool,
+    #[serde(default)] pub(crate) legendary: bool,
+    #[serde(default)] pub(crate) delve: bool,
+    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
+    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
+    #[serde(default)] pub(crate) adventure: Option<AdventureFace>,
+    #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
+    #[serde(default)] pub(crate) keywords: Vec<String>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct ArtifactData {
+    #[serde(default)] pub(crate) mana_cost: String,
+    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
+    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
+}
+
+/// The ninjutsu ability on a ninja creature.
+#[derive(Deserialize, Clone)]
+pub(crate) struct NinjutsuAbility {
+    pub(crate) mana_cost: String,
+}
+
+impl NinjutsuAbility {
+    pub(crate) fn as_ability_def(&self) -> AbilityDef {
+        AbilityDef {
+            zone: "hand".to_string(),
+            mana_cost: self.mana_cost.clone(),
+            ninjutsu: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// The adventure face of an adventure card (the instant/sorcery half).
+#[derive(Deserialize, Clone)]
+pub(crate) struct AdventureFace {
+    pub(crate) name: String,
+    #[serde(default)] pub(crate) card_type: String,  // "instant" or "sorcery"
+    #[serde(default)] pub(crate) mana_cost: String,
+    #[serde(default)] pub(crate) target: Option<String>,
+    #[serde(default)] pub(crate) effects: Vec<String>,
+}
+
+/// Spell data shared by Instant and Sorcery variants.
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct SpellData {
+    #[serde(default)] pub(crate) mana_cost: String,
+    #[serde(default)] pub(crate) blue: bool,
+    #[serde(default)] pub(crate) black: bool,
+    #[allow(dead_code)]
+    #[serde(default)] pub(crate) exileable: bool,
+    #[serde(default)] pub(crate) target: Option<String>,
+    #[serde(default)] pub(crate) counter_target: Option<String>,
+    #[serde(default)] pub(crate) requires: Vec<String>,
+    #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
+    #[serde(default)] pub(crate) delve: bool,
+}
+
+#[derive(Deserialize, Clone)]
+pub(crate) struct PlaneswalkerData {
+    #[serde(default)] pub(crate) mana_cost: String,
+    #[serde(default)] pub(crate) loyalty: i32,
+    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
+}
+
+#[derive(Clone)]
+pub(crate) enum CardKind {
+    Land(LandData),
+    Creature(CreatureData),
+    Artifact(ArtifactData),
+    Instant(SpellData),
+    Sorcery(SpellData),
+    Planeswalker(PlaneswalkerData),
+    Enchantment,
+}
+
+// ── CardDef wrapper ───────────────────────────────────────────────────────────
+
+/// A card the generator knows about. Cards not in the catalog are treated as
+/// generic non-land spells: hand-eligible, not permanent candidates, not exileable.
+///
+/// Wrapper struct preserving direct `.name` access and stable HashMap keys while
+/// holding a typed `kind` that enforces card-category invariants.
+#[derive(Clone)]
+pub(crate) struct CardDef {
+    pub(crate) name: String,
+    /// Relative likelihood of appearing as a permanent in play (default 100).
+    #[allow(dead_code)]
+    pub(crate) play_weight: Option<u32>,
+    /// True for tokens and flip-targets: never in a library, created by effects at runtime.
+    pub(crate) is_token: bool,
+    pub(crate) kind: CardKind,
+}
+
+impl CardDef {
+    pub(crate) fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
+    pub(crate) fn is_creature(&self) -> bool { matches!(self.kind, CardKind::Creature(_)) }
+    pub(crate) fn is_instant(&self) -> bool { matches!(self.kind, CardKind::Instant(_)) }
+    #[allow(dead_code)]
+    pub(crate) fn is_sorcery(&self) -> bool { matches!(self.kind, CardKind::Sorcery(_)) }
+
+    pub(crate) fn mana_cost(&self) -> &str {
+        match &self.kind {
+            CardKind::Land(_) | CardKind::Enchantment => "",
+            CardKind::Creature(c) => &c.mana_cost,
+            CardKind::Artifact(a) => &a.mana_cost,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.mana_cost,
+            CardKind::Planeswalker(p) => &p.mana_cost,
+        }
+    }
+
+    pub(crate) fn abilities(&self) -> &[AbilityDef] {
+        match &self.kind {
+            CardKind::Land(l) => &l.abilities,
+            CardKind::Creature(c) => &c.abilities,
+            CardKind::Artifact(a) => &a.abilities,
+            CardKind::Planeswalker(p) => &p.abilities,
+            CardKind::Instant(_) | CardKind::Sorcery(_) | CardKind::Enchantment => &[],
+        }
+    }
+
+    pub(crate) fn alternate_costs(&self) -> &[AlternateCost] {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.alternate_costs,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn counter_target(&self) -> Option<&str> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.counter_target.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn target(&self) -> Option<&str> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.target.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn requires(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.requires,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn delve(&self) -> bool {
+        match &self.kind {
+            CardKind::Creature(c) => c.delve,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.delve,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn legendary(&self) -> bool {
+        match &self.kind {
+            CardKind::Creature(c) => c.legendary,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn annotation_options(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Land(l) => &l.annotation_options,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn is_blue(&self) -> bool {
+        self.mana_cost().contains('U')
+            || match &self.kind {
+                CardKind::Creature(c) => c.blue,
+                CardKind::Instant(s) | CardKind::Sorcery(s) => s.blue,
+                _ => false,
+            }
+    }
+
+    pub(crate) fn is_black(&self) -> bool {
+        self.mana_cost().contains('B')
+            || match &self.kind {
+                CardKind::Creature(c) => c.black,
+                CardKind::Instant(s) | CardKind::Sorcery(s) => s.black,
+                _ => false,
+            }
+    }
+
+    pub(crate) fn mana_abilities(&self) -> &[ManaAbility] {
+        match &self.kind {
+            CardKind::Land(l) => &l.mana_abilities,
+            CardKind::Creature(c) => &c.mana_abilities,
+            CardKind::Artifact(a) => &a.mana_abilities,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn as_land(&self) -> Option<&LandData> {
+        match &self.kind { CardKind::Land(l) => Some(l), _ => None }
+    }
+
+    pub(crate) fn as_creature(&self) -> Option<&CreatureData> {
+        match &self.kind { CardKind::Creature(c) => Some(c), _ => None }
+    }
+
+    pub(crate) fn as_spell(&self) -> Option<&SpellData> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn adventure(&self) -> Option<&AdventureFace> {
+        match &self.kind {
+            CardKind::Creature(c) => c.adventure.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn ninjutsu(&self) -> Option<&NinjutsuAbility> {
+        match &self.kind {
+            CardKind::Creature(c) => c.ninjutsu.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn keywords(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Creature(c) => &c.keywords,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn has_keyword(&self, kw: &str) -> bool {
+        self.keywords().iter().any(|k| k == kw)
+    }
+}
+
+// ── TOML deserialization: two-step via RawCardDef ─────────────────────────────
+
+/// Typed card category used only during TOML deserialization.
+#[derive(Deserialize, Clone, PartialEq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CardType {
+    Land,
+    Creature,
+    Planeswalker,
+    Artifact,
+    #[default]
+    Instant,
+    Sorcery,
+    Enchantment,
+}
+
+/// Flat deserialization target. Converted to `CardDef` by `From<RawCardDef>`.
+#[derive(Deserialize, Clone, Default)]
+pub(crate) struct RawCardDef {
+    pub(crate) name: String,
+    pub(crate) card_type: CardType,
+    #[serde(default)] pub(crate) enters_tapped: bool,
+    #[serde(default)] pub(crate) basic: bool,
+    #[serde(default)] pub(crate) land_types: LandTypes,
+    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
+    #[serde(default)] pub(crate) annotation_options: Vec<String>,
+    #[serde(default)] pub(crate) mana_cost: String,
+    #[serde(default)] pub(crate) power: Option<i32>,
+    #[serde(default)] pub(crate) toughness: Option<i32>,
+    #[serde(default)] pub(crate) loyalty: Option<i32>,
+    #[serde(default)] pub(crate) legendary: bool,
+    #[serde(default)] pub(crate) blue: bool,
+    #[serde(default)] pub(crate) black: bool,
+    #[serde(default)] pub(crate) target: Option<String>,
+    #[serde(default)] pub(crate) exileable: bool,
+    #[serde(default)] pub(crate) play_weight: Option<u32>,
+    #[serde(default)] pub(crate) requires: Vec<String>,
+    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
+    #[serde(default)] pub(crate) delve: bool,
+    #[serde(default)] pub(crate) counter_target: Option<String>,
+    #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
+    #[serde(default)] pub(crate) adventure: Option<AdventureFace>,
+    #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
+    #[serde(default)] pub(crate) keywords: Vec<String>,
+    #[serde(default)] pub(crate) is_token: bool,
+}
+
+impl From<RawCardDef> for CardDef {
+    fn from(r: RawCardDef) -> Self {
+        let kind = match r.card_type {
+            CardType::Land => CardKind::Land(LandData {
+                basic: r.basic,
+                land_types: r.land_types,
+                enters_tapped: r.enters_tapped,
+                annotation_options: r.annotation_options,
+                mana_abilities: r.mana_abilities.clone(),
+                abilities: r.abilities,
+            }),
+            CardType::Creature => CardKind::Creature(CreatureData {
+                mana_cost: r.mana_cost,
+                power: r.power.unwrap_or(1),
+                toughness: r.toughness.unwrap_or(1),
+                black: r.black,
+                blue: r.blue,
+                exileable: r.exileable,
+                legendary: r.legendary,
+                delve: r.delve,
+                abilities: r.abilities,
+                mana_abilities: r.mana_abilities.clone(),
+                adventure: r.adventure,
+                ninjutsu: r.ninjutsu,
+                keywords: r.keywords,
+            }),
+            CardType::Instant => CardKind::Instant(SpellData {
+                mana_cost: r.mana_cost,
+                blue: r.blue,
+                black: r.black,
+                exileable: r.exileable,
+                target: r.target,
+                counter_target: r.counter_target,
+                requires: r.requires,
+                alternate_costs: r.alternate_costs,
+                delve: r.delve,
+            }),
+            CardType::Sorcery => CardKind::Sorcery(SpellData {
+                mana_cost: r.mana_cost,
+                blue: r.blue,
+                black: r.black,
+                exileable: r.exileable,
+                target: r.target,
+                counter_target: r.counter_target,
+                requires: r.requires,
+                alternate_costs: r.alternate_costs,
+                delve: r.delve,
+            }),
+            CardType::Artifact => CardKind::Artifact(ArtifactData {
+                mana_cost: r.mana_cost,
+                abilities: r.abilities,
+                mana_abilities: r.mana_abilities.clone(),
+            }),
+            CardType::Planeswalker => CardKind::Planeswalker(PlaneswalkerData {
+                mana_cost: r.mana_cost,
+                loyalty: r.loyalty.unwrap_or(0),
+                abilities: r.abilities,
+            }),
+            CardType::Enchantment => CardKind::Enchantment,
+        };
+        CardDef { name: r.name, play_weight: r.play_weight, is_token: r.is_token, kind }
+    }
+}
+
+impl<'de> Deserialize<'de> for CardDef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        RawCardDef::deserialize(d).map(CardDef::from)
+    }
+}
