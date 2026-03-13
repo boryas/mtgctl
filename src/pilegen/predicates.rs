@@ -10,6 +10,36 @@ pub(crate) enum Target {
     Object(ObjId),
 }
 
+/// Predicate describing which stack spells a counterspell may target.
+#[derive(Clone, Debug)]
+pub(crate) enum SpellFilter {
+    Any,
+    Noncreature,
+    Nonland,
+    InstantOrSorcery,
+}
+
+impl SpellFilter {
+    pub(crate) fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "any"                => Some(SpellFilter::Any),
+            "noncreature"        => Some(SpellFilter::Noncreature),
+            "nonland"            => Some(SpellFilter::Nonland),
+            "instant_or_sorcery" => Some(SpellFilter::InstantOrSorcery),
+            _                    => None,
+        }
+    }
+
+    pub(crate) fn matches(&self, kind: &CardKind) -> bool {
+        match self {
+            SpellFilter::Any             => true,
+            SpellFilter::Noncreature     => !matches!(kind, CardKind::Creature(_)),
+            SpellFilter::Nonland         => !matches!(kind, CardKind::Land(_)),
+            SpellFilter::InstantOrSorcery => matches!(kind, CardKind::Instant(_) | CardKind::Sorcery(_)),
+        }
+    }
+}
+
 /// Declarative description of what targets a spell or ability may choose from.
 /// Used both to enumerate legal choices and to re-validate at resolution.
 #[derive(Clone, Debug)]
@@ -182,16 +212,6 @@ pub(crate) fn choose_permanent_target(
     Some(candidates.remove(idx))
 }
 
-/// Return true if `spell_kind` is a valid target for a counterspell with `counter_target`.
-pub(crate) fn matches_counter_target(counter_target: &str, spell_kind: &CardKind) -> bool {
-    match counter_target {
-        "any"              => true,
-        "noncreature"      => !matches!(spell_kind, CardKind::Creature(_)),
-        "nonland"          => !matches!(spell_kind, CardKind::Land(_)),
-        "instant_or_sorcery" => matches!(spell_kind, CardKind::Instant(_) | CardKind::Sorcery(_)),
-        _ => false,
-    }
-}
 
 /// Match a search filter string against a card definition.
 /// Filter syntax: `"land"`, `"land-island"`, `"land-swamp"`, `"land-island|swamp"`.

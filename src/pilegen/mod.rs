@@ -1475,8 +1475,8 @@ fn collect_hand_actions(
                 let has_target = stack.iter().any(|item| {
                     if item.owner == owner_id || item.is_ability { return false; }
                     match catalog_map.get(item.name.as_str()) {
-                        Some(d) => matches_counter_target(ct, &d.kind),
-                        None    => ct == "any",
+                        Some(d) => ct.matches(&d.kind),
+                        None    => matches!(ct, SpellFilter::Any),
                     }
                 });
                 if !has_target { return None; }
@@ -1819,7 +1819,6 @@ fn apply_ability_effect(
     state.log(t, who, format!("{} ability resolves", source_name));
 }
 
-// matches_counter_target is defined in predicates.rs
 
 /// Check whether `cost` can be paid by `who` given current state.
 /// `source_name` is the counterspell card name (excluded from blue pitch candidates).
@@ -2176,7 +2175,7 @@ fn respond_with_counter(
         .iter()
         .filter(|(_, n, d)| {
             d.counter_target()
-                .is_some_and(|ct| matches_counter_target(ct, target_kind))
+                .is_some_and(|ct| ct.matches(target_kind))
                 && !d.alternate_costs().is_empty()
                 && !(n.as_str() == "Daze" && target_has_untapped_lands)
         })

@@ -178,18 +178,18 @@ pub(crate) struct AdventureFace {
 }
 
 /// Spell data shared by Instant and Sorcery variants.
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SpellData {
-    #[serde(default)] pub(crate) mana_cost: String,
-    #[serde(default)] pub(crate) blue: bool,
-    #[serde(default)] pub(crate) black: bool,
+    pub(crate) mana_cost: String,
+    pub(crate) blue: bool,
+    pub(crate) black: bool,
     #[allow(dead_code)]
-    #[serde(default)] pub(crate) exileable: bool,
-    #[serde(default)] pub(crate) target: Option<String>,
-    #[serde(default)] pub(crate) counter_target: Option<String>,
-    #[serde(default)] pub(crate) requires: Vec<String>,
-    #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
-    #[serde(default)] pub(crate) delve: bool,
+    pub(crate) exileable: bool,
+    pub(crate) target: Option<String>,
+    pub(crate) counter_target: Option<SpellFilter>,
+    pub(crate) requires: Vec<String>,
+    pub(crate) alternate_costs: Vec<AlternateCost>,
+    pub(crate) delve: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -262,9 +262,9 @@ impl CardDef {
         }
     }
 
-    pub(crate) fn counter_target(&self) -> Option<&str> {
+    pub(crate) fn counter_target(&self) -> Option<&SpellFilter> {
         match &self.kind {
-            CardKind::Instant(s) | CardKind::Sorcery(s) => s.counter_target.as_deref(),
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.counter_target.as_ref(),
             _ => None,
         }
     }
@@ -452,7 +452,7 @@ impl From<RawCardDef> for CardDef {
                 black: r.black,
                 exileable: r.exileable,
                 target: r.target,
-                counter_target: r.counter_target,
+                counter_target: r.counter_target.as_deref().and_then(SpellFilter::from_str),
                 requires: r.requires,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
@@ -463,7 +463,7 @@ impl From<RawCardDef> for CardDef {
                 black: r.black,
                 exileable: r.exileable,
                 target: r.target,
-                counter_target: r.counter_target,
+                counter_target: r.counter_target.as_deref().and_then(SpellFilter::from_str),
                 requires: r.requires,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,

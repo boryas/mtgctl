@@ -82,22 +82,23 @@ work (same card, two names, one `ObjId`). Acknowledged by `TODO(ids)` in the cod
 
 ---
 
-## Step 4 — `counter_target` → `TargetSpec`
+## Step 4 — `counter_target` → `SpellFilter`
 
-**Status: TODO**
+**Status: DONE**
 
 **Why:** `counter_target` is currently a `String` matched by a custom
-`matches_counter_target()` function. Making it a `TargetSpec` variant unifies
-all three predicate systems (target matching, counter matching, search matching)
-into one.
+`matches_counter_target()` function. Making it a typed `SpellFilter` enum
+replaces the ad-hoc string dispatch with a proper predicate.
 
-**What to do:**
+**What was done:**
 
-- Add a `TargetSpec::StackEntry { … }` variant (or reuse the existing predicate
-  system to describe stack entries by type).
-- Change `SpellData.counter_target: Option<String>` → `Option<TargetSpec>`.
-- Replace `matches_counter_target()` with the standard `has_valid_target()` path.
-- Update TOML parsing to build the `TargetSpec` at load time.
+- Added `SpellFilter` enum (`Any`, `Noncreature`, `Nonland`, `InstantOrSorcery`)
+  with `from_str()` and `matches()` methods to `predicates.rs`.
+- Changed `SpellData.counter_target: Option<String>` → `Option<SpellFilter>`.
+- Removed `Deserialize` from `SpellData` (only constructed from `RawCardDef`).
+- `From<RawCardDef>` converts the TOML string → `SpellFilter` at load time.
+- Replaced both `matches_counter_target(ct, &d.kind)` call sites with `ct.matches(&d.kind)`.
+- Deleted `matches_counter_target`.
 
 **Verification:** `cargo test` passes. `matches_counter_target` is deleted.
 
@@ -167,14 +168,13 @@ describes; mechanics read it from there.
 ### Adventure
 
 - Remove `PlayerState.on_adventure: Vec<String>`.
-- Add `on_adventure: bool` to the `Exile` zone representation (or as a flag on
-  the card object when in exile).
+- Add `on_adventure: bool` to the card object when in exile.
 - `collect_hand_actions` reads exile objects with `on_adventure == true` to find
   castable adventure cards. No special `Vec<String>` needed.
 
 ### Tamiyo / DFC transform
 
-- Remove `do_flip_tamiyo()` destroy-and-create pattern.
+- Tamiyo flip is a two step play->exile(id); exile->play-flipped(id);
 - Add `active_face: u8` field to permanents (0 = front, 1 = back).
 - DFC card definitions carry both faces. Transform = flip `active_face` in place.
   Same `ObjId`, same damage counters, same "entered this turn" status.
@@ -184,9 +184,11 @@ describes; mechanics read it from there.
 
 - Remove `ninjutsu_attack_target` from `StackItem` (done after Step 5).
 - Ninjutsu is an activated ability from hand with combat timing. The attacker
-  to return is chosen as a regular `Target` at activation time (target = an
-  unblocked attacker you control). The "enters attacking" state is generic:
-  the entering creature inherits the returned attacker's `attack_target`.
+  to return is chosen as part of paying the cost of the ability.
+  The costs are: (usually) mana + return an unblocked attacking creature to your hand.
+  whether "there exists" an unblocked attacking creature (and equally, but less interestingly, the mana) determines whether we can ninjutsu.
+  The "enters attacking" state is generic: attackers track an attack target, so a ninjutsu effect reads that off (we can track costs paid as an input to effects, this works for murktide too)
+  the entering creature inherits the returned attacker's `attack_target` which it reads from having access to costs paid.
 
 **Verification:** `cargo test` passes. `do_flip_tamiyo`, `on_adventure: Vec<String>`,
 and `ninjutsu_attack_target` are deleted.
