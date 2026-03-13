@@ -236,8 +236,11 @@ enum GameEvent {
 /// The effect closure captures all context (targets, source data) at trigger-push time.
 #[derive(Clone)]
 struct TriggerContext {
-    /// Card name of the triggering permanent. TODO(ids): replace with permanent ID.
-    source: String,
+    /// ObjId of the permanent that generated this trigger.
+    /// Use ObjId::UNSET for synthetic/test triggers with no real source permanent.
+    source_id: ObjId,
+    /// Display name of the source — used for stack item naming and logging.
+    source_name: String,
     /// Player who controls that permanent.
     controller: String,
     /// Short string label for this trigger type — used in logging and test assertions.
@@ -1801,7 +1804,7 @@ fn apply_ability_effect(
 
     // tamiyo_plus_two: register a continuous effect until controller's next turn.
     if ability.effect == "tamiyo_plus_two" {
-        state.active_effects.push(tamiyo_plus_two_effect(who));
+        state.active_effects.push(tamiyo_plus_two_effect(who, source_id));
         state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
         return;
     }

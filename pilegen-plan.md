@@ -8,9 +8,9 @@ Steps are ordered by dependency and impact. Complete them in order.
 
 ---
 
-## Step 1 — Split into `src/sim/` module
+## Step 1 — Split into `src/pilegen/` module
 
-**Status: TODO**
+**Status: DONE** (commit 3e4b077)
 
 **Why first:** With 6k+ lines, every subsequent step is harder than it needs to be.
 Pulling strategy into its own file makes the engine/strategy boundary physically
@@ -38,7 +38,7 @@ Create `src/sim/` and split `pilegen.rs` along these seams:
 
 ## Step 2 — Fire `EnteredStep` for all steps
 
-**Status: TODO**
+**Status: DONE** (commit 209b7cc)
 
 **Why:** Currently only `DeclareAttackers` fires `EnteredStep`. Every step with a
 priority round must fire it before the priority loop. This is load-bearing for any
@@ -67,7 +67,7 @@ and confirms it fires.
 
 ## Step 3 — `TriggerContext.source` → `ObjId`
 
-**Status: TODO**
+**Status: DONE** (commit to follow)
 
 **Why:** The last string-identity field in the trigger pipeline. Required before DFC
 work (same card, two names, one `ObjId`). Acknowledged by `TODO(ids)` in the code.

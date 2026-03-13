@@ -493,10 +493,11 @@ impl<'de> Deserialize<'de> for CardDef {
 // ── Trigger check functions (one per trigger-having card) ─────────────────────
 
 /// Build a Bowmasters trigger context. Target is chosen at resolution time via TargetSpec::AnyTarget.
-fn bowmasters_trigger_ctx(controller: &str, kind: &'static str, log_msg: &'static str) -> TriggerContext {
+fn bowmasters_trigger_ctx(source_id: ObjId, controller: &str, kind: &'static str, log_msg: &'static str) -> TriggerContext {
     let ctl = controller.to_string();
     TriggerContext {
-        source: "Orcish Bowmasters".into(),
+        source_id,
+        source_name: "Orcish Bowmasters".into(),
         controller: ctl.clone(),
         kind,
         target_spec: TargetSpec::AnyTarget,
@@ -531,25 +532,25 @@ fn bowmasters_trigger_ctx(controller: &str, kind: &'static str, log_msg: &'stati
     }
 }
 
-pub(super) fn bowmasters_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerContext>) {
+pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
     match event {
         // ETB: only fires for the entering Bowmasters itself.
         GameEvent::ZoneChange { card, to: ZoneId::Battlefield, controller: ctlr, .. }
             if card == "Orcish Bowmasters" && ctlr == controller =>
         {
-            pending.push(bowmasters_trigger_ctx(controller, "BowmastersEtb", "Bowmasters ETB: amass Orc 1"));
+            pending.push(bowmasters_trigger_ctx(source_id, controller, "BowmastersEtb", "Bowmasters ETB: amass Orc 1"));
         }
         // Opponent draws any card that isn't their natural draw-step draw.
         GameEvent::Draw { controller: drawer, draw_index: _, is_natural }
             if drawer != controller && !is_natural =>
         {
-            pending.push(bowmasters_trigger_ctx(controller, "BowmastersDrawTrigger", "Bowmasters draw trigger: amass Orc 1"));
+            pending.push(bowmasters_trigger_ctx(source_id, controller, "BowmastersDrawTrigger", "Bowmasters draw trigger: amass Orc 1"));
         }
         _ => {}
     }
 }
 
-fn murktide_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerContext>) {
+fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange {
         from: ZoneId::Graveyard, to: ZoneId::Exile,
         card_type, controller: exiler, ..
@@ -557,13 +558,14 @@ fn murktide_check(event: &GameEvent, controller: &str, pending: &mut Vec<Trigger
         if (card_type == "instant" || card_type == "sorcery") && exiler == controller {
             let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source: "Murktide Regent".into(),
+                source_id,
+                source_name: "Murktide Regent".into(),
                 controller: ctl.clone(),
                 kind: "MurktideExile",
                 target_spec: TargetSpec::None,
                 effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
                     if let Some(p) = state.player_mut(&ctl).permanents
-                        .iter_mut().find(|p| p.name == "Murktide Regent")
+                        .iter_mut().find(|p| p.id == source_id)
                     {
                         p.counters += 1;
                         state.log(t, &ctl, "Murktide: inst/sorc exiled → +1/+1 counter");
@@ -574,7 +576,7 @@ fn murktide_check(event: &GameEvent, controller: &str, pending: &mut Vec<Trigger
     }
 }
 
-fn tamiyo_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerContext>) {
+fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
     match event {
         // EnteredStep DeclareAttackers fires after attackers are marked, so p.attacking is set.
         GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
@@ -582,13 +584,14 @@ fn tamiyo_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerCo
         {
             let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source: "Tamiyo, Inquisitive Student".into(),
+                source_id,
+                source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
                 kind: "TamiyoClue",
                 target_spec: TargetSpec::None,
                 effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
                     if state.player(&ctl).permanents.iter()
-                        .any(|p| p.name == "Tamiyo, Inquisitive Student" && p.attacking)
+                        .any(|p| p.id == source_id && p.attacking)
                     {
                         do_create_clue(&ctl, state, t);
                     }
@@ -601,7 +604,8 @@ fn tamiyo_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerCo
         {
             let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source: "Tamiyo, Inquisitive Student".into(),
+                source_id,
+                source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
                 kind: "TamiyoFlip",
                 target_spec: TargetSpec::None,
@@ -615,13 +619,14 @@ fn tamiyo_check(event: &GameEvent, controller: &str, pending: &mut Vec<TriggerCo
 }
 
 /// Signature for a per-card trigger check function.
+/// Receives the source permanent's `ObjId` so it can be captured in the effect closure.
 /// Inspects the event, and if a trigger fires, appends a `TriggerContext` to `pending`.
 /// Does NOT modify state — triggers are queued and pushed onto the stack by the caller.
-type TriggerCheckFn = fn(&GameEvent, &str, &mut Vec<TriggerContext>);
+type TriggerCheckFn = fn(&GameEvent, ObjId, &str, &mut Vec<TriggerContext>);
 
 static CARD_TRIGGERS: &[(&str, TriggerCheckFn)] = &[
-    ("Orcish Bowmasters",         bowmasters_check),
-    ("Murktide Regent",           murktide_check),
+    ("Orcish Bowmasters",           bowmasters_check),
+    ("Murktide Regent",             murktide_check),
     ("Tamiyo, Inquisitive Student", tamiyo_check),
 ];
 
@@ -631,11 +636,11 @@ static CARD_TRIGGERS: &[(&str, TriggerCheckFn)] = &[
 pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerContext> {
     let mut pending: Vec<TriggerContext> = Vec::new();
 
-    // Static card-based triggers.
+    // Static card-based triggers: pass the source permanent's ObjId to each check function.
     for &(card_name, check_fn) in CARD_TRIGGERS {
         for owner in ["us", "opp"] {
-            if state.player(owner).permanents.iter().any(|p| p.name == card_name) {
-                check_fn(event, owner, &mut pending);
+            if let Some(p) = state.player(owner).permanents.iter().find(|p| p.name == card_name) {
+                check_fn(event, p.id, owner, &mut pending);
             }
         }
     }
@@ -660,7 +665,7 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<Stack
             .into_iter().collect();
         stack.push(StackItem {
             id: ObjId::UNSET,
-            name: format!("{} trigger", ctx.source),
+            name: format!("{} trigger", ctx.source_name),
             owner: state.player_id(&ctx.controller),
             card_id: ObjId::UNSET,
             is_ability: true,       // NAP skips countering triggered abilities
@@ -686,11 +691,12 @@ pub(super) fn apply_trigger(ctx: &TriggerContext, targets: &[Target], state: &mu
 
 /// Build a TriggerContext for the Tamiyo +2 per-attacker trigger.
 /// Extracted to keep the on_event closure in `tamiyo_plus_two_effect` readable.
-fn tamiyo_plus_two_fire_ctx(tamiyo_ctl: String, attacker_id: ObjId, attacker_ctl: String) -> TriggerContext {
+fn tamiyo_plus_two_fire_ctx(tamiyo_id: ObjId, tamiyo_ctl: String, attacker_id: ObjId, attacker_ctl: String) -> TriggerContext {
     let ctl = tamiyo_ctl.clone();
     let atk_ctl = attacker_ctl.clone();
     TriggerContext {
-        source: "Tamiyo, Seasoned Scholar".into(),
+        source_id: tamiyo_id,
+        source_name: "Tamiyo, Seasoned Scholar".into(),
         controller: tamiyo_ctl,
         kind: "TamiyoPlusTwoFire",
         target_spec: TargetSpec::None,
@@ -720,14 +726,16 @@ fn tamiyo_plus_two_fire_ctx(tamiyo_ctl: String, attacker_id: ObjId, attacker_ctl
 }
 
 /// Build a ContinuousEffect for Tamiyo's +2 loyalty ability.
-pub(super) fn tamiyo_plus_two_effect(controller: &str) -> ContinuousEffect {
+/// `tamiyo_id` is the ObjId of the Tamiyo permanent activating the ability.
+pub(super) fn tamiyo_plus_two_effect(controller: &str, tamiyo_id: ObjId) -> ContinuousEffect {
     ContinuousEffect {
         controller: controller.to_string(),
         expires: EffectExpiry::StartOfControllerNextTurn,
-        on_event: Some(std::sync::Arc::new(|event, effect_controller| {
+        on_event: Some(std::sync::Arc::new(move |event, effect_controller| {
             if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
                 if attacker_controller != effect_controller {
                     return Some(tamiyo_plus_two_fire_ctx(
+                        tamiyo_id,
                         effect_controller.to_string(),
                         *attacker_id,
                         attacker_controller.clone(),

@@ -1426,7 +1426,7 @@
             controller: controller.to_string(),
         };
         let mut pending = Vec::new();
-        bowmasters_check(&ev, controller, &mut pending);
+        bowmasters_check(&ev, ObjId::UNSET, controller, &mut pending);
         pending.remove(0)
     }
 
@@ -1636,7 +1636,7 @@
     fn test_tamiyo_plus_two_applies_power_mod_to_attackers() {
         let mut state = make_state();
         // Register the +2 effect for "us" (as if us activated it last turn).
-        state.active_effects.push(tamiyo_plus_two_effect("us"));
+        state.active_effects.push(tamiyo_plus_two_effect("us", ObjId::UNSET));
         // Opp has a 3/3 attacker.
         let atk_def = creature("Dragon", 3, 3);
         let mut atk = SimPermanent::new("Dragon");
@@ -1661,7 +1661,7 @@
     #[test]
     fn test_tamiyo_plus_two_expires_at_controller_untap() {
         let mut state = make_state();
-        state.active_effects.push(tamiyo_plus_two_effect("us"));
+        state.active_effects.push(tamiyo_plus_two_effect("us", ObjId::UNSET));
         assert_eq!(state.active_effects.len(), 1);
 
         // Untap step for "us" should expire the effect.
@@ -1728,7 +1728,7 @@
                     if let GameEvent::EnteredStep { step, .. } = e {
                         if *step == step_kind {
                             return Some(TriggerContext {
-                                source: format!("test-{:?}", step_kind),
+                                source_id: ObjId::UNSET, source_name: format!("test-{:?}", step_kind),
                                 controller: "us".to_string(),
                                 kind: "TestStepTrigger",
                                 target_spec: TargetSpec::None,
@@ -1761,7 +1761,7 @@
                     if let GameEvent::EnteredPhase { phase, .. } = e {
                         if *phase == phase_kind {
                             return Some(TriggerContext {
-                                source: format!("test-{:?}", phase_kind),
+                                source_id: ObjId::UNSET, source_name: format!("test-{:?}", phase_kind),
                                 controller: "us".to_string(),
                                 kind: "TestPhaseTrigger",
                                 target_spec: TargetSpec::None,
