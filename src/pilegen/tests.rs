@@ -37,21 +37,16 @@
         }
     }
 
-    fn stack_item(name: &str, _owner: &str) -> StackItem {
-        StackItem {
+    fn stack_item(name: &str, _owner: &str) -> StackEntry {
+        StackEntry::Spell {
             id: ObjId::UNSET,
+            card_id: ObjId::UNSET,
             name: name.to_string(),
             owner: ObjId::UNSET,
-            card_id: ObjId::UNSET,
-            is_ability: false,
-            ability_def: None,
-            annotation: None,
-            adventure_exile: false,
+            is_adventure_face: false,
             adventure_card_name: None,
-            adventure_face: None,
-            trigger_context: None,
+            annotation: None,
             chosen_targets: vec![],
-            ninjutsu_attack_target: None,
             effect: None,
         }
     }
@@ -475,8 +470,8 @@
 
         assert!(item.is_some(), "spell should be cast");
         let item = item.unwrap();
-        assert_eq!(item.name, "Dark Ritual");
-        assert_eq!(item.owner, state.us.id, "owner should be us player id");
+        assert_eq!(item.display_name(), "Dark Ritual");
+        assert_eq!(item.owner(), state.us.id, "owner should be us player id");
         assert!(!us_lib.iter().any(|(_, n, _)| n == "Dark Ritual"), "removed from library");
         assert_eq!(state.us.pool.b, 0, "mana spent");
     }
@@ -835,11 +830,12 @@
 
         let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
         // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
-        assert_eq!(item.annotation.as_deref(), Some("+3"));
+        let StackEntry::Spell { ref annotation, ref effect, ref chosen_targets, .. } = item else { panic!("expected Spell") };
+        assert_eq!(annotation.as_deref(), Some("+3"));
 
         // Resolve via Effect path
         let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
-        item.effect.as_ref().unwrap().call(&mut state, 1, &item.chosen_targets, &catalog_map, rng_dyn);
+        effect.as_ref().unwrap().call(&mut state, 1, chosen_targets, &catalog_map, rng_dyn);
 
         let murktide = &state.us.permanents[0];
         assert_eq!(murktide.counters, 3, "3 instants/sorceries exiled → 3 counters");
@@ -874,10 +870,11 @@
         let mut us_lib = vec![(ObjId::UNSET, "Murktide Regent".to_string(), murktide_def)];
 
         let item = cast_spell(&mut state, 1, "us", "Murktide Regent", &mut us_lib, None, &catalog_map, &mut seeded_rng()).unwrap();
-        assert!(item.annotation.is_none(), "no instants/sorceries → no counter annotation");
+        let StackEntry::Spell { ref annotation, ref effect, ref chosen_targets, .. } = item else { panic!("expected Spell") };
+        assert!(annotation.is_none(), "no instants/sorceries → no counter annotation");
 
         let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
-        item.effect.as_ref().unwrap().call(&mut state, 1, &item.chosen_targets, &catalog_map, rng_dyn);
+        effect.as_ref().unwrap().call(&mut state, 1, chosen_targets, &catalog_map, rng_dyn);
 
         let murktide = &state.us.permanents[0];
         assert_eq!(murktide.counters, 0);

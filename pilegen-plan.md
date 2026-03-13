@@ -148,7 +148,7 @@ resolution. Once `stack` is on `SimState`, counterspells can use a proper
 
 ## Step 5 — `StackEntry` enum
 
-**Status: TODO**
+**Status: DONE**
 
 **Why:** `StackItem` has 17 fields, many mutually exclusive. The flat struct makes
 it hard to reason about what fields are valid for spells vs abilities vs triggers.

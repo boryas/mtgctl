@@ -105,13 +105,13 @@ pub(crate) fn choose_trigger_target(
             // Pick the topmost opposing non-ability spell matching the filter.
             state.stack.iter().rev()
                 .find(|item| {
-                    if item.owner == caster_id || item.is_ability { return false; }
-                    match catalog_map.get(item.name.as_str()) {
+                    if item.owner() == caster_id || !item.is_counterable() { return false; }
+                    match catalog_map.get(item.display_name()) {
                         Some(d) => stack_filter_matches(filter, &d.kind),
                         None    => filter == "any",
                     }
                 })
-                .map(|item| Target::Object(item.id))
+                .map(|item| Target::Object(item.id()))
         }
     }
 }
@@ -168,8 +168,8 @@ pub(crate) fn has_valid_target(
     if let Some(filter) = target_str.strip_prefix("stack:") {
         let actor_id = state.player_id(actor);
         return state.stack.iter().any(|item| {
-            if item.owner == actor_id || item.is_ability { return false; }
-            match catalog_map.get(item.name.as_str()) {
+            if item.owner() == actor_id || !item.is_counterable() { return false; }
+            match catalog_map.get(item.display_name()) {
                 Some(d) => stack_filter_matches(filter, &d.kind),
                 None    => filter == "any",
             }

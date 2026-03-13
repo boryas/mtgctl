@@ -116,61 +116,72 @@ impl CardObject {
     }
 }
 
-/// An activated or triggered ability on the stack (not a card).
+/// A typed stack entry: a spell, activated ability, or triggered ability on the stack.
 #[derive(Clone)]
-struct StackAbility {
-    id: ObjId,
-    source_id: ObjId,
-    source_name: String,
-    owner: String,
-    controller: String,
-    ability_def: Option<AbilityDef>,
-    trigger_context: Option<TriggerContext>,
-    chosen_targets: Vec<Target>,
-    effect: Option<Effect>,
-    annotation: Option<String>,
+pub(crate) enum StackEntry {
+    /// A spell cast from hand (or adventure / from-adventure). Counterable.
+    Spell {
+        /// Stable ObjId allocated at cast time.
+        id: ObjId,
+        /// ObjId of the physical card (matches library entry). UNSET for cast-from-adventure.
+        card_id: ObjId,
+        /// Name of the spell face being cast (adventure face name, or card name).
+        name: String,
+        owner: ObjId,
+        /// When true, this is an adventure face: resolves to exile + on_adventure.
+        is_adventure_face: bool,
+        /// Physical card name (creature half) when is_adventure_face=true.
+        adventure_card_name: Option<String>,
+        /// Pre-computed annotation for permanents (e.g. Murktide counter count).
+        annotation: Option<String>,
+        chosen_targets: Vec<Target>,
+        effect: Option<Effect>,
+    },
+    /// An activated ability (not a card). Not counterable.
+    Ability {
+        id: ObjId,
+        /// ObjId of the permanent whose ability this is.
+        source_id: ObjId,
+        source_name: String,
+        owner: ObjId,
+        ability_def: Option<AbilityDef>,
+        chosen_targets: Vec<Target>,
+        /// For ninjutsu: attack_target of the replaced attacker.
+        ninjutsu_attack_target: Option<ObjId>,
+    },
+    /// A triggered ability (not a card). Not counterable.
+    Trigger {
+        id: ObjId,
+        source_id: ObjId,
+        source_name: String,
+        owner: ObjId,
+        context: TriggerContext,
+        chosen_targets: Vec<Target>,
+    },
 }
 
-/// An item on the spell stack: a spell or ability that has been declared and paid for
-/// but not yet resolved.
-///
-/// Targets are chosen at cast time and stored here so resolution carries out effects
-/// deterministically without needing to re-pick targets.
-#[derive(Clone)]
-pub(crate) struct StackItem {
-    /// Stable stack-object identity. Freshly allocated for spells; ObjId::UNSET for abilities.
-    id: ObjId,
-    name: String,
-    owner: ObjId,
-    /// Stable ObjId of the physical card this stack item represents.
-    /// Matches the id assigned when the card was placed in the library.
-    /// ObjId::UNSET for ability stack items (not a card).
-    card_id: ObjId,
-    /// True for activated abilities; NAP skips countering these.
-    is_ability: bool,
-    /// For activated abilities: the ability definition, used to apply the effect at resolution.
-    ability_def: Option<AbilityDef>,
-    /// Pre-computed annotation for permanents (e.g. Murktide size from delve count).
-    /// If Some, overrides random annotation_options pick at resolution time.
-    annotation: Option<String>,
-    /// When true, the spell is an adventure face: on resolution it goes to exile + on_adventure
-    /// instead of the graveyard.
-    adventure_exile: bool,
-    /// The physical card's name (creature half) when adventure_exile=true; used for exile placement.
-    adventure_card_name: Option<String>,
-    /// Adventure face data (name, effects, target) used at resolution when adventure_exile=true.
-    adventure_face: Option<AdventureFace>,
-    /// For triggered abilities: the trigger payload to apply at resolution.
-    /// When Some, this overrides ability_def / spell resolution — `apply_trigger` is called instead.
-    trigger_context: Option<TriggerContext>,
-    /// Targets chosen when the trigger was put on the stack (from trigger_context.target_spec).
-    chosen_targets: Vec<Target>,
-    /// For ninjutsu abilities: the attack_target of the replaced attacker, so the ninja can inherit it.
-    ninjutsu_attack_target: Option<ObjId>,
-    /// Composable effect closure populated by `spell_effect` at cast time.
-    /// When Some, the new Effect path is used at resolution. When None, falls back
-    /// When None, the spell has no game text (e.g. test stubs).
-    effect: Option<Effect>,
+impl StackEntry {
+    pub(crate) fn id(&self) -> ObjId {
+        match self {
+            Self::Spell { id, .. } | Self::Ability { id, .. } | Self::Trigger { id, .. } => *id,
+        }
+    }
+    pub(crate) fn owner(&self) -> ObjId {
+        match self {
+            Self::Spell { owner, .. } | Self::Ability { owner, .. } | Self::Trigger { owner, .. } => *owner,
+        }
+    }
+    /// Display name: spell name for Spell, source name for Ability/Trigger.
+    pub(crate) fn display_name(&self) -> &str {
+        match self {
+            Self::Spell { name, .. } => name,
+            Self::Ability { source_name, .. } | Self::Trigger { source_name, .. } => source_name,
+        }
+    }
+    /// True only for spells — abilities and triggers are not counterable.
+    pub(crate) fn is_counterable(&self) -> bool {
+        matches!(self, Self::Spell { .. })
+    }
 }
 
 
@@ -230,10 +241,10 @@ enum GameEvent {
     //                  CounterChanged, LifeChanged, TokenCreated.
 }
 
-/// Data stored with a triggered ability's `StackItem`.
+/// Data stored with a triggered ability's stack entry.
 /// The effect closure captures all context (targets, source data) at trigger-push time.
 #[derive(Clone)]
-struct TriggerContext {
+pub(crate) struct TriggerContext {
     /// ObjId of the permanent that generated this trigger.
     /// Use ObjId::UNSET for synthetic/test triggers with no real source permanent.
     source_id: ObjId,
@@ -858,11 +869,9 @@ pub(crate) struct SimState {
     active_effects: Vec<ContinuousEffect>,
     /// Spell/ability stack. Items are resolved last-in-first-out. Populated by
     /// handle_priority_round; empty between priority rounds.
-    pub(crate) stack: Vec<StackItem>,
+    pub(crate) stack: Vec<StackEntry>,
     /// All cards in all zones, keyed by stable ObjId. Added as part of staged object model migration.
     cards: HashMap<ObjId, CardObject>,
-    /// Activated/triggered abilities currently on the stack, keyed by ObjId.
-    abilities: HashMap<ObjId, StackAbility>,
     /// ID allocator — starts at 1; 0 is reserved as ObjId::UNSET.
     next_id: u64,
 }
@@ -885,7 +894,6 @@ impl SimState {
             active_effects: Vec::new(),
             stack: Vec::new(),
             cards: HashMap::new(),
-            abilities: HashMap::new(),
             next_id: 0,
         };
         s.us.id = s.alloc_id();
@@ -1898,7 +1906,7 @@ fn apply_alt_cost_components(
 }
 
 /// Cast a spell: pay its cost, choose any permanent target, remove from library, log,
-/// and return a `StackItem` ready to be placed on the stack.
+/// and return a `StackEntry` ready to be placed on the stack.
 ///
 /// Cost selection: if `preferred_cost` is `Some`, that specific alternate cost is used
 /// (caller already verified it's payable, e.g. `respond_with_counter` after prob checks).
@@ -1906,7 +1914,7 @@ fn apply_alt_cost_components(
 /// and the card has alternate costs), the first payable alternate cost is used instead.
 ///
 /// Permanent targets (from `CardDef.target`) are chosen randomly at cast time and
-/// locked into the `StackItem`; resolution uses the stored target directly.
+/// locked into the `StackEntry`; resolution uses the stored target directly.
 ///
 /// Returns `None` if the spell can't be cast (cost unpayable or card not in library).
 fn cast_spell(
@@ -1918,7 +1926,7 @@ fn cast_spell(
     preferred_cost: Option<&AlternateCost>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
-) -> Option<StackItem> {
+) -> Option<StackEntry> {
     let def = *catalog_map.get(name)?;
     let mut cost = parse_mana_cost(def.mana_cost());
 
@@ -2024,20 +2032,15 @@ fn cast_spell(
         .into_iter()
         .collect::<Vec<_>>();
 
-    Some(StackItem {
+    Some(StackEntry::Spell {
         id: state.alloc_id(),
         name: name.to_string(),
         owner: state.player_id(who),
         card_id,
-        is_ability: false,
-        ability_def: None,
-        annotation,
-        adventure_exile: false,
+        is_adventure_face: false,
         adventure_card_name: None,
-        adventure_face: None,
-        trigger_context: None,
+        annotation,
         chosen_targets: spell_chosen_targets,
-        ninjutsu_attack_target: None,
         effect: Some(spell_eff),
     })
 }
@@ -2155,12 +2158,12 @@ fn respond_with_counter(
     probabilistic: bool,
 ) -> Option<PriorityAction> {
     let default_kind;
-    let target_kind: &CardKind = match catalog_map.get(state.stack[target_idx].name.as_str()) {
+    let target_kind: &CardKind = match catalog_map.get(state.stack[target_idx].display_name()) {
         Some(d) => &d.kind,
         None => { default_kind = CardKind::Sorcery(SpellData::default()); &default_kind }
     };
 
-    let target_has_untapped_lands = state.player(state.who_str(state.stack[target_idx].owner)).lands.iter().any(|l| !l.tapped);
+    let target_has_untapped_lands = state.player(state.who_str(state.stack[target_idx].owner())).lands.iter().any(|l| !l.tapped);
 
     // Deduplicate counterspell names so each spell is evaluated once.
     let mut seen = std::collections::HashSet::new();
@@ -2425,21 +2428,14 @@ fn handle_priority_round(
                 // Pay costs now; effect is deferred until the ability resolves.
                 let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
                 pay_activation_cost(state, t, &who, source_id, ability, actor_lib, catalog_map);
-                state.stack.push(StackItem {
+                state.stack.push(StackEntry::Ability {
                     id: ObjId::UNSET,
-                    name: source_name_for_stack,
+                    source_id,
+                    source_name: source_name_for_stack,
                     owner: state.player_id(&who),
-                    card_id: source_id,
-                    is_ability: true,
                     ability_def: Some(ability.clone()),
-                    annotation: None,
-                    adventure_exile: false,
-                    adventure_card_name: None,
-                    adventure_face: None,
-                    trigger_context: None,
                     chosen_targets: vec![],
                     ninjutsu_attack_target,
-                    effect: None,
                 });
                 let next = if who == ap { nap } else { ap };
                 priority_holder = next.to_string();
@@ -2487,20 +2483,15 @@ fn handle_priority_round(
                 // Push StackItem.
                 let item_id = state.alloc_id();
                 let item_owner = state.player_id(&who);
-                state.stack.push(StackItem {
+                state.stack.push(StackEntry::Spell {
                     id: item_id,
+                    card_id: adv_card_id,
                     name: face.name.clone(),
                     owner: item_owner,
-                    card_id: adv_card_id,
-                    is_ability: false,
-                    ability_def: None,
-                    annotation: None,
-                    adventure_exile: true,
+                    is_adventure_face: true,
                     adventure_card_name: Some(card_name.clone()),
-                    adventure_face: Some(face),
-                    trigger_context: None,
+                    annotation: None,
                     chosen_targets: adv_targets,
-                    ninjutsu_attack_target: None,
                     effect: Some(adv_eff),
                 });
                 state.player_mut(&who).spells_cast_this_turn += 1;
@@ -2540,20 +2531,15 @@ fn handle_priority_round(
                     .collect::<Vec<_>>();
                 let item_id = state.alloc_id();
                 let item_owner = state.player_id(&who);
-                state.stack.push(StackItem {
+                state.stack.push(StackEntry::Spell {
                     id: item_id,
+                    card_id: ObjId::UNSET, // TODO: look up from state.cards when zone tracking is complete
                     name: card_name.clone(),
                     owner: item_owner,
-                    card_id: ObjId::UNSET, // TODO: look up from state.cards when zone tracking is complete
-                    is_ability: false,
-                    ability_def: None,
-                    annotation: None,
-                    adventure_exile: false,
+                    is_adventure_face: false,
                     adventure_card_name: None,
-                    adventure_face: None,
-                    trigger_context: None,
+                    annotation: None,
                     chosen_targets: from_adv_targets,
-                    ninjutsu_attack_target: None,
                     effect: Some(from_adv_eff),
                 });
                 state.player_mut(&who).spells_cast_this_turn += 1;
@@ -2569,7 +2555,7 @@ fn handle_priority_round(
                     .unwrap_or(false);
                 if !is_instant && !state.stack.is_empty() {
                     eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack (stack={}), treating as Pass", name,
-                        state.stack.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "));
+                        state.stack.iter().map(|s| s.display_name()).collect::<Vec<_>>().join(", "));
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     // Treat as Pass — no resources spent, no card removed.
                     last_passer = Some(who.clone());
@@ -2610,46 +2596,50 @@ fn handle_priority_round(
                     } else {
                         // Resolve top item only, then AP gets priority again.
                         let top = state.stack.pop().unwrap();
-                        let top_owner_str = state.who_str(top.owner).to_string();
-                        if top.is_ability {
-                            // Triggered ability resolves.
-                            if let Some(ref ctx) = top.trigger_context.clone() {
-                                apply_trigger(ctx, &top.chosen_targets, state, t, catalog_map);
-                            // Activated ability resolves.
-                            } else if let Some(ref ab) = top.ability_def {
-                                let (actor_lib, _other_lib) = if top_owner_str == "us" {
-                                    (&mut *us_lib, &mut *opp_lib)
+                        let top_owner_str = state.who_str(top.owner()).to_string();
+                        match top {
+                            StackEntry::Trigger { ref context, ref chosen_targets, .. } => {
+                                apply_trigger(context, chosen_targets, state, t, catalog_map);
+                            }
+                            StackEntry::Ability { source_id, ref ability_def, ninjutsu_attack_target, .. } => {
+                                if let Some(ref ab) = ability_def {
+                                    let (actor_lib, _other_lib) = if top_owner_str == "us" {
+                                        (&mut *us_lib, &mut *opp_lib)
+                                    } else {
+                                        (&mut *opp_lib, &mut *us_lib)
+                                    };
+                                    apply_ability_effect(state, t, &top_owner_str, source_id, ab, actor_lib, catalog_map, rng, ninjutsu_attack_target);
+                                }
+                            }
+                            StackEntry::Spell { ref name, ref adventure_card_name, is_adventure_face, ref chosen_targets, ref effect, .. } => {
+                                if is_adventure_face {
+                                    // Adventure spell: run the effect (e.g. bounce), then exile to on_adventure.
+                                    if let Some(ref eff) = effect {
+                                        let rng_dyn: &mut dyn rand::RngCore = rng;
+                                        eff.call(state, t, chosen_targets, catalog_map, rng_dyn);
+                                    }
+                                    let card_name = adventure_card_name.as_deref().unwrap_or(name).to_string();
+                                    state.player_mut(&top_owner_str).exile.visible.push(card_name.clone());
+                                    state.player_mut(&top_owner_str).on_adventure.push(card_name.clone());
+                                    state.log(t, &top_owner_str, format!("{} resolves → {} on adventure in exile", name, card_name));
+                                } else if let Some(ref eff) = effect {
+                                    // Effect path: all non-adventure spells.
+                                    let is_perm = catalog_map.get(name.as_str())
+                                        .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
+                                            | CardKind::Planeswalker(_) | CardKind::Enchantment))
+                                        .unwrap_or(false);
+                                    if !is_perm {
+                                        state.player_mut(&top_owner_str).graveyard.visible.push(name.clone());
+                                        state.log(t, &top_owner_str, format!("{} resolves", name));
+                                    }
+                                    let rng_dyn: &mut dyn rand::RngCore = rng;
+                                    eff.call(state, t, chosen_targets, catalog_map, rng_dyn);
                                 } else {
-                                    (&mut *opp_lib, &mut *us_lib)
-                                };
-                                apply_ability_effect(state, t, &top_owner_str, top.card_id, ab, actor_lib, catalog_map, rng, top.ninjutsu_attack_target);
+                                    // effect: None — treat as no-op (should not occur in production).
+                                    state.player_mut(&top_owner_str).graveyard.visible.push(name.clone());
+                                    state.log(t, &top_owner_str, format!("{} resolves", name));
+                                }
                             }
-                        } else if top.adventure_exile {
-                            // Adventure spell: run the effect (e.g. bounce), then exile to on_adventure.
-                            if let Some(ref eff) = top.effect {
-                                let rng_dyn: &mut dyn rand::RngCore = rng;
-                                eff.call(state, t, &top.chosen_targets, catalog_map, rng_dyn);
-                            }
-                            let card_name = top.adventure_card_name.as_deref().unwrap_or(&top.name).to_string();
-                            state.player_mut(&top_owner_str).exile.visible.push(card_name.clone());
-                            state.player_mut(&top_owner_str).on_adventure.push(card_name.clone());
-                            state.log(t, &top_owner_str, format!("{} resolves → {} on adventure in exile", top.name, card_name));
-                        } else if let Some(ref eff) = top.effect {
-                            // New Effect path: used for all non-adventure spells.
-                            let is_perm = catalog_map.get(top.name.as_str())
-                                .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
-                                    | CardKind::Planeswalker(_) | CardKind::Enchantment))
-                                .unwrap_or(false);
-                            if !is_perm {
-                                state.player_mut(&top_owner_str).graveyard.visible.push(top.name.clone());
-                                state.log(t, &top_owner_str, format!("{} resolves", top.name));
-                            }
-                            let rng_dyn: &mut dyn rand::RngCore = rng;
-                            eff.call(state, t, &top.chosen_targets, catalog_map, rng_dyn);
-                        } else {
-                            // effect: None — treat as no-op (should not occur in production).
-                            state.player_mut(&top_owner_str).graveyard.visible.push(top.name.clone());
-                            state.log(t, &top_owner_str, format!("{} resolves", top.name));
                         }
                         // AP gets priority with remaining stack.
                         priority_holder = ap.to_string();

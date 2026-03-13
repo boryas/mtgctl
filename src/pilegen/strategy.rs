@@ -129,10 +129,10 @@ fn nap_action(
     if other_acted {
         let actor_lib: &[_] = if who == "us" { us_lib } else { opp_lib };
         for idx in (0..state.stack.len()).rev() {
-            let item_owner = state.stack[idx].owner;
-            let item_is_ability = state.stack[idx].is_ability;
-            let item_name = state.stack[idx].name.clone();
-            if item_owner != state.player_id(who) && !item_is_ability {
+            let item_owner = state.stack[idx].owner();
+            let item_is_counterable = state.stack[idx].is_counterable();
+            let item_name = state.stack[idx].display_name().to_string();
+            if item_owner != state.player_id(who) && item_is_counterable {
                 if !worth_countering(&item_name, catalog_map) {
                     eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, item_name);
                     break;
@@ -166,16 +166,19 @@ fn ap_react(
         return None;
     }
     let top_idx = state.stack.len() - 1;
-    let top_is_ability = state.stack[top_idx].is_ability;
-    let top_owner = state.stack[top_idx].owner;
-    let top_chosen = state.stack[top_idx].chosen_targets.clone();
+    let top_is_counterable = state.stack[top_idx].is_counterable();
+    let top_owner = state.stack[top_idx].owner();
+    let top_chosen = match &state.stack[top_idx] {
+        StackEntry::Spell { chosen_targets, .. } => chosen_targets.clone(),
+        _ => vec![],
+    };
     let us_id = state.us.id;
-    let dd_countered = !top_is_ability
+    let dd_countered = top_is_counterable
         && top_owner != us_id
         && top_chosen.first()
             .and_then(|t| if let Target::Object(id) = t { Some(id) } else { None })
-            .and_then(|id| state.stack.iter().find(|s| s.id == *id))
-            .is_some_and(|s| s.name == "Doomsday" && s.owner == us_id);
+            .and_then(|id| state.stack.iter().find(|s| s.id() == *id))
+            .is_some_and(|s| matches!(s, StackEntry::Spell { name, owner, .. } if name == "Doomsday" && *owner == us_id));
     if !dd_countered {
         return None;
     }

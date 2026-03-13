@@ -219,12 +219,13 @@ pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
     Effect(Arc::new(move |state, t, targets, _catalog, _rng| {
         let Some(Target::Object(target_id)) = targets.first() else { return; };
         let target_id = *target_id;
-        let pos = state.stack.iter().position(|s| s.id == target_id);
+        let pos = state.stack.iter().position(|s| s.id() == target_id);
         if let Some(pos) = pos {
             let target = state.stack.remove(pos);
-            let target_owner = state.who_str(target.owner).to_string();
-            state.player_mut(&target_owner).graveyard.visible.push(target.name.clone());
-            state.log(t, &caster, format!("→ {} countered", target.name));
+            let target_owner = state.who_str(target.owner()).to_string();
+            let target_name = target.display_name().to_string();
+            state.player_mut(&target_owner).graveyard.visible.push(target_name.clone());
+            state.log(t, &caster, format!("→ {} countered", target_name));
         } else {
             state.log(t, &caster, "→ fizzled (target already resolved)".to_string());
         }

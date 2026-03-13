@@ -652,21 +652,16 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
     for ctx in triggers {
         let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map)
             .into_iter().collect();
-        state.stack.push(StackItem {
+        let source_name = ctx.source_name.clone();
+        let source_id = ctx.source_id;
+        let owner = state.player_id(&ctx.controller);
+        state.stack.push(StackEntry::Trigger {
             id: ObjId::UNSET,
-            name: format!("{} trigger", ctx.source_name),
-            owner: state.player_id(&ctx.controller),
-            card_id: ObjId::UNSET,
-            is_ability: true,       // NAP skips countering triggered abilities
-            ability_def: None,
-            annotation: None,
-            adventure_exile: false,
-            adventure_card_name: None,
-            adventure_face: None,
-            trigger_context: Some(ctx),
+            source_id,
+            source_name,
+            owner,
+            context: ctx,
             chosen_targets,
-            ninjutsu_attack_target: None, // sentinel to avoid replace_all collision
-            effect: None,
         });
     }
 }
