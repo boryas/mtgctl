@@ -310,6 +310,7 @@ enum StepKind {
     Untap,
     Upkeep,
     Draw,
+    Main,   // pre- and post-combat main phase priority window
     BeginCombat,
     DeclareAttackers,
     DeclareBlockers,
@@ -2698,16 +2699,17 @@ fn do_step(
     rng: &mut impl Rng,
 ) {
     state.current_phase = match step.kind {
-        StepKind::Untap           => "Untap",
-        StepKind::Upkeep          => "Upkeep",
-        StepKind::Draw            => "Draw",
-        StepKind::BeginCombat     => "BeginCombat",
+        StepKind::Untap            => "Untap",
+        StepKind::Upkeep           => "Upkeep",
+        StepKind::Draw             => "Draw",
+        StepKind::Main             => "Main",
+        StepKind::BeginCombat      => "BeginCombat",
         StepKind::DeclareAttackers => "DeclareAttackers",
         StepKind::DeclareBlockers  => "DeclareBlockers",
-        StepKind::CombatDamage    => "CombatDamage",
-        StepKind::EndCombat       => "EndCombat",
-        StepKind::End             => "EndStep",
-        StepKind::Cleanup         => "Cleanup",
+        StepKind::CombatDamage     => "CombatDamage",
+        StepKind::EndCombat        => "EndCombat",
+        StepKind::End              => "EndStep",
+        StepKind::Cleanup          => "Cleanup",
     }.to_string();
     match step.kind {
         StepKind::Untap => {
@@ -2997,9 +2999,19 @@ fn do_step(
             for p in state.us.permanents.iter_mut() { p.attacking = false; p.unblocked = false; }
             for p in state.opp.permanents.iter_mut() { p.attacking = false; p.unblocked = false; }
         }
-        StepKind::Upkeep | StepKind::BeginCombat | StepKind::End => {
+        StepKind::Upkeep | StepKind::BeginCombat | StepKind::End | StepKind::Main => {
             // No automatic actions.
         }
+    }
+
+    // Fire EnteredStep for all priority-bearing steps.
+    // DeclareAttackers fires it inside its own arm (after p.attacking is set) so skip it here.
+    if step.prio && step.kind != StepKind::DeclareAttackers {
+        let step_ev = GameEvent::EnteredStep {
+            step: step.kind,
+            active_player: ap.to_string(),
+        };
+        state.queue_triggers(&step_ev);
     }
 
     if step.prio {
@@ -3071,6 +3083,11 @@ fn do_phase(
     }
     if phase.is_main_phase() {
         state.current_phase = "Main".to_string();
+        let step_ev = GameEvent::EnteredStep {
+            step: StepKind::Main,
+            active_player: ap.to_string(),
+        };
+        state.queue_triggers(&step_ev);
         let on_board = collect_on_board_actions(state, ap, t, dd_turn, catalog_map, rng);
         state.player_mut(ap).pending_actions = on_board;
         handle_priority_round(state, t, ap, dd_turn, us_lib, opp_lib, catalog_map, rng);
