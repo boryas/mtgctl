@@ -2330,6 +2330,7 @@ fn collect_hand_actions(
     who: &str,
     library: &[(ObjId, String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
+    stack: &[StackItem],
 ) -> Vec<PriorityAction> {
     if state.player(who).hand.hidden <= 0 {
         return Vec::new();
@@ -2346,10 +2347,6 @@ fn collect_hand_actions(
             if !card_has_implementation(def) {
                 return None;
             }
-            // Counterspells are only useful in response; exclude from proactive casting.
-            if def.counter_target().is_some() {
-                return None;
-            }
             if def.legendary() && permanents_in_play.iter().any(|p| p.name == name.as_str()) {
                 return None;
             }
@@ -2357,6 +2354,17 @@ fn collect_hand_actions(
                 if !has_valid_target(tgt, state, who, catalog_map) {
                     return None;
                 }
+            }
+            if let Some(ct) = def.counter_target() {
+                let owner_id = state.player_id(who);
+                let has_target = stack.iter().any(|item| {
+                    if item.owner == owner_id || item.is_ability { return false; }
+                    match catalog_map.get(item.name.as_str()) {
+                        Some(d) => matches_counter_target(ct, &d.kind),
+                        None    => ct == "any",
+                    }
+                });
+                if !has_target { return None; }
             }
             let ok = def.requires().iter().all(|req| match req.as_str() {
                 "opp_hand_nonempty" => state.player(opp_who).hand.hidden > 0,
@@ -3820,7 +3828,7 @@ fn ap_proactive(
     }
 
     let actor_lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-    let actions = collect_hand_actions(state, who, actor_lib, catalog_map);
+    let actions = collect_hand_actions(state, who, actor_lib, catalog_map, stack);
     if actions.is_empty() {
         let pool = &state.player(who).pool;
         let hand = state.player(who).hand.hidden;
