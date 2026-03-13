@@ -2346,6 +2346,10 @@ fn collect_hand_actions(
             if !card_has_implementation(def) {
                 return None;
             }
+            // Counterspells are only useful in response; exclude from proactive casting.
+            if def.counter_target().is_some() {
+                return None;
+            }
             if def.legendary() && permanents_in_play.iter().any(|p| p.name == name.as_str()) {
                 return None;
             }
@@ -3254,10 +3258,9 @@ fn bowmasters_check(event: &GameEvent, controller: &str, pending: &mut Vec<Trigg
         {
             pending.push(bowmasters_trigger_ctx(controller, "BowmastersEtb", "Bowmasters ETB: amass Orc 1"));
         }
-        // Opponent draws any card that isn't their natural draw-step draw,
-        // OR a draw-step draw that is their 2nd+ draw this turn.
-        GameEvent::Draw { controller: drawer, draw_index, is_natural }
-            if drawer != controller && (!is_natural || *draw_index > 1) =>
+        // Opponent draws any card that isn't their natural draw-step draw.
+        GameEvent::Draw { controller: drawer, draw_index: _, is_natural }
+            if drawer != controller && !is_natural =>
         {
             pending.push(bowmasters_trigger_ctx(controller, "BowmastersDrawTrigger", "Bowmasters draw trigger: amass Orc 1"));
         }
@@ -3642,6 +3645,20 @@ fn collect_on_board_actions(
     actions
 }
 
+/// True if `name` is a spell the NAP considers worth spending a free counterspell (FoW / Daze) on.
+/// Cantrips and mana rituals are not worth pitching; permanents and combo pieces are.
+fn worth_countering(name: &str, catalog_map: &HashMap<&str, &CardDef>) -> bool {
+    if let Some(def) = catalog_map.get(name) {
+        match &def.kind {
+            CardKind::Creature(_) | CardKind::Planeswalker(_)
+            | CardKind::Artifact(_) | CardKind::Enchantment => return true,
+            _ => {}
+        }
+    }
+    // High-value non-permanent spells: combo kill, mass discard
+    matches!(name, "Doomsday" | "Hymn to Tourach" | "Unearth")
+}
+
 /// NAP decision: if AP just acted, try to counter the top opposing spell; otherwise pass.
 fn nap_action(
     state: &SimState,
@@ -3658,6 +3675,10 @@ fn nap_action(
         let actor_lib: &[_] = if who == "us" { us_lib } else { opp_lib };
         for idx in (0..stack.len()).rev() {
             if stack[idx].owner != state.player_id(who) && !stack[idx].is_ability {
+                if !worth_countering(&stack[idx].name, catalog_map) {
+                    eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, stack[idx].name);
+                    break;
+                }
                 if let Some(action) = respond_with_counter(state, stack, idx, who, actor_lib, catalog_map, rng, true) {
                     if let PriorityAction::CastSpell { ref name, .. } = action {
                         eprintln!("[decision] {}: NAP counter {} targeting {}", who, name, stack[idx].name);
@@ -6432,18 +6453,6 @@ mod tests {
         let ev = GameEvent::Draw { controller: "us".to_string(), draw_index: 1, is_natural: true };
         let result = fire_triggers(&ev, &state);
         assert!(result.is_empty(), "no trigger on first natural draw");
-    }
-
-    #[test]
-    fn test_bowmasters_triggers_on_second_natural_draw() {
-        let mut state = make_state();
-        state.opp.permanents.push(SimPermanent::new("Orcish Bowmasters"));
-
-        let ev = GameEvent::Draw { controller: "us".to_string(), draw_index: 2, is_natural: true };
-        let result = fire_triggers(&ev, &state);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].kind, "BowmastersDrawTrigger");
-        assert_eq!(result[0].controller, "opp");
     }
 
     #[test]
