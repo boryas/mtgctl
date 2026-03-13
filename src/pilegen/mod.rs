@@ -137,7 +137,7 @@ struct StackAbility {
 /// Targets are chosen at cast time and stored here so resolution carries out effects
 /// deterministically without needing to re-pick targets.
 #[derive(Clone)]
-struct StackItem {
+pub(crate) struct StackItem {
     /// Stable stack-object identity. Freshly allocated for spells; ObjId::UNSET for abilities.
     id: ObjId,
     name: String,
@@ -150,8 +150,6 @@ struct StackItem {
     is_ability: bool,
     /// For activated abilities: the ability definition, used to apply the effect at resolution.
     ability_def: Option<AbilityDef>,
-    /// For counterspells: the ObjId of the stack item this spell is targeting.
-    counters: Option<ObjId>,
     /// Pre-computed annotation for permanents (e.g. Murktide size from delve count).
     /// If Some, overrides random annotation_options pick at resolution time.
     annotation: Option<String>,
@@ -356,8 +354,7 @@ enum PriorityAction {
     /// commits this action. The framework validates legality (sorcery-speed, etc.) there.
     ///
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
-    /// `counters`       — ObjId of the stack item this spell will counter (counterspell only).
-    CastSpell { name: String, preferred_cost: Option<AlternateCost>, counters: Option<ObjId> },
+    CastSpell { name: String, preferred_cost: Option<AlternateCost> },
     /// Cast the adventure face of a card in hand.
     CastAdventure { card_name: String },
     /// Cast the creature face of a card currently on adventure in exile.
@@ -1400,7 +1397,7 @@ fn ability_available(
         }
     }
     if let Some(tgt) = &ability.target {
-        if !has_valid_target(tgt, state, who, catalog_map) {
+        if !has_valid_target(tgt, state, who, catalog_map, &[]) {
             return false;
         }
     }
@@ -1466,20 +1463,9 @@ fn collect_hand_actions(
                 return None;
             }
             if let Some(tgt) = def.target() {
-                if !has_valid_target(tgt, state, who, catalog_map) {
+                if !has_valid_target(tgt, state, who, catalog_map, stack) {
                     return None;
                 }
-            }
-            if let Some(ct) = def.counter_target() {
-                let owner_id = state.player_id(who);
-                let has_target = stack.iter().any(|item| {
-                    if item.owner == owner_id || item.is_ability { return false; }
-                    match catalog_map.get(item.name.as_str()) {
-                        Some(d) => ct.matches(&d.kind),
-                        None    => matches!(ct, SpellFilter::Any),
-                    }
-                });
-                if !has_target { return None; }
             }
             let ok = def.requires().iter().all(|req| match req.as_str() {
                 "opp_hand_nonempty" => state.player(opp_who).hand.hidden > 0,
@@ -1491,7 +1477,7 @@ fn collect_hand_actions(
             });
             if !ok { return None; }
             if !spell_is_affordable(name, def, state, who, library) { return None; }
-            Some(PriorityAction::CastSpell { name: name.clone(), preferred_cost: None, counters: None })
+            Some(PriorityAction::CastSpell { name: name.clone(), preferred_cost: None })
         })
         .collect();
 
@@ -1512,7 +1498,7 @@ fn collect_hand_actions(
             if !state.player(who).potential_mana().can_pay(&cost) { continue; }
         }
         if let Some(ref tgt) = face.target {
-            if !has_valid_target(tgt, state, who, catalog_map) { continue; }
+            if !has_valid_target(tgt, state, who, catalog_map, stack) { continue; }
         }
         actions.push(PriorityAction::CastAdventure { card_name: name.clone() });
     }
@@ -1929,6 +1915,7 @@ fn cast_spell(
     preferred_cost: Option<&AlternateCost>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
+    stack: &[StackItem],
 ) -> Option<StackItem> {
     let def = *catalog_map.get(name)?;
     let mut cost = parse_mana_cost(def.mana_cost());
@@ -2031,7 +2018,7 @@ fn cast_spell(
     state.log(t, who, format!("Cast {} ({}{})", name, cast_label, delve_label));
 
     let (spell_target_spec, spell_eff) = spell_effect(name, who, annotation.clone(), catalog_map);
-    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, catalog_map)
+    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, catalog_map, stack)
         .into_iter()
         .collect::<Vec<_>>();
 
@@ -2042,8 +2029,6 @@ fn cast_spell(
         card_id,
         is_ability: false,
         ability_def: None,
-        counters: None,
-
         annotation,
         adventure_exile: false,
         adventure_card_name: None,
@@ -2174,8 +2159,9 @@ fn respond_with_counter(
     let counterspells: Vec<String> = responding_library
         .iter()
         .filter(|(_, n, d)| {
-            d.counter_target()
-                .is_some_and(|ct| ct.matches(target_kind))
+            d.target()
+                .and_then(|t| t.strip_prefix("stack:"))
+                .is_some_and(|filter| stack_filter_matches(filter, target_kind))
                 && !d.alternate_costs().is_empty()
                 && !(n.as_str() == "Daze" && target_has_untapped_lands)
         })
@@ -2216,7 +2202,6 @@ fn respond_with_counter(
                 return Some(PriorityAction::CastSpell {
                     name: cs_name.clone(),
                     preferred_cost: Some(cost.clone()),
-                    counters: Some(stack[target_idx].id),
                 });
             }
         }
@@ -2440,8 +2425,6 @@ fn handle_priority_round(
                     card_id: source_id,
                     is_ability: true,
                     ability_def: Some(ability.clone()),
-                    counters: None,
-
                     annotation: None,
                     adventure_exile: false,
                     adventure_card_name: None,
@@ -2491,7 +2474,7 @@ fn handle_priority_round(
                 state.player_mut(&who).hand.hidden -= 1;
                 // Build effect and choose target using the same Effect system as non-adventure spells.
                 let (adv_spec, adv_eff) = spell_effect(&face.name, &who, None, catalog_map);
-                let adv_targets = choose_spell_target(&adv_spec, &who, state, catalog_map)
+                let adv_targets = choose_spell_target(&adv_spec, &who, state, catalog_map, &stack)
                     .into_iter().collect::<Vec<_>>();
                 state.log(t, &who, format!("Cast {} (adventure, {})", face.name, face.mana_cost));
                 // Push StackItem.
@@ -2502,7 +2485,6 @@ fn handle_priority_round(
                     card_id: adv_card_id,
                     is_ability: false,
                     ability_def: None,
-                    counters: None,
                     annotation: None,
                     adventure_exile: true,
                     adventure_card_name: Some(card_name.clone()),
@@ -2544,7 +2526,7 @@ fn handle_priority_round(
                 state.log_mana_activations(t, &who, mana_log);
                 state.log(t, &who, format!("Cast {} from adventure ({})", card_name, def.mana_cost()));
                 let (from_adv_spec, from_adv_eff) = spell_effect(card_name, &who, None, catalog_map);
-                let from_adv_targets = choose_spell_target(&from_adv_spec, &who, state, catalog_map)
+                let from_adv_targets = choose_spell_target(&from_adv_spec, &who, state, catalog_map, &stack)
                     .into_iter()
                     .collect::<Vec<_>>();
                 stack.push(StackItem {
@@ -2554,8 +2536,6 @@ fn handle_priority_round(
                     card_id: ObjId::UNSET, // TODO: look up from state.cards when zone tracking is complete
                     is_ability: false,
                     ability_def: None,
-                    counters: None,
-
                     annotation: None,
                     adventure_exile: false,
                     adventure_card_name: None,
@@ -2570,7 +2550,7 @@ fn handle_priority_round(
                 priority_holder = next.to_string();
                 last_passer = None;
             }
-            PriorityAction::CastSpell { ref name, ref preferred_cost, counters } => {
+            PriorityAction::CastSpell { ref name, ref preferred_cost } => {
                 // Framework legality check: non-instant spells require an empty stack.
                 // No resources have been spent yet, so it is safe to drop an illegal action.
                 let is_instant = catalog_map.get(name.as_str())
@@ -2587,9 +2567,8 @@ fn handle_priority_round(
                 } else {
                     // Commit: pay costs and create the StackItem.
                     let actor_lib = if who == "us" { &mut *us_lib } else { &mut *opp_lib };
-                    if let Some(mut item) = cast_spell(state, t, &who, name, actor_lib,
-                                                       preferred_cost.as_ref(), catalog_map, rng) {
-                        item.counters = counters;
+                    if let Some(item) = cast_spell(state, t, &who, name, actor_lib,
+                                                   preferred_cost.as_ref(), catalog_map, rng, &stack) {
                         // Bookkeeping that was previously in the decision functions.
                         if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
                         state.player_mut(&who).spells_cast_this_turn += 1;
@@ -2621,10 +2600,18 @@ fn handle_priority_round(
                         // Resolve top item only, then AP gets priority again.
                         let top = stack.pop().unwrap();
                         let top_owner_str = state.who_str(top.owner).to_string();
-                        if let Some(target_id) = top.counters {
-                            if let Some(target_pos) = stack.iter().position(|s| s.id == target_id) {
-                                // Target still on stack — counter resolves: remove and graveyard target.
-                                let target = stack.remove(target_pos);
+                        // Counterspell detection: spell targets the stack (target = "stack:...").
+                        let is_counter = catalog_map.get(top.name.as_str())
+                            .and_then(|d| d.target())
+                            .is_some_and(|t| t.starts_with("stack:"));
+                        if is_counter {
+                            let target_pos = top.chosen_targets.first().and_then(|t| {
+                                if let Target::Object(id) = t { stack.iter().position(|s| s.id == *id) }
+                                else { None }
+                            });
+                            if let Some(pos) = target_pos {
+                                // Target still on stack — counter resolves.
+                                let target = stack.remove(pos);
                                 let target_owner_str = state.who_str(target.owner).to_string();
                                 state.log(t, &top_owner_str, &format!("{} counters {}", top.name, target.name));
                                 state.player_mut(&target_owner_str).graveyard.visible.push(target.name);
@@ -3347,11 +3334,11 @@ fn weighted_choice<T: Clone>(options: &[(T, u32)], rng: &mut impl Rng) -> T {
 ///
 /// - Lands are always actionable (played via land-drop logic).
 /// - Permanents (creatures, artifacts, planeswalkers, enchantments) are always castable.
-/// - Spells need a counter_target, abilities, or a known entry in `spell_effect`.
+/// - Spells need a target (including stack targets), abilities, or a known entry in `spell_effect`.
 fn card_has_implementation(def: &CardDef) -> bool {
     if def.is_land() { return true; }
     if !def.abilities().is_empty() { return true; }
-    if def.counter_target().is_some() { return true; }
+    if def.target().is_some() { return true; }
     match &def.kind {
         CardKind::Creature(_) | CardKind::Artifact(_)
         | CardKind::Planeswalker(_) | CardKind::Enchantment => true,

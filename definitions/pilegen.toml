@@ -218,7 +218,7 @@ name = "Daze"
 card_type = "instant"
 exileable = true
 blue = true
-counter_target = "any"
+target = "stack:any"
 alternate_costs = [
   { bounce_island = true, hand_min = 1 },
   { mana_cost = "1U", hand_min = 1, prob = 0.2 },
@@ -228,7 +228,7 @@ alternate_costs = [
 name = "Force of Will"
 card_type = "instant"
 blue = true
-counter_target = "any"
+target = "stack:any"
 alternate_costs = [
   { exile_blue_from_hand = true, life_cost = 1, hand_min = 2 },
   { mana_cost = "3UU", hand_min = 1 },

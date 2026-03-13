@@ -168,10 +168,10 @@ fn ap_react(
     let top = &stack[top_idx];
     let dd_countered = !top.is_ability
         && top.owner != state.us.id
-        && top.counters
-            .and_then(|tid| stack.iter().find(|s| s.id == tid))
-            .map(|s| s.name == "Doomsday" && s.owner == state.us.id)
-            .unwrap_or(false);
+        && top.chosen_targets.first()
+            .and_then(|t| if let Target::Object(id) = t { Some(id) } else { None })
+            .and_then(|id| stack.iter().find(|s| s.id == *id))
+            .is_some_and(|s| s.name == "Doomsday" && s.owner == state.us.id);
     if !dd_countered {
         return None;
     }
@@ -293,9 +293,9 @@ fn ap_proactive(
     // Fateful turn prioritization: Doomsday > Dark Ritual > anything else.
     let fateful = who == "us" && t == dd_turn && !state.us.dd_cast;
     let action = if fateful && actions.iter().any(|a| matches!(a, PriorityAction::CastSpell { name, .. } if name == "Doomsday")) {
-        PriorityAction::CastSpell { name: "Doomsday".to_string(), preferred_cost: None, counters: None }
+        PriorityAction::CastSpell { name: "Doomsday".to_string(), preferred_cost: None }
     } else if fateful && actions.iter().any(|a| matches!(a, PriorityAction::CastSpell { name, .. } if name == "Dark Ritual")) {
-        PriorityAction::CastSpell { name: "Dark Ritual".to_string(), preferred_cost: None, counters: None }
+        PriorityAction::CastSpell { name: "Dark Ritual".to_string(), preferred_cost: None }
     } else {
         // General casting — decaying probability for multi-spell turns.
         // 1st spell: always; 2nd: 30%; 3rd+: 10%.

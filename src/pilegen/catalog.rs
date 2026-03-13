@@ -178,18 +178,17 @@ pub(crate) struct AdventureFace {
 }
 
 /// Spell data shared by Instant and Sorcery variants.
-#[derive(Clone, Default)]
+#[derive(Deserialize, Clone, Default)]
 pub(crate) struct SpellData {
-    pub(crate) mana_cost: String,
-    pub(crate) blue: bool,
-    pub(crate) black: bool,
+    #[serde(default)] pub(crate) mana_cost: String,
+    #[serde(default)] pub(crate) blue: bool,
+    #[serde(default)] pub(crate) black: bool,
     #[allow(dead_code)]
-    pub(crate) exileable: bool,
-    pub(crate) target: Option<String>,
-    pub(crate) counter_target: Option<SpellFilter>,
-    pub(crate) requires: Vec<String>,
-    pub(crate) alternate_costs: Vec<AlternateCost>,
-    pub(crate) delve: bool,
+    #[serde(default)] pub(crate) exileable: bool,
+    #[serde(default)] pub(crate) target: Option<String>,
+    #[serde(default)] pub(crate) requires: Vec<String>,
+    #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
+    #[serde(default)] pub(crate) delve: bool,
 }
 
 #[derive(Deserialize, Clone)]
@@ -259,13 +258,6 @@ impl CardDef {
         match &self.kind {
             CardKind::Instant(s) | CardKind::Sorcery(s) => &s.alternate_costs,
             _ => &[],
-        }
-    }
-
-    pub(crate) fn counter_target(&self) -> Option<&SpellFilter> {
-        match &self.kind {
-            CardKind::Instant(s) | CardKind::Sorcery(s) => s.counter_target.as_ref(),
-            _ => None,
         }
     }
 
@@ -412,7 +404,6 @@ pub(crate) struct RawCardDef {
     #[serde(default)] pub(crate) requires: Vec<String>,
     #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
     #[serde(default)] pub(crate) delve: bool,
-    #[serde(default)] pub(crate) counter_target: Option<String>,
     #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
     #[serde(default)] pub(crate) adventure: Option<AdventureFace>,
     #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
@@ -452,7 +443,6 @@ impl From<RawCardDef> for CardDef {
                 black: r.black,
                 exileable: r.exileable,
                 target: r.target,
-                counter_target: r.counter_target.as_deref().and_then(SpellFilter::from_str),
                 requires: r.requires,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
@@ -463,7 +453,6 @@ impl From<RawCardDef> for CardDef {
                 black: r.black,
                 exileable: r.exileable,
                 target: r.target,
-                counter_target: r.counter_target.as_deref().and_then(SpellFilter::from_str),
                 requires: r.requires,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
@@ -661,7 +650,7 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
 /// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
 pub(super) fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<StackItem>, state: &SimState, catalog_map: &HashMap<&str, &CardDef>) {
     for ctx in triggers {
-        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map)
+        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map, stack)
             .into_iter().collect();
         stack.push(StackItem {
             id: ObjId::UNSET,
@@ -670,8 +659,6 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, stack: &mut Vec<Stack
             card_id: ObjId::UNSET,
             is_ability: true,       // NAP skips countering triggered abilities
             ability_def: None,
-            counters: None,
-
             annotation: None,
             adventure_exile: false,
             adventure_card_name: None,

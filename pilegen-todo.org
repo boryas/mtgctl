@@ -1,0 +1,234 @@
+#+title: Pilegen Todo
+* DONE Make display_player_board totally in terms of PlayerState
+CLOSED: [2026-03-08 Sun 16:22]
+Get rid of GameState for just SimState (GameState probably a better name)
+add a "generate known cards" function for a PlayerState that takes remaining deck and number of revealed cards and samples without replacement. For us, known == hand size. for opp it is 0.
+use impl::Display
+* DONE Implement turn phases
+CLOSED: [2026-03-08 Sun 22:10]
+a turn is a fixed set of phases
+a phase consists of steps
+steps have actions associated with them and may involve a round of priority
+** Beginning Phase
+*** Untap step
+no prio, just untap
+*** Upkeep step
+prio
+*** Draw step
+draw a card
+prio
+** Pre-combat Main Phase
+land drops
+sorceries
+prio
+** Combat Phase
+*** Begin Combat Step
+prio
+*** Declare Attackers Step
+AP selects attackers
+prio
+*** Declare Blockers Step
+NAP declares blockers
+prio
+*** Combat Damage Step
+Apply combat damage
+prio
+*** End Combat Step
+prio
+** Post-combat Main Phase
+land drops
+sorceries
+prio
+** End Phase
+*** End step
+prio
+*** Cleanup step
+discard to hand size
+remove damage
+conclude "till end of turn" effects
+no prio
+** [X] Implement a cleaner Priority Action system.
+CLOSED: [2026-03-08 Sun 17:39]
+Use ActivePlayer / NonActivePlayer terminology
+Something like a state machine:
+handle_priority->[special action|activate ability|cast spell|pass] then if the action used the stack or was pass, call the opp's handle_priority. Otherwise, call ours again.
+pass with empty stack from NAP ends the priority round
+rules for actions:
+land drop special action: AP during main phase empty stack (does not use stack)
+ability: any time (uses stack)
+cast spell: sorcery AP during main phase empty stack, instant any time (uses stack)
+pass: n/a
+** [X] Implement a Step
+CLOSED: [2026-03-08 Sun 17:39]
+do_step function that takes the game state and does stuff like untap, draw, apply damage, discard to hand size, etc...
+prio boolean determines whether we have a round of priority in the step at the end
+** [X] Implement a Phase
+CLOSED: [2026-03-08 Sun 17:39]
+series of steps (could be empty for main)
+optional prio round for the phase
+do_phase should call do_step on each step and do a priority round if step.prio is True
+Main Phase starts (for simplicity) with a land drop, max 1 per turn
+** [X] Implement a Turn
+CLOSED: [2026-03-08 Sun 17:39]
+do_phase 3 times.
+
+* DONE Real Mana Pool
+CLOSED: [2026-03-09 Mon 08:51]
+* DONE combat
+CLOSED: [2026-03-10 Tue 11:03]
+** [X] creatures have power / toughness
+CLOSED: [2026-03-09 Mon 15:41]
+** [X] AP declares attackers
+CLOSED: [2026-03-09 Mon 15:41]
+sum up opp power, don't attack with a creature whose toughness is <= that sum
+** [X] NAP declares blockers
+CLOSED: [2026-03-09 Mon 15:41]
+if blocker "eats" attacker, block
+if blocker "trades", block
+if blocker "chumps", do not block
+no multi blocks
+** [X] damage
+CLOSED: [2026-03-09 Mon 15:41]
+SBA?!?
+** [X] ninjutsu
+CLOSED: [2026-03-10 Tue 11:03]
+* DONE Finish all spells in dimir tempo vs tempo doomsday.
+CLOSED: [2026-03-10 Tue 11:03]
+** [X] Notice on unimplemented cards in a given deck
+CLOSED: [2026-03-09 Mon 08:59]
+** ⚠  tempo-doomsday-wasteland-1.4 — unimplemented cards:
+*** new ability: cycling
+pay a cost, put in GY, draw a card
+~ 1×Unearth — no simulation effects (drawn but never cast)
+~ 1×Edge of Autumn — no simulation effects (drawn but never cast)
+~ 1×Street Wraith — no simulation effects (drawn but never cast)
+*** new casting cost rule: delve
+exile cards from graveyard to reduce cost by 1 generic for each exiled card
+~ 2×Murktide Regent — no simulation effects (drawn but never cast)
+Murktide also counts how many of the delved cards were instants/sorceries to pick it's size 3/3 + nr-exiled-instants/sorceries
+
+*** non-triggered behavior on entry
+murktide -- set initial size
+cavern -- pick creature type (wizard, orc, lhurgoyf, dragon)
+
+*** triggered abilities (handle later)
+Thassa -- on entry, no real effect
+Murktide -- on instant/sorc leaving GY add +1/+1 counter
+OBM -- on opp draw besides first of turn "amass orcs"
+tamiyo -- on draw 3rd card flip
+
+*** new ability: ninjutsu
+✗ 2×Kaito, Bane of Nightmares — not in pilegen.toml (excluded from simulation)
+
+*** new effect: bounce target permanent opp controls
+✗ 1×Brazen Borrower — not in pilegen.toml (excluded from simulation)
+Also has the weird adventure thing going on
+
+* [ ] static abilities
+** [X] Triggered abilities
+CLOSED: [2026-03-10 Tue 20:48]
+bowmaster when enters
+tamiyo draw 3rd
+tamiyo attack clue
+bowmaster draw besides for turn
+murktide when inst./sorc. exiled
+
+impl: generalized "event" system
+** [ ] replacement effects
+murktide enter
+cavern enter
+** [ ] characteristic defining abilities
+barrowgoyf p/t
+probably kaito being a creature and a planeswalker
+"flag on card, anything that checks characteristic needs to apply it to get the true characteristic"
+condition -> modification to card (create an "instantiated" version that's not a card?)
+** [X] keyword abilities
+CLOSED: [2026-03-10 Tue 20:48]
+just a bunch of useful "static" abilities to practice on
+flying
+deathtouch
+trample
+menace
+first strike
+trample
+vigilance
+haste
+hexproof
+* [X] planeswalker activated abilities
+CLOSED: [2026-03-11 Wed 07:59]
+loyalty
+attacking planeswalkers
+
+* [X] cleanup mana abilities
+CLOSED: [2026-03-09 Mon 22:41]
+is_fetch ... stupid
+produces blue ... stupid
+ancient tomb, cavern, etc.
+** [X] cleanup casting mechanics
+CLOSED: [2026-03-09 Mon 22:41]
+goes on stack (full zone)
+pick targets
+check everything is legal
+pay costs (can activate mana abilities)
+* [X] end the blue/black supremacy
+CLOSED: [2026-03-09 Mon 22:41]
+color...
+
+* DONE Effects as thunks of logic
+CLOSED: [2026-03-12 Thu 17:47]
+stop parsing effects in line when applying them. when effects (spell, ability) are on the stack (or probably being carried out instantly) they should be (generally) anonymous functions composed of well tested reusable components like destroy(target), draw(cards), etc. This way we can produce arbitrarily complex cards and especially triggered and continuous effect abilities without implementing a new "effects" language to parse.
+
+This entails difficulties in selecting targets for effects that need targets when putting them on the stack.
+* DONE TargetSpec
+CLOSED: [2026-03-12 Thu 17:47]
+TargetSpec solves these difficulties. We create a boolean algebra of target legality.
+
+So a targetted ability has a well defined effect (from the above work) and if it needs a target, like "destroy target non black creature" we need to be able to specify "object satisfies: zone = in play, type = creature, color-identity = non-black"
+
+So to produce a trigger in general, we must describe the effect as a hunk of code and the target predicate as a composed predicate. Then the trigger is ready for the trigger owner to decide targets (same for spell is ready for spell caster to select targets to cast). This needs to be aware of the trigger source object (same for spells) to allow strategic choice.
+
+All targettable objects in the game should be "GameObjects" or "SimObject" whatever. These should have totally generic properties shared between players and cards (could be protection from X for example, not yet defined). But more interestingly, targettable things in general are:
+** objects
+*** players
+*** spells on stack
+e.g. counter with fow / daze
+*** abilities on stack
+e.g. counter with stifle / consign to memory
+*** creatures in play
+e.g. destroy with fatal push / snuff out
+*** permanents in play
+e.g. bounce with petty theft
+*** lands in play
+e.g. destroy with wasteland.
+
+** predicates / properties
+*** object type
+*** color
+*** mana value
+*** color
+*** attacking/blocking
+*** tapped/untapped
+*** more ...
+
+* DONE Object ID
+CLOSED: [2026-03-12 Thu 17:47]
+Currently we only identify objects in play by their name.
+This breaks under duplicates.
+
+Instead we must give each object (player, card, object on stack, token, emblem, etc.) a unique ID. Ideally we store all game objects in a handful of flat associative data structures keyed by ID and associate them with the object itself and perhaps some super high level identifying information like current zone. Then we can have a "Cards" map ID -> Card,Owner,Zone or something and implement "change zones" as changing the zone and firing a zone change event. (Zone being library, hand, stack, battlefield, graveyard, exile). Zone can also stay or be a property of the Card. Abilities on stack would be relatively simpler, not having a Zone besides stack, but still eneding to be indexed by ID.
+
+* TODO object model
+player
+card (lots of properties: type, color, mana value, zone)
+stack ability
+non-card permanent (subset of card properties)
+non-card spell (subset of card properties, as pertains to the stack zone)
+
+* WAIT Revealed cards
+two cases:
+return real known cards to hand (ninjutsu, daze, bounce)
+discard reveals the hand
+
+model "known cards" as part of hand size. if you remove a known card from hand, remove it from known cards. also model "known cards count". at end of sim, rng known_count / 2 -> known_count and reveal random cards as the known cards.
+
+brainstorm fully resets known count and known cards

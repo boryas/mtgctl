@@ -10,36 +10,6 @@ pub(crate) enum Target {
     Object(ObjId),
 }
 
-/// Predicate describing which stack spells a counterspell may target.
-#[derive(Clone, Debug)]
-pub(crate) enum SpellFilter {
-    Any,
-    Noncreature,
-    Nonland,
-    InstantOrSorcery,
-}
-
-impl SpellFilter {
-    pub(crate) fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "any"                => Some(SpellFilter::Any),
-            "noncreature"        => Some(SpellFilter::Noncreature),
-            "nonland"            => Some(SpellFilter::Nonland),
-            "instant_or_sorcery" => Some(SpellFilter::InstantOrSorcery),
-            _                    => None,
-        }
-    }
-
-    pub(crate) fn matches(&self, kind: &CardKind) -> bool {
-        match self {
-            SpellFilter::Any             => true,
-            SpellFilter::Noncreature     => !matches!(kind, CardKind::Creature(_)),
-            SpellFilter::Nonland         => !matches!(kind, CardKind::Land(_)),
-            SpellFilter::InstantOrSorcery => matches!(kind, CardKind::Instant(_) | CardKind::Sorcery(_)),
-        }
-    }
-}
-
 /// Declarative description of what targets a spell or ability may choose from.
 /// Used both to enumerate legal choices and to re-validate at resolution.
 #[derive(Clone, Debug)]
@@ -53,12 +23,32 @@ pub(crate) enum TargetSpec {
     CardInOwnGraveyard { card_type: Option<String> },
     /// Any player or creature — used by Orcish Bowmasters ping.
     AnyTarget,
+    /// A spell currently on the stack owned by the opponent, matching `filter`.
+    /// Used by counterspells: `filter` is "any", "noncreature", "nonland", or "instant_or_sorcery".
+    StackEntry { filter: String },
     // Extend as new cards require it.
+}
+
+/// Return true if stack spell `kind` matches the given filter string.
+pub(crate) fn stack_filter_matches(filter: &str, kind: &CardKind) -> bool {
+    match filter {
+        "any"                => true,
+        "noncreature"        => !matches!(kind, CardKind::Creature(_)),
+        "nonland"            => !matches!(kind, CardKind::Land(_)),
+        "instant_or_sorcery" => matches!(kind, CardKind::Instant(_) | CardKind::Sorcery(_)),
+        _                    => false,
+    }
 }
 
 /// Choose a target for a trigger according to its spec and current game state.
 /// Returns None if the spec is None or no legal targets exist.
-pub(crate) fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: &SimState, catalog_map: &HashMap<&str, &CardDef>) -> Option<Target> {
+pub(crate) fn choose_trigger_target(
+    spec: &TargetSpec,
+    controller: &str,
+    state: &SimState,
+    catalog_map: &HashMap<&str, &CardDef>,
+    stack: &[StackItem],
+) -> Option<Target> {
     let opp = opp_of(controller);
     match spec {
         TargetSpec::None => None,
@@ -111,6 +101,19 @@ pub(crate) fn choose_trigger_target(spec: &TargetSpec, controller: &str, state: 
             }
             Some(Target::Player(state.player_id(opp)))
         }
+        TargetSpec::StackEntry { filter } => {
+            let caster_id = state.player_id(controller);
+            // Pick the topmost opposing non-ability spell matching the filter.
+            stack.iter().rev()
+                .find(|item| {
+                    if item.owner == caster_id || item.is_ability { return false; }
+                    match catalog_map.get(item.name.as_str()) {
+                        Some(d) => stack_filter_matches(filter, &d.kind),
+                        None    => filter == "any",
+                    }
+                })
+                .map(|item| Target::Object(item.id))
+        }
     }
 }
 
@@ -120,8 +123,9 @@ pub(crate) fn choose_spell_target(
     caster: &str,
     state: &SimState,
     catalog_map: &HashMap<&str, &CardDef>,
+    stack: &[StackItem],
 ) -> Option<Target> {
-    choose_trigger_target(spec, caster, state, catalog_map)
+    choose_trigger_target(spec, caster, state, catalog_map, stack)
 }
 
 /// Check whether `type_str` matches a permanent. `def` is the target card's definition,
@@ -155,12 +159,25 @@ pub(crate) fn matches_target_type(
 }
 
 /// Return true if at least one valid target exists for `target_str`.
+/// For `"stack:<filter>"` targets, checks the current stack for opposing non-ability spells.
+/// For permanent/player targets, checks the battlefield.
 pub(crate) fn has_valid_target(
     target_str: &str,
     state: &SimState,
     actor: &str,
     catalog_map: &HashMap<&str, &CardDef>,
+    stack: &[StackItem],
 ) -> bool {
+    if let Some(filter) = target_str.strip_prefix("stack:") {
+        let actor_id = state.player_id(actor);
+        return stack.iter().any(|item| {
+            if item.owner == actor_id || item.is_ability { return false; }
+            match catalog_map.get(item.name.as_str()) {
+                Some(d) => stack_filter_matches(filter, &d.kind),
+                None    => filter == "any",
+            }
+        });
+    }
     let (who_rel, type_str) = match target_str.split_once(':') {
         Some(pair) => pair,
         None => return false,

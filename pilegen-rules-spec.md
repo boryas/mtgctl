@@ -255,7 +255,7 @@ At cast/activation time:
 At resolution time:
 1. Recheck that each chosen target is still a legal target.
 2. If a target is no longer legal (died, left the zone), the spell or ability
-   is **countered on resolution** (fizzles) if all its targets are illegal.
+   is **countered on resolution** (fizzles) if all its targets are illegal. If an ability is composed of several effects chained by then(), the order matters. If the first one fizzles, so does the rest of the chain.
 
 ---
 
@@ -273,6 +273,7 @@ Every meaningful state change fires a `GameEvent`:
 | `Draw { controller, draw_index, is_natural }` | A card is drawn. |
 | `ZoneChange { card, from, to, controller }` | A card moves between zones. |
 | `CreatureAttacked { attacker_id, attacker, attacker_controller, attack_target }` | A creature is declared as an attacker. |
+| `EnteredPhase { phase, active_player }` | A phase with priority begins. |
 | `EnteredStep { step, active_player }` | A step with priority begins. |
 
 *More events will be added as cards require them.*
@@ -320,7 +321,7 @@ Combat follows the Combat Phase step structure above.
 
 ### Declare Attackers
 AP selects which untapped, non-summoning-sick creatures attack. Each attacker
-may target either the defending player or a planeswalker that player controls.
+may attack either the defending player or a planeswalker that player controls.
 Attacking taps the creature (unless it has vigilance).
 
 ### Declare Blockers
@@ -335,7 +336,7 @@ Damage is assigned simultaneously:
 - A blocked attacker and its blocker deal damage to each other simultaneously.
 
 Damage uses the **lethal damage** SBA: a creature is destroyed when accumulated
-damage ≥ toughness. SBAs are checked immediately after damage is dealt.
+damage ≥ toughness.
 
 ### Keywords affecting combat
 - **Flying** — can only be blocked by creatures with flying or reach.
