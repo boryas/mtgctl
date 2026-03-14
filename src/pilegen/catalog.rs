@@ -189,6 +189,7 @@ pub(crate) struct SpellData {
     #[serde(default)] pub(crate) requires: Vec<String>,
     #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
     #[serde(default)] pub(crate) delve: bool,
+    #[serde(default)] pub(crate) effects: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -222,8 +223,6 @@ pub(crate) struct CardDef {
     /// Relative likelihood of appearing as a permanent in play (default 100).
     #[allow(dead_code)]
     pub(crate) play_weight: Option<u32>,
-    /// True for tokens and flip-targets: never in a library, created by effects at runtime.
-    pub(crate) is_token: bool,
     pub(crate) kind: CardKind,
 }
 
@@ -265,6 +264,13 @@ impl CardDef {
         match &self.kind {
             CardKind::Instant(s) | CardKind::Sorcery(s) => s.target.as_deref(),
             _ => None,
+        }
+    }
+
+    pub(crate) fn effects(&self) -> &[String] {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.effects,
+            _ => &[],
         }
     }
 
@@ -408,7 +414,7 @@ pub(crate) struct RawCardDef {
     #[serde(default)] pub(crate) adventure: Option<AdventureFace>,
     #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
     #[serde(default)] pub(crate) keywords: Vec<String>,
-    #[serde(default)] pub(crate) is_token: bool,
+    #[serde(default)] pub(crate) effects: Vec<String>,
 }
 
 impl From<RawCardDef> for CardDef {
@@ -446,6 +452,7 @@ impl From<RawCardDef> for CardDef {
                 requires: r.requires,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
+                effects: r.effects,
             }),
             CardType::Sorcery => CardKind::Sorcery(SpellData {
                 mana_cost: r.mana_cost,
@@ -456,6 +463,7 @@ impl From<RawCardDef> for CardDef {
                 requires: r.requires,
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
+                effects: r.effects,
             }),
             CardType::Artifact => CardKind::Artifact(ArtifactData {
                 mana_cost: r.mana_cost,
@@ -469,7 +477,7 @@ impl From<RawCardDef> for CardDef {
             }),
             CardType::Enchantment => CardKind::Enchantment,
         };
-        CardDef { name: r.name, play_weight: r.play_weight, is_token: r.is_token, kind }
+        CardDef { name: r.name, play_weight: r.play_weight, kind }
     }
 }
 
@@ -481,16 +489,14 @@ impl<'de> Deserialize<'de> for CardDef {
 
 // ── Trigger check functions (one per trigger-having card) ─────────────────────
 
-/// Build a Bowmasters trigger context. Target is chosen at resolution time via TargetSpec::AnyTarget.
-fn bowmasters_trigger_ctx(source_id: ObjId, controller: &str, kind: &'static str, log_msg: &'static str) -> TriggerContext {
+/// Build a Bowmasters trigger context. Target is "any_target" = creature | planeswalker | player.
+fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static str) -> TriggerContext {
     let ctl = controller.to_string();
     TriggerContext {
-        source_id,
         source_name: "Orcish Bowmasters".into(),
         controller: ctl.clone(),
-        kind,
-        target_spec: TargetSpec::AnyTarget,
-        effect: std::sync::Arc::new(move |state, t, targets, _catalog| {
+        target_spec: target_spec_from_str(Some("any_target")),
+        effect: Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
             // Apply 1 damage to the chosen target, then amass.
             match targets.first() {
                 Some(Target::Player(id)) => {
@@ -502,11 +508,9 @@ fn bowmasters_trigger_ctx(source_id: ObjId, controller: &str, kind: &'static str
                     let id = *id;
                     let tgt_ctl = state.permanent_controller(id).map(|s| s.to_string());
                     let name = state.permanent_name(id);
-                    if let (Some(tgt_ctl), Some(name)) = (tgt_ctl, name) {
-                        if let Some(p) = state.player_mut(&tgt_ctl).permanents
-                            .iter_mut().find(|p| p.id == id)
-                        {
-                            p.damage += 1;
+                    if let (Some(_tgt_ctl), Some(name)) = (tgt_ctl, name) {
+                        if let Some(bf) = state.permanent_bf_mut(id) {
+                            bf.damage += 1;
                         }
                         state.log(t, &ctl, format!("Bowmasters: 1 damage to {name}"));
                     }
@@ -517,7 +521,7 @@ fn bowmasters_trigger_ctx(source_id: ObjId, controller: &str, kind: &'static str
             }
             do_amass_orc(&ctl, 1, state, t);
             state.log(t, &ctl, log_msg);
-        }),
+        })),
     }
 }
 
@@ -527,13 +531,13 @@ pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: 
         GameEvent::ZoneChange { card, to: ZoneId::Battlefield, controller: ctlr, .. }
             if card == "Orcish Bowmasters" && ctlr == controller =>
         {
-            pending.push(bowmasters_trigger_ctx(source_id, controller, "BowmastersEtb", "Bowmasters ETB: amass Orc 1"));
+            pending.push(bowmasters_trigger_ctx(source_id, controller, "Bowmasters ETB: amass Orc 1"));
         }
         // Opponent draws any card that isn't their natural draw-step draw.
         GameEvent::Draw { controller: drawer, draw_index: _, is_natural }
             if drawer != controller && !is_natural =>
         {
-            pending.push(bowmasters_trigger_ctx(source_id, controller, "BowmastersDrawTrigger", "Bowmasters draw trigger: amass Orc 1"));
+            pending.push(bowmasters_trigger_ctx(source_id, controller, "Bowmasters draw trigger: amass Orc 1"));
         }
         _ => {}
     }
@@ -547,19 +551,15 @@ fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &str, pending
         if (card_type == "instant" || card_type == "sorcery") && exiler == controller {
             let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source_id,
                 source_name: "Murktide Regent".into(),
                 controller: ctl.clone(),
-                kind: "MurktideExile",
                 target_spec: TargetSpec::None,
-                effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
-                    if let Some(p) = state.player_mut(&ctl).permanents
-                        .iter_mut().find(|p| p.id == source_id)
-                    {
-                        p.counters += 1;
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                    if let Some(bf) = state.permanent_bf_mut(source_id) {
+                        bf.counters += 1;
                         state.log(t, &ctl, "Murktide: inst/sorc exiled → +1/+1 counter");
                     }
-                }),
+                })),
             });
         }
     }
@@ -573,18 +573,14 @@ fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: 
         {
             let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source_id,
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
-                kind: "TamiyoClue",
                 target_spec: TargetSpec::None,
-                effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
-                    if state.player(&ctl).permanents.iter()
-                        .any(|p| p.id == source_id && p.attacking)
-                    {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                    if state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
                         do_create_clue(&ctl, state, t);
                     }
-                }),
+                })),
             });
         }
         // Controller draws their 3rd card this turn.
@@ -593,14 +589,12 @@ fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: 
         {
             let ctl = controller.to_string();
             pending.push(TriggerContext {
-                source_id,
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
-                kind: "TamiyoFlip",
                 target_spec: TargetSpec::None,
-                effect: std::sync::Arc::new(move |state, t, _targets, catalog| {
-                    do_flip_tamiyo(&ctl, state, t, catalog);
-                }),
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, catalog, _rng| {
+                    do_flip_tamiyo(source_id, &ctl, state, t, catalog);
+                })),
             });
         }
         _ => {}
@@ -628,7 +622,7 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
     // Static card-based triggers: pass the source permanent's ObjId to each check function.
     for &(card_name, check_fn) in CARD_TRIGGERS {
         for owner in ["us", "opp"] {
-            if let Some(p) = state.player(owner).permanents.iter().find(|p| p.name == card_name) {
+            if let Some(p) = state.find_permanent_by_name(card_name, owner) {
                 check_fn(event, p.id, owner, &mut pending);
             }
         }
@@ -652,44 +646,34 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
     for ctx in triggers {
         let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map)
             .into_iter().collect();
-        let source_name = ctx.source_name.clone();
-        let source_id = ctx.source_id;
-        let owner = state.player_id(&ctx.controller);
-        state.stack.push(StackEntry::Trigger {
-            id: ObjId::UNSET,
-            source_id,
-            source_name,
-            owner,
-            context: ctx,
+        let ab_id = state.alloc_id();
+        let ab_owner = state.player_id(&ctx.controller);
+        let ab = StackAbility {
+            id: ab_id,
+            source_name: ctx.source_name.clone(),
+            owner: ab_owner,
+            effect: ctx.effect.clone(),
             chosen_targets,
-        });
+        };
+        state.abilities.insert(ab_id, ab);
+        state.stack.push(ab_id);
     }
-}
-
-/// Apply the resolution effect of a triggered ability.
-pub(super) fn apply_trigger(ctx: &TriggerContext, targets: &[Target], state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
-    (ctx.effect)(state, t, targets, catalog_map);
 }
 
 /// Build a TriggerContext for the Tamiyo +2 per-attacker trigger.
 /// Extracted to keep the on_event closure in `tamiyo_plus_two_effect` readable.
-fn tamiyo_plus_two_fire_ctx(tamiyo_id: ObjId, tamiyo_ctl: String, attacker_id: ObjId, attacker_ctl: String) -> TriggerContext {
+fn tamiyo_plus_two_fire_ctx(_tamiyo_id: ObjId, tamiyo_ctl: String, attacker_id: ObjId, _attacker_ctl: String) -> TriggerContext {
     let ctl = tamiyo_ctl.clone();
-    let atk_ctl = attacker_ctl.clone();
     TriggerContext {
-        source_id: tamiyo_id,
         source_name: "Tamiyo, Seasoned Scholar".into(),
         controller: tamiyo_ctl,
-        kind: "TamiyoPlusTwoFire",
         target_spec: TargetSpec::None,
-        effect: std::sync::Arc::new(move |state, t, _targets, _catalog| {
+        effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
             let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
-            let still_in_play = state.player(&atk_ctl).permanents.iter().any(|p| p.id == attacker_id);
+            let still_in_play = state.permanent_bf(attacker_id).is_some();
             if still_in_play {
-                if let Some(p) = state.player_mut(&atk_ctl).permanents
-                    .iter_mut().find(|p| p.id == attacker_id)
-                {
-                    p.power_mod -= 1;
+                if let Some(bf) = state.permanent_bf_mut(attacker_id) {
+                    bf.power_mod -= 1;
                 }
                 state.active_effects.push(ContinuousEffect {
                     controller: ctl.clone(),
@@ -703,7 +687,7 @@ fn tamiyo_plus_two_fire_ctx(tamiyo_id: ObjId, tamiyo_ctl: String, attacker_id: O
                 });
             }
             state.log(t, &ctl, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
-        }),
+        })),
     }
 }
 
@@ -728,4 +712,156 @@ pub(super) fn tamiyo_plus_two_effect(controller: &str, tamiyo_id: ObjId) -> Cont
         })),
         stat_mod: None,
     }
+}
+
+/// A named effect builder: given `(who, source_id)`, produces an `Effect` closure.
+/// Used by `NAMED_ABILITY_EFFECTS` to register card-specific ability effects by their
+/// TOML effect tag, the same way `CARD_TRIGGERS` registers card-specific trigger logic.
+type NamedEffectBuilder = fn(&str, ObjId) -> Effect;
+
+fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
+    let who = who.to_string();
+    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+        state.active_effects.push(tamiyo_plus_two_effect(&who, source_id));
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        state.log(t, &who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
+    }))
+}
+
+/// Registry of named ability effects. Each entry maps a TOML `effect` tag to a builder
+/// function. New card-specific effects are added here rather than as inline branches.
+static NAMED_ABILITY_EFFECTS: &[(&str, NamedEffectBuilder)] = &[
+    ("tamiyo_plus_two", build_tamiyo_plus_two),
+];
+
+/// Build an `Effect` closure for an activated ability at push time.
+/// Replaces the old string-dispatch path in `apply_ability_effect`.
+pub(super) fn build_ability_effect(
+    ability: &AbilityDef,
+    who: &str,
+    source_id: ObjId,
+) -> Effect {
+    let who = who.to_string();
+
+    if let Some(rest) = ability.effect.strip_prefix("draw:") {
+        let n: usize = rest.parse().unwrap_or(1);
+        return eff_draw(who, n);
+    }
+
+    if ability.effect.starts_with("search:") {
+        let mut parts = ability.effect.splitn(3, ':');
+        parts.next(); // "search"
+        let filter = parts.next().unwrap_or("").to_string();
+        let dest = parts.next().unwrap_or("play").to_string();
+        return eff_fetch_search(who, source_id, filter, dest);
+    }
+
+    for &(tag, builder) in NAMED_ABILITY_EFFECTS {
+        if ability.effect == tag {
+            return builder(&who, source_id);
+        }
+    }
+
+    // Targeted effect (destroy/bounce/exile): target was chosen at push time, stored in chosen_targets.
+    if !ability.effect.is_empty() {
+        let to = match ability.effect.as_str() {
+            "exile"  => ZoneId::Exile,
+            "bounce" => ZoneId::Hand,
+            _        => ZoneId::Graveyard,  // "destroy" and anything else
+        };
+        let who_c = who.clone();
+        return Effect(std::sync::Arc::new(move |state, t, targets, catalog, _rng| {
+            if let Some(Target::Object(id)) = targets.first() {
+                change_zone(*id, to, state, t, &who_c, catalog);
+            }
+        }));
+    }
+
+    // No-op (ability with no effect string — e.g. loyalty ability that just adjusts loyalty).
+    Effect(std::sync::Arc::new(|_state, _t, _targets, _catalog, _rng| {}))
+}
+
+/// Build an `Effect` for a single effect string (e.g. `"draw:3"`, `"destroy"`, `"win"`).
+fn build_single_effect(effect: &str, who: &str, _def: &CardDef) -> Effect {
+    if let Some(rest) = effect.strip_prefix("draw:") {
+        let n: usize = rest.parse().unwrap_or(1);
+        return eff_draw(who.to_string(), n);
+    }
+    if let Some(rest) = effect.strip_prefix("put_back:") {
+        let n: usize = rest.parse().unwrap_or(0);
+        return eff_put_back(who.to_string(), n);
+    }
+    if let Some(spec) = effect.strip_prefix("mana:") {
+        return eff_mana(who.to_string(), spec.to_string());
+    }
+    if let Some(rest) = effect.strip_prefix("life_loss:") {
+        let n: i32 = rest.parse().unwrap_or(0);
+        return eff_life_loss(who.to_string(), n);
+    }
+    if let Some(rest) = effect.strip_prefix("discard:") {
+        let mut parts = rest.splitn(2, ':');
+        let n: usize = parts.next().unwrap_or("1").parse().unwrap_or(1);
+        let filter = parts.next().unwrap_or("").to_string();
+        return eff_discard(who.to_string(), Who::Opp, n, filter);
+    }
+    if effect.starts_with("search:") {
+        let mut parts = effect.splitn(3, ':');
+        parts.next();
+        let filter = parts.next().unwrap_or("").to_string();
+        let dest = parts.next().unwrap_or("play").to_string();
+        return eff_fetch_search(who.to_string(), ObjId::UNSET, filter, dest);
+    }
+    match effect {
+        "win"       => eff_doomsday(),
+        "destroy"   => eff_destroy_target(who.to_string()),
+        "bounce"    => eff_bounce_target(who.to_string()),
+        "counter"   => eff_counter_target(who.to_string()),
+        "reanimate" => eff_reanimate(who.to_string()),
+        "cantrip"   => eff_draw(who.to_string(), 1),
+        _           => Effect(std::sync::Arc::new(|_,_,_,_,_| {})),
+    }
+}
+
+/// Build a `(TargetSpec, Effect)` for a spell at cast time.
+/// Replaces the old `spell_effect` dispatch function in `mod.rs`.
+///
+/// - Parses `def.target()` into a `TargetSpec` via `target_spec_from_str`.
+/// - Chains `def.effects()` into a single `Effect` via `build_single_effect`.
+/// - If `effects` is empty, the card is a permanent: returns `eff_enter_permanent`.
+pub(super) fn build_spell_effect(
+    def: &CardDef,
+    who: &str,
+    annotation: Option<String>,
+) -> (TargetSpec, Effect) {
+    let target_spec = target_spec_from_str(def.target());
+    let effects = def.effects();
+    if effects.is_empty() {
+        // Permanent (or unrecognized spell): enters the battlefield.
+        return (TargetSpec::None, eff_enter_permanent(who.to_string(), def.name.clone(), annotation));
+    }
+    let mut eff = build_single_effect(effects[0].as_str(), who, def);
+    for e in &effects[1..] {
+        eff = eff.then(build_single_effect(e.as_str(), who, def));
+    }
+    (target_spec, eff)
+}
+
+/// Build a `(TargetSpec, Effect)` for an adventure face at cast time.
+pub(super) fn build_adventure_effect(face: &AdventureFace, who: &str) -> (TargetSpec, Effect) {
+    let target_spec = target_spec_from_str(face.target.as_deref());
+    let effects = &face.effects;
+    if effects.is_empty() {
+        return (TargetSpec::None, Effect(std::sync::Arc::new(|_,_,_,_,_| {})));
+    }
+    // Use a dummy CardDef for build_single_effect (effects don't need def info currently).
+    let dummy_def = CardDef {
+        name: face.name.clone(),
+        play_weight: None,
+        kind: CardKind::Instant(SpellData::default()),
+    };
+    let mut eff = build_single_effect(effects[0].as_str(), who, &dummy_def);
+    for e in &effects[1..] {
+        eff = eff.then(build_single_effect(e.as_str(), who, &dummy_def));
+    }
+    (target_spec, eff)
 }

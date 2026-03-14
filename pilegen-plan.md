@@ -1,6 +1,6 @@
 # Pilegen Improvement Plan
 
-Iterative steps to improve `src/pilegen.rs` against the principles in `CLAUDE.md`.
+Iterative steps to improve `src/pilegen/` against the principles in `CLAUDE.md`.
 Each step must leave `cargo test` green and behavior unchanged (unless the step is
 explicitly a behavior fix).
 
@@ -67,7 +67,7 @@ and confirms it fires.
 
 ## Step 3 — `TriggerContext.source` → `ObjId`
 
-**Status: DONE** (commit to follow)
+**Status: DONE**
 
 **Why:** The last string-identity field in the trigger pipeline. Required before DFC
 work (same card, two names, one `ObjId`). Acknowledged by `TODO(ids)` in the code.
@@ -103,9 +103,6 @@ stack — the same concept as any targeted spell, just with a stack-zone predica
   `"stack:"` instead of `counter_target()`.
 - `dd_countered` in `strategy.rs` uses `top.chosen_targets` instead of `top.counters`.
 
-**Known remaining issue:** Resolution in `handle_priority_round` detects counters
-with an `is_counter` check — this violates target opacity (Step 4b below).
-
 **Verification:** 113 tests pass. `counter_target` and `matches_counter_target` deleted.
 
 ---
@@ -119,29 +116,6 @@ with an `is_counter` check — this violates target opacity (Step 4b below).
 resolution. Once `stack` is on `SimState`, counterspells can use a proper
 `eff_counter_target()` closure — resolution becomes truly opaque.
 
-**What to do:**
-
-1. Add `pub(crate) stack: Vec<StackItem>` to `SimState`; initialize to `vec![]`.
-2. Replace all `stack` local uses in `handle_priority_round` with `state.stack`.
-3. Remove `stack: &[StackItem]` parameters from `has_valid_target`,
-   `choose_trigger_target`, `choose_spell_target`, `cast_spell`, `push_triggers`
-   — they all read `state.stack` directly.
-4. Implement `eff_counter_target()` in `effects.rs`:
-   - finds `targets[0]` (an `ObjId`) in `state.stack`
-   - removes it and moves it to the owner's graveyard
-   - if not found, logs a fizzle and does nothing (same as `eff_destroy_target` on
-     a dead permanent — no special-case needed)
-5. In `spell_effect()` catch-all in `catalog.rs`, when `def.target()` starts with
-   `"stack:"`, return `(TargetSpec::StackEntry { filter }, eff_counter_target())`.
-6. Delete the `is_counter` block in resolution — just:
-   ```rust
-   } else if let Some(ref eff) = top.effect {
-       // New Effect path: all non-adventure, non-ability spells including counterspells.
-       ...
-       eff.call(state, t, &top.chosen_targets, catalog_map, rng_dyn);
-   }
-   ```
-
 **Verification:** `cargo test` passes. No `is_counter` in codebase.
 
 ---
@@ -153,46 +127,11 @@ resolution. Once `stack` is on `SimState`, counterspells can use a proper
 **Why:** `StackItem` has 17 fields, many mutually exclusive. The flat struct makes
 it hard to reason about what fields are valid for spells vs abilities vs triggers.
 
-**What to do:**
+**What was done:**
 
-Replace `StackItem` with:
-
-```rust
-enum StackEntry {
-    Spell {
-        id: ObjId,
-        card_id: ObjId,
-        name: String,
-        owner: ObjId,
-        controller: ObjId,
-        chosen_targets: Vec<Target>,
-        effect: Option<Effect>,
-        is_adventure_face: bool,
-    },
-    Ability {
-        id: ObjId,
-        source_id: ObjId,
-        source_name: String,
-        owner: ObjId,
-        controller: ObjId,
-        ability_def: Option<AbilityDef>,
-        chosen_targets: Vec<Target>,
-        effect: Option<Effect>,
-    },
-    Trigger {
-        id: ObjId,
-        source_id: ObjId,
-        controller: ObjId,
-        context: TriggerContext,
-        chosen_targets: Vec<Target>,
-        effect: Option<Effect>,
-    },
-}
-```
-
-Adventure-specific fields live only on `Spell`. Trigger context lives only on
-`Trigger`. No special `ninjutsu_attack_target` — ninjutsu targets are in
-`chosen_targets` on the `Ability` variant.
+Replaced `StackItem` with a typed `StackEntry` enum: `Spell`, `Ability`, `Trigger`.
+Adventure-specific fields live only on `Spell`. Ninjutsu targets are in
+`chosen_targets` on `Ability`. No `ninjutsu_attack_target` field.
 
 **Verification:** `cargo test` passes. No `unwrap_or_default()` workarounds for
 dead fields.
@@ -201,70 +140,251 @@ dead fields.
 
 ## Step 6 — DFC / adventure / ninjutsu: state on the object
 
-**Status: TODO**
+**Status: DONE**
 
 **Why:** These three mechanics all hard-code their state tracking rather than
 reading generic game state. The principle: state belongs on the object it
 describes; mechanics read it from there.
 
-### Adventure
+**What was done:**
 
-- Remove `PlayerState.on_adventure: Vec<String>`.
-- Add `on_adventure: bool` to the card object when in exile.
-- `collect_hand_actions` reads exile objects with `on_adventure == true` to find
-  castable adventure cards. No special `Vec<String>` needed.
+- `PlayerState.on_adventure: Vec<String>` deleted; replaced by `Exile { on_adventure: bool }` on `CardZone`.
+- `active_face: u8` on `SimPermanent` for DFC transform in-place.
+- `do_flip_tamiyo` and `do_amass_orc` find targets by `ObjId`, not by name.
+- Ninjutsu attack target read from combat state generically via `chosen_targets`.
 
-### Tamiyo / DFC transform
-
-- Tamiyo flip is a two step play->exile(id); exile->play-flipped(id);
-- Add `active_face: u8` field to permanents (0 = front, 1 = back).
-- DFC card definitions carry both faces. Transform = flip `active_face` in place.
-  Same `ObjId`, same damage counters, same "entered this turn" status.
-- `do_amass_orc()` and `do_flip_tamiyo()` find targets by `ObjId`, not by name.
-
-### Ninjutsu
-
-- Remove `ninjutsu_attack_target` from `StackItem` (done after Step 5).
-- Ninjutsu is an activated ability from hand with combat timing. The attacker
-  to return is chosen as part of paying the cost of the ability.
-  The costs are: (usually) mana + return an unblocked attacking creature to your hand.
-  whether "there exists" an unblocked attacking creature (and equally, but less interestingly, the mana) determines whether we can ninjutsu.
-  The "enters attacking" state is generic: attackers track an attack target, so a ninjutsu effect reads that off (we can track costs paid as an input to effects, this works for murktide too)
-  the entering creature inherits the returned attacker's `attack_target` which it reads from having access to costs paid.
-
-**Verification:** `cargo test` passes. `do_flip_tamiyo`, `on_adventure: Vec<String>`,
-and `ninjutsu_attack_target` are deleted.
+**Verification:** `cargo test` passes.
 
 ---
 
 ## Step 7 — Ability effects as closures from TOML
 
-**Status: TODO**
+**Status: DONE**
 
-**Why:** `ability.effect.starts_with("draw:")`, `"tamiyo_plus_two"`, and the other
-string-dispatched effects in `apply_ability_effect()` are not composable and require
-engine changes to add new effects. The `Effect` closure system already exists and
-works correctly for spells.
+**What was done:**
 
-**What to do:**
+- `apply_ability_effect` and its string dispatch deleted. Replaced by
+  `build_ability_effect(ability, who, source_id) -> Effect` in `catalog.rs`.
+- `eff_fetch_search(who, source_id, filter, dest)` primitive added to `effects.rs`.
+- `apply_trigger` deleted. Trigger resolution now uses `context.effect.call(...)`.
+- All `StackEntry` variants (Spell, Ability, Trigger) resolve via a single
+  `eff.call(state, t, &chosen_targets, catalog_map, rng_dyn)` path.
+- `TriggerContext.kind` field deleted; assertions migrated to `source_name`.
+- `EffectFn` type alias and `no_effect()` deleted from `mod.rs`.
+- `"tamiyo_plus_two"` inline branch replaced by `NAMED_ABILITY_EFFECTS` static
+  registry (same pattern as `CARD_TRIGGERS`).
+- `change_zone(id, to, state, t, actor)` helper added; replaces `apply_effect_to`.
 
-- Extend `AbilityDef` to carry an `Effect` closure built at TOML deserialization.
-- Remove the `ability.effect` string dispatch block in `apply_ability_effect()`.
-- `"tamiyo_plus_two"` becomes a registered closure on Tamiyo's `CardDef`, built
-  the same way `bowmasters_check` is registered in `CARD_TRIGGERS`.
-- `search:`, `draw:`, and other effect strings are replaced by `eff_*` primitives.
-
-**Verification:** `cargo test` passes. `apply_ability_effect` string dispatch
-(`strip_prefix`, `starts_with`, `==`) is deleted. `"tamiyo_plus_two"` string is gone.
+**Verification:** `cargo test` passes (113 tests). Single closure-call resolution
+path for all stack entries.
 
 ---
 
-## Notes
+## Step 8 — Flatten zone storage: `state.cards` as source of truth
 
-- The `decide_action()` boundary (engine ↔ strategy) is correct. After Step 1,
-  `strategy.rs` formalizes this as a module boundary. A future step can make it a
-  trait to support multiple player archetypes.
-- Probability constants (`75%` on-board roll, `30%` second-spell, `35%` ninjutsu)
-  should eventually move to `PilegenConfig`. Not blocking anything above.
-- `eprintln!()` decision logging in strategy bypasses `state.log`. Should be
-  replaced with `state.log.push(...)` at some point.
+**Status: DONE**
+
+**Why:** `PlayerState` held six separate zone containers (`library`, `hand`, `lands`,
+`permanents`, `graveyard`, `exile`), requiring every zone transition to keep two
+representations in sync. `state.cards: HashMap<ObjId, CardObject>` with `zone:
+CardZone` on each object is now the single canonical store.
+
+**What was done:**
+
+- **8a**: `SimLand` deleted. Lands are permanents with a land subtype. All mana
+  production, potential-mana, display, and strategy sites filter `permanents_of` by
+  `catalog.is_land()`. `PlayerState.lands` deleted.
+- **8b**: `SimPermanent` deleted. `PlayerState.permanents` deleted. All battlefield
+  objects live in `state.cards` with `zone: Battlefield` and a populated `bf`.
+  Mana methods (`potential_mana`, `produce_mana`, `pay_mana`, `has_black_mana`) moved
+  from `PlayerState` to `SimState`. Helpers added: `permanents_of`, `permanent_bf`,
+  `permanent_bf_mut`.
+- **8c**: `Zone` struct deleted. `PlayerState.hand`, `.graveyard`, `.exile`,
+  `.library` deleted. All off-board cards live in `state.cards` with the appropriate
+  `CardZone`. Helpers added: `hand_of`, `library_of`, `graveyard_of`, `exile_of`,
+  `on_adventure_of`, `hand_size`, `set_card_zone`. Library threading (`us_lib`,
+  `opp_lib`) removed from all function signatures.
+- **8d**: `change_zone(id, to, state, t, actor, catalog_map)` now derives `from` from
+  the card's current zone, fires `GameEvent::ZoneChange`, clears `bf` on Battlefield
+  exit and `stack` on Stack exit, and logs semantically by `(from, to)` pair. Manual
+  `GameEvent::ZoneChange` fire sites (lethal-damage deaths, delve GY→Exile) collapsed
+  into `change_zone` calls. `eff_enter_permanent` still constructs new `CardObject`
+  entries directly (entering the battlefield from resolution is a creation, not a
+  zone-change in the same sense).
+
+**Verification:** 113 tests pass. `SimLand`, `SimPermanent`, `Zone` deleted.
+`state.cards` is the only container. `change_zone` has no source-zone special-casing.
+
+---
+
+## Step 9 — Spell effects as data; no engine dispatch on card names
+
+**Why:** `spell_effect()` in `mod.rs` dispatches on card names to build `(TargetSpec,
+Effect)` pairs at cast time. This violates the core principle: "no card should have
+engine dispatch logic when used." `AbilityDef` already carries an `effect: String`
+field that `build_ability_effect` parses into a closure — spells should work the same
+way. Additionally, hardcoded `TargetSpec` variants (`OpponentCreatureMvLt4`,
+`AnyOpponentNonlandPermanent`, etc.) collapse generic concepts into named constants
+that must be extended per-card.
+
+**Principle:** Effects and targets are data on the card definition. They are parsed
+from TOML strings once at cast time by `build_spell_effect`. Resolution is fully
+opaque: call `eff.call(state, t, &targets, catalog, rng)` — no names, no dispatch.
+
+### 9a — `SpellData` gets `effects: Vec<String>`; TOML updated
+
+Add `effects: Vec<String>` to `SpellData` and `RawCardDef`. Map it through
+`From<RawCardDef>` for `Instant` and `Sorcery`. Add `effects()` accessor to `CardDef`
+that returns the vec for spells and `&["enter"]` for permanents
+(Creature/Artifact/Planeswalker/Enchantment).
+
+Add `effects` to pilegen.toml for every instant/sorcery:
+
+| Card | effects |
+|------|---------|
+| Brainstorm | `["draw:3", "put_back:2"]` |
+| Ponder / Consider / Preordain | `["draw:1"]` |
+| Dark Ritual | `["mana:BBB"]` |
+| Doomsday | `["win"]` |
+| Fatal Push / Snuff Out | `["destroy"]` |
+| Thoughtseize | `["discard:1:nonland", "life_loss:2"]` |
+| Hymn to Tourach | `["discard:2"]` |
+| Unearth | `["reanimate"]` + `target = "self:gy:creature"` |
+| Force of Will / Daze | `["counter"]` |
+
+### 9b — Generic `TargetSpec`; delete hardcoded variants
+
+Replace named variants with composable ones:
+
+```rust
+enum TargetSpec {
+    None,
+    AnyTarget,                                        // Bowmasters ping
+    Player,
+    Permanent { controller: Who, filter: String },   // replaces 3 named variants
+    CardInZone { controller: Who, zone: ZoneId, filter: String }, // replaces CardInOwnGraveyard
+    StackEntry { filter: String },
+}
+```
+
+`target_spec_from_str(target: Option<&str>) -> TargetSpec` parses TOML target strings
+into these variants:
+- `"opp:creature_mv_lt4"` → `Permanent { controller: Opp, filter: "creature_mv_lt4" }`
+- `"self:gy:creature"` → `CardInZone { controller: Actor, zone: Graveyard, filter: "creature" }`
+- `"stack:any"` → `StackEntry { filter: "any" }`
+
+`choose_trigger_target`, `choose_spell_target`, and `has_valid_target` updated to use
+the new variants (no named-variant dispatch).
+
+### 9c — `build_spell_effect` replaces `spell_effect`
+
+`pub(super) fn build_spell_effect(def: &CardDef, who: &str, annotation: Option<String>) -> (TargetSpec, Effect)` in `catalog.rs`:
+- Calls `target_spec_from_str(def.target())`
+- Iterates `def.effects()`, building each into an `Effect` via `build_single_effect`,
+  chaining with `.then()`
+- For `"enter"`, builds `eff_enter_permanent(who, def.name.clone(), annotation)`
+- For `"counter"`, builds `eff_counter_target(who)` (which pops the targeted stack item)
+
+`build_single_effect(effect: &str, who: &str) -> Effect` handles the vocabulary;
+shared with `build_ability_effect` (which becomes a thin wrapper).
+
+`spell_effect()` in `mod.rs` deleted. `cast_spell` calls `build_spell_effect(def, who, annotation)`.
+
+**Verification:** `cargo test` passes. `spell_effect` deleted. No card names in
+resolution or cast path. All spells/permanents go through `build_spell_effect`.
+
+---
+
+## Next Steps (ideas, not yet scheduled)
+
+### Unified predicate layer
+
+Targeting legality, search filters, strategy queries ("what lands do I have?"), and
+trigger guards are all doing the same thing: "does this card satisfy these
+constraints?" They're currently scattered across `predicates.rs`, `catalog.rs`, and
+`strategy.rs` with slightly different signatures.
+
+Once Step 8 lands and all cards are `CardObject`, a single predicate type makes sense:
+
+- `CardFilter` — composable, data-driven; works on `(&CardObject, &CardDef)`.
+- `card_matches(filter: &CardFilter, card: &CardObject, catalog) -> bool` — one evaluation path.
+- Everything goes through it: targeting, search, strategy queries, trigger guards.
+
+The TOML vocabulary (`type`, `controller`, `color`, `zone`, etc.) naturally extends
+to filter expressions. A `[filter]` block in TOML that parses into a `CardFilter` at
+load time would let abilities declare targeting predicates without Rust — the same way
+effects are already declared.
+
+
+### Replacement effects
+when this enters... (murktide, cavern, etc..) are replacement effects
+
+### Searching
+kind of like targeting but in the library. reuse predicates but a diff zone.
+
+### Characteristic changing abilities
+once we have truly rich characteristics
+tag a card with "has a characteristic changing ability"
+and then when you look at a characteristic of that card, you have to run the ability on it first
+e.g. barrowgoyf p/t, kaito hexproof creature on owner turn
+
+### Strategy as a trait
+
+`decide_action()` and friends could become a `PlayerStrategy` trait, making it
+possible to swap in different archetypes (e.g. a reactive opponent, a goldfish) or
+test the engine against a fixed script.
+
+### State-based actions
+
+SBAs (creatures with lethal damage, players at 0 life, etc.) are currently checked
+inline at specific points. A proper `check_state_based_actions` pass before every
+priority invocation would make the engine more correct and remove special-case checks.
+
+### ninjutsu cost
+reasonable and tricky
+more generic way is to "capture the cost" in general. And if the cost is bouncing an attacking creature we should snapshot the state of the attacking creature including what it was attacking.
+
+this cuts across to murktide "capturing the cost" to include the spells delved.
+
+### `handle_priority_round`
+Function is massive and needs cleaning up.
+
+Comment on `handle_priority_round` is out of date.
+
+Is `sim_play_land` needed with generic zone logic?
+
+Library threading (`us_lib`/`them_lib`) is already gone. The remaining work: use
+player `ObjId` (`AP_id`/`NAP_id`) instead of `"us"`/`"opp"` strings for active
+player tracking.
+
+Factor `resolve_top_of_stack` out of `handle_priority_round`.
+
+### protection
+good test for targeting
+with protection from X, X cannot:
+damage
+enchant
+block
+target (if instant gives protection like veil of summer, target becomes invalid at resolution and fizzles)
+
+### `do_step`
+match enum to string is silly. `state.current_phase` should also be an enum and this should be a function. Also why is `state.current_phase` even wrong now?
+pull out functions for the steps? No benefit to epic mono-function I can see.
+
+attacking / blocking strategy is in `do_step` for DeclareAttackers/DeclareBlockers.
+
+share 'unblocked' state between ninjutsu and damage? or derive it naturally from attacking/blocked/step?
+
+### `activate_planeswalkers`
+"pending actions" type logic should all be in strategy, not main engine.
+
+## review / cleanups
+
+These should be relatively easy things to tick off, just from code review.
+
+``eff_enter_permanent` encodes a lot of logic that feels overweight.
+
+`clue` and `Orc Army` is a token not a card
+
+tamiyo flip is exile -> bf-flipped
+

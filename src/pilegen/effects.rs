@@ -4,7 +4,7 @@ use super::*;
 
 /// Actor-relative player reference used in effect primitives.
 /// `Actor` = the spell's controller; `Opp` = their opponent.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum Who { Actor, Opp }
 
 impl Who {
@@ -57,11 +57,16 @@ pub(crate) fn eff_draw(who: impl Into<String>, n: usize) -> Effect {
 }
 
 /// Put `n` cards back from `who`'s hand (Brainstorm put-back).
+/// Moves `n` hand cards back to Library zone (unknown — just sets zone).
 pub(crate) fn eff_put_back(who: impl Into<String>, n: usize) -> Effect {
     let who = who.into();
     Effect(Arc::new(move |state, _t, _targets, _catalog, _rng| {
-        let actual = (n as i32).min(state.player(&who).hand.hidden);
-        state.player_mut(&who).hand.hidden -= actual;
+        let ids: Vec<ObjId> = state.hand_of(&who).map(|c| c.id).take(n).collect();
+        for id in ids {
+            if let Some(card) = state.cards.get_mut(&id) {
+                card.zone = CardZone::Library;
+            }
+        }
     }))
 }
 
@@ -92,9 +97,9 @@ pub(crate) fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effec
 /// Destroy the permanent in `targets[0]`. `caster` used for logging.
 pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, _catalog, _rng| {
+    Effect(Arc::new(move |state, t, targets, catalog, _rng| {
         if let Some(Target::Object(id)) = targets.first() {
-            apply_effect_to("destroy", *id, state, t, &caster);
+            change_zone(*id, ZoneId::Graveyard, state, t, &caster, catalog);
         }
     }))
 }
@@ -102,18 +107,9 @@ pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
 /// Bounce the permanent in `targets[0]` to its controller's hand.
 pub(crate) fn eff_bounce_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, _catalog, _rng| {
+    Effect(Arc::new(move |state, t, targets, catalog, _rng| {
         if let Some(Target::Object(id)) = targets.first() {
-            let id = *id;
-            let controller = state.permanent_controller(id).map(|s| s.to_string());
-            let name = state.permanent_name(id);
-            if let (Some(controller), Some(name)) = (controller, name) {
-                if let Some(idx) = state.player(&controller).permanents.iter().position(|p| p.id == id) {
-                    state.player_mut(&controller).permanents.remove(idx);
-                    state.player_mut(&controller).hand.hidden += 1;
-                    state.log(t, &caster, format!("→ {} returned to {}'s hand", name, controller));
-                }
-            }
+            change_zone(*id, ZoneId::Hand, state, t, &caster, catalog);
         }
     }))
 }
@@ -125,30 +121,23 @@ pub(crate) fn eff_doomsday() -> Effect {
     }))
 }
 
-/// Discard `n` random cards from `target`'s hand. `nonland=true` skips lands.
-pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, nonland: bool) -> Effect {
+/// Discard `n` random cards from `target`'s hand.
+/// `filter` is a type predicate string (e.g. `"nonland"`, `"any"`, `""` = any).
+pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filter: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, _targets, _catalog, rng| {
+    let filter = filter.into();
+    Effect(Arc::new(move |state, t, _targets, catalog, rng| {
         use rand::Rng;
         let target_who = target.resolve(&caster).to_string();
-        let mut lib = std::mem::take(&mut state.player_mut(&target_who).library);
-        let mut discarded: Vec<String> = Vec::new();
         for _ in 0..n {
-            if state.player(&target_who).hand.hidden <= 0 { break; }
-            let candidates: Vec<usize> = lib.iter().enumerate()
-                .filter(|(_, (_, _, d))| !nonland || !d.is_land())
-                .map(|(i, _)| i)
+            let candidates: Vec<ObjId> = state.hand_of(&target_who)
+                .filter(|c| filter.is_empty() || filter == "any" || catalog.get(c.name.as_str())
+                    .map_or(true, |d| matches_target_type(&filter, &d.kind, false, Some(d))))
+                .map(|c| c.id)
                 .collect();
             if candidates.is_empty() { break; }
-            let idx = candidates[rng.gen_range(0..candidates.len())];
-            let (_id, card, _) = lib.remove(idx);
-            state.player_mut(&target_who).hand.hidden -= 1;
-            state.player_mut(&target_who).graveyard.visible.push(card.clone());
-            discarded.push(card);
-        }
-        state.player_mut(&target_who).library = lib;
-        if !discarded.is_empty() {
-            state.log(t, &caster, format!("→ {} discards: {}", target_who, discarded.join(", ")));
+            let id = candidates[rng.gen_range(0..candidates.len())];
+            change_zone(id, ZoneId::Graveyard, state, t, &caster, catalog);
         }
     }))
 }
@@ -182,23 +171,29 @@ pub(crate) fn eff_enter_permanent(
         let mana_abs = catalog.get(card_name.as_str())
             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
         let new_id = state.alloc_id();
-        state.cards.insert(new_id, CardObject::new(new_id, card_name.clone(), &owner));
-        state.player_mut(&owner).permanents.push(SimPermanent {
+        state.cards.insert(new_id, CardObject {
             id: new_id,
             name: card_name.clone(),
-            annotation: ann,
-            counters,
-            tapped: false,
-            damage: 0,
-            entered_this_turn: true,
-            mana_abilities: mana_abs,
-            attacking: false,
-            unblocked: false,
-            loyalty: pw_loyalty,
-            pw_activated_this_turn: false,
-            attack_target: None,
-            power_mod: 0,
-            toughness_mod: 0,
+            owner: owner.clone(),
+            controller: owner.clone(),
+            zone: CardZone::Battlefield,
+            spell: None,
+            bf: Some(BattlefieldState {
+                annotation: ann,
+                counters,
+                tapped: false,
+                damage: 0,
+                entered_this_turn: true,
+                mana_abilities: mana_abs,
+                attacking: false,
+                unblocked: false,
+                loyalty: pw_loyalty,
+                pw_activated_this_turn: false,
+                attack_target: None,
+                power_mod: 0,
+                toughness_mod: 0,
+                active_face: 0,
+            }),
         });
         let etb_ev = GameEvent::ZoneChange {
             card: card_name.clone(),
@@ -219,44 +214,87 @@ pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
     Effect(Arc::new(move |state, t, targets, _catalog, _rng| {
         let Some(Target::Object(target_id)) = targets.first() else { return; };
         let target_id = *target_id;
-        let pos = state.stack.iter().position(|s| s.id() == target_id);
+        let pos = state.stack.iter().position(|&id| id == target_id);
         if let Some(pos) = pos {
-            let target = state.stack.remove(pos);
-            let target_owner = state.who_str(target.owner()).to_string();
-            let target_name = target.display_name().to_string();
-            state.player_mut(&target_owner).graveyard.visible.push(target_name.clone());
-            state.log(t, &caster, format!("→ {} countered", target_name));
+            state.stack.remove(pos);
+            if let Some(card) = state.cards.get_mut(&target_id) {
+                let name = card.name.clone();
+                card.zone = CardZone::Graveyard;
+                card.spell = None;
+                state.log(t, &caster, format!("→ {} countered", name));
+            } else {
+                state.log(t, &caster, "→ ability countered".to_string());
+            }
         } else {
             state.log(t, &caster, "→ fizzled (target already resolved)".to_string());
         }
     }))
 }
 
-/// Reanimate a random card of `type_filter` from `target`'s graveyard.
-pub(crate) fn eff_reanimate(actor: impl Into<String>, target: Who, type_filter: impl Into<String>) -> Effect {
+/// Move the card in `targets[0]` onto the Battlefield.
+/// Target selection happens in the strategy layer via `choose_spell_target`.
+pub(crate) fn eff_reanimate(actor: impl Into<String>) -> Effect {
     let actor = actor.into();
-    let type_filter = type_filter.into();
+    Effect(Arc::new(move |state, t, targets, catalog, _rng| {
+        if let Some(Target::Object(id)) = targets.first() {
+            change_zone(*id, ZoneId::Battlefield, state, t, &actor, catalog);
+        }
+    }))
+}
+
+/// Search the library for a land matching `filter` and put it into `dest` ("play" or "hand").
+/// Used for fetchland abilities (e.g. `search:land-island|swamp:play`).
+pub(crate) fn eff_fetch_search(
+    who: impl Into<String>,
+    source_id: ObjId,
+    filter: impl Into<String>,
+    dest: impl Into<String>,
+) -> Effect {
+    let who = who.into();
+    let filter = filter.into();
+    let dest = dest.into();
     Effect(Arc::new(move |state, t, _targets, catalog, rng| {
         use rand::Rng;
-        let target_who = target.resolve(&actor).to_string();
-        let candidates: Vec<String> = state.player(&target_who).graveyard.visible.iter()
-            .filter(|n| catalog.get(n.as_str())
-                .map(|d| matches_target_type(&type_filter, &d.kind, false, Some(*d)))
-                .unwrap_or(false))
-            .cloned()
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        // Collect candidates from Library zone.
+        let candidates: Vec<(ObjId, String)> = state.library_of(&who)
+            .filter(|c| catalog.get(c.name.as_str()).map_or(false, |d| matches_search_filter(&filter, d)))
+            .map(|c| (c.id, c.name.clone()))
             .collect();
-        if candidates.is_empty() { return; }
-        let chosen = candidates[rng.gen_range(0..candidates.len())].clone();
-        state.player_mut(&target_who).graveyard.visible.retain(|n| n != &chosen);
-        let mana_abs = catalog.get(chosen.as_str()).map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
-        let new_id = state.alloc_id();
-        state.cards.insert(new_id, CardObject::new(new_id, chosen.clone(), &target_who));
-        state.player_mut(&target_who).permanents.push(SimPermanent {
-            id: new_id,
-            name: chosen.clone(),
-            mana_abilities: mana_abs,
-            ..SimPermanent::new(&chosen)
-        });
-        state.log(t, &actor, format!("→ {} returns from graveyard", chosen));
+        if !candidates.is_empty() {
+            // Prefer a black-producing land if available.
+            let black_candidates: Vec<(ObjId, String)> = candidates.iter()
+                .filter(|(_, n)| catalog.get(n.as_str()).and_then(|d| d.as_land()).map_or(false, |l| {
+                    l.land_types.swamp || l.mana_abilities.iter().any(|ma| ma.produces.contains('B'))
+                }))
+                .cloned()
+                .collect();
+            let pool = if !black_candidates.is_empty() { &black_candidates } else { &candidates };
+            let (chosen_id, name) = pool[rng.gen_range(0..pool.len())].clone();
+            let mana_abilities = catalog.get(name.as_str())
+                .and_then(|d| d.as_land())
+                .map(|l| l.mana_abilities.clone())
+                .unwrap_or_default();
+            match dest.as_str() {
+                "play" => {
+                    if let Some(card) = state.cards.get_mut(&chosen_id) {
+                        card.zone = CardZone::Battlefield;
+                        card.bf = Some(BattlefieldState {
+                            tapped: false,
+                            mana_abilities,
+                            ..BattlefieldState::new(vec![])
+                        });
+                    }
+                    state.log(t, &who, format!("{} ability → {}", source_name, name));
+                }
+                "hand" => {
+                    if let Some(card) = state.cards.get_mut(&chosen_id) {
+                        card.zone = CardZone::Hand { known: true };
+                    }
+                    state.log(t, &who, format!("{} ability → {} (to hand)", source_name, name));
+                }
+                _ => {}
+            }
+        }
     }))
 }

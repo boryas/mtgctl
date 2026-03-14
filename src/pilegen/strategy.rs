@@ -12,13 +12,13 @@ pub(super) fn collect_on_board_actions(
 ) -> Vec<PriorityAction> {
     let mut actions: Vec<PriorityAction> = Vec::new();
 
-    // 75% roll per land with an available ability.
-    let land_ids: Vec<(ObjId, String)> = state.player(ap).lands.iter()
-        .filter(|l| !l.tapped)
-        .filter(|l| catalog_map.get(l.name.as_str())
-            .map_or(false, |def| def.abilities().iter()
+    // 75% roll per land (permanent that is_land) with an available ability.
+    let land_ids: Vec<(ObjId, String)> = state.permanents_of(ap)
+        .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
+        .filter(|p| catalog_map.get(p.name.as_str())
+            .map_or(false, |def| def.is_land() && def.abilities().iter()
                 .any(|ab| ability_available(ab, state, ap, true, catalog_map))))
-        .map(|l| (l.id, l.name.clone()))
+        .map(|p| (p.id, p.name.clone()))
         .collect();
     for (land_id, name) in land_ids {
         if rng.gen_bool(0.75) {
@@ -34,11 +34,14 @@ pub(super) fn collect_on_board_actions(
     }
 
     // 75% roll per permanent with an available non-loyalty ability.
-    let perm_ids: Vec<(ObjId, String, bool)> = state.player(ap).permanents.iter()
-        .filter(|p| catalog_map.get(p.name.as_str())
-            .map_or(false, |def| def.abilities().iter()
-                .any(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !p.tapped, catalog_map))))
-        .map(|p| (p.id, p.name.clone(), p.tapped))
+    let perm_ids: Vec<(ObjId, String, bool)> = state.permanents_of(ap)
+        .filter(|p| {
+            let tapped = p.bf.as_ref().map_or(false, |bf| bf.tapped);
+            catalog_map.get(p.name.as_str())
+                .map_or(false, |def| def.abilities().iter()
+                    .any(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped, catalog_map)))
+        })
+        .map(|p| (p.id, p.name.clone(), p.bf.as_ref().map_or(false, |bf| bf.tapped)))
         .collect();
     for (perm_id, name, tapped) in perm_ids {
         if rng.gen_bool(0.75) {
@@ -54,11 +57,11 @@ pub(super) fn collect_on_board_actions(
     }
 
     // Adventure creatures in exile: 75% roll to cast the creature face.
-    let on_adventure_names: Vec<String> = state.player(ap).on_adventure.clone();
+    let on_adventure_names: Vec<String> = state.on_adventure_of(ap).map(|c| c.name.clone()).collect();
     for card_name in on_adventure_names {
         if let Some(&def) = catalog_map.get(card_name.as_str()) {
             let cost = parse_mana_cost(def.mana_cost());
-            if !state.player(ap).potential_mana().can_pay(&cost) { continue; }
+            if !state.potential_mana(ap).can_pay(&cost) { continue; }
             if rng.gen_bool(0.75) {
                 actions.push(PriorityAction::CastFromAdventure { card_name });
             }
@@ -67,16 +70,16 @@ pub(super) fn collect_on_board_actions(
 
     // Fateful turn override: force-include fetch lands that can search for a black source,
     // if we have no black mana. (These bypass the 75% roll.)
-    if ap == "us" && t == dd_turn && !state.us.has_black_mana() {
+    if ap == "us" && t == dd_turn && !state.has_black_mana("us") {
         let can_search_black = |name: &str| catalog_map.get(name).map_or(false, |def|
             def.abilities().iter().any(|ab|
                 ab.effect.starts_with("search:land-swamp")
                     || ab.effect.starts_with("search:land-island|swamp")
             )
         );
-        let fetch_ids: Vec<(ObjId, String)> = state.us.lands.iter()
-            .filter(|l| !l.tapped && can_search_black(&l.name))
-            .map(|l| (l.id, l.name.clone()))
+        let fetch_ids: Vec<(ObjId, String)> = state.permanents_of("us")
+            .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && can_search_black(&p.name))
+            .map(|p| (p.id, p.name.clone()))
             .collect();
         if !fetch_ids.is_empty() {
             for (fid, name) in &fetch_ids {
@@ -120,24 +123,22 @@ fn nap_action(
     state: &SimState,
     who: &str,
     last_action: &PriorityAction,
-    us_lib: &mut Vec<(ObjId, String, CardDef)>,
-    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     let other_acted = matches!(last_action, PriorityAction::CastSpell { .. } | PriorityAction::ActivateAbility(..) | PriorityAction::CastAdventure { .. } | PriorityAction::CastFromAdventure { .. });
     if other_acted {
-        let actor_lib: &[_] = if who == "us" { us_lib } else { opp_lib };
         for idx in (0..state.stack.len()).rev() {
-            let item_owner = state.stack[idx].owner();
-            let item_is_counterable = state.stack[idx].is_counterable();
-            let item_name = state.stack[idx].display_name().to_string();
+            let item_id = state.stack[idx];
+            let item_owner = state.stack_item_owner(item_id);
+            let item_is_counterable = state.stack_item_is_counterable(item_id);
+            let item_name = state.stack_item_display_name(item_id).to_string();
             if item_owner != state.player_id(who) && item_is_counterable {
                 if !worth_countering(&item_name, catalog_map) {
                     eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, item_name);
                     break;
                 }
-                if let Some(action) = respond_with_counter(state, idx, who, actor_lib, catalog_map, rng, true) {
+                if let Some(action) = respond_with_counter(state, idx, who, catalog_map, rng, true) {
                     if let PriorityAction::CastSpell { ref name, .. } = action {
                         eprintln!("[decision] {}: NAP counter {} targeting {}", who, name, item_name);
                     }
@@ -158,7 +159,6 @@ fn ap_react(
     state: &mut SimState,
     t: u8,
     who: &str,
-    us_lib: &[(ObjId, String, CardDef)],
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
@@ -166,24 +166,29 @@ fn ap_react(
         return None;
     }
     let top_idx = state.stack.len() - 1;
-    let top_is_counterable = state.stack[top_idx].is_counterable();
-    let top_owner = state.stack[top_idx].owner();
-    let top_chosen = match &state.stack[top_idx] {
-        StackEntry::Spell { chosen_targets, .. } => chosen_targets.clone(),
-        _ => vec![],
-    };
+    let top_id = state.stack[top_idx];
+    let top_is_counterable = state.stack_item_is_counterable(top_id);
+    let top_owner = state.stack_item_owner(top_id);
+    let top_chosen = state.cards.get(&top_id)
+        .and_then(|c| c.spell.as_ref())
+        .map(|s| s.chosen_targets.clone())
+        .unwrap_or_default();
     let us_id = state.us.id;
     let dd_countered = top_is_counterable
         && top_owner != us_id
         && top_chosen.first()
             .and_then(|t| if let Target::Object(id) = t { Some(id) } else { None })
-            .and_then(|id| state.stack.iter().find(|s| s.id() == *id))
-            .is_some_and(|s| matches!(s, StackEntry::Spell { name, owner, .. } if name == "Doomsday" && *owner == us_id));
+            .and_then(|id| state.stack.iter().find(|&&s| s == *id).map(|_| *id))
+            .is_some_and(|id| {
+                state.cards.get(&id)
+                    .map(|c| c.name == "Doomsday" && state.player_id(&c.owner) == us_id)
+                    .unwrap_or(false)
+            });
     if !dd_countered {
         return None;
     }
     Some(
-        if let Some(action) = respond_with_counter(state, top_idx, "us", us_lib, catalog_map, rng, false) {
+        if let Some(action) = respond_with_counter(state, top_idx, "us", catalog_map, rng, false) {
             action
         } else {
             state.log(t, "us", "⚠ Doomsday countered — could not protect");
@@ -200,8 +205,6 @@ fn ap_proactive(
     t: u8,
     who: &str,
     dd_turn: u8,
-    us_lib: &mut Vec<(ObjId, String, CardDef)>,
-    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
@@ -211,17 +214,18 @@ fn ap_proactive(
         // On the fateful turn, skip the land drop if Doomsday is already castable — playing
         // a land might spend our last card in hand and leave us unable to cast Doomsday.
         let dd_already_castable = fateful && !state.us.dd_cast
-            && state.us.potential_mana().can_pay(&ManaCost { b: 3, ..Default::default() })
-            && us_lib.iter().any(|(_, n, _)| n == "Doomsday");
+            && state.potential_mana("us").can_pay(&ManaCost { b: 3, ..Default::default() })
+            && state.hand_of("us").any(|c| c.name == "Doomsday");
         if !dd_already_castable {
             let force = state.player(who).must_land_drop;
-            let lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-            let land_count = lib.iter().filter(|(_, _, d)| d.is_land()).count();
+            let land_count = state.hand_of(who)
+                .filter(|c| catalog_map.get(c.name.as_str()).map_or(false, |d| d.is_land()))
+                .count();
             if land_count > 0 {
                 // T1=100%, T2=90%, T3=80%, T4+=70%; forced to 100% when must_land_drop is set.
                 let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
                 if rng.gen::<f64>() < prob {
-                    if let Some(name) = choose_land_name(state, who, lib, fateful, rng) {
+                    if let Some(name) = choose_land_name(state, who, catalog_map, fateful, rng) {
                         state.player_mut(who).must_land_drop = false;
                         return PriorityAction::LandDrop(name);
                     }
@@ -241,20 +245,18 @@ fn ap_proactive(
                     if !state.stack.is_empty() { false }
                     else {
                         let loyalty_ok = if cost < 0 {
-                            state.player(who).permanents.iter()
-                                .find(|p| p.id == *source_id)
-                                .map_or(false, |p| p.loyalty >= -cost)
+                            state.permanent_bf(*source_id)
+                                .map_or(false, |bf| bf.loyalty >= -cost)
                         } else {
-                            state.player(who).permanents.iter().any(|p| p.id == *source_id)
+                            state.permanent_bf(*source_id).is_some()
                         };
-                        let already_used = state.player(who).permanents.iter()
-                            .find(|p| p.id == *source_id)
-                            .map_or(true, |p| p.pw_activated_this_turn);
+                        let already_used = state.permanent_bf(*source_id)
+                            .map_or(true, |bf| bf.pw_activated_this_turn);
                         loyalty_ok && !already_used
                     }
                 } else {
-                    let source_untapped = state.player(who).lands.iter().any(|l| l.id == *source_id && !l.tapped)
-                        || state.player(who).permanents.iter().any(|p| p.id == *source_id && (!p.tapped || ab.sacrifice_self));
+                    let source_untapped = state.permanent_bf(*source_id)
+                        .map_or(false, |bf| !bf.tapped || ab.sacrifice_self);
                     // Also allow hand-zone abilities (ninjutsu/cycling) — check via permanent_controller
                     // (for hand-zone sources, the permanent isn't in play, so we check differently)
                     let is_hand_ability = ab.zone == "hand";
@@ -262,9 +264,9 @@ fn ap_proactive(
                 }
             }
             PriorityAction::CastFromAdventure { card_name } => {
-                state.player(who).on_adventure.iter().any(|n| n == card_name)
+                state.on_adventure_of(who).any(|c| c.name == *card_name)
                     && catalog_map.get(card_name.as_str())
-                        .map(|def| state.player(who).potential_mana().can_pay(&parse_mana_cost(def.mana_cost())))
+                        .map(|def| state.potential_mana(who).can_pay(&parse_mana_cost(def.mana_cost())))
                         .unwrap_or(false)
             }
             _ => false,
@@ -281,17 +283,16 @@ fn ap_proactive(
         return PriorityAction::Pass;
     }
 
-    let actor_lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-    let actions = collect_hand_actions(state, who, actor_lib, catalog_map);
+    let actions = collect_hand_actions(state, who, catalog_map);
     if actions.is_empty() {
         let pool = &state.player(who).pool;
-        let hand = state.player(who).hand.hidden;
+        let hand = state.hand_size(who);
         eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
             who, pool.b, pool.u, pool.total, hand);
         if who == "us" && t == dd_turn && !state.us.dd_cast {
-            let dd_in_lib = actor_lib.iter().filter(|(_, n, _)| n == "Doomsday").count();
-            eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_lib={}, potential B={} tot={}",
-                hand, dd_in_lib, pool.b, pool.total);
+            let dd_in_hand = state.hand_of("us").filter(|c| c.name == "Doomsday").count();
+            eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_hand={}, potential B={} tot={}",
+                hand, dd_in_hand, pool.b, pool.total);
         }
         return PriorityAction::Pass;
     }
@@ -333,30 +334,32 @@ pub(super) fn decide_action(
     who: &str,
     dd_turn: u8,
     last_action: &PriorityAction,
-    us_lib: &mut Vec<(ObjId, String, CardDef)>,
-    opp_lib: &mut Vec<(ObjId, String, CardDef)>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     if who != ap {
         if state.stack.is_empty() { return PriorityAction::Pass; }
-        return nap_action(state, who, last_action, us_lib, opp_lib, catalog_map, rng);
+        return nap_action(state, who, last_action, catalog_map, rng);
     }
     // Ninjutsu: AP can activate during DeclareBlockers / CombatDamage / EndCombat.
-    let in_ninjutsu_step = matches!(state.current_phase.as_str(),
-        "DeclareBlockers" | "CombatDamage" | "EndCombat");
+    let in_ninjutsu_step = matches!(state.current_phase,
+        Some(TurnPosition::Step(StepKind::DeclareBlockers))
+        | Some(TurnPosition::Step(StepKind::CombatDamage))
+        | Some(TurnPosition::Step(StepKind::EndCombat)));
     if in_ninjutsu_step {
-        let actor_lib: &[(ObjId, String, CardDef)] = if who == "us" { us_lib } else { opp_lib };
-        if let Some(action) = try_ninjutsu(state, who, actor_lib, rng) {
+        if let Some(action) = try_ninjutsu(state, who, catalog_map, rng) {
             return action;
         }
         return PriorityAction::Pass;
     }
-    if state.current_phase != "Main" {
+    let in_main_phase = matches!(state.current_phase,
+        Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
+        | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
+    if !in_main_phase {
         return PriorityAction::Pass;
     }
-    if let Some(action) = ap_react(state, t, who, us_lib, catalog_map, rng) {
+    if let Some(action) = ap_react(state, t, who, catalog_map, rng) {
         return action;
     }
-    ap_proactive(state, t, who, dd_turn, us_lib, opp_lib, catalog_map, rng)
+    ap_proactive(state, t, who, dd_turn, catalog_map, rng)
 }

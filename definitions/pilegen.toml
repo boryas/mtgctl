@@ -194,24 +194,28 @@ play_weight = 10
 name = "Doomsday"
 card_type = "sorcery"
 mana_cost = "BBB"
+effects = ["win"]
 
 [[cards]]
 name = "Brainstorm"
 card_type = "instant"
 exileable = true
 mana_cost = "U"
+effects = ["draw:3", "put_back:2"]
 
 [[cards]]
 name = "Ponder"
 card_type = "sorcery"
 exileable = true
 mana_cost = "U"
+effects = ["draw:1"]
 
 [[cards]]
 name = "Consider"
 card_type = "instant"
 exileable = true
 mana_cost = "U"
+effects = ["draw:1"]
 
 [[cards]]
 name = "Daze"
@@ -219,6 +223,7 @@ card_type = "instant"
 exileable = true
 blue = true
 target = "stack:any"
+effects = ["counter"]
 alternate_costs = [
   { bounce_island = true, hand_min = 1 },
   { mana_cost = "1U", hand_min = 1, prob = 0.2 },
@@ -229,6 +234,7 @@ name = "Force of Will"
 card_type = "instant"
 blue = true
 target = "stack:any"
+effects = ["counter"]
 alternate_costs = [
   { exile_blue_from_hand = true, life_cost = 1, hand_min = 2 },
   { mana_cost = "3UU", hand_min = 1 },
@@ -238,12 +244,14 @@ alternate_costs = [
 name = "Dark Ritual"
 card_type = "instant"
 mana_cost = "B"
+effects = ["mana:BBB"]
 
 [[cards]]
 name = "Fatal Push"
 card_type = "instant"
 mana_cost = "B"
 target = "opp:creature_mv_lt4"
+effects = ["destroy"]
 
 [[cards]]
 name = "Snuff Out"
@@ -251,6 +259,7 @@ card_type = "instant"
 mana_cost = "3BB"
 black = true
 target = "opp:creature_nonblack"
+effects = ["destroy"]
 alternate_costs = [
   { life_cost = 4 },
 ]
@@ -268,18 +277,22 @@ name = "Thoughtseize"
 card_type = "sorcery"
 mana_cost = "B"
 requires = ["opp_hand_nonempty"]
+effects = ["discard:1:nonland", "life_loss:2"]
 
 [[cards]]
 name = "Unearth"
 card_type = "sorcery"
 mana_cost = "B"
 requires = ["us_gy_has_creature"]
+target = "self:gy:creature"
+effects = ["reanimate"]
 
 [[cards]]
 name = "Hymn to Tourach"
 card_type = "sorcery"
 mana_cost = "BB"
 requires = ["opp_hand_nonempty"]
+effects = ["discard:2"]
 
 [[cards]]
 name = "Edge of Autumn"
