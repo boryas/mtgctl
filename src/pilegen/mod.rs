@@ -235,13 +235,6 @@ struct ContinuousEffect {
     stat_mod: Option<StatModData>,
 }
 
-// ── Effect system (new) ───────────────────────────────────────────────────────
-//
-// Target, TargetSpec, Who, Effect, and eff_* primitives live in effects.rs and predicates.rs,
-// re-exported via `pub(crate) use effects::*` and `pub(crate) use predicates::*` above.
-
-// ── Effect primitives and predicate functions are in effects.rs and predicates.rs ──
-
 // ── Turn structure ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -353,8 +346,6 @@ fn end_phase() -> Phase {
         ],
     }
 }
-
-// ── Mana cost parsing ─────────────────────────────────────────────────────────
 
 // ── Mana cost ─────────────────────────────────────────────────────────────────
 
@@ -1183,8 +1174,6 @@ fn select_deck(prompt: &str, flow_type_filter: Option<&str>) -> Option<(String, 
     })
 }
 
-// ── Deck card loading ─────────────────────────────────────────────────────────
-
 // ── Turn simulation ───────────────────────────────────────────────────────────
 
 /// Choose a land to play from the hand. Returns the chosen land name, or `None` if no eligible
@@ -1289,12 +1278,9 @@ fn ability_available(
     true
 }
 
-/// Collect spells from hand that can be cast this turn (cantrips / permanents / discard).
-/// Abilities are handled separately in the ability pass.
-/// Collect spells that can be proactively cast from an empty-stack main phase.
-/// Counterspells are handled separately (via `respond_with_counter`); this only
-/// covers cantrips, permanents, removal, and other proactive non-counter spells.
-/// Returns true if the player can currently afford to cast `name` via any available cost.
+/// True if the player can currently afford to cast `name` via any available cost.
+///
+/// Tries the standard mana cost first; falls back to alternate costs (e.g. delve, pitch).
 fn spell_is_affordable(
     name: &str,
     def: &CardDef,
@@ -1824,7 +1810,7 @@ fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
 ///   - For `exile_blue_from_hand` costs: also roll P(have a blue pitch card in hand).
 /// When `probabilistic = false` the attempt is deterministic (used when protecting Doomsday).
 ///
-/// On success, returns a `CastSpell` intent with `counters = Some(target_idx)`.
+/// On success, returns a `CastSpell` intent targeting `stack[target_idx]`.
 /// No resources are spent; the caller (`handle_priority_round`) commits the action.
 fn respond_with_counter(
     state: &SimState,
@@ -1951,8 +1937,6 @@ fn creature_has_keyword(name: &str, kw: &str, catalog_map: &HashMap<&str, &CardD
 }
 
 
-/// Deal 1 damage from Bowmasters to the best target on `target_player`'s side.
-
 /// Remove creatures whose accumulated damage meets or exceeds their toughness (SBA).
 fn check_lethal_damage(who: &str, state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
     let dead: Vec<(ObjId, String)> = state.permanents_of(who)
@@ -2031,22 +2015,19 @@ fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u
     state.log(t, controller, format!("Tamiyo flips → Tamiyo, Seasoned Scholar [loyalty: {}]", loyalty));
 }
 
-// ── New turn-structure functions ──────────────────────────────────────────────
-
 /// Collect on-board actions (ability activations) to potentially take this main phase.
 ///
-/// Performs a 75% roll per land/permanent with an available ability and returns the resulting
-/// `Vec<PriorityAction>`. This replaces the old `want_to_activate` flag system: instead of
-/// marking flags on `SimLand`/`SimPermanent`, we pre-collect a list of actions the player
-/// intends to take, which `ap_proactive` then pops in order.
-///
-/// On the fateful (Doomsday) turn, if we can't produce any black mana, fetches that can search
-/// for a black land are force-added (bypassing the 75% roll). If no such fetch exists,
-/// `state.us.must_land_drop` is set as a side effect so the land drop is guaranteed.
+/// Performs a 75% roll per land/permanent with an available ability. On the fateful
+/// (Doomsday) turn, if no black mana is available, fetches that can find a black land
+/// are force-added (bypassing the roll); if no such fetch exists, `state.us.must_land_drop`
+/// is set so the land drop is guaranteed.
 
-/// Run a priority round. AP gets priority first; both players must pass consecutively
-/// (with an empty stack) for the round to end. When both pass with a non-empty stack,
-/// the entire stack resolves LIFO and AP regains priority.
+/// Pop and resolve the top item of the stack.
+///
+/// If the top id is in `state.cards` it is a spell: runs its effect and moves the card to
+/// graveyard (instant/sorcery) or exile-on-adventure, or leaves zone management to
+/// `eff_enter_permanent` (permanent spells). If the id is in `state.abilities` it is an
+/// activated or triggered ability: runs its effect and removes the entry.
 fn resolve_top_of_stack(
     state: &mut SimState,
     t: u8,
