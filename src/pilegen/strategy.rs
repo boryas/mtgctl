@@ -363,3 +363,128 @@ pub(super) fn decide_action(
     }
     ap_proactive(state, t, who, dd_turn, catalog_map, rng)
 }
+
+// ── Combat strategy ───────────────────────────────────────────────────────────
+
+/// Decide which creatures attack and what each one targets.
+///
+/// Returns `(attacker_id, attack_target)` pairs. `attack_target` is `None` to attack the
+/// opponent player, or `Some(pw_id)` to attack a planeswalker. Attackers are chosen if their
+/// toughness exceeds the total power of NAP creatures that could block them.
+pub(super) fn declare_attackers(
+    ap: &str,
+    state: &SimState,
+    catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut impl Rng,
+) -> Vec<(ObjId, Option<ObjId>)> {
+    let nap = opp_of(ap);
+    // Compute NAP blocker power per flying/non-flying attacker.
+    let nap_blockers: Vec<(String, i32)> = state.permanents_of(nap)
+        .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
+        .filter_map(|p| {
+            let def = catalog_map.get(p.name.as_str())?;
+            if !def.is_creature() { return None; }
+            let bf = p.bf.as_ref().unwrap();
+            Some((p.name.clone(), creature_stats(bf, Some(def)).0))
+        })
+        .collect();
+    let nap_pw_ids: Vec<ObjId> = state.permanents_of(nap)
+        .filter(|p| catalog_map.get(p.name.as_str())
+            .map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_))))
+        .map(|p| p.id)
+        .collect();
+    state.permanents_of(ap)
+        .filter(|p| p.bf.as_ref().map_or(false, |bf| !bf.tapped && !bf.entered_this_turn))
+        .filter_map(|p| {
+            let def = catalog_map.get(p.name.as_str())?;
+            if !def.is_creature() { return None; }
+            let atk_flies = def.has_keyword("flying");
+            // Sum power of NAP creatures that can block this attacker.
+            let blocking_power: i32 = nap_blockers.iter()
+                .filter(|(blk_name, _)| !atk_flies || creature_has_keyword(blk_name, "flying", catalog_map))
+                .map(|(_, pow)| *pow)
+                .sum();
+            let (_, tgh) = creature_stats(p.bf.as_ref().unwrap(), Some(def));
+            if tgh <= blocking_power { return None; }
+            // Randomly attack a NAP planeswalker (50%) or the player.
+            let target = if !nap_pw_ids.is_empty() && rng.gen_bool(0.5) {
+                Some(nap_pw_ids[rng.gen_range(0..nap_pw_ids.len())])
+            } else {
+                None
+            };
+            Some((p.id, target))
+        })
+        .collect()
+}
+
+/// Decide which NAP creatures block which attackers.
+///
+/// Returns `(attacker_id, blocker_id)` pairs. A creature only blocks if it's a "good block":
+/// it kills the attacker, or both creatures survive (no chump blocks).
+pub(super) fn declare_blockers(
+    ap: &str,
+    state: &SimState,
+    catalog_map: &HashMap<&str, &CardDef>,
+) -> Vec<(ObjId, ObjId)> {
+    let nap = opp_of(ap);
+    let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
+    let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
+    for &atk_id in &state.combat_attackers {
+        let (atk_name, atk_pow, atk_tgh) = match state.cards.get(&atk_id)
+            .and_then(|p| p.bf.as_ref().map(|bf| (p.name.clone(), bf)))
+        {
+            Some((name, bf)) => {
+                let def = catalog_map.get(name.as_str()).copied();
+                let (pow, tgh) = creature_stats(bf, def);
+                (name, pow, tgh)
+            }
+            None => continue,
+        };
+        let atk_flies = creature_has_keyword(&atk_name, "flying", catalog_map);
+        let blocker = state.permanents_of(nap)
+            .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
+            .find_map(|p| {
+                let def = catalog_map.get(p.name.as_str()).copied();
+                if !def.map(|d| d.is_creature()).unwrap_or(false) { return None; }
+                // Flying attackers can only be blocked by flying creatures.
+                if atk_flies && !creature_has_keyword(&p.name, "flying", catalog_map) { return None; }
+                let (blk_pow, blk_tgh) = creature_stats(p.bf.as_ref().unwrap(), def);
+                // Good block: kills attacker OR both survive. Not a chump.
+                if blk_pow >= atk_tgh || atk_pow < blk_tgh { Some(p.id) } else { None }
+            });
+        if let Some(blk_id) = blocker {
+            used_blockers.insert(blk_id);
+            blocks.push((atk_id, blk_id));
+        }
+    }
+    blocks
+}
+
+/// Try to perform ninjutsu during a combat priority window (DeclareBlockers / CombatDamage / EndCombat).
+///
+/// Requires: unblocked attacker, ninjutsu card in hand, and enough mana.
+/// Returns an `ActivateAbility` action or `None` if conditions aren't met.
+pub(super) fn try_ninjutsu(
+    state: &SimState,
+    who: &str,
+    catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut impl Rng,
+) -> Option<PriorityAction> {
+    if state.hand_size(who) <= 0 { return None; }
+    let has_unblocked = state.permanents_of(who)
+        .any(|c| c.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked));
+    if !has_unblocked { return None; }
+    let ninjas: Vec<(ObjId, String)> = state.hand_of(who)
+        .filter(|c| catalog_map.get(c.name.as_str()).map_or(false, |d| d.ninjutsu().is_some()))
+        .map(|c| (c.id, c.name.clone()))
+        .collect();
+    if ninjas.is_empty() { return None; }
+    // 35% roll: simulates probability of wanting to use it.
+    if !rng.gen_bool(0.35) { return None; }
+    let idx = rng.gen_range(0..ninjas.len());
+    let (ninja_id, ninja_name) = &ninjas[idx];
+    let ninja_def = catalog_map.get(ninja_name.as_str())?;
+    let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
+    if !state.potential_mana(who).can_pay(&ninjutsu_cost) { return None; }
+    Some(PriorityAction::ActivateAbility(*ninja_id, ninja_def.ninjutsu()?.as_ability_def()))
+}

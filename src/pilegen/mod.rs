@@ -19,7 +19,8 @@ mod predicates;
 pub(crate) use predicates::*;
 
 mod strategy;
-use strategy::{decide_action, collect_on_board_actions};
+use strategy::{decide_action, collect_on_board_actions, declare_attackers, declare_blockers};
+#[cfg(test)] use strategy::try_ninjutsu;
 
 #[cfg(test)]
 mod tests;
@@ -1898,38 +1899,6 @@ fn creature_stats(bf: &BattlefieldState, def: Option<&CardDef>) -> (i32, i32) {
     (power + bf.counters + bf.power_mod, toughness + bf.counters + bf.toughness_mod)
 }
 
-/// Try to perform ninjutsu during a combat priority window (DeclareBlockers / CombatDamage / EndCombat).
-///
-/// Requires: unblocked attacker, ninjutsu card in library (treated probabilistically as in-hand),
-/// and enough mana. Returns a `Ninjutsu` action or `None` if conditions aren't met.
-fn try_ninjutsu(
-    state: &SimState,
-    who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
-    rng: &mut impl Rng,
-) -> Option<PriorityAction> {
-    if state.hand_size(who) <= 0 { return None; }
-    // Find an unblocked attacker controlled by `who`.
-    let has_unblocked = state.permanents_of(who)
-        .any(|c| c.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked));
-    if !has_unblocked { return None; }
-    // Find ninjutsu cards in hand.
-    let ninjas: Vec<(ObjId, String)> = state.hand_of(who)
-        .filter(|c| catalog_map.get(c.name.as_str()).map_or(false, |d| d.ninjutsu().is_some()))
-        .map(|c| (c.id, c.name.clone()))
-        .collect();
-    if ninjas.is_empty() { return None; }
-    // 35% roll: simulates probability of holding it and wanting to use it.
-    if !rng.gen_bool(0.35) { return None; }
-    // Pick a random ninja and verify mana.
-    let idx = rng.gen_range(0..ninjas.len());
-    let (ninja_id, ninja_name) = &ninjas[idx];
-    let ninja_def = catalog_map.get(ninja_name.as_str())?;
-    let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
-    if !state.potential_mana(who).can_pay(&ninjutsu_cost) { return None; }
-    Some(PriorityAction::ActivateAbility(*ninja_id, ninja_def.ninjutsu()?.as_ability_def()))
-}
-
 // ── Keyword helpers ───────────────────────────────────────────────────────────
 
 fn creature_has_keyword(name: &str, kw: &str, catalog_map: &HashMap<&str, &CardDef>) -> bool {
@@ -2014,13 +1983,6 @@ fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u
     }
     state.log(t, controller, format!("Tamiyo flips → Tamiyo, Seasoned Scholar [loyalty: {}]", loyalty));
 }
-
-/// Collect on-board actions (ability activations) to potentially take this main phase.
-///
-/// Performs a 75% roll per land/permanent with an available ability. On the fateful
-/// (Doomsday) turn, if no black mana is available, fetches that can find a black land
-/// are force-added (bypassing the roll); if no such fetch exists, `state.us.must_land_drop`
-/// is set so the land drop is guaranteed.
 
 /// Pop and resolve the top item of the stack.
 ///
@@ -2407,63 +2369,21 @@ fn do_step(
             }
         }
         StepKind::DeclareAttackers => {
-            let nap = if ap == "us" { "opp" } else { "us" };
-            // For each candidate attacker, compute the relevant NAP blocking power:
-            // only untapped NAP creatures that *can* block that attacker count.
-            // Flying attackers are only threatened by flying blockers.
-            let nap_blockers: Vec<(String, i32)> = state.permanents_of(nap)
-                .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
-                .filter_map(|p| {
-                    let def = catalog_map.get(p.name.as_str());
-                    if def.map(|d| d.is_creature()).unwrap_or(false) {
-                        let bf = p.bf.as_ref().unwrap();
-                        Some((p.name.clone(), creature_stats(bf, def.copied()).0))
-                    } else { None }
-                })
-                .collect();
-            let attackers: Vec<ObjId> = state.permanents_of(ap)
-                .filter(|p| p.bf.as_ref().map_or(false, |bf| !bf.tapped && !bf.entered_this_turn))
-                .filter_map(|p| {
-                    let def = catalog_map.get(p.name.as_str());
-                    if def.map(|d| d.is_creature()).unwrap_or(false) {
-                        let atk_flies = creature_has_keyword(&p.name, "flying", catalog_map);
-                        // Sum power of NAP creatures that can block this attacker.
-                        let relevant_power: i32 = nap_blockers.iter()
-                            .filter(|(blk_name, _)| {
-                                // A flyer can only be blocked by flyers.
-                                !atk_flies || creature_has_keyword(blk_name, "flying", catalog_map)
-                            })
-                            .map(|(_, pow)| pow)
-                            .sum();
-                        let bf = p.bf.as_ref().unwrap();
-                        let (_, tgh) = creature_stats(bf, def.copied());
-                        if tgh > relevant_power { Some(p.id) } else { None }
-                    } else { None }
-                })
-                .collect();
-            // Assign attack targets: each attacker picks the player or a random NAP planeswalker.
-            let nap_pw_ids: Vec<ObjId> = state.permanents_of(nap)
-                .filter(|p| catalog_map.get(p.name.as_str())
-                    .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_))))
-                .map(|p| p.id)
-                .collect();
-            for &atk_id in &attackers {
-                let target: Option<ObjId> = if !nap_pw_ids.is_empty() && rng.gen_bool(0.5) {
-                    Some(nap_pw_ids[rng.gen_range(0..nap_pw_ids.len())])
-                } else {
-                    None
-                };
+            // Strategy decides who attacks and what each attacker targets.
+            let decisions = declare_attackers(ap, state, catalog_map, rng);
+            // Apply: mark each attacker on the battlefield.
+            for &(atk_id, target) in &decisions {
                 if let Some(bf) = state.permanent_bf_mut(atk_id) {
-                    bf.attack_target = target;
-                    bf.tapped = true;
                     bf.attacking = true;
+                    bf.tapped = true;
+                    bf.attack_target = target;
                 }
             }
+            let attackers: Vec<ObjId> = decisions.iter().map(|&(id, _)| id).collect();
             if !attackers.is_empty() {
                 let atk_descs: Vec<String> = attackers.iter().filter_map(|&atk_id| {
                     let p = state.cards.get(&atk_id)?;
-                    let bf = p.bf.as_ref()?;
-                    let target_name = bf.attack_target
+                    let target_name = p.bf.as_ref()?.attack_target
                         .and_then(|id| state.permanent_name(id))
                         .unwrap_or_else(|| "player".to_string());
                     Some(format!("{} → {}", p.name, target_name))
@@ -2471,75 +2391,36 @@ fn do_step(
                 state.log(t, ap, format!("Declare attackers: {}", atk_descs.join(", ")));
             }
             state.combat_attackers = attackers.clone();
-
-            // Fire per-creature and step events AFTER attackers are marked.
-            for &atk_id in &attackers {
-                if let Some(p) = state.cards.get(&atk_id) {
-                    if let Some(id) = p.bf.as_ref().map(|_| p.id) {
-                        let ev = GameEvent::CreatureAttacked {
-                            attacker_id: id,
-                            attacker_controller: ap.to_string(),
-                        };
-                        state.queue_triggers(&ev);
-                    }
-                }
+            // Fire triggers after attackers are marked.
+            for atk_id in attackers {
+                state.queue_triggers(&GameEvent::CreatureAttacked {
+                    attacker_id: atk_id,
+                    attacker_controller: ap.to_string(),
+                });
             }
-            let step_ev = GameEvent::EnteredStep {
+            state.queue_triggers(&GameEvent::EnteredStep {
                 step: StepKind::DeclareAttackers,
                 active_player: ap.to_string(),
-            };
-            state.queue_triggers(&step_ev);
+            });
         }
         StepKind::DeclareBlockers => {
-            let nap = if ap == "us" { "opp" } else { "us" };
-            let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
-            let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
-            for &atk_id in &state.combat_attackers.clone() {
-                let (atk_name, atk_pow, atk_tgh) = {
-                    match state.cards.get(&atk_id).and_then(|p| p.bf.as_ref().map(|bf| (p.name.clone(), bf))) {
-                        Some((name, bf)) => {
-                            let def = catalog_map.get(name.as_str()).copied();
-                            let (pow, tgh) = creature_stats(bf, def);
-                            (name, pow, tgh)
-                        }
-                        None => continue,
-                    }
-                };
-                let atk_flies = creature_has_keyword(&atk_name, "flying", catalog_map);
-                let blocker_id: Option<(ObjId, String)> = state.permanents_of(nap)
-                    .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
-                    .filter_map(|p| {
-                        let def = catalog_map.get(p.name.as_str()).copied();
-                        if def.map(|d| d.is_creature()).unwrap_or(false) {
-                            // Flying attackers can only be blocked by flying creatures.
-                            if atk_flies && !creature_has_keyword(&p.name, "flying", catalog_map) {
-                                return None;
-                            }
-                            let bf = p.bf.as_ref().unwrap();
-                            let (blk_pow, blk_tgh) = creature_stats(bf, def);
-                            // Good block: kills attacker OR both survive (touch butts). Not a chump.
-                            let good_block = blk_pow >= atk_tgh || atk_pow < blk_tgh;
-                            if good_block { Some((p.id, p.name.clone())) } else { None }
-                        } else { None }
-                    })
-                    .next();
-                if let Some((blk_id, blk_name)) = blocker_id {
-                    state.log(t, nap, format!("{} blocks {}", blk_name, atk_name));
-                    used_blockers.insert(blk_id);
-                    blocks.push((atk_id, blk_id));
-                }
+            let nap = opp_of(ap);
+            // Strategy decides which blockers to assign.
+            let blocks = declare_blockers(ap, state, catalog_map);
+            for &(atk_id, blk_id) in &blocks {
+                let atk_name = state.cards.get(&atk_id).map(|p| p.name.as_str()).unwrap_or("");
+                let blk_name = state.cards.get(&blk_id).map(|p| p.name.clone()).unwrap_or_default();
+                state.log(t, nap, format!("{} blocks {}", blk_name, atk_name));
             }
             state.combat_blocks = blocks;
             // Mark unblocked attackers so ninjutsu can target them.
-            let blocked_atk_ids: std::collections::HashSet<ObjId> = state.combat_blocks.iter()
-                .map(|(a, _)| *a).collect();
-            let unblocked_ids: Vec<ObjId> = state.combat_attackers.iter()
-                .filter(|&&a| !blocked_atk_ids.contains(&a))
-                .copied()
-                .collect();
-            for id in unblocked_ids {
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.unblocked = true;
+            let blocked_atk_ids: std::collections::HashSet<ObjId> =
+                state.combat_blocks.iter().map(|(a, _)| *a).collect();
+            for &atk_id in &state.combat_attackers.clone() {
+                if !blocked_atk_ids.contains(&atk_id) {
+                    if let Some(bf) = state.permanent_bf_mut(atk_id) {
+                        bf.unblocked = true;
+                    }
                 }
             }
         }
