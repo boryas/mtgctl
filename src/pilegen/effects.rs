@@ -281,21 +281,13 @@ pub(crate) fn eff_fetch_search(
                 .collect();
             let pool = if !black_candidates.is_empty() { &black_candidates } else { &candidates };
             let (chosen_id, name) = pool[rng.gen_range(0..pool.len())].clone();
-            let mana_abilities = catalog.get(name.as_str())
-                .and_then(|d| d.as_land())
-                .map(|l| l.mana_abilities.clone())
-                .unwrap_or_default();
             match dest.as_str() {
                 "play" => {
-                    if let Some(card) = state.cards.get_mut(&chosen_id) {
-                        card.zone = CardZone::Battlefield;
-                        card.bf = Some(BattlefieldState {
-                            tapped: false,
-                            mana_abilities,
-                            ..BattlefieldState::new(vec![])
-                        });
-                    }
+                    // Log before entering so the message precedes any ETB trigger logs.
                     state.log(t, &who, format!("{} ability → {}", source_name, name));
+                    // Go through change_zone so do_effect handles BattlefieldState init,
+                    // including enters_tapped, mana_abilities, and ETB trigger dispatch.
+                    change_zone(chosen_id, ZoneId::Battlefield, state, t, &who, catalog, rng);
                 }
                 "hand" => {
                     if let Some(card) = state.cards.get_mut(&chosen_id) {

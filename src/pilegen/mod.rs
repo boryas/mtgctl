@@ -1223,25 +1223,15 @@ fn sim_play_land(
     who: &str,
     card_id: ObjId,
     catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut impl Rng,
 ) {
     if !state.player(who).land_drop_available { return; }
     let land_name = match state.cards.get(&card_id) {
         Some(c) if matches!(c.zone, CardZone::Hand { .. }) => c.name.clone(),
         _ => return,
     };
-    let (tapped, mana_abilities) = {
-        let def = catalog_map.get(land_name.as_str()).and_then(|d| d.as_land()).expect("sim_play_land: not a land");
-        (def.enters_tapped, def.mana_abilities.clone())
-    };
-    if let Some(card) = state.cards.get_mut(&card_id) {
-        card.zone = CardZone::Battlefield;
-        card.bf = Some(BattlefieldState {
-            tapped,
-            mana_abilities,
-            ..BattlefieldState::new(vec![])
-        });
-    }
     state.log(t, who, format!("Play {} [hand: {}]", land_name, state.hand_size(who)));
+    change_zone(card_id, ZoneId::Battlefield, state, t, who, catalog_map, rng);
 }
 
 
@@ -1361,12 +1351,16 @@ fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str
                     if from == ZoneId::Battlefield { card.bf = None; }
                 }
                 if to == ZoneId::Battlefield && card.bf.is_none() {
-                    let mana_abs = catalog_map.get(card.name.as_str())
-                        .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
-                    let loyalty = catalog_map.get(card.name.as_str())
+                    let def = catalog_map.get(card.name.as_str());
+                    let mana_abs = def.map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+                    let loyalty = def
                         .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
                         .unwrap_or(0);
+                    // "Enters the battlefield tapped" is an ETB replacement: the card's data
+                    // determines its initial tapped state, handled here alongside PW loyalty.
+                    let enters_tapped = def.and_then(|d| d.as_land()).map_or(false, |l| l.enters_tapped);
                     card.bf = Some(BattlefieldState {
+                        tapped: enters_tapped,
                         mana_abilities: mana_abs,
                         loyalty,
                         entered_this_turn: true,
@@ -2000,7 +1994,7 @@ fn handle_priority_round(
 
         match action {
             PriorityAction::LandDrop(card_id) => {
-                sim_play_land(state, t, &who, card_id, catalog_map);
+                sim_play_land(state, t, &who, card_id, catalog_map, rng);
                 state.player_mut(&who).land_drop_available = false;
                 last_passer = None;
             }
