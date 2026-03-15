@@ -295,6 +295,58 @@ resolution or cast path. All spells/permanents go through `build_spell_effect`.
 
 ---
 
+---
+
+## Step 10 — Replacement effects + unified event pipeline
+
+**Status: DONE** (commit eb96e5a)
+
+**What was done:**
+
+- `fire_event(event, state, t, actor, catalog_map, rng)` — central clearinghouse for all elemental game events. Pipeline: `check_replacement → do_effect → check_triggers`.
+- `do_effect` applies state mutation per event type (ZoneChange mutates zone, initialises/tears down `BattlefieldState`; Draw moves Library→Hand; notification events are no-ops).
+- `log_event` logs semantically by (from, to) zone pair.
+- `RegisteredReplacement` struct with `id: ObjId`, `source_id`, `controller`, `check: ReplacementCheckFn`, `effect: Effect`.
+- Loop prevention: `repl_depth: u32` + `repl_applied: HashSet<ObjId>` on `SimState`. Depth 1 = fresh chain (clears applied set); depth > 1 = inside replacement chain (keeps applied set).
+- `change_zone` becomes a thin caller of `fire_event`. All zone mutation logic lives in `do_effect`.
+- `sim_draw` converted from `&mut self` method to free function, calls `fire_event`.
+- `queue_triggers` deleted; all event sites go through `fire_event`.
+- Leyline of the Void: ongoing replacement, `ZoneChange{to: Graveyard}` → `ZoneChange{to: Exile}`.
+- Murktide ETB: self-ETB replacement, sets exile-count counters then re-fires ETB event (skipped by `repl_applied`).
+
+---
+
+## Step 11 — Pre-registered trigger/replacement instances + behavior on CardDef
+
+**Status: DONE** (commit eb96e5a)
+
+**What was done:**
+
+- `TriggerInstance` and `ReplacementInstance` structs (replacing `RegisteredReplacement`), each with `source_id`, `controller`, `check` fn, pre-built `effect`, and `active: bool`.
+- All instances pre-registered at sim init with `active: false`; `activate_instances` / `deactivate_instances` flip the flag on battlefield entry/exit.
+- `change_zone` activates/deactivates instances **before** calling `fire_event` so ETB replacements are visible to `check_replacement`.
+- `SimState` gains `trigger_instances: Vec<TriggerInstance>` and `replacement_instances: Vec<ReplacementInstance>`.
+- `fire_triggers` iterates `state.trigger_instances` (skips inactive); no longer scans permanents by name.
+- `CARD_TRIGGERS`, `CARD_REPLACEMENTS`, `TriggerPrototype`, `ReplacementPrototype` all removed.
+- `CardDef` gains `trigger_defs: Vec<TriggerCheckFn>` and `replacement_defs: Vec<ReplacementDef>`, populated in `From<RawCardDef>` by card name. No runtime table lookups; behavior lives on the card definition.
+- `preregister_instances(card_def, source_id, controller, state)` reads from `card_def` directly.
+
+---
+
+## Step 12 — Compact per-player state display
+
+**Status: DONE** (commit 2509928)
+
+**What was done:**
+
+- One line per zone (was one line per card).
+- Permanents split into **Lands** and **Permanents** lines; tapped first within each group, then alphabetical.
+- Graveyard shown in entry order (oldest first) — rules-relevant for Doomsday piles. `SimState` gains `graveyard_order: Vec<ObjId>` updated in `do_effect`.
+- Hand shows known card names + hidden count on one line.
+- Exile shows cards with `(adv)` annotation inline.
+
+---
+
 ## Next Steps (ideas, not yet scheduled)
 
 ### Unified predicate layer
@@ -317,39 +369,8 @@ effects are already declared.
 
 
 ### Replacement effects
-when this enters... (murktide, cavern, etc..) are replacement effects
-planeswalkers having loyalty on enter
-both are simple predicates "this etb" and simple chained effects: etb+add counters, etb+ask strategy to decide a creature type.
-very unified with triggers actually. As far as I can tell, the difference is just the effect going on the stack.
 
-Event, Owner, State -> Triggered Effect
-vs
-Event, Owner, State -> Replaced Effect
-
-so the system looks something like:
-a flat list of all replacement effects. Before an event occurs, walk the list and see if the event "passes" any of them and replace. This swallows the event and it never happens. Running the replacement effect will likely itself trigger a new event, however (which may itself be replaced). We must track which replacement effects have already been applied to a given event to avoid this chaining forever (or more than once...) That is the trickiest bit. An important difficulty to manage is making sure we sequence "doing the effect" with "producing the event" and "replacing the event". For example, there are replacement effects like "if you put X in the graveyard put it in exile instead". In that case, IDEALLY, we don't actually move it to the graveyard before running and replacing the event and actually putting it in exile. It's probably not the end of the world if there are no side effects, though.
-
-if no replacement effects apply, the event is considered to have occurred. Apply its effects fully. Then walk the list of triggers. If any apply queue them up for triggering at the next priority.
-
-In both cases there can be multiple matching events. The proper rules solution to this is to have the owner choose the order of application and if both players have one or more, this is done in APNAP order. So if we have 3 replacement effects REAP1 REAP2 and RENAP1, AP orders REAP1 and REAP2 then NAPs replacement effect is done last. The same ordering system is the rule for triggered abilities. This is obviously also quite tricky and "last mile".
-
-Concrete Goals:
-Active replacement effects and triggers are Objects and get IDs. They refer back to their owning permanent or continuous effect by ID.
-Generic, unified Event Replacement/Trigger Predicate checks.
-Two separate passes over replacement effects and triggers per game event. encapsulated in the concept of "running" or "firing" the event.
-If replacement effect occurs, event "doesn't happen", gets replaced, and is marked with being replaced by the ID of the replacement effect. Immediately (without stack) run the new registered effect.
-If no replacement occurs, then the event has fired, and the effects truly happen, and we look through the list of triggers for matching triggers, and fire those, prepping triggers for the stack.
-When an object which generates a trigger or replacement effect leaves play or expires, it removes its replacement effects / triggers from the system.
-If multiple replacement effects or triggers apply to an event, then we do the apnap selection order and it goes to the strategy component to decide the order (that is just random)
-
-useful components:
-self-etb predicate (very common, good to prove we implement it well)
-static full replacement: e.g. leyline of the void "if a card would be put in a graveyard from anywhere, exile it instead) + extra credit for a trigger that cares about cards going to the graveyard NOT firing and a trigger for going to exile firing.
-
-useful tests:
-orcish bowmasters etb: trigger with compound effect
-murktide/planeswalker enters play: replace with same + extra. proves we don't infinitely recurse replacement
-tamiyo +2: expiring trigger
+**DONE** — see Steps 10 and 11.
 
 ### Characteristic changing abilities
 once we have truly rich characteristics
