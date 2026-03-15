@@ -935,18 +935,18 @@ impl SimState {
             .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
             .count();
         if visible.len() + hidden > 0 {
-            let mut parts: Vec<String> = visible.iter().map(|s| s.to_string()).collect();
+            let mut parts = Self::collapse_counts(visible.iter().map(|s| s.to_string()).collect());
             if hidden > 0 { parts.push(format!("({} hidden)", hidden)); }
             writeln!(f, "  Hand      : {}", parts.join(", "))?;
         }
 
-        let gy: Vec<&str> = self.graveyard_order.iter()
+        let gy: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
             .filter(|c| c.owner == who)
-            .map(|c| c.name.as_str())
+            .map(|c| c.name.clone())
             .collect();
         if !gy.is_empty() {
-            writeln!(f, "  Graveyard : {}", gy.join(", "))?;
+            writeln!(f, "  Graveyard : {}", Self::collapse_counts(gy).join(", "))?;
         }
 
         let mut exile: Vec<String> = self.exile_of(who)
@@ -958,10 +958,23 @@ impl SimState {
             .collect();
         if !exile.is_empty() {
             exile.sort();
-            writeln!(f, "  Exile     : {}", exile.join(", "))?;
+            writeln!(f, "  Exile     : {}", Self::collapse_counts(exile).join(", "))?;
         }
 
         Ok(())
+    }
+
+    /// Collapse a list of display strings into `"Name ×N"` entries, preserving first-seen order.
+    fn collapse_counts(items: Vec<String>) -> Vec<String> {
+        let mut seen: Vec<(String, usize)> = Vec::new();
+        for item in items {
+            if let Some(entry) = seen.iter_mut().find(|(s, _)| *s == item) {
+                entry.1 += 1;
+            } else {
+                seen.push((item, 1));
+            }
+        }
+        seen.into_iter().map(|(s, n)| if n > 1 { format!("{} ×{}", s, n) } else { s }).collect()
     }
 
     /// Write permanents for `who` — lands on one line, non-lands on another.
@@ -993,11 +1006,11 @@ impl SimState {
         others.sort_by(tapped_first);
 
         if !lands.is_empty() {
-            let items: Vec<String> = lands.iter().filter_map(fmt_perm).collect();
+            let items = Self::collapse_counts(lands.iter().filter_map(fmt_perm).collect());
             writeln!(f, "  Lands     : {}", items.join(", "))?;
         }
         if !others.is_empty() {
-            let items: Vec<String> = others.iter().filter_map(fmt_perm).collect();
+            let items = Self::collapse_counts(others.iter().filter_map(fmt_perm).collect());
             writeln!(f, "  Permanents: {}", items.join(", "))?;
         }
         Ok(())
