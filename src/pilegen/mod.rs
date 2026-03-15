@@ -19,7 +19,7 @@ mod predicates;
 pub(crate) use predicates::*;
 
 mod strategy;
-use strategy::{decide_action, collect_on_board_actions, declare_attackers, declare_blockers, activate_planeswalkers};
+use strategy::{decide_action, collect_on_board_actions, declare_attackers, declare_blockers};
 #[cfg(test)] use strategy::try_ninjutsu;
 
 #[cfg(test)]
@@ -153,7 +153,8 @@ pub(super) enum ZoneId {
 /// A game event emitted at key moments. Handlers inspect this to decide whether their
 /// trigger fires. Owned strings to avoid lifetime issues when pushing onto the stack.
 #[derive(Clone)]
-enum GameEvent {
+#[allow(dead_code)]
+pub(super) enum GameEvent {
     /// A card moved from one zone to another (ETB, GY→Exile, etc.).
     /// Does NOT include drawing — use `Draw` for that.
     ZoneChange {
@@ -274,7 +275,7 @@ pub(super) struct ReplacementInstance {
 // ── Turn structure ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum PhaseKind {
+pub(super) enum PhaseKind {
     Beginning,
     PreCombatMain,
     Combat,
@@ -289,7 +290,7 @@ enum TurnPosition {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum StepKind {
+pub(super) enum StepKind {
     Untap,
     Upkeep,
     Draw,
@@ -320,6 +321,10 @@ impl Phase {
 
 // ── Priority actions ──────────────────────────────────────────────────────────
 
+/// Which face of a card to cast.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SpellFace { Main, Adventure }
+
 #[derive(Clone)]
 enum PriorityAction {
     /// Land drop: AP only, does NOT pass priority. Carries the chosen land name.
@@ -328,13 +333,9 @@ enum PriorityAction {
     ActivateAbility(ObjId, AbilityDef),
     /// Intent to cast a spell. No resources are spent until `handle_priority_round` accepts and
     /// commits this action. The framework validates legality (sorcery-speed, etc.) there.
-    ///
+    /// `face` selects main vs adventure face/cost; card zone identifies the source zone.
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
-    CastSpell { name: String, preferred_cost: Option<AlternateCost> },
-    /// Cast the adventure face of a card in hand.
-    CastAdventure { card_name: String },
-    /// Cast the creature face of a card currently on adventure in exile.
-    CastFromAdventure { card_name: String },
+    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost> },
     /// Pass priority.
     Pass,
 }
@@ -693,9 +694,6 @@ impl SimState {
         }
     }
 
-    fn find_permanent_by_name<'a>(&'a self, name: &str, controller: &str) -> Option<&'a CardObject> {
-        self.cards.values().find(|c| c.name == name && c.controller == controller && c.zone == CardZone::Battlefield)
-    }
 
 
     /// True when the simulation should stop (either success or reroll).
@@ -1268,7 +1266,7 @@ fn sim_discard_to_limit(state: &mut SimState, t: u8, who: &str) {
 // ── Action system ─────────────────────────────────────────────────────────────
 
 // resolve_who, matches_target_type, has_valid_target, ability_available,
-// collect_hand_actions, choose_land_name, respond_with_counter, activate_planeswalkers
+// collect_hand_actions, choose_land_name, respond_with_counter
 // are defined in strategy.rs / predicates.rs
 
 // choose_permanent_target is defined in predicates.rs
@@ -1398,7 +1396,10 @@ fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: &str) {
     match event {
         GameEvent::ZoneChange { from, to, card, controller, .. } => {
             match (from, to) {
-                (ZoneId::Stack,       ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} countered", card)),
+                // Stack→Graveyard is silent here: resolution logs "{name} resolves" before calling
+                // change_zone, and eff_counter_target logs "→ {name} countered" before setting zone
+                // directly (bypassing change_zone). Logging here would produce a spurious "countered".
+                (ZoneId::Stack,       ZoneId::Graveyard)   => {}
                 (ZoneId::Battlefield, ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} destroyed", card)),
                 (ZoneId::Hand,        ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} discarded", card)),
                 (_,                   ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} to graveyard", card)),
@@ -1670,18 +1671,50 @@ fn apply_alt_cost_components(
 ///
 /// Permanent targets (from `CardDef.target`) are chosen randomly at cast time and
 /// locked into the SpellState on the card; resolution uses the stored target directly.
-///
-/// Returns `None` if the spell can't be cast (cost unpayable or card not in hand).
+/// Cast a spell identified by `card_id`, using the specified `face` (Main or Adventure).
+/// Pays cost, builds effect, sets SpellState on the card object.
+/// Returns `None` if the cast fails (cost unpayable, card missing).
 fn cast_spell(
     state: &mut SimState,
     t: u8,
     who: &str,
-    name: &str,
+    card_id: ObjId,
+    face: SpellFace,
     preferred_cost: Option<&AlternateCost>,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
-    let def = *catalog_map.get(name)?;
+    let name = state.cards.get(&card_id)?.name.clone();
+    let def = *catalog_map.get(name.as_str())?;
+
+    if face == SpellFace::Adventure {
+        let adv = def.adventure()?.clone();
+        let is_sorcery = adv.card_type == "sorcery";
+        if is_sorcery && !state.stack.is_empty() {
+            eprintln!("[priority] BUG: adventure sorcery {} on non-empty stack, treating as Pass", adv.name);
+            return None;
+        }
+        let cost = parse_mana_cost(&adv.mana_cost);
+        let mana_log = state.pay_mana(who, &cost, t);
+        state.log_mana_activations(t, who, mana_log);
+        let (adv_spec, adv_eff) = build_adventure_effect(&adv, who);
+        let adv_targets = choose_spell_target(&adv_spec, who, state, catalog_map, rng)
+            .into_iter().collect::<Vec<_>>();
+        state.log(t, who, format!("Cast {} (adventure, {}) [hand: {}]", adv.name, adv.mana_cost, state.hand_size(who)));
+        if let Some(card) = state.cards.get_mut(&card_id) {
+            card.zone = CardZone::Stack;
+            card.spell = Some(SpellState {
+                effect: Some(adv_eff),
+                chosen_targets: adv_targets,
+                is_adventure_face: true,
+                adventure_card_name: Some(name),
+                annotation: None,
+            });
+        }
+        return Some(card_id);
+    }
+
+    // Main face: pay main cost (with delve and alternate costs).
     let mut cost = parse_mana_cost(def.mana_cost());
 
     // Delve: reduce generic cost by exiling cards from the caster's graveyard.
@@ -1705,27 +1738,22 @@ fn cast_spell(
 
     // Select cost.
     let alt_cost: Option<AlternateCost> = if let Some(pc) = preferred_cost {
-        // Caller specified the exact cost to use.
         Some(pc.clone())
     } else if !mana_is_usable {
-        // Can't pay mana (or mana_cost is empty / alt-cost-only): try alternate costs.
         def.alternate_costs()
             .iter()
-            .find(|c| can_pay_alternate_cost(c, state, who, name, catalog_map))
+            .find(|c| can_pay_alternate_cost(c, state, who, &name, catalog_map))
             .cloned()
     } else if has_alt_costs {
-        // Mana is payable but there are also alternate costs — prefer mana by default.
         None
     } else {
         None
     };
 
     if alt_cost.is_none() && !mana_is_usable {
-        return None; // no payable cost
+        return None;
     }
 
-    // Remove the spell from hand, capturing its stable ObjId.
-    let card_id = state.hand_of(who).find(|c| c.name == name).map(|c| c.id)?;
     // Move to Stack zone.
     if let Some(card) = state.cards.get_mut(&card_id) {
         card.zone = CardZone::Stack;
@@ -1733,7 +1761,7 @@ fn cast_spell(
 
     // Pay cost and build a log label.
     let cast_label = if let Some(ref cost) = alt_cost {
-        let parts = apply_alt_cost_components(cost, state, t, who, name, catalog_map, rng);
+        let parts = apply_alt_cost_components(cost, state, t, who, &name, catalog_map, rng);
         parts.join(", ")
     } else {
         let mana_log = state.pay_mana(who, &cost, t);
@@ -1743,18 +1771,14 @@ fn cast_spell(
 
     // Exile delve cards from graveyard (cost payment).
     let to_exile_names: Vec<String> = to_exile_ids.iter().map(|(_, n)| n.clone()).collect();
-    for (exile_id, _card_name) in &to_exile_ids {
-        // Exile from GY: fires ZoneChange trigger (e.g. Murktide counter).
+    for (exile_id, _) in &to_exile_ids {
         change_zone(*exile_id, ZoneId::Exile, state, t, who, catalog_map, rng);
     }
 
     // For delve permanents: encode +1/+1 counter count as "+N" in annotation.
-    // Counters come from instants/sorceries exiled via delve (e.g. Murktide Regent).
     let annotation: Option<String> = if def.delve() && def.is_creature() {
         let count = to_exile_names.iter()
-            .filter(|n| catalog_map.get(n.as_str())
-                .map(|d| d.as_spell().is_some())
-                .unwrap_or(false))
+            .filter(|n| catalog_map.get(n.as_str()).map(|d| d.as_spell().is_some()).unwrap_or(false))
             .count() as i32;
         if count > 0 { Some(format!("+{}", count)) } else { None }
     } else {
@@ -1770,16 +1794,15 @@ fn cast_spell(
 
     let (spell_target_spec, spell_eff) = build_spell_effect(def, who, annotation.clone());
     let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, catalog_map, rng)
-        .into_iter()
-        .collect::<Vec<_>>();
+        .into_iter().collect::<Vec<_>>();
 
     if let Some(card) = state.cards.get_mut(&card_id) {
         card.spell = Some(SpellState {
-            effect: Some(spell_eff.clone()),
-            chosen_targets: spell_chosen_targets.clone(),
+            effect: Some(spell_eff),
+            chosen_targets: spell_chosen_targets,
             is_adventure_face: false,
             adventure_card_name: None,
-            annotation: annotation.clone(),
+            annotation,
         });
     }
 
@@ -2055,131 +2078,30 @@ fn handle_priority_round(
                 priority_holder = next.to_string();
                 last_passer = None;
             }
-            PriorityAction::CastAdventure { ref card_name } => {
-                let face = catalog_map.get(card_name.as_str())
-                    .and_then(|d| d.adventure())
-                    .cloned();
-                let Some(face) = face else {
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                    continue;
-                };
-                let is_sorcery = face.card_type == "sorcery";
-                if is_sorcery && !state.stack.is_empty() {
-                    eprintln!("[priority] adventure sorcery {} on non-empty stack, treating as Pass", face.name);
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                    continue;
-                };
-                let adv_card_id_opt = state.hand_of(&who).find(|c| c.name == *card_name).map(|c| c.id);
-                let Some(adv_card_id) = adv_card_id_opt else {
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                    continue;
-                };
-                if let Some(card) = state.cards.get_mut(&adv_card_id) {
-                    card.zone = CardZone::Stack;
-                }
-                if !face.mana_cost.is_empty() {
-                    let cost = parse_mana_cost(&face.mana_cost);
-                    let mana_log = state.pay_mana(&who, &cost, t);
-                    state.log_mana_activations(t, &who, mana_log);
-                }
-                let (adv_spec, adv_eff) = build_adventure_effect(&face, &who);
-                let adv_targets = choose_spell_target(&adv_spec, &who, state, catalog_map, rng)
-                    .into_iter().collect::<Vec<_>>();
-                state.log(t, &who, format!("Cast {} (adventure, {}) [hand: {}]", face.name, face.mana_cost, state.hand_size(&who)));
-                if let Some(card) = state.cards.get_mut(&adv_card_id) {
-                    card.spell = Some(SpellState {
-                        effect: Some(adv_eff.clone()),
-                        chosen_targets: adv_targets.clone(),
-                        is_adventure_face: true,
-                        adventure_card_name: Some(card_name.clone()),
-                        annotation: None,
-                    });
-                }
-                state.stack.push(adv_card_id);
-                state.player_mut(&who).spells_cast_this_turn += 1;
-                let next = if who == ap { nap } else { ap };
-                priority_holder = next.to_string();
-                last_passer = None;
-            }
-            PriorityAction::CastFromAdventure { ref card_name } => {
-                if !state.on_adventure_of(&who).any(|c| c.name == *card_name) {
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                    continue;
-                }
-                let Some(&def) = catalog_map.get(card_name.as_str()) else {
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                    continue;
-                };
-                let cost = parse_mana_cost(def.mana_cost());
-                if !state.potential_mana(&who).can_pay(&cost) {
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                    continue;
-                }
-                let card_obj_id = state.on_adventure_of(&who).find(|c| c.name == *card_name).map(|c| c.id);
-                if let Some(cid) = card_obj_id {
-                    if let Some(card_obj) = state.cards.get_mut(&cid) {
-                        card_obj.zone = CardZone::Stack;
-                    }
-                }
-                let mana_log = state.pay_mana(&who, &cost, t);
-                state.log_mana_activations(t, &who, mana_log);
-                state.log(t, &who, format!("Cast {} from adventure ({})", card_name, def.mana_cost()));
-                let (from_adv_spec, from_adv_eff) = build_spell_effect(def, &who, None);
-                let from_adv_targets = choose_spell_target(&from_adv_spec, &who, state, catalog_map, rng)
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                if let Some(cid) = card_obj_id {
-                    if let Some(card) = state.cards.get_mut(&cid) {
-                        card.spell = Some(SpellState {
-                            effect: Some(from_adv_eff.clone()),
-                            chosen_targets: from_adv_targets.clone(),
-                            is_adventure_face: false,
-                            adventure_card_name: None,
-                            annotation: None,
-                        });
-                    }
-                }
-                state.stack.push(card_obj_id.unwrap_or(ObjId::UNSET));
-                state.player_mut(&who).spells_cast_this_turn += 1;
-                let next = if who == ap { nap } else { ap };
-                priority_holder = next.to_string();
-                last_passer = None;
-            }
-            PriorityAction::CastSpell { ref name, ref preferred_cost } => {
-                let is_instant = catalog_map.get(name.as_str())
-                    .map(|d| d.is_instant())
-                    .unwrap_or(false);
+            PriorityAction::CastSpell { card_id, face, ref preferred_cost } => {
+                let name = state.cards.get(&card_id).map(|c| c.name.clone()).unwrap_or_default();
+                // Sorcery-speed check for main-face non-instants.
+                let is_instant = face == SpellFace::Adventure || catalog_map.get(name.as_str())
+                    .map(|d| d.is_instant()).unwrap_or(false);
                 if !is_instant && !state.stack.is_empty() {
-                    eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack (stack={}), treating as Pass", name,
-                        state.stack.iter().map(|&id| state.stack_item_display_name(id)).collect::<Vec<_>>().join(", "));
+                    eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack, treating as Pass", name);
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     last_passer = Some(who.clone());
-                    let other = if who == ap { nap } else { ap };
-                    priority_holder = other.to_string();
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                } else if let Some(cid) = cast_spell(state, t, &who, card_id, face, preferred_cost.as_ref(), catalog_map, rng) {
+                    if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
+                    state.player_mut(&who).spells_cast_this_turn += 1;
+                    state.stack.push(cid);
+                    let next = if who == ap { nap } else { ap };
+                    priority_holder = next.to_string();
+                    last_passer = None;
                 } else {
-                    if let Some(card_id) = cast_spell(state, t, &who, name,
-                                                   preferred_cost.as_ref(), catalog_map, rng) {
-                        if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
-                        state.player_mut(&who).spells_cast_this_turn += 1;
-                        state.stack.push(card_id);
-                        let next = if who == ap { nap } else { ap };
-                        priority_holder = next.to_string();
-                        last_passer = None;
-                    } else {
-                        let pool = &state.player(&who).pool;
-                        eprintln!("[priority] BUG: cast_spell failed for {} by {} (pool B={} U={} tot={}, hand={})",
-                            name, who, pool.b, pool.u, pool.total, state.hand_size(&who));
-                        debug_assert!(false, "BUG: cast_spell failed for {} — decision function returned unaffordable/unavailable spell", name);
-                        last_passer = Some(who.clone());
-                        let other = if who == ap { nap } else { ap };
-                        priority_holder = other.to_string();
-                    }
+                    let pool = &state.player(&who).pool;
+                    eprintln!("[priority] BUG: cast_spell failed for {} by {} (pool B={} U={} tot={}, hand={})",
+                        name, who, pool.b, pool.u, pool.total, state.hand_size(&who));
+                    debug_assert!(false, "BUG: cast_spell failed — decision function returned unaffordable/unavailable spell");
+                    last_passer = Some(who.clone());
+                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
                 }
             }
             PriorityAction::Pass => {
@@ -2488,10 +2410,6 @@ fn do_phase(
         state.us.pool.drain();
         state.opp.pool.drain();
         if state.done() { return; }
-        // Activate each AP planeswalker's loyalty ability (100% — runs after all other actions).
-        activate_planeswalkers(state, t, ap, dd_turn, catalog_map, rng);
-        state.us.pool.drain();
-        state.opp.pool.drain();
     }
 }
 

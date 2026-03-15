@@ -476,12 +476,12 @@
         "#).unwrap();
         state.us.pool.b = 1;
         state.us.pool.total = 1;
-        add_hand_card(&mut state, "us", "Dark Ritual");
+        let dark_ritual_id = add_hand_card(&mut state, "us", "Dark Ritual");
 
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let card_id = cast_spell(&mut state, 1, "us", "Dark Ritual", None, &catalog_map, &mut seeded_rng());
+        let card_id = cast_spell(&mut state, 1, "us", dark_ritual_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
 
         assert!(card_id.is_some(), "spell should be cast");
         let card_id = card_id.unwrap();
@@ -501,11 +501,11 @@
             mana_cost = "BBB"
         "#).unwrap();
         // No mana in pool, no lands
-        add_hand_card(&mut state, "us", "Doomsday");
+        let doomsday_id = add_hand_card(&mut state, "us", "Doomsday");
 
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let item = cast_spell(&mut state, 1, "us", "Doomsday", None, &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", doomsday_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast with no mana");
     }
@@ -533,13 +533,13 @@
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         // Add FoW and Brainstorm to hand (FoW pitches itself? No — Brainstorm is the pitch card)
-        add_hand_card(&mut state, "us", "Force of Will");
+        let fow_id = add_hand_card(&mut state, "us", "Force of Will");
         add_hand_card(&mut state, "us", "Brainstorm");
 
         let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
-        let item = cast_spell(&mut state, 1, "us", "Force of Will", Some(alt_cost), &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", fow_id, SpellFace::Main, Some(alt_cost), &catalog_map, &mut seeded_rng());
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
@@ -792,14 +792,14 @@
         for name in &["A", "B", "C", "D", "E", "F", "G"] {
             add_graveyard_card(&mut state, "us", name);
         }
-        add_hand_card(&mut state, "us", "Treasure Cruise");
+        let tc_id = add_hand_card(&mut state, "us", "Treasure Cruise");
         state.us.pool.u  = 1;
         state.us.pool.total = 1; // only 1 mana in pool — delve pays the other 7
 
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let item = cast_spell(&mut state, 1, "us", "Treasure Cruise", None, &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", tc_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.graveyard_of("us").count(), 0, "all 7 graveyard cards exiled");
@@ -820,13 +820,13 @@
         "#).unwrap();
         add_graveyard_card(&mut state, "us", "Ritual");
         add_graveyard_card(&mut state, "us", "Ponder");
-        add_hand_card(&mut state, "us", "Dead Drop");
+        let dead_drop_id = add_hand_card(&mut state, "us", "Dead Drop");
         state.us.pool.total = 1; // covers the 1 remaining generic after delve
 
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let item = cast_spell(&mut state, 1, "us", "Dead Drop", None, &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.graveyard_of("us").count(), 0, "both graveyard cards exiled");
@@ -855,7 +855,7 @@
         add_graveyard_card(&mut state, "us", "Ponder");
         add_graveyard_card(&mut state, "us", "Consider");
         add_graveyard_card(&mut state, "us", "Ragavan");
-        add_hand_card(&mut state, "us", "Murktide Regent");
+        let murktide_id = add_hand_card(&mut state, "us", "Murktide Regent");
         // After delving all 4, generic cost = 5-4 = 1. Need UU + 1 generic.
         state.us.pool.u  = 2;
         state.us.pool.total = 3;
@@ -863,7 +863,7 @@
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let card_id = cast_spell(&mut state, 1, "us", "Murktide Regent", None, &catalog_map, &mut seeded_rng()).unwrap();
+        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
         // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
         let spell = state.cards[&card_id].spell.as_ref().expect("spell state populated").clone();
         let annotation = &spell.annotation;
@@ -900,7 +900,7 @@
         let ragavan_def = creature("Ragavan", 2, 1);
 
         add_graveyard_card(&mut state, "us", "Ragavan");
-        add_hand_card(&mut state, "us", "Murktide Regent");
+        let murktide_id = add_hand_card(&mut state, "us", "Murktide Regent");
         // 5 - 1 = 4 generic remaining; need UU + 4 generic
         state.us.pool.u  = 2;
         state.us.pool.total = 6;
@@ -908,7 +908,7 @@
         let catalog = vec![murktide_def.clone(), ragavan_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let card_id = cast_spell(&mut state, 1, "us", "Murktide Regent", None, &catalog_map, &mut seeded_rng()).unwrap();
+        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
         let spell = state.cards[&card_id].spell.as_ref().expect("spell state populated").clone();
         let annotation = &spell.annotation;
         let effect = &spell.effect;
@@ -961,13 +961,13 @@
         "#).unwrap();
         add_graveyard_card(&mut state, "us", "Ritual");
         add_graveyard_card(&mut state, "us", "Ponder");
-        add_hand_card(&mut state, "us", "Dead Drop");
+        let dead_drop_id = add_hand_card(&mut state, "us", "Dead Drop");
         // no mana
 
         let catalog = vec![def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let item = cast_spell(&mut state, 1, "us", "Dead Drop", None, &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast — 1 generic still unpaid");
         assert_eq!(state.graveyard_of("us").count(), 2, "graveyard unchanged on failed cast");
@@ -1311,7 +1311,7 @@
         });
         // Inject the pending action directly (bypasses the 75% roll from collect_on_board_actions).
         state.us.pending_actions = vec![
-            PriorityAction::CastFromAdventure { card_name: "Brazen Borrower".to_string() }
+            PriorityAction::CastSpell { card_id: borrower_id, face: SpellFace::Main, preferred_cost: None }
         ];
         handle_priority_round(&mut state, 1, "us", 3, &catalog_map, &mut seeded_rng());
 
@@ -1796,6 +1796,67 @@
     }
 
     // ── Section 10: Replacement Effect Tests ─────────────────────────────────
+
+    // ── Section 11: Regression Tests ─────────────────────────────────────────
+
+    /// Resolving a non-permanent spell must not log "countered".
+    /// Bug: log_event had (Stack→Graveyard) → "countered" which fired during normal resolution.
+    #[test]
+    fn test_resolve_instant_does_not_log_countered() {
+        let mut state = make_state();
+        add_library_card(&mut state, "us", "Island");
+        add_library_card(&mut state, "us", "Swamp");
+        add_library_card(&mut state, "us", "Plains");
+        // Manually place Brainstorm on stack with its effect.
+        let id = state.alloc_id();
+        state.cards.insert(id, CardObject {
+            id,
+            name: "Brainstorm".to_string(),
+            owner: "us".to_string(),
+            controller: "us".to_string(),
+            zone: CardZone::Stack,
+            spell: Some(SpellState {
+                effect: Some(eff_draw("us", 3).then(eff_put_back("us", 2))),
+                chosen_targets: vec![],
+                is_adventure_face: false,
+                adventure_card_name: None,
+                annotation: None,
+            }),
+            bf: None,
+        });
+        state.stack.push(id);
+        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
+        resolve_top_of_stack(&mut state, 1, "us", &catalog_map, &mut seeded_rng());
+        let log = state.log.join("\n");
+        assert!(log.contains("Brainstorm resolves"), "should log 'resolves'");
+        assert!(!log.contains("countered"), "resolving an instant must not produce 'countered' in the log");
+    }
+
+    /// A fetch land must appear at most once in pending_actions even though it satisfies both
+    /// the land-ability loop and the permanent-ability loop in collect_on_board_actions.
+    #[test]
+    fn test_fetchland_not_duplicated_in_pending_actions() {
+        let fetch_def: CardDef = toml::from_str(r#"
+            name = "Polluted Delta"
+            card_type = "land"
+            [[abilities]]
+            sacrifice_self = true
+            life_cost = 1
+            effect = "search:land-island|swamp:play"
+        "#).unwrap();
+        let catalog = vec![fetch_def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        let mut state = make_state();
+        state.us.life = 20;
+        add_perm(&mut state, "us", "Polluted Delta", BattlefieldState::new(vec![]));
+        // Use a fixed seed where the 75% roll passes so the ability would be queued.
+        // We just check there's at most one, regardless of the roll outcome.
+        let actions = collect_on_board_actions(&mut state, "us", 1, 99, &catalog_map, &mut seeded_rng());
+        let fetch_count = actions.iter()
+            .filter(|a| matches!(a, PriorityAction::ActivateAbility(_, ab) if ab.sacrifice_self))
+            .count();
+        assert!(fetch_count <= 1, "fetchland should appear at most once, got {}", fetch_count);
+    }
 
     #[test]
     fn test_leyline_redirects_gy_to_exile() {
