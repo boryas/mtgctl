@@ -588,6 +588,8 @@ pub(crate) struct SimState {
     cards: HashMap<ObjId, CardObject>,
     /// ID allocator — starts at 1; 0 is reserved as ObjId::UNSET.
     next_id: u64,
+    /// Order in which cards entered each player's graveyard (oldest first). Used for display.
+    graveyard_order: Vec<ObjId>,
     /// All trigger instances for card objects in the simulation (pre-registered at init).
     /// `active` is false until the card enters the battlefield.
     pub(super) trigger_instances: Vec<TriggerInstance>,
@@ -620,6 +622,7 @@ impl SimState {
             abilities: HashMap::new(),
             cards: HashMap::new(),
             next_id: 0,
+            graveyard_order: Vec::new(),
             trigger_instances: Vec::new(),
             replacement_instances: Vec::new(),
             repl_applied: HashSet::new(),
@@ -926,71 +929,81 @@ fn sec(label: &str) -> String {
 // PlayerState Display is handled via SimState::fmt_player_zones which has access to state.cards.
 
 impl SimState {
-    /// Write hand/graveyard/exile zones for `who` to the formatter, reading from state.cards.
+    /// Write hand/graveyard/exile zones for `who` to the formatter — one line per zone.
     fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: &str) -> std::fmt::Result {
-        let hand_count = self.hand_size(who);
-        if hand_count > 0 {
-            // Collect known hand cards (visible names from Hand { known: true }).
-            let visible: Vec<&str> = self.hand_of(who)
-                .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
-                .map(|c| c.name.as_str())
-                .collect();
-            let hidden = self.hand_of(who)
-                .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
-                .count() as i32;
-            writeln!(f, "  Hand       :")?;
-            for name in &visible {
-                writeln!(f, "    * {}", name)?;
-            }
-            if hidden > 0 {
-                writeln!(f, "    ({} hidden card{})", hidden, if hidden == 1 { "" } else { "s" })?;
-            }
-        }
-        let mut gy: Vec<&str> = self.graveyard_of(who).map(|c| c.name.as_str()).collect();
-        if !gy.is_empty() {
-            gy.sort();
-            writeln!(f, "  Graveyard  :")?;
-            for name in &gy {
-                writeln!(f, "    * {}", name)?;
-            }
-        }
-        let mut exile_cards: Vec<(&str, bool)> = self.exile_of(who)
-            .map(|c| (c.name.as_str(), matches!(c.zone, CardZone::Exile { on_adventure: true })))
+        let mut visible: Vec<&str> = self.hand_of(who)
+            .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
+            .map(|c| c.name.as_str())
             .collect();
-        if !exile_cards.is_empty() {
-            exile_cards.sort_by_key(|(n, _)| *n);
-            writeln!(f, "  Exile      :")?;
-            for (name, on_adv) in &exile_cards {
-                if *on_adv {
-                    writeln!(f, "    * {} (on adventure)", name)?;
-                } else {
-                    writeln!(f, "    * {}", name)?;
-                }
-            }
+        visible.sort();
+        let hidden = self.hand_of(who)
+            .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
+            .count();
+        if visible.len() + hidden > 0 {
+            let mut parts: Vec<String> = visible.iter().map(|s| s.to_string()).collect();
+            if hidden > 0 { parts.push(format!("({} hidden)", hidden)); }
+            writeln!(f, "  Hand      : {}", parts.join(", "))?;
         }
+
+        let gy: Vec<&str> = self.graveyard_order.iter()
+            .filter_map(|id| self.cards.get(id))
+            .filter(|c| c.owner == who)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !gy.is_empty() {
+            writeln!(f, "  Graveyard : {}", gy.join(", "))?;
+        }
+
+        let mut exile: Vec<String> = self.exile_of(who)
+            .map(|c| if matches!(c.zone, CardZone::Exile { on_adventure: true }) {
+                format!("{} (adv)", c.name)
+            } else {
+                c.name.clone()
+            })
+            .collect();
+        if !exile.is_empty() {
+            exile.sort();
+            writeln!(f, "  Exile     : {}", exile.join(", "))?;
+        }
+
         Ok(())
     }
 
-    /// Write the permanents for `who` to the formatter, reading from state.cards.
+    /// Write permanents for `who` — lands on one line, non-lands on another.
     fn fmt_permanents(&self, f: &mut std::fmt::Formatter<'_>, who: &str) -> std::fmt::Result {
-        let mut perms: Vec<&CardObject> = self.permanents_of(who).collect();
-        perms.sort_by(|a, b| a.name.cmp(&b.name));
-        if !perms.is_empty() {
-            writeln!(f, "  Permanents :")?;
-            for card in &perms {
-                if let Some(bf) = &card.bf {
-                    let mut tags: Vec<String> = Vec::new();
-                    if let Some(ann) = &bf.annotation { tags.push(ann.clone()); }
-                    if bf.counters > 0 { tags.push(format!("+{} counters", bf.counters)); }
-                    if bf.loyalty > 0 { tags.push(format!("loyalty: {}", bf.loyalty)); }
-                    let suffix = if tags.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" [{}]", tags.join(", "))
-                    };
-                    writeln!(f, "    * {}{}", card.name, suffix)?;
-                }
-            }
+        let fmt_perm = |card: &&CardObject| -> Option<String> {
+            let bf = card.bf.as_ref()?;
+            let mut tags: Vec<String> = Vec::new();
+            if let Some(ann) = &bf.annotation { tags.push(ann.clone()); }
+            if bf.counters != 0 { tags.push(format!("{:+}", bf.counters)); }
+            if bf.loyalty > 0   { tags.push(format!("loy:{}", bf.loyalty)); }
+            if bf.tapped         { tags.push("tapped".into()); }
+            let suffix = if tags.is_empty() { String::new() } else { format!(" [{}]", tags.join(", ")) };
+            Some(format!("{}{}", card.name, suffix))
+        };
+
+        let mut lands: Vec<&CardObject> = self.permanents_of(who)
+            .filter(|c| c.bf.as_ref().map_or(false, |bf| !bf.mana_abilities.is_empty()))
+            .collect();
+        let tapped_first = |a: &&CardObject, b: &&CardObject| {
+            let a_tap = a.bf.as_ref().map_or(false, |bf| bf.tapped);
+            let b_tap = b.bf.as_ref().map_or(false, |bf| bf.tapped);
+            b_tap.cmp(&a_tap).then(a.name.cmp(&b.name))
+        };
+        lands.sort_by(tapped_first);
+
+        let mut others: Vec<&CardObject> = self.permanents_of(who)
+            .filter(|c| c.bf.as_ref().map_or(true, |bf| bf.mana_abilities.is_empty()))
+            .collect();
+        others.sort_by(tapped_first);
+
+        if !lands.is_empty() {
+            let items: Vec<String> = lands.iter().filter_map(fmt_perm).collect();
+            writeln!(f, "  Lands     : {}", items.join(", "))?;
+        }
+        if !others.is_empty() {
+            let items: Vec<String> = others.iter().filter_map(fmt_perm).collect();
+            writeln!(f, "  Permanents: {}", items.join(", "))?;
         }
         Ok(())
     }
@@ -1348,6 +1361,8 @@ fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str
             if let Some(card) = state.cards.get_mut(&id) {
                 // Only update if zone actually changed (idempotent guard for re-fired ETB events)
                 if card.zone != new_zone {
+                    if new_zone == CardZone::Graveyard { state.graveyard_order.push(id); }
+                    else { state.graveyard_order.retain(|&x| x != id); }
                     card.zone = new_zone;
                     if from == ZoneId::Battlefield { card.bf = None; }
                 }
