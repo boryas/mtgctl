@@ -19,7 +19,7 @@ mod predicates;
 pub(crate) use predicates::*;
 
 mod strategy;
-use strategy::{decide_action, collect_on_board_actions, declare_attackers, declare_blockers};
+use strategy::{decide_action, declare_attackers, declare_blockers};
 #[cfg(test)] use strategy::try_ninjutsu;
 
 #[cfg(test)]
@@ -533,9 +533,6 @@ struct PlayerState {
     spells_cast_this_turn: u8,
     /// Mana produced but not yet spent; drains at end of each step/phase.
     pool: ManaPool,
-    /// On-board actions pre-collected at the start of each main phase (populated by
-    /// `collect_on_board_actions`). `ap_proactive` pops from this list instead of scanning flags.
-    pending_actions: Vec<PriorityAction>,
     /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
     draws_this_turn: u8,
 }
@@ -551,7 +548,6 @@ impl PlayerState {
             dd_cast: false,
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
-            pending_actions: Vec::new(),
             draws_this_turn: 0,
         }
     }
@@ -2152,7 +2148,6 @@ fn do_step(
             }
             state.player_mut(ap).land_drop_available = true;
             state.player_mut(ap).spells_cast_this_turn = 0;
-            state.player_mut(ap).pending_actions.clear();
             state.player_mut(ap).draws_this_turn = 0;
             // Expire "until your next turn" effects whose controller is now the active player.
             state.active_effects.retain(|e| {
@@ -2403,8 +2398,6 @@ fn do_phase(
         state.current_phase = Some(TurnPosition::Phase(phase.kind));
         let phase_ev = GameEvent::EnteredPhase { phase: phase.kind };
         fire_event(phase_ev, state, t, ap, catalog_map, rng);
-        let on_board = collect_on_board_actions(state, ap, t, dd_turn, catalog_map, rng);
-        state.player_mut(ap).pending_actions = on_board;
         handle_priority_round(state, t, ap, dd_turn, catalog_map, rng);
         // Mana pool drains at the end of the main phase.
         state.us.pool.drain();

@@ -1279,8 +1279,8 @@
 
     #[test]
     fn test_cast_from_adventure_enters_play() {
-        // With the still_valid fix, CastFromAdventure in pending_actions is validated and
-        // executed, putting the creature into play and clearing the on_adventure marker.
+        // pick_on_board_action detects adventure creatures in exile and picks the cast action
+        // (75% roll). Run with multiple seeds to confirm it fires and the creature enters play.
         let borrower_def: CardDef = toml::from_str(r#"
             name = "Brazen Borrower"
             card_type = "creature"
@@ -1292,32 +1292,41 @@
         let catalog = vec![borrower_def.clone()];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let mut state = make_state();
-        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
-        state.current_ap = state.us.id;
-        let borrower_id = state.alloc_id();
-        let mut borrower_obj = CardObject::new(borrower_id, "Brazen Borrower", "us");
-        borrower_obj.zone = CardZone::Exile { on_adventure: true };
-        state.cards.insert(borrower_id, borrower_obj);
-        // 1UU mana: two Islands + one generic (Swamp)
-        island_land(&mut state, "us");
-        add_perm(&mut state, "us", "Island2", BattlefieldState {
-            mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
-            ..BattlefieldState::new(vec![])
-        });
-        add_perm(&mut state, "us", "Swamp", BattlefieldState {
-            mana_abilities: vec![ManaAbility { tap_self: true, produces: "B".into(), ..Default::default() }],
-            ..BattlefieldState::new(vec![])
-        });
-        // Inject the pending action directly (bypasses the 75% roll from collect_on_board_actions).
-        state.us.pending_actions = vec![
-            PriorityAction::CastSpell { card_id: borrower_id, face: SpellFace::Main, preferred_cost: None }
-        ];
-        handle_priority_round(&mut state, 1, "us", 3, &catalog_map, &mut seeded_rng());
+        let make_fresh_state = || {
+            let mut state = make_state();
+            state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+            state.current_ap = state.us.id;
+            let borrower_id = state.alloc_id();
+            let mut borrower_obj = CardObject::new(borrower_id, "Brazen Borrower", "us");
+            borrower_obj.zone = CardZone::Exile { on_adventure: true };
+            state.cards.insert(borrower_id, borrower_obj);
+            // 1UU mana: two Islands + one generic (Swamp)
+            island_land(&mut state, "us");
+            add_perm(&mut state, "us", "Island2", BattlefieldState {
+                mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
+                ..BattlefieldState::new(vec![])
+            });
+            add_perm(&mut state, "us", "Swamp", BattlefieldState {
+                mana_abilities: vec![ManaAbility { tap_self: true, produces: "B".into(), ..Default::default() }],
+                ..BattlefieldState::new(vec![])
+            });
+            state
+        };
 
-        assert!(state.permanents_of("us").any(|p| p.name == "Brazen Borrower"), "Borrower enters play");
-        assert!(!state.on_adventure_of("us").any(|c| c.name == "Brazen Borrower"), "removed from on_adventure");
-        assert!(!state.exile_of("us").any(|c| c.name == "Brazen Borrower"), "removed from exile");
+        // At 75% per attempt, try up to 20 seeds; at least one must result in Borrower entering play.
+        let mut entered = false;
+        for seed in 0u64..20 {
+            let mut state = make_fresh_state();
+            let mut rng = StdRng::seed_from_u64(seed);
+            handle_priority_round(&mut state, 1, "us", 3, &catalog_map, &mut rng);
+            if state.permanents_of("us").any(|p| p.name == "Brazen Borrower") {
+                assert!(!state.on_adventure_of("us").any(|c| c.name == "Brazen Borrower"), "removed from on_adventure");
+                assert!(!state.exile_of("us").any(|c| c.name == "Brazen Borrower"), "removed from exile");
+                entered = true;
+                break;
+            }
+        }
+        assert!(entered, "Brazen Borrower should have entered play in at least one of 20 seeded runs");
     }
 
     // ── Section 8: Keyword Tests ──────────────────────────────────────────────
@@ -1832,10 +1841,12 @@
         assert!(!log.contains("countered"), "resolving an instant must not produce 'countered' in the log");
     }
 
-    /// A fetch land must appear at most once in pending_actions even though it satisfies both
-    /// the land-ability loop and the permanent-ability loop in collect_on_board_actions.
+    /// After a sacrifice_self ability's cost is paid (permanent leaves battlefield), the action
+    /// layer must never offer that ability again. This tests the structural guarantee that
+    /// effects only arise from stack resolution — not from the decision layer re-selecting
+    /// an ability whose cost has already been paid.
     #[test]
-    fn test_fetchland_not_duplicated_in_pending_actions() {
+    fn test_no_ability_offered_after_sacrifice_cost_paid() {
         let fetch_def: CardDef = toml::from_str(r#"
             name = "Polluted Delta"
             card_type = "land"
@@ -1846,16 +1857,27 @@
         "#).unwrap();
         let catalog = vec![fetch_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
         let mut state = make_state();
         state.us.life = 20;
-        add_perm(&mut state, "us", "Polluted Delta", BattlefieldState::new(vec![]));
-        // Use a fixed seed where the 75% roll passes so the ability would be queued.
-        // We just check there's at most one, regardless of the roll outcome.
-        let actions = collect_on_board_actions(&mut state, "us", 1, 99, &catalog_map, &mut seeded_rng());
-        let fetch_count = actions.iter()
-            .filter(|a| matches!(a, PriorityAction::ActivateAbility(_, ab) if ab.sacrifice_self))
-            .count();
-        assert!(fetch_count <= 1, "fetchland should appear at most once, got {}", fetch_count);
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PostCombatMain));
+        let delta_id = add_perm(&mut state, "us", "Polluted Delta", BattlefieldState::new(vec![]));
+
+        // Simulate paying the sacrifice cost: permanent leaves the battlefield.
+        state.set_card_zone(delta_id, CardZone::Graveyard);
+        state.us.life -= 1;
+
+        // With the source gone, decide_action must never offer ActivateAbility for that id,
+        // regardless of how many times it is called.
+        for seed in 0..50u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let action = decide_action(&mut state, 1, "us", "us", 99, &PriorityAction::Pass, &catalog_map, &mut rng);
+            assert!(
+                !matches!(action, PriorityAction::ActivateAbility(id, _) if id == delta_id),
+                "seed {}: offered ability for sacrificed permanent — effect would fire without a stack item",
+                seed
+            );
+        }
     }
 
     #[test]

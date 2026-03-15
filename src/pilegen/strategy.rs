@@ -2,15 +2,15 @@ use rand::Rng;
 use std::collections::HashMap;
 use super::*;
 
-pub(super) fn collect_on_board_actions(
+fn pick_on_board_action(
     state: &mut SimState,
     ap: &str,
     t: u8,
     dd_turn: u8,
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
-) -> Vec<PriorityAction> {
-    let mut actions: Vec<PriorityAction> = Vec::new();
+) -> Option<PriorityAction> {
+    let mut candidates: Vec<PriorityAction> = Vec::new();
 
     // 75% roll per land (permanent that is_land) with an available ability.
     let land_ids: Vec<(ObjId, String)> = state.permanents_of(ap)
@@ -21,13 +21,13 @@ pub(super) fn collect_on_board_actions(
         .map(|p| (p.id, p.name.clone()))
         .collect();
     for (land_id, name) in land_ids {
-        if rng.gen_bool(0.75) {
-            if let Some(def) = catalog_map.get(name.as_str()) {
-                if let Some(ab) = def.abilities().iter()
-                    .find(|ab| ability_available(ab, state, ap, true, catalog_map))
-                    .cloned()
-                {
-                    actions.push(PriorityAction::ActivateAbility(land_id, ab));
+        if let Some(def) = catalog_map.get(name.as_str()) {
+            if let Some(ab) = def.abilities().iter()
+                .find(|ab| ability_available(ab, state, ap, true, catalog_map))
+                .cloned()
+            {
+                if rng.gen_bool(0.75) {
+                    candidates.push(PriorityAction::ActivateAbility(land_id, ab));
                 }
             }
         }
@@ -45,13 +45,13 @@ pub(super) fn collect_on_board_actions(
         .map(|p| (p.id, p.name.clone(), p.bf.as_ref().map_or(false, |bf| bf.tapped)))
         .collect();
     for (perm_id, name, tapped) in perm_ids {
-        if rng.gen_bool(0.75) {
-            if let Some(def) = catalog_map.get(name.as_str()) {
-                if let Some(ab) = def.abilities().iter()
-                    .find(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped, catalog_map))
-                    .cloned()
-                {
-                    actions.push(PriorityAction::ActivateAbility(perm_id, ab));
+        if let Some(def) = catalog_map.get(name.as_str()) {
+            if let Some(ab) = def.abilities().iter()
+                .find(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped, catalog_map))
+                .cloned()
+            {
+                if rng.gen_bool(0.75) {
+                    candidates.push(PriorityAction::ActivateAbility(perm_id, ab));
                 }
             }
         }
@@ -59,7 +59,7 @@ pub(super) fn collect_on_board_actions(
 
     // Postcombat main phase: activate any un-activated planeswalkers (sorcery speed, empty stack).
     let is_postcombat_main = matches!(state.current_phase, Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
-    if is_postcombat_main {
+    if is_postcombat_main && state.stack.is_empty() {
         let pw_data: Vec<(ObjId, String, i32)> = state.permanents_of(ap)
             .filter(|p| {
                 let bf = p.bf.as_ref();
@@ -79,20 +79,8 @@ pub(super) fn collect_on_board_actions(
                     .next()
                     .cloned()
                 {
-                    actions.push(PriorityAction::ActivateAbility(pw_id, ab));
+                    candidates.push(PriorityAction::ActivateAbility(pw_id, ab));
                 }
-            }
-        }
-    }
-
-    // Adventure creatures in exile: 75% roll to cast the creature face.
-    let on_adventure: Vec<(ObjId, String)> = state.on_adventure_of(ap).map(|c| (c.id, c.name.clone())).collect();
-    for (card_id, card_name) in on_adventure {
-        if let Some(&def) = catalog_map.get(card_name.as_str()) {
-            let cost = parse_mana_cost(def.mana_cost());
-            if !state.potential_mana(ap).can_pay(&cost) { continue; }
-            if rng.gen_bool(0.75) {
-                actions.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None });
             }
         }
     }
@@ -112,14 +100,14 @@ pub(super) fn collect_on_board_actions(
             .collect();
         if !fetch_ids.is_empty() {
             for (fid, name) in &fetch_ids {
-                // Add if not already in the list.
-                if !actions.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _) if *id == *fid)) {
+                // Force-include if not already a candidate (bypasses the 75% roll).
+                if !candidates.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _) if *id == *fid)) {
                     if let Some(def) = catalog_map.get(name.as_str()) {
                         if let Some(ab) = def.abilities().iter()
                             .find(|ab| ability_available(ab, state, "us", true, catalog_map))
                             .cloned()
                         {
-                            actions.push(PriorityAction::ActivateAbility(*fid, ab));
+                            candidates.push(PriorityAction::ActivateAbility(*fid, ab));
                         }
                     }
                 }
@@ -130,7 +118,19 @@ pub(super) fn collect_on_board_actions(
         }
     }
 
-    actions
+    // Adventure creatures in exile: 75% roll to cast the creature face.
+    let on_adventure: Vec<(ObjId, String)> = state.on_adventure_of(ap).map(|c| (c.id, c.name.clone())).collect();
+    for (card_id, card_name) in on_adventure {
+        if let Some(&def) = catalog_map.get(card_name.as_str()) {
+            let cost = parse_mana_cost(def.mana_cost());
+            if !state.potential_mana(ap).can_pay(&cost) { continue; }
+            if rng.gen_bool(0.75) {
+                candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None });
+            }
+        }
+    }
+
+    if candidates.is_empty() { None } else { Some(candidates.remove(rng.gen_range(0..candidates.len()))) }
 }
 
 /// True if `name` is a spell the NAP considers worth spending a free counterspell (FoW / Daze) on.
@@ -266,52 +266,9 @@ fn ap_proactive(
         }
     }
 
-    // On-board actions: pop the first pending action (pre-rolled at phase start).
-    if let Some(action) = state.player(who).pending_actions.first().cloned() {
-        // Verify it's still valid before committing (source might have been tapped/sacrificed).
-        let still_valid = match &action {
-            PriorityAction::ActivateAbility(source_id, ab) => {
-                if let Some(cost) = ab.loyalty_cost {
-                    if !state.stack.is_empty() { false }
-                    else {
-                        let loyalty_ok = if cost < 0 {
-                            state.permanent_bf(*source_id)
-                                .map_or(false, |bf| bf.loyalty >= -cost)
-                        } else {
-                            state.permanent_bf(*source_id).is_some()
-                        };
-                        let already_used = state.permanent_bf(*source_id)
-                            .map_or(true, |bf| bf.pw_activated_this_turn);
-                        loyalty_ok && !already_used
-                    }
-                } else {
-                    let is_hand_ability = ab.zone == "hand";
-                    // For battlefield abilities, require the source is still in play.
-                    if !is_hand_ability && state.permanent_bf(*source_id).is_none() {
-                        false
-                    } else {
-                        let source_untapped = state.permanent_bf(*source_id)
-                            .map_or(false, |bf| !bf.tapped || ab.sacrifice_self);
-                        is_hand_ability || ability_available(ab, state, who, source_untapped, catalog_map)
-                    }
-                }
-            }
-            PriorityAction::CastSpell { card_id, .. } => {
-                // Only from-adventure cards appear in pending_actions; verify still on adventure + affordable.
-                let card = state.cards.get(card_id);
-                let zone_ok = card.map_or(false, |c| matches!(c.zone, CardZone::Exile { on_adventure: true }));
-                let mana_ok = card.and_then(|c| catalog_map.get(c.name.as_str()))
-                    .map(|def| state.potential_mana(who).can_pay(&parse_mana_cost(def.mana_cost())))
-                    .unwrap_or(false);
-                zone_ok && mana_ok
-            }
-            _ => false,
-        };
-        state.player_mut(who).pending_actions.remove(0);
-        if still_valid {
-            return action;
-        }
-        // Fall through to hand actions.
+    // On-board actions: computed fresh from current state.
+    if let Some(action) = pick_on_board_action(state, who, t, dd_turn, catalog_map, rng) {
+        return action;
     }
 
     // Hand actions: only on empty stack.
