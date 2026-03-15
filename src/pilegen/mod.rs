@@ -19,7 +19,7 @@ mod predicates;
 pub(crate) use predicates::*;
 
 mod strategy;
-use strategy::{decide_action, collect_on_board_actions, declare_attackers, declare_blockers};
+use strategy::{decide_action, collect_on_board_actions, declare_attackers, declare_blockers, activate_planeswalkers};
 #[cfg(test)] use strategy::try_ninjutsu;
 
 #[cfg(test)]
@@ -288,7 +288,7 @@ impl Phase {
 #[derive(Clone)]
 enum PriorityAction {
     /// Land drop: AP only, does NOT pass priority. Carries the chosen land name.
-    LandDrop(String),
+    LandDrop(ObjId),
     /// Activate a permanent ability. Carries source ObjId + ability def. Uses the stack, passes priority after.
     ActivateAbility(ObjId, AbilityDef),
     /// Intent to cast a spell. No resources are spent until `handle_priority_round` accepts and
@@ -1177,33 +1177,6 @@ fn select_deck(prompt: &str, flow_type_filter: Option<&str>) -> Option<(String, 
 
 // ── Turn simulation ───────────────────────────────────────────────────────────
 
-/// Choose a land to play from the hand. Returns the chosen land name, or `None` if no eligible
-/// land exists. Weights black-producing lands 3× when the player has no black source.
-/// `fateful` = Doomsday turn: skip cracked-land entries (e.g. Wasteland) to avoid mana issues.
-fn choose_land_name(
-    state: &SimState,
-    who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
-    fateful: bool,
-    rng: &mut impl Rng,
-) -> Option<String> {
-    if state.hand_size(who) <= 0 {
-        return None;
-    }
-    // On the fateful turn, if we can't produce black mana yet, require a black source.
-    let need_black = fateful && !state.has_black_mana(who);
-    let candidates: Vec<String> = state.hand_of(who)
-        .filter_map(|c| {
-            let def = catalog_map.get(c.name.as_str())?;
-            let land = def.as_land()?;
-            if need_black && !land.mana_abilities.iter().any(|ma| ma.produces.contains('B')) { return None; }
-            Some(c.name.clone())
-        })
-        .collect();
-    if candidates.is_empty() { return None; }
-    let idx = rng.gen_range(0..candidates.len());
-    Some(candidates[idx].clone())
-}
 
 /// Play a specific, pre-chosen land from hand (moves it to Battlefield).
 /// Fetches stay in play to be cracked later in the ability pass.
@@ -1211,18 +1184,18 @@ fn sim_play_land(
     state: &mut SimState,
     t: u8,
     who: &str,
-    land_name: &str,
+    card_id: ObjId,
     catalog_map: &HashMap<&str, &CardDef>,
 ) {
-    // Find a Hand card with this name.
-    let card_id = state.hand_of(who).find(|c| c.name == land_name).map(|c| c.id);
-    let Some(card_id) = card_id else { return; };
-
+    if !state.player(who).land_drop_available { return; }
+    let land_name = match state.cards.get(&card_id) {
+        Some(c) if matches!(c.zone, CardZone::Hand { .. }) => c.name.clone(),
+        _ => return,
+    };
     let (tapped, mana_abilities) = {
-        let def = catalog_map.get(land_name).and_then(|d| d.as_land()).expect("sim_play_land: not a land");
+        let def = catalog_map.get(land_name.as_str()).and_then(|d| d.as_land()).expect("sim_play_land: not a land");
         (def.enters_tapped, def.mana_abilities.clone())
     };
-    // Move from Hand to Battlefield.
     if let Some(card) = state.cards.get_mut(&card_id) {
         card.zone = CardZone::Battlefield;
         card.bf = Some(BattlefieldState {
@@ -1251,126 +1224,9 @@ fn sim_discard_to_limit(state: &mut SimState, t: u8, who: &str) {
 
 // ── Action system ─────────────────────────────────────────────────────────────
 
-// resolve_who, matches_target_type, has_valid_target are defined in predicates.rs
-
-/// Check whether an ability can be activated (cost payable + valid target exists).
-/// `source_untapped` must be true when the source is an untapped land/permanent.
-fn ability_available(
-    ability: &AbilityDef,
-    state: &SimState,
-    who: &str,
-    source_untapped: bool,
-    catalog_map: &HashMap<&str, &CardDef>,
-) -> bool {
-    if ability.tap_self && !source_untapped {
-        return false;
-    }
-    if !ability.mana_cost.is_empty() {
-        let cost = parse_mana_cost(&ability.mana_cost);
-        if !state.potential_mana(who).can_pay(&cost) {
-            return false;
-        }
-    }
-    if let Some(tgt) = &ability.target {
-        if !has_valid_target(tgt, state, who, catalog_map) {
-            return false;
-        }
-    }
-    true
-}
-
-/// True if the player can currently afford to cast `name` via any available cost.
-///
-/// Tries the standard mana cost first; falls back to alternate costs (e.g. delve, pitch).
-fn spell_is_affordable(
-    name: &str,
-    def: &CardDef,
-    state: &SimState,
-    who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
-) -> bool {
-    let mut cost = parse_mana_cost(def.mana_cost());
-    if def.delve() && cost.generic > 0 {
-        let gy_len = state.graveyard_of(who).count() as i32;
-        cost.generic = (cost.generic - gy_len).max(0);
-    }
-    let mana_is_usable = !def.mana_cost().is_empty() && state.potential_mana(who).can_pay(&cost);
-    if mana_is_usable { return true; }
-    def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name, catalog_map))
-}
-
-fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) -> bool {
-    let player = state.player(who);
-    if !ability.mana_cost.is_empty() {
-        if !state.potential_mana(who).can_pay(&parse_mana_cost(&ability.mana_cost)) { return false; }
-    }
-    if ability.life_cost > 0 && player.life <= ability.life_cost { return false; }
-    if ability.sacrifice_land && !state.permanents_of(who).any(|c| {
-        c.bf.as_ref().map_or(false, |bf| !bf.mana_abilities.is_empty())
-    }) { return false; }
-    true
-}
-
-fn collect_hand_actions(
-    state: &SimState,
-    who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
-) -> Vec<PriorityAction> {
-    if state.hand_size(who) <= 0 {
-        return Vec::new();
-    }
-    let opp_who = if who == "us" { "opp" } else { "us" };
-
-    // Collect hand card names and their ids (deduplicate by name to avoid offering same spell twice).
-    let hand_cards: Vec<(ObjId, String)> = state.hand_of(who)
-        .map(|c| (c.id, c.name.clone()))
-        .collect();
-
-    let mut seen_names: std::collections::HashSet<String> = Default::default();
-    let mut actions: Vec<PriorityAction> = Vec::new();
-
-    for (card_id, name) in &hand_cards {
-        let Some(&def) = catalog_map.get(name.as_str()) else { continue; };
-        if def.is_land() { continue; }
-        if !card_has_implementation(def) { continue; }
-        if def.legendary() && state.permanents_of(who).any(|c| c.name == name.as_str()) { continue; }
-        if let Some(tgt) = def.target() {
-            if !has_valid_target(tgt, state, who, catalog_map) { continue; }
-        }
-        let ok = def.requires().iter().all(|req| match req.as_str() {
-            "opp_hand_nonempty" => state.hand_size(opp_who) > 0,
-            "us_gy_has_creature" => state.graveyard_of(who)
-                .any(|c| catalog_map.get(c.name.as_str()).map(|d| d.is_creature()).unwrap_or(false)),
-            _ => true,
-        });
-        if !ok { continue; }
-        if !spell_is_affordable(name, def, state, who, catalog_map) { continue; }
-        if seen_names.insert(name.clone()) {
-            actions.push(PriorityAction::CastSpell { name: name.clone(), preferred_cost: None });
-        }
-
-        // In-hand abilities (cycling, channel, etc.)
-        for ab in def.abilities().iter().filter(|ab| ab.zone == "hand") {
-            if hand_ability_affordable(ab, state, who) {
-                actions.push(PriorityAction::ActivateAbility(*card_id, ab.clone()));
-            }
-        }
-
-        // Adventure spell face.
-        if let Some(face) = def.adventure() {
-            if !face.mana_cost.is_empty() {
-                let cost = parse_mana_cost(&face.mana_cost);
-                if !state.potential_mana(who).can_pay(&cost) { continue; }
-            }
-            if let Some(ref tgt) = face.target {
-                if !has_valid_target(tgt, state, who, catalog_map) { continue; }
-            }
-            actions.push(PriorityAction::CastAdventure { card_name: name.clone() });
-        }
-    }
-
-    actions
-}
+// resolve_who, matches_target_type, has_valid_target, ability_available,
+// collect_hand_actions, choose_land_name, respond_with_counter, activate_planeswalkers
+// are defined in strategy.rs / predicates.rs
 
 // choose_permanent_target is defined in predicates.rs
 
@@ -1781,112 +1637,7 @@ fn cast_spell(
 }
 
 
-/// Hypergeometric P(≥1 copy of a card is in the "in-hand" portion of the library pool).
-///
-/// `library_size` — total cards remaining in the pool (hand + undrawn).
-/// `hand_size`    — how many of those are conceptually in hand.
-/// `copies`       — how many copies of the card exist in the pool.
-#[allow(dead_code)]
-fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
-    let t = library_size;
-    let h = (hand_size.max(0) as usize).min(t);
-    let n = copies;
-    if n == 0 || h == 0 { return 0.0; }
-    if n >= t { return 1.0; }
-    // P(0 in hand) = ∏ᵢ₌₀ʰ⁻¹ (T-N-i)/(T-i)
-    let mut p_none: f64 = 1.0;
-    for i in 0..h {
-        let num = t.saturating_sub(n + i);
-        if num == 0 { return 1.0; }
-        p_none *= num as f64 / (t - i) as f64;
-    }
-    (1.0 - p_none).max(0.0)
-}
 
-/// Try to respond to `stack[target_idx]` by casting a counterspell.
-///
-/// When `probabilistic = true`:
-///   - Per counterspell: roll P(card in hand) via hypergeometric, then a strategic 50% choice
-///     (overridden by `cost.prob` if set on the first cost option).
-///   - For `exile_blue_from_hand` costs: also roll P(have a blue pitch card in hand).
-/// When `probabilistic = false` the attempt is deterministic (used when protecting Doomsday).
-///
-/// On success, returns a `CastSpell` intent targeting `stack[target_idx]`.
-/// No resources are spent; the caller (`handle_priority_round`) commits the action.
-fn respond_with_counter(
-    state: &SimState,
-    target_idx: usize,
-    responding_who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
-    rng: &mut impl Rng,
-    probabilistic: bool,
-) -> Option<PriorityAction> {
-    let default_kind;
-    let target_name = state.stack_item_display_name(state.stack[target_idx]).to_string();
-    let target_kind: &CardKind = match catalog_map.get(target_name.as_str()) {
-        Some(d) => &d.kind,
-        None => { default_kind = CardKind::Sorcery(SpellData::default()); &default_kind }
-    };
-
-    let target_owner_str = state.who_str(state.stack_item_owner(state.stack[target_idx])).to_string();
-    let target_has_untapped_lands = state.permanents_of(&target_owner_str).any(|c| {
-        c.bf.as_ref().map_or(false, |bf| !bf.tapped && !bf.mana_abilities.is_empty())
-    });
-
-    // Find counterspells in hand.
-    let mut seen = std::collections::HashSet::new();
-    let counterspells: Vec<String> = state.hand_of(responding_who)
-        .filter_map(|c| {
-            let def = catalog_map.get(c.name.as_str())?;
-            let filter = def.target().and_then(|t| t.strip_prefix("stack:"))?;
-            if !stack_filter_matches(filter, target_kind) { return None; }
-            if def.alternate_costs().is_empty() { return None; }
-            if c.name == "Daze" && target_has_untapped_lands { return None; }
-            seen.insert(c.name.clone()).then(|| c.name.clone())
-        })
-        .collect();
-
-    if counterspells.is_empty() {
-        return None;
-    }
-
-    let hand_size = state.hand_size(responding_who);
-    let lib_size = state.library_size(responding_who) + hand_size as usize;
-
-    for cs_name in &counterspells {
-        if probabilistic {
-            // Roll: is this counterspell in our hand?
-            let copies = state.hand_of(responding_who).filter(|c| c.name == *cs_name).count();
-            let p_have = p_card_in_hand(lib_size, hand_size, copies);
-            if !rng.gen_bool(p_have.max(f64::MIN_POSITIVE)) { continue; }
-
-            // Roll: strategic choice to use it (default 50%; per-spell override via first cost.prob).
-            let costs = catalog_map[cs_name.as_str()].alternate_costs();
-            let strategic = costs.first().and_then(|c| c.prob).unwrap_or(0.5);
-            if !rng.gen_bool(strategic) { continue; }
-        }
-
-        let costs = catalog_map[cs_name.as_str()].alternate_costs().to_vec();
-        for cost in &costs {
-            // For pitch costs, also roll whether we have a blue card to pitch.
-            if probabilistic && cost.exile_blue_from_hand {
-                let n_blue = state.hand_of(responding_who)
-                    .filter(|c| c.name != *cs_name
-                        && catalog_map.get(c.name.as_str()).map_or(false, |d| !d.is_land() && d.is_blue()))
-                    .count();
-                let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
-                if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
-            }
-            if can_pay_alternate_cost(cost, state, responding_who, cs_name, catalog_map) {
-                return Some(PriorityAction::CastSpell {
-                    name: cs_name.clone(),
-                    preferred_cost: Some(cost.clone()),
-                });
-            }
-        }
-    }
-    None
-}
 
 
 
@@ -2079,8 +1830,8 @@ fn handle_priority_round(
         last_action = action.clone();
 
         match action {
-            PriorityAction::LandDrop(ref land_name) => {
-                sim_play_land(state, t, &who, land_name, catalog_map);
+            PriorityAction::LandDrop(card_id) => {
+                sim_play_land(state, t, &who, card_id, catalog_map);
                 state.player_mut(&who).land_drop_available = false;
                 last_passer = None;
             }
@@ -2558,43 +2309,6 @@ fn do_step(
     state.opp.pool.drain();
 }
 
-/// Activate each AP planeswalker's loyalty ability once (100% — never skip).
-/// Called at the end of each main phase, after the regular priority round.
-/// For each unactivated PW, picks a random available loyalty ability and runs a priority round.
-fn activate_planeswalkers(
-    state: &mut SimState,
-    t: u8,
-    ap: &str,
-    dd_turn: u8,
-    catalog_map: &HashMap<&str, &CardDef>,
-    rng: &mut impl Rng,
-) {
-    // Collect unactivated PW IDs + names + their current loyalty snapshot.
-    let pw_data: Vec<(ObjId, String, i32)> = state.permanents_of(ap)
-        .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.pw_activated_this_turn))
-        .filter(|p| catalog_map.get(p.name.as_str())
-            .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_))))
-        .map(|p| (p.id, p.name.clone(), p.bf.as_ref().map_or(0, |bf| bf.loyalty)))
-        .collect();
-
-    for (pw_id, name, loyalty) in pw_data {
-        let def = match catalog_map.get(name.as_str()) { Some(d) => *d, None => continue };
-        let available: Vec<AbilityDef> = def.abilities().iter()
-            .filter(|ab| {
-                let Some(cost) = ab.loyalty_cost else { return false; };
-                !(cost < 0 && loyalty < -cost)
-            })
-            .cloned()
-            .collect();
-        if available.is_empty() { continue; }
-        let ab = available[rng.gen_range(0..available.len())].clone();
-        state.player_mut(ap).pending_actions = vec![PriorityAction::ActivateAbility(pw_id, ab)];
-        handle_priority_round(state, t, ap, dd_turn, catalog_map, rng);
-        state.us.pool.drain();
-        state.opp.pool.drain();
-        if state.done() { return; }
-    }
-}
 
 /// Execute a full phase: run each step, then optionally run a phase-level priority round.
 fn do_phase(
