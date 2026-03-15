@@ -119,7 +119,6 @@ pub(crate) struct LandTypes {
 pub(crate) struct LandData {
     #[serde(default)] pub(crate) basic: bool,
     #[serde(default)] pub(crate) land_types: LandTypes,
-    #[serde(default)] pub(crate) enters_tapped: bool,
     #[serde(default)] pub(crate) annotation_options: Vec<String>,
     #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
     #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
@@ -432,11 +431,12 @@ pub(crate) struct RawCardDef {
 
 impl From<RawCardDef> for CardDef {
     fn from(r: RawCardDef) -> Self {
+        let enters_tapped = r.enters_tapped;
+        let is_planeswalker = matches!(r.card_type, CardType::Planeswalker);
         let kind = match r.card_type {
             CardType::Land => CardKind::Land(LandData {
                 basic: r.basic,
                 land_types: r.land_types,
-                enters_tapped: r.enters_tapped,
                 annotation_options: r.annotation_options,
                 mana_abilities: r.mana_abilities.clone(),
                 abilities: r.abilities,
@@ -496,11 +496,17 @@ impl From<RawCardDef> for CardDef {
             "Tamiyo, Inquisitive Student" => vec![tamiyo_check],
             _ => vec![],
         };
-        let replacement_defs: Vec<ReplacementDef> = match r.name.as_str() {
+        let mut replacement_defs: Vec<ReplacementDef> = match r.name.as_str() {
             "Leyline of the Void" => vec![ReplacementDef { check: leyline_check,      build_effect: build_leyline_effect }],
             "Murktide Regent"     => vec![ReplacementDef { check: murktide_etb_check, build_effect: build_murktide_etb_effect }],
             _ => vec![],
         };
+        if enters_tapped {
+            replacement_defs.push(ReplacementDef { check: etb_self_check, build_effect: build_enters_tapped_effect });
+        }
+        if is_planeswalker {
+            replacement_defs.push(ReplacementDef { check: etb_self_check, build_effect: build_enter_with_loyalty_effect });
+        }
         CardDef { name: r.name, play_weight: r.play_weight, kind, trigger_defs, replacement_defs }
     }
 }
@@ -940,6 +946,84 @@ fn build_leyline_effect(_source_id: ObjId, controller: &str) -> Effect {
     }))
 }
 
+// ── Shared ETB-self check ─────────────────────────────────────────────────────
+
+/// Matches any ZoneChange where this permanent is the object entering the battlefield.
+fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: &str) -> Option<Vec<Target>> {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
+        if *id == source_id {
+            return Some(vec![Target::Object(*id)]);
+        }
+    }
+    None
+}
+
+/// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
+/// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
+fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
+    state.cards.get(&id).map(|c| card_zone_to_id(&c.zone)).unwrap_or(ZoneId::Hand)
+}
+
+// ── Enters-tapped ETB replacement ─────────────────────────────────────────────
+
+fn build_enters_tapped_effect(_source_id: ObjId, controller: &str) -> Effect {
+    let ctl = controller.to_string();
+    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+        let Some(Target::Object(id)) = targets.first() else { return; };
+        let id = *id;
+        let from = current_zone_id(id, state);
+        let (card_name, card_type_s) = {
+            let name = state.cards.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("land").to_string();
+            (name, ct)
+        };
+        // Re-fire the ETB: do_effect creates BattlefieldState (tapped = false); ETB triggers fire.
+        // This replacement is in repl_applied so it will not intercept the re-fired event.
+        fire_event(
+            GameEvent::ZoneChange {
+                id, actor: ctl.clone(), card: card_name, card_type: card_type_s,
+                from, to: ZoneId::Battlefield, controller: ctl.clone(),
+            },
+            state, t, &ctl, catalog, rng,
+        );
+        // Chain: set tapped now that BattlefieldState exists.
+        if let Some(bf) = state.permanent_bf_mut(id) {
+            bf.tapped = true;
+        }
+    }))
+}
+
+// ── Planeswalker enters-with-loyalty ETB replacement ─────────────────────────
+
+fn build_enter_with_loyalty_effect(_source_id: ObjId, controller: &str) -> Effect {
+    let ctl = controller.to_string();
+    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+        let Some(Target::Object(id)) = targets.first() else { return; };
+        let id = *id;
+        let from = current_zone_id(id, state);
+        let (card_name, card_type_s, base_loyalty) = {
+            let name = state.cards.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("planeswalker").to_string();
+            let loyalty = catalog.get(name.as_str())
+                .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
+                .unwrap_or(0);
+            (name, ct, loyalty)
+        };
+        // Re-fire the ETB: do_effect creates BattlefieldState (loyalty = 0); ETB triggers fire.
+        fire_event(
+            GameEvent::ZoneChange {
+                id, actor: ctl.clone(), card: card_name, card_type: card_type_s,
+                from, to: ZoneId::Battlefield, controller: ctl.clone(),
+            },
+            state, t, &ctl, catalog, rng,
+        );
+        // Chain: set loyalty now that BattlefieldState exists.
+        if let Some(bf) = state.permanent_bf_mut(id) {
+            bf.loyalty = base_loyalty;
+        }
+    }))
+}
+
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────
 
 fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> Option<Vec<Target>> {
@@ -951,7 +1035,7 @@ fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> 
     None
 }
 
-fn build_murktide_etb_effect(source_id: ObjId, controller: &str) -> Effect {
+fn build_murktide_etb_effect(_source_id: ObjId, controller: &str) -> Effect {
     let ctl = controller.to_string();
     Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
         let Some(Target::Object(id)) = targets.first() else { return; };

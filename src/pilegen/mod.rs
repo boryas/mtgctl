@@ -45,7 +45,7 @@ impl ObjId {
 
 /// Zone a card currently occupies.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum CardZone {
+pub(super) enum CardZone {
     Library,
     Hand { known: bool },   // known = identity visible to opponent
     Stack,
@@ -1257,7 +1257,7 @@ fn sim_discard_to_limit(state: &mut SimState, t: u8, who: &str) {
 
 // choose_permanent_target is defined in predicates.rs
 
-fn card_zone_to_id(zone: &CardZone) -> ZoneId {
+pub(super) fn card_zone_to_id(zone: &CardZone) -> ZoneId {
     match zone {
         CardZone::Library        => ZoneId::Library,
         CardZone::Hand { .. }    => ZoneId::Hand,
@@ -1268,7 +1268,7 @@ fn card_zone_to_id(zone: &CardZone) -> ZoneId {
     }
 }
 
-fn card_type_str(d: &CardDef) -> &'static str {
+pub(super) fn card_type_str(d: &CardDef) -> &'static str {
     if d.is_creature()      { "creature" }
     else if d.is_instant()  { "instant" }
     else if d.is_sorcery()  { "sorcery" }
@@ -1351,18 +1351,10 @@ fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str
                     if from == ZoneId::Battlefield { card.bf = None; }
                 }
                 if to == ZoneId::Battlefield && card.bf.is_none() {
-                    let def = catalog_map.get(card.name.as_str());
-                    let mana_abs = def.map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
-                    let loyalty = def
-                        .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
-                        .unwrap_or(0);
-                    // "Enters the battlefield tapped" is an ETB replacement: the card's data
-                    // determines its initial tapped state, handled here alongside PW loyalty.
-                    let enters_tapped = def.and_then(|d| d.as_land()).map_or(false, |l| l.enters_tapped);
+                    let mana_abs = catalog_map.get(card.name.as_str())
+                        .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
                     card.bf = Some(BattlefieldState {
-                        tapped: enters_tapped,
                         mana_abilities: mana_abs,
-                        loyalty,
                         entered_this_turn: true,
                         ..BattlefieldState::new(vec![])
                     });

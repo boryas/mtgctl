@@ -165,9 +165,6 @@ pub(crate) fn eff_enter_permanent(
                 (0, ann)
             }
         };
-        let pw_loyalty = catalog.get(card_name.as_str())
-            .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
-            .unwrap_or(0);
         let mana_abs = catalog.get(card_name.as_str())
             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
         let new_id = state.alloc_id();
@@ -187,18 +184,9 @@ pub(crate) fn eff_enter_permanent(
             bf: Some(BattlefieldState {
                 annotation: ann,
                 counters,
-                tapped: false,
-                damage: 0,
-                entered_this_turn: true,
                 mana_abilities: mana_abs,
-                attacking: false,
-                unblocked: false,
-                loyalty: pw_loyalty,
-                pw_activated_this_turn: false,
-                attack_target: None,
-                power_mod: 0,
-                toughness_mod: 0,
-                active_face: 0,
+                entered_this_turn: true,
+                ..BattlefieldState::new(vec![])
             }),
         });
         fire_event(
