@@ -217,6 +217,15 @@ pub(crate) enum CardKind {
 ///
 /// Wrapper struct preserving direct `.name` access and stable HashMap keys while
 /// holding a typed `kind` that enforces card-category invariants.
+/// A replacement effect definition stored directly on a `CardDef`.
+/// `check` returns `Some(targets)` if the replacement applies to an event; `build_effect` builds
+/// the closure that runs instead of the original event.
+#[derive(Clone, Copy)]
+pub(super) struct ReplacementDef {
+    pub(super) check: ReplacementCheckFn,
+    pub(super) build_effect: fn(ObjId, &str) -> Effect,
+}
+
 #[derive(Clone)]
 pub(crate) struct CardDef {
     pub(crate) name: String,
@@ -224,6 +233,10 @@ pub(crate) struct CardDef {
     #[allow(dead_code)]
     pub(crate) play_weight: Option<u32>,
     pub(crate) kind: CardKind,
+    /// Trigger check functions for this card (populated at load time, not from TOML).
+    pub(super) trigger_defs: Vec<TriggerCheckFn>,
+    /// Replacement effect definitions for this card (populated at load time, not from TOML).
+    pub(super) replacement_defs: Vec<ReplacementDef>,
 }
 
 impl CardDef {
@@ -477,7 +490,18 @@ impl From<RawCardDef> for CardDef {
             }),
             CardType::Enchantment => CardKind::Enchantment,
         };
-        CardDef { name: r.name, play_weight: r.play_weight, kind }
+        let trigger_defs: Vec<TriggerCheckFn> = match r.name.as_str() {
+            "Orcish Bowmasters"           => vec![bowmasters_check],
+            "Murktide Regent"             => vec![murktide_check],
+            "Tamiyo, Inquisitive Student" => vec![tamiyo_check],
+            _ => vec![],
+        };
+        let replacement_defs: Vec<ReplacementDef> = match r.name.as_str() {
+            "Leyline of the Void" => vec![ReplacementDef { check: leyline_check,      build_effect: build_leyline_effect }],
+            "Murktide Regent"     => vec![ReplacementDef { check: murktide_etb_check, build_effect: build_murktide_etb_effect }],
+            _ => vec![],
+        };
+        CardDef { name: r.name, play_weight: r.play_weight, kind, trigger_defs, replacement_defs }
     }
 }
 
@@ -601,31 +625,15 @@ fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: 
     }
 }
 
-/// Signature for a per-card trigger check function.
-/// Receives the source permanent's `ObjId` so it can be captured in the effect closure.
-/// Inspects the event, and if a trigger fires, appends a `TriggerContext` to `pending`.
-/// Does NOT modify state — triggers are queued and pushed onto the stack by the caller.
-type TriggerCheckFn = fn(&GameEvent, ObjId, &str, &mut Vec<TriggerContext>);
 
-static CARD_TRIGGERS: &[(&str, TriggerCheckFn)] = &[
-    ("Orcish Bowmasters",           bowmasters_check),
-    ("Murktide Regent",             murktide_check),
-    ("Tamiyo, Inquisitive Student", tamiyo_check),
-];
-
-/// Check every in-play permanent against `CARD_TRIGGERS` for the given event,
-/// then check `state.active_effects` for registered effect-based triggers.
+/// Check every active trigger instance for the given event, then check `state.active_effects`.
 /// Returns any triggered ability contexts that should be pushed onto the stack.
 pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerContext> {
     let mut pending: Vec<TriggerContext> = Vec::new();
 
-    // Static card-based triggers: pass the source permanent's ObjId to each check function.
-    for &(card_name, check_fn) in CARD_TRIGGERS {
-        for owner in ["us", "opp"] {
-            if let Some(p) = state.find_permanent_by_name(card_name, owner) {
-                check_fn(event, p.id, owner, &mut pending);
-            }
-        }
+    for inst in &state.trigger_instances {
+        if !inst.active { continue; }
+        (inst.check)(event, inst.source_id, &inst.controller, &mut pending);
     }
 
     // Effect-based triggers registered in active_effects.
@@ -770,9 +778,9 @@ pub(super) fn build_ability_effect(
             _        => ZoneId::Graveyard,  // "destroy" and anything else
         };
         let who_c = who.clone();
-        return Effect(std::sync::Arc::new(move |state, t, targets, catalog, _rng| {
+        return Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
             if let Some(Target::Object(id)) = targets.first() {
-                change_zone(*id, to, state, t, &who_c, catalog);
+                change_zone(*id, to, state, t, &who_c, catalog, rng);
             }
         }));
     }
@@ -858,10 +866,118 @@ pub(super) fn build_adventure_effect(face: &AdventureFace, who: &str) -> (Target
         name: face.name.clone(),
         play_weight: None,
         kind: CardKind::Instant(SpellData::default()),
+        trigger_defs: vec![],
+        replacement_defs: vec![],
     };
     let mut eff = build_single_effect(effects[0].as_str(), who, &dummy_def);
     for e in &effects[1..] {
         eff = eff.then(build_single_effect(e.as_str(), who, &dummy_def));
     }
     (target_spec, eff)
+}
+
+/// Pre-register trigger and replacement instances for a card object at simulation init.
+/// Reads directly from `card_def.trigger_defs` and `card_def.replacement_defs` — no table lookup.
+/// Instances start with `active: false`; they are activated when the card enters the battlefield.
+pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, controller: &str, state: &mut SimState) {
+    for &check in &card_def.trigger_defs {
+        state.trigger_instances.push(TriggerInstance {
+            source_id,
+            controller: controller.to_string(),
+            check,
+            active: false,
+        });
+    }
+    for repl in &card_def.replacement_defs {
+        let id = state.alloc_id();
+        state.replacement_instances.push(ReplacementInstance {
+            id,
+            source_id,
+            controller: controller.to_string(),
+            check: repl.check,
+            effect: (repl.build_effect)(source_id, controller),
+            active: false,
+        });
+    }
+}
+
+/// Activate all trigger and replacement instances for a card entering the battlefield.
+pub(super) fn activate_instances(source_id: ObjId, state: &mut SimState) {
+    for inst in &mut state.trigger_instances {
+        if inst.source_id == source_id { inst.active = true; }
+    }
+    for inst in &mut state.replacement_instances {
+        if inst.source_id == source_id { inst.active = true; }
+    }
+}
+
+/// Deactivate all trigger and replacement instances for a card leaving the battlefield.
+pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
+    for inst in &mut state.trigger_instances {
+        if inst.source_id == source_id { inst.active = false; }
+    }
+    for inst in &mut state.replacement_instances {
+        if inst.source_id == source_id { inst.active = false; }
+    }
+}
+
+// ── Leyline of the Void ───────────────────────────────────────────────────────
+
+fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &str) -> Option<Vec<Target>> {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, .. } = event {
+        Some(vec![Target::Object(*id)])
+    } else {
+        None
+    }
+}
+
+fn build_leyline_effect(_source_id: ObjId, controller: &str) -> Effect {
+    let ctl = controller.to_string();
+    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+        if let Some(Target::Object(id)) = targets.first() {
+            change_zone(*id, ZoneId::Exile, state, t, &ctl, catalog, rng);
+        }
+    }))
+}
+
+// ── Murktide Regent ETB ───────────────────────────────────────────────────────
+
+fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> Option<Vec<Target>> {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+        if *id == source_id && ctlr == controller {
+            return Some(vec![Target::Object(*id)]);
+        }
+    }
+    None
+}
+
+fn build_murktide_etb_effect(source_id: ObjId, controller: &str) -> Effect {
+    let ctl = controller.to_string();
+    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+        let Some(Target::Object(id)) = targets.first() else { return; };
+        let id = *id;
+        // Count instant/sorcery cards in controller's exile
+        let exile_count = state.exile_of(&ctl)
+            .filter(|c| catalog.get(c.name.as_str())
+                .map_or(false, |d| d.is_instant() || d.is_sorcery()))
+            .count() as i32;
+        // Set counters on the already-created BattlefieldState
+        if let Some(bf) = state.permanent_bf_mut(id) {
+            bf.counters = exile_count;
+        }
+        // Re-fire the ETB event so triggers (Bowmasters, etc.) run.
+        // Murktide's replacement is now in repl_applied, so it won't fire again.
+        fire_event(
+            GameEvent::ZoneChange {
+                id,
+                actor: ctl.clone(),
+                card: "Murktide Regent".to_string(),
+                card_type: "creature".to_string(),
+                from: ZoneId::Stack,
+                to: ZoneId::Battlefield,
+                controller: ctl.clone(),
+            },
+            state, t, &ctl, catalog, rng,
+        );
+    }))
 }

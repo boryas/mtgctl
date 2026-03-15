@@ -318,9 +318,38 @@ effects are already declared.
 
 ### Replacement effects
 when this enters... (murktide, cavern, etc..) are replacement effects
+planeswalkers having loyalty on enter
+both are simple predicates "this etb" and simple chained effects: etb+add counters, etb+ask strategy to decide a creature type.
+very unified with triggers actually. As far as I can tell, the difference is just the effect going on the stack.
 
-### Searching
-kind of like targeting but in the library. reuse predicates but a diff zone.
+Event, Owner, State -> Triggered Effect
+vs
+Event, Owner, State -> Replaced Effect
+
+so the system looks something like:
+a flat list of all replacement effects. Before an event occurs, walk the list and see if the event "passes" any of them and replace. This swallows the event and it never happens. Running the replacement effect will likely itself trigger a new event, however (which may itself be replaced). We must track which replacement effects have already been applied to a given event to avoid this chaining forever (or more than once...) That is the trickiest bit. An important difficulty to manage is making sure we sequence "doing the effect" with "producing the event" and "replacing the event". For example, there are replacement effects like "if you put X in the graveyard put it in exile instead". In that case, IDEALLY, we don't actually move it to the graveyard before running and replacing the event and actually putting it in exile. It's probably not the end of the world if there are no side effects, though.
+
+if no replacement effects apply, the event is considered to have occurred. Apply its effects fully. Then walk the list of triggers. If any apply queue them up for triggering at the next priority.
+
+In both cases there can be multiple matching events. The proper rules solution to this is to have the owner choose the order of application and if both players have one or more, this is done in APNAP order. So if we have 3 replacement effects REAP1 REAP2 and RENAP1, AP orders REAP1 and REAP2 then NAPs replacement effect is done last. The same ordering system is the rule for triggered abilities. This is obviously also quite tricky and "last mile".
+
+Concrete Goals:
+Active replacement effects and triggers are Objects and get IDs. They refer back to their owning permanent or continuous effect by ID.
+Generic, unified Event Replacement/Trigger Predicate checks.
+Two separate passes over replacement effects and triggers per game event. encapsulated in the concept of "running" or "firing" the event.
+If replacement effect occurs, event "doesn't happen", gets replaced, and is marked with being replaced by the ID of the replacement effect. Immediately (without stack) run the new registered effect.
+If no replacement occurs, then the event has fired, and the effects truly happen, and we look through the list of triggers for matching triggers, and fire those, prepping triggers for the stack.
+When an object which generates a trigger or replacement effect leaves play or expires, it removes its replacement effects / triggers from the system.
+If multiple replacement effects or triggers apply to an event, then we do the apnap selection order and it goes to the strategy component to decide the order (that is just random)
+
+useful components:
+self-etb predicate (very common, good to prove we implement it well)
+static full replacement: e.g. leyline of the void "if a card would be put in a graveyard from anywhere, exile it instead) + extra credit for a trigger that cares about cards going to the graveyard NOT firing and a trigger for going to exile firing.
+
+useful tests:
+orcish bowmasters etb: trigger with compound effect
+murktide/planeswalker enters play: replace with same + extra. proves we don't infinitely recurse replacement
+tamiyo +2: expiring trigger
 
 ### Characteristic changing abilities
 once we have truly rich characteristics
@@ -328,23 +357,26 @@ tag a card with "has a characteristic changing ability"
 and then when you look at a characteristic of that card, you have to run the ability on it first
 e.g. barrowgoyf p/t, kaito hexproof creature on owner turn
 
-### Strategy as a trait
+### State-based actions
+SBAs (creatures with lethal damage, players at 0 life, pw with 0 loyalty, two of a legend, etc.) are currently checked inline at specific points. A proper `check_state_based_actions` pass before every priority invocation would make the engine more correct and remove special-case checks.
 
+### Searching
+kind of like targeting but in the library. reuse predicates but a diff zone.
+useful tests:
+fetches
+
+### Strategy as a trait
 `decide_action()` and friends could become a `PlayerStrategy` trait, making it
 possible to swap in different archetypes (e.g. a reactive opponent, a goldfish) or
 test the engine against a fixed script.
-
-### State-based actions
-
-SBAs (creatures with lethal damage, players at 0 life, etc.) are currently checked
-inline at specific points. A proper `check_state_based_actions` pass before every
-priority invocation would make the engine more correct and remove special-case checks.
 
 ### ninjutsu cost
 reasonable and tricky
 more generic way is to "capture the cost" in general. And if the cost is bouncing an attacking creature we should snapshot the state of the attacking creature including what it was attacking.
 
 this cuts across to murktide "capturing the cost" to include the spells delved.
+
+### unify shared bits of activation and spell costs
 
 ### `handle_priority_round`
 Function is massive and needs cleaning up.

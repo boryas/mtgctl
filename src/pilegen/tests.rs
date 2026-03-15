@@ -23,6 +23,7 @@
     }
 
     /// Insert a permanent into `state.cards` for `who` and return its ObjId.
+    /// Also pre-registers and activates trigger/replacement instances so fire_triggers works.
     fn add_perm(state: &mut SimState, who: &str, name: &str, bf: BattlefieldState) -> ObjId {
         let id = state.alloc_id();
         state.cards.insert(id, CardObject {
@@ -34,6 +35,11 @@
             spell: None,
             bf: Some(bf),
         });
+        // Build a minimal CardDef so From<RawCardDef> sets trigger/replacement defs by name.
+        let toml = format!("name = {:?}\ncard_type = \"creature\"\npower = 1\ntoughness = 1\n", name);
+        let def: CardDef = toml::from_str(&toml).expect("add_perm: CardDef parse failed");
+        preregister_instances(&def, id, who, state);
+        activate_instances(id, state);
         id
     }
 
@@ -1401,6 +1407,8 @@
         add_default_perm(&mut state, "opp", "Orcish Bowmasters");
 
         let ev = GameEvent::ZoneChange {
+            id: ObjId::UNSET,
+            actor: "test".to_string(),
             card: "Orcish Bowmasters".to_string(),
             card_type: "creature".to_string(),
             from: ZoneId::Stack,
@@ -1416,6 +1424,8 @@
     fn test_fire_triggers_empty_when_no_bowmasters_in_play() {
         let state = make_state(); // no permanents
         let ev = GameEvent::ZoneChange {
+            id: ObjId::UNSET,
+            actor: "test".to_string(),
             card: "Orcish Bowmasters".to_string(),
             card_type: "creature".to_string(),
             from: ZoneId::Stack,
@@ -1429,6 +1439,8 @@
     /// Fire a Bowmasters ETB trigger for `controller` and return the TriggerContext.
     fn bowmasters_etb_ctx(controller: &str) -> TriggerContext {
         let ev = GameEvent::ZoneChange {
+            id: ObjId::UNSET,
+            actor: "test".to_string(),
             card: "Orcish Bowmasters".into(),
             card_type: "creature".into(),
             from: ZoneId::Hand,
@@ -1492,7 +1504,7 @@
         let catalog = vec![creature("Ragavan, Nimble Pilferer", 2, 1)];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         fire_bowmasters_etb("opp", &mut state, &catalog_map);
-        check_lethal_damage("us", &mut state, 1, &catalog_map);
+        check_lethal_damage("us", &mut state, 1, &catalog_map, &mut seeded_rng());
         assert_eq!(state.us.life, initial_life, "life total unchanged when creature is targeted");
         assert!(!state.permanents_of("us").any(|p| p.name == "Ragavan, Nimble Pilferer"),
             "Ragavan dies to 1 damage");
@@ -1509,7 +1521,7 @@
         let catalog = vec![creature("Troll", 3, 3), creature("Orcish Bowmasters", 1, 1)];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         fire_bowmasters_etb("opp", &mut state, &catalog_map);
-        check_lethal_damage("us", &mut state, 1, &catalog_map);
+        check_lethal_damage("us", &mut state, 1, &catalog_map, &mut seeded_rng());
         assert!(!state.permanents_of("us").any(|p| p.name == "Orcish Bowmasters"),
             "opposing Bowmasters is killed");
         assert!(state.permanents_of("us").any(|p| p.name == "Troll"), "Troll survives");
@@ -1541,6 +1553,8 @@
         add_perm(&mut state, "us", "Murktide Regent", BattlefieldState { counters: 0, ..BattlefieldState::new(vec![]) });
 
         let ev = GameEvent::ZoneChange {
+            id: ObjId::UNSET,
+            actor: "test".to_string(),
             card: "Counterspell".to_string(),
             card_type: "instant".to_string(),
             from: ZoneId::Graveyard,
@@ -1563,6 +1577,8 @@
         add_default_perm(&mut state, "us", "Murktide Regent");
 
         let ev = GameEvent::ZoneChange {
+            id: ObjId::UNSET,
+            actor: "test".to_string(),
             card: "Island".to_string(),
             card_type: "land".to_string(),
             from: ZoneId::Graveyard,
@@ -1728,7 +1744,7 @@
                 stat_mod: None,
             });
             let ev = GameEvent::EnteredStep { step: step_kind, active_player: "us".to_string() };
-            state.queue_triggers(&ev);
+            fire_event(ev, &mut state, 1, "us", &HashMap::new(), &mut seeded_rng());
             assert!(
                 !state.pending_triggers.is_empty(),
                 "EnteredStep {:?} should have produced a pending trigger", step_kind
@@ -1760,7 +1776,7 @@
                 stat_mod: None,
             });
             let ev = GameEvent::EnteredPhase { phase: phase_kind };
-            state.queue_triggers(&ev);
+            fire_event(ev, &mut state, 1, "us", &HashMap::new(), &mut seeded_rng());
             assert!(
                 !state.pending_triggers.is_empty(),
                 "EnteredPhase {:?} should have produced a pending trigger", phase_kind
@@ -1777,4 +1793,36 @@
             assert!(state.pending_triggers.is_empty(),
                 "{:?} starts with no pending triggers", step_kind);
         }
+    }
+
+    // ── Section 10: Replacement Effect Tests ─────────────────────────────────
+
+    #[test]
+    fn test_leyline_redirects_gy_to_exile() {
+        let mut state = make_state();
+        let mut rng = seeded_rng();
+        let catalog: HashMap<&str, &CardDef> = HashMap::new();
+        // Place Leyline on battlefield (add_perm now pre-registers and activates instances)
+        let leyline_id = add_default_perm(&mut state, "opp", "Leyline of the Void");
+        // Put a card in hand
+        let hand_id = add_hand_card(&mut state, "us", "Ponder");
+        // Move hand card to graveyard — Leyline should redirect to exile
+        change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
+        // Card should be in Exile, not Graveyard
+        assert_eq!(state.cards[&hand_id].zone, CardZone::Exile { on_adventure: false });
+    }
+
+    #[test]
+    fn test_leyline_removed_no_redirect() {
+        let mut state = make_state();
+        let mut rng = seeded_rng();
+        let catalog: HashMap<&str, &CardDef> = HashMap::new();
+        // add_perm pre-registers and activates Leyline's replacement
+        let leyline_id = add_default_perm(&mut state, "opp", "Leyline of the Void");
+        // Destroy Leyline (deactivates its replacement via change_zone → deactivate_instances)
+        change_zone(leyline_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
+        // Now move a card to GY — should stay in GY
+        let hand_id = add_hand_card(&mut state, "us", "Ponder");
+        change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
+        assert_eq!(state.cards[&hand_id].zone, CardZone::Graveyard);
     }

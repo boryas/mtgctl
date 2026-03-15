@@ -49,9 +49,9 @@ impl Effect {
 /// Draw `n` cards for `who`.
 pub(crate) fn eff_draw(who: impl Into<String>, n: usize) -> Effect {
     let who = who.into();
-    Effect(Arc::new(move |state, t, _targets, _catalog, _rng| {
+    Effect(Arc::new(move |state, t, _targets, catalog, rng| {
         for _ in 0..n {
-            state.sim_draw(&who, t, false);
+            sim_draw(state, &who, t, false, catalog, rng);
         }
     }))
 }
@@ -97,9 +97,9 @@ pub(crate) fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effec
 /// Destroy the permanent in `targets[0]`. `caster` used for logging.
 pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, catalog, _rng| {
+    Effect(Arc::new(move |state, t, targets, catalog, rng| {
         if let Some(Target::Object(id)) = targets.first() {
-            change_zone(*id, ZoneId::Graveyard, state, t, &caster, catalog);
+            change_zone(*id, ZoneId::Graveyard, state, t, &caster, catalog, rng);
         }
     }))
 }
@@ -107,9 +107,9 @@ pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
 /// Bounce the permanent in `targets[0]` to its controller's hand.
 pub(crate) fn eff_bounce_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, catalog, _rng| {
+    Effect(Arc::new(move |state, t, targets, catalog, rng| {
         if let Some(Target::Object(id)) = targets.first() {
-            change_zone(*id, ZoneId::Hand, state, t, &caster, catalog);
+            change_zone(*id, ZoneId::Hand, state, t, &caster, catalog, rng);
         }
     }))
 }
@@ -137,7 +137,7 @@ pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filt
                 .collect();
             if candidates.is_empty() { break; }
             let id = candidates[rng.gen_range(0..candidates.len())];
-            change_zone(id, ZoneId::Graveyard, state, t, &caster, catalog);
+            change_zone(id, ZoneId::Graveyard, state, t, &caster, catalog, rng);
         }
     }))
 }
@@ -171,6 +171,12 @@ pub(crate) fn eff_enter_permanent(
         let mana_abs = catalog.get(card_name.as_str())
             .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
         let new_id = state.alloc_id();
+        // Pre-register and immediately activate instances before the event fires,
+        // so ETB replacement checks (e.g. Murktide self-ETB) can intercept the event.
+        if let Some(def) = catalog.get(card_name.as_str()) {
+            preregister_instances(def, new_id, &owner, state);
+        }
+        activate_instances(new_id, state);
         state.cards.insert(new_id, CardObject {
             id: new_id,
             name: card_name.clone(),
@@ -195,14 +201,18 @@ pub(crate) fn eff_enter_permanent(
                 active_face: 0,
             }),
         });
-        let etb_ev = GameEvent::ZoneChange {
-            card: card_name.clone(),
-            card_type: "creature".to_string(),
-            from: ZoneId::Stack,
-            to: ZoneId::Battlefield,
-            controller: owner.clone(),
-        };
-        state.queue_triggers(&etb_ev);
+        fire_event(
+            GameEvent::ZoneChange {
+                id: new_id,
+                actor: owner.clone(),
+                card: card_name.clone(),
+                card_type: "creature".to_string(),
+                from: ZoneId::Stack,
+                to: ZoneId::Battlefield,
+                controller: owner.clone(),
+            },
+            state, t, &owner, catalog, rng,
+        );
         state.log(t, &owner, format!("{} enters play", card_name));
     }))
 }
@@ -235,9 +245,9 @@ pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
 /// Target selection happens in the strategy layer via `choose_spell_target`.
 pub(crate) fn eff_reanimate(actor: impl Into<String>) -> Effect {
     let actor = actor.into();
-    Effect(Arc::new(move |state, t, targets, catalog, _rng| {
+    Effect(Arc::new(move |state, t, targets, catalog, rng| {
         if let Some(Target::Object(id)) = targets.first() {
-            change_zone(*id, ZoneId::Battlefield, state, t, &actor, catalog);
+            change_zone(*id, ZoneId::Battlefield, state, t, &actor, catalog, rng);
         }
     }))
 }

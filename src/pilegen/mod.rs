@@ -3,7 +3,7 @@ use dialoguer::Confirm;
 use diesel::prelude::*;
 use rand::Rng;
 use skim::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 
 use crate::db::schema::{cards, deck_types, decks};
@@ -157,6 +157,8 @@ enum GameEvent {
     /// A card moved from one zone to another (ETB, GY→Exile, etc.).
     /// Does NOT include drawing — use `Draw` for that.
     ZoneChange {
+        id: ObjId,
+        actor: String,
         card: String,
         card_type: String,
         from: ZoneId,
@@ -234,6 +236,39 @@ struct ContinuousEffect {
     on_event: Option<std::sync::Arc<dyn Fn(&GameEvent, &str) -> Option<TriggerContext> + Send + Sync>>,
     /// If Some, a stat modification that Cleanup must reverse when this effect expires.
     stat_mod: Option<StatModData>,
+}
+
+// ── Triggers and replacement effects ─────────────────────────────────────────
+
+/// Signature for a per-card trigger check function.
+/// Inspects the event, and if a trigger fires, appends a `TriggerContext` to `pending`.
+pub(super) type TriggerCheckFn = fn(&GameEvent, ObjId, &str, &mut Vec<TriggerContext>);
+
+/// Signature for a per-card replacement check function.
+/// Returns Some(targets) if this replacement applies to the event; None otherwise.
+/// `source_id` is passed so self-ETB checks work without string dispatch.
+pub(super) type ReplacementCheckFn = fn(&GameEvent, ObjId, &str) -> Option<Vec<Target>>;
+
+/// One trigger registration per card object in the simulation.
+/// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
+/// `prototype_id` indexes into `CARD_TRIGGERS` in catalog.rs.
+pub(super) struct TriggerInstance {
+    pub(super) source_id: ObjId,
+    pub(super) controller: String,
+    pub(super) check: TriggerCheckFn,
+    pub(super) active: bool,
+}
+
+/// One replacement registration per card object in the simulation.
+/// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
+/// `id` is stable across the whole simulation — used for loop prevention in `repl_applied`.
+pub(super) struct ReplacementInstance {
+    pub(super) id: ObjId,
+    pub(super) source_id: ObjId,
+    pub(super) controller: String,
+    pub(super) check: ReplacementCheckFn,
+    pub(super) effect: Effect,
+    pub(super) active: bool,
 }
 
 // ── Turn structure ────────────────────────────────────────────────────────────
@@ -553,6 +588,16 @@ pub(crate) struct SimState {
     cards: HashMap<ObjId, CardObject>,
     /// ID allocator — starts at 1; 0 is reserved as ObjId::UNSET.
     next_id: u64,
+    /// All trigger instances for card objects in the simulation (pre-registered at init).
+    /// `active` is false until the card enters the battlefield.
+    pub(super) trigger_instances: Vec<TriggerInstance>,
+    /// All replacement instances for card objects in the simulation (pre-registered at init).
+    /// `active` is false until the card enters the battlefield.
+    pub(super) replacement_instances: Vec<ReplacementInstance>,
+    /// Replacements already applied in the current fire_event call chain (prevents loops).
+    repl_applied: HashSet<ObjId>,
+    /// Recursion depth for fire_event (used to clear repl_applied at the top level).
+    repl_depth: u32,
 }
 
 impl SimState {
@@ -575,6 +620,10 @@ impl SimState {
             abilities: HashMap::new(),
             cards: HashMap::new(),
             next_id: 0,
+            trigger_instances: Vec::new(),
+            replacement_instances: Vec::new(),
+            repl_applied: HashSet::new(),
+            repl_depth: 0,
         };
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();
@@ -645,25 +694,6 @@ impl SimState {
         self.cards.values().find(|c| c.name == name && c.controller == controller && c.zone == CardZone::Battlefield)
     }
 
-    fn queue_triggers(&mut self, event: &GameEvent) {
-        let triggers = fire_triggers(event, self);
-        self.pending_triggers.extend(triggers);
-    }
-
-    /// Draw one card for `who`. Increments draws_this_turn, moves a Library card to Hand, then fires a Draw event.
-    fn sim_draw(&mut self, who: &str, t: u8, is_natural: bool) {
-        self.player_mut(who).draws_this_turn += 1;
-        let draw_index = self.player(who).draws_this_turn;
-        // Move one Library card to Hand.
-        let top_id = self.library_of(who).next().map(|c| c.id);
-        if let Some(id) = top_id {
-            self.set_card_zone(id, CardZone::Hand { known: false });
-        }
-        let hand = self.hand_size(who);
-        let ev = GameEvent::Draw { controller: who.to_string(), draw_index, is_natural };
-        self.queue_triggers(&ev);
-        self.log(t, who, if is_natural { format!("Draw [hand: {}]", hand) } else { format!("draw ({}) [hand: {}]", draw_index, hand) });
-    }
 
     /// True when the simulation should stop (either success or reroll).
     fn done(&self) -> bool {
@@ -1249,9 +1279,135 @@ fn card_type_str(d: &CardDef) -> &'static str {
     else                    { "permanent" }
 }
 
+/// The central elemental event pipeline: check_replacement → do_effect → check_triggers.
+/// Every elemental game operation (zone change, draw, step/phase entry, etc.) passes through here.
+/// If a replacement fires, the original effect is suppressed and the replacement runs immediately.
+pub(super) fn fire_event(
+    event: GameEvent,
+    state: &mut SimState,
+    t: u8,
+    actor: &str,
+    catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut dyn rand::RngCore,
+) {
+    state.repl_depth += 1;
+    if state.repl_depth == 1 {
+        state.repl_applied.clear();
+    }
+
+    // check_replacement: first active, non-applied replacement that matches
+    let repl_match = {
+        let mut found = None;
+        for inst in &state.replacement_instances {
+            if !inst.active { continue; }
+            if state.repl_applied.contains(&inst.id) { continue; }
+            if let Some(targets) = (inst.check)(&event, inst.source_id, &inst.controller) {
+                found = Some((inst.id, targets, inst.effect.clone()));
+                break;
+            }
+        }
+        found
+    };
+
+    if let Some((repl_id, targets, effect)) = repl_match {
+        state.repl_applied.insert(repl_id);
+        effect.call(state, t, &targets, catalog_map, rng);
+        state.repl_depth -= 1;
+        return; // original effect suppressed
+    }
+
+    // do_effect: apply the state mutation for this event type
+    do_effect(&event, state, catalog_map);
+
+    // log
+    log_event(&event, state, t, actor);
+
+    // check_triggers
+    let triggers = fire_triggers(&event, state);
+    state.pending_triggers.extend(triggers);
+
+    state.repl_depth -= 1;
+}
+
+fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
+    match event {
+        GameEvent::ZoneChange { id, from, to, .. } => {
+            let id = *id;
+            let from = *from;
+            let to = *to;
+
+            let new_zone = match to {
+                ZoneId::Graveyard   => CardZone::Graveyard,
+                ZoneId::Exile       => CardZone::Exile { on_adventure: false },
+                ZoneId::Hand        => CardZone::Hand { known: false },
+                ZoneId::Library     => CardZone::Library,
+                ZoneId::Stack       => CardZone::Stack,
+                ZoneId::Battlefield => CardZone::Battlefield,
+            };
+
+            if let Some(card) = state.cards.get_mut(&id) {
+                // Only update if zone actually changed (idempotent guard for re-fired ETB events)
+                if card.zone != new_zone {
+                    card.zone = new_zone;
+                    if from == ZoneId::Battlefield { card.bf = None; }
+                }
+                if to == ZoneId::Battlefield && card.bf.is_none() {
+                    let mana_abs = catalog_map.get(card.name.as_str())
+                        .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
+                    let loyalty = catalog_map.get(card.name.as_str())
+                        .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
+                        .unwrap_or(0);
+                    card.bf = Some(BattlefieldState {
+                        mana_abilities: mana_abs,
+                        loyalty,
+                        entered_this_turn: true,
+                        ..BattlefieldState::new(vec![])
+                    });
+                }
+            }
+
+        }
+        GameEvent::Draw { controller, .. } => {
+            let controller = controller.clone();
+            let top_id = state.library_of(&controller).next().map(|c| c.id);
+            if let Some(card_id) = top_id {
+                state.set_card_zone(card_id, CardZone::Hand { known: false });
+            }
+        }
+        // EnteredStep, EnteredPhase, CreatureAttacked — notification events, no state mutation
+        _ => {}
+    }
+}
+
+fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: &str) {
+    match event {
+        GameEvent::ZoneChange { from, to, card, controller, .. } => {
+            match (from, to) {
+                (ZoneId::Stack,       ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} countered", card)),
+                (ZoneId::Battlefield, ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} destroyed", card)),
+                (ZoneId::Hand,        ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} discarded", card)),
+                (_,                   ZoneId::Graveyard)   => state.log(t, actor, format!("→ {} to graveyard", card)),
+                (_,                   ZoneId::Exile)       => state.log(t, actor, format!("→ {} exiled", card)),
+                (_,                   ZoneId::Hand)        => state.log(t, actor, format!("→ {} returned to {}'s hand", card, controller)),
+                (ZoneId::Graveyard,   ZoneId::Battlefield) => state.log(t, actor, format!("→ {} returns from graveyard", card)),
+                _ => {}
+            }
+        }
+        GameEvent::Draw { controller, draw_index, is_natural } => {
+            let hand = state.hand_size(controller);
+            if *is_natural {
+                state.log(t, controller, format!("Draw [hand: {}]", hand));
+            } else {
+                state.log(t, controller, format!("draw ({}) [hand: {}]", draw_index, hand));
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Move a game object from its current zone to `to`.
 /// Works for any zone transition. No-ops silently if the id is not found.
-/// Fires `GameEvent::ZoneChange` and logs semantically based on (from, to).
+/// Fires the event pipeline (replacements → state mutation → triggers → log).
 pub(super) fn change_zone(
     id: ObjId,
     to: ZoneId,
@@ -1259,6 +1415,7 @@ pub(super) fn change_zone(
     t: u8,
     actor: &str,
     catalog_map: &HashMap<&str, &CardDef>,
+    rng: &mut dyn rand::RngCore,
 ) {
     let (name, controller, from, card_type) = {
         let card = match state.cards.get(&id) {
@@ -1271,55 +1428,33 @@ pub(super) fn change_zone(
             .unwrap_or("permanent");
         (card.name.clone(), card.controller.clone(), from, ct)
     };
-
-    let new_zone = match to {
-        ZoneId::Graveyard    => CardZone::Graveyard,
-        ZoneId::Exile        => CardZone::Exile { on_adventure: false },
-        ZoneId::Hand         => CardZone::Hand { known: false },
-        ZoneId::Library      => CardZone::Library,
-        ZoneId::Stack        => CardZone::Stack,
-        ZoneId::Battlefield  => CardZone::Battlefield,
-    };
-    if let Some(card) = state.cards.get_mut(&id) {
-        card.zone = new_zone;
-        if from == ZoneId::Battlefield { card.bf = None; }
-        if to   == ZoneId::Battlefield {
-            let mana_abs = catalog_map.get(card.name.as_str())
-                .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
-            let loyalty = catalog_map.get(card.name.as_str())
-                .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
-                .unwrap_or(0);
-            card.bf = Some(BattlefieldState {
-                mana_abilities: mana_abs,
-                loyalty,
-                entered_this_turn: true,
-                ..BattlefieldState::new(vec![])
-            });
-        }
-    }
-
-    match (from, to) {
-        (ZoneId::Stack,       ZoneId::Graveyard)    => state.log(t, actor, format!("→ {} countered", name)),
-        (ZoneId::Battlefield, ZoneId::Graveyard)    => state.log(t, actor, format!("→ {} destroyed", name)),
-        (ZoneId::Hand,        ZoneId::Graveyard)    => state.log(t, actor, format!("→ {} discarded", name)),
-        (_,                   ZoneId::Graveyard)    => state.log(t, actor, format!("→ {} to graveyard", name)),
-        (_,                   ZoneId::Exile)        => state.log(t, actor, format!("→ {} exiled", name)),
-        (_,                   ZoneId::Hand)         => state.log(t, actor, format!("→ {} returned to {}'s hand", name, controller)),
-        (ZoneId::Graveyard,   ZoneId::Battlefield)  => state.log(t, actor, format!("→ {} returns from graveyard", name)),
-        _ => {}
-    }
-
-    let ev = GameEvent::ZoneChange {
-        card: name,
-        card_type: card_type.to_string(),
-        from,
-        to,
-        controller,
-    };
-    state.queue_triggers(&ev);
+    // Activate/deactivate instances BEFORE firing the event so replacement checks see the right state.
+    if from == ZoneId::Battlefield { deactivate_instances(id, state); }
+    if to == ZoneId::Battlefield   { activate_instances(id, state); }
+    fire_event(
+        GameEvent::ZoneChange {
+            id,
+            actor: actor.to_string(),
+            card: name,
+            card_type: card_type.to_string(),
+            from,
+            to,
+            controller,
+        },
+        state, t, actor, catalog_map, rng,
+    );
 }
 
 // matches_search_filter is defined in predicates.rs
+
+/// Draw one card for `who` through the event pipeline. Increments draws_this_turn, fires a Draw
+/// event (which handles the state mutation, logging, and trigger dispatch).
+fn sim_draw(state: &mut SimState, who: &str, t: u8, is_natural: bool, catalog_map: &HashMap<&str, &CardDef>, rng: &mut dyn rand::RngCore) {
+    state.player_mut(who).draws_this_turn += 1;
+    let draw_index = state.player(who).draws_this_turn;
+    let ev = GameEvent::Draw { controller: who.to_string(), draw_index, is_natural };
+    fire_event(ev, state, t, who, catalog_map, rng);
+}
 
 /// Pay the activation cost of an ability: mana, life, tap, and/or sacrifice.
 /// Effects are NOT applied here — they happen when the ability resolves off the stack.
@@ -1595,7 +1730,7 @@ fn cast_spell(
     let to_exile_names: Vec<String> = to_exile_ids.iter().map(|(_, n)| n.clone()).collect();
     for (exile_id, _card_name) in &to_exile_ids {
         // Exile from GY: fires ZoneChange trigger (e.g. Murktide counter).
-        change_zone(*exile_id, ZoneId::Exile, state, t, who, catalog_map);
+        change_zone(*exile_id, ZoneId::Exile, state, t, who, catalog_map, rng);
     }
 
     // For delve permanents: encode +1/+1 counter count as "+N" in annotation.
@@ -1658,7 +1793,7 @@ fn creature_has_keyword(name: &str, kw: &str, catalog_map: &HashMap<&str, &CardD
 
 
 /// Remove creatures whose accumulated damage meets or exceeds their toughness (SBA).
-fn check_lethal_damage(who: &str, state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
+fn check_lethal_damage(who: &str, state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>, rng: &mut dyn rand::RngCore) {
     let dead: Vec<(ObjId, String)> = state.permanents_of(who)
         .filter_map(|card| {
             let bf = card.bf.as_ref()?;
@@ -1670,7 +1805,7 @@ fn check_lethal_damage(who: &str, state: &mut SimState, t: u8, catalog_map: &Has
         })
         .collect();
     for (id, _name) in dead {
-        change_zone(id, ZoneId::Graveyard, state, t, who, catalog_map);
+        change_zone(id, ZoneId::Graveyard, state, t, who, catalog_map, rng);
     }
 }
 
@@ -1779,10 +1914,10 @@ fn resolve_top_of_stack(
                 .unwrap_or(false);
             if !is_perm {
                 if let Some(card_obj) = state.cards.get_mut(&id) {
-                    card_obj.zone = CardZone::Graveyard;
                     card_obj.spell = None;
                 }
                 state.log(t, &owner_str, format!("{} resolves", name));
+                change_zone(id, ZoneId::Graveyard, state, t, &owner_str, catalog_map, rng);
             }
             let rng_dyn: &mut dyn rand::RngCore = rng;
             eff.call(state, t, &spell.chosen_targets, catalog_map, rng_dyn);
@@ -1793,10 +1928,10 @@ fn resolve_top_of_stack(
             }
         } else {
             if let Some(card_obj) = state.cards.get_mut(&id) {
-                card_obj.zone = CardZone::Graveyard;
                 card_obj.spell = None;
             }
             state.log(t, &owner_str, format!("{} resolves", name));
+            change_zone(id, ZoneId::Graveyard, state, t, &owner_str, catalog_map, rng);
         }
     } else if let Some(ability) = state.abilities.remove(&id) {
         let rng_dyn: &mut dyn rand::RngCore = rng;
@@ -1820,8 +1955,8 @@ fn handle_priority_round(
     loop {
         let queued = std::mem::take(&mut state.pending_triggers);
         push_triggers(queued, state, catalog_map);
-        check_lethal_damage("us",  state, t, catalog_map);
-        check_lethal_damage("opp", state, t, catalog_map);
+        check_lethal_damage("us",  state, t, catalog_map, rng);
+        check_lethal_damage("opp", state, t, catalog_map, rng);
 
         let who = priority_holder.clone();
         let action = decide_action(
@@ -2093,7 +2228,7 @@ fn do_step(
             if skip {
                 state.log(t, ap, "No draw (on the play)");
             } else {
-                state.sim_draw(ap, t, true);
+                sim_draw(state, ap, t, true, catalog_map, rng);
             }
         }
         StepKind::Cleanup => {
@@ -2144,15 +2279,15 @@ fn do_step(
             state.combat_attackers = attackers.clone();
             // Fire triggers after attackers are marked.
             for atk_id in attackers {
-                state.queue_triggers(&GameEvent::CreatureAttacked {
+                fire_event(GameEvent::CreatureAttacked {
                     attacker_id: atk_id,
                     attacker_controller: ap.to_string(),
-                });
+                }, state, t, ap, catalog_map, rng);
             }
-            state.queue_triggers(&GameEvent::EnteredStep {
+            fire_event(GameEvent::EnteredStep {
                 step: StepKind::DeclareAttackers,
                 active_player: ap.to_string(),
-            });
+            }, state, t, ap, catalog_map, rng);
         }
         StepKind::DeclareBlockers => {
             let nap = opp_of(ap);
@@ -2298,7 +2433,7 @@ fn do_step(
             step: step.kind,
             active_player: ap.to_string(),
         };
-        state.queue_triggers(&step_ev);
+        fire_event(step_ev, state, t, ap, catalog_map, rng);
     }
 
     if step.prio {
@@ -2330,7 +2465,7 @@ fn do_phase(
     if phase.is_main_phase() {
         state.current_phase = Some(TurnPosition::Phase(phase.kind));
         let phase_ev = GameEvent::EnteredPhase { phase: phase.kind };
-        state.queue_triggers(&phase_ev);
+        fire_event(phase_ev, state, t, ap, catalog_map, rng);
         let on_board = collect_on_board_actions(state, ap, t, dd_turn, catalog_map, rng);
         state.player_mut(ap).pending_actions = on_board;
         handle_priority_round(state, t, ap, dd_turn, catalog_map, rng);
@@ -2403,6 +2538,9 @@ fn simulate_game(
         for _ in 0..*qty {
             let id = state.alloc_id();
             state.cards.insert(id, CardObject::new(id, name.clone(), "us"));
+            if let Some(def) = catalog_map.get(name.as_str()) {
+                preregister_instances(def, id, "us", &mut state);
+            }
         }
     }
     for (name, qty, board) in opp_cards {
@@ -2411,15 +2549,18 @@ fn simulate_game(
         for _ in 0..*qty {
             let id = state.alloc_id();
             state.cards.insert(id, CardObject::new(id, name.clone(), "opp"));
+            if let Some(def) = catalog_map.get(name.as_str()) {
+                preregister_instances(def, id, "opp", &mut state);
+            }
         }
     }
 
     // Deal opening hands: move `7 - mulligans` cards from Library to Hand.
     for _ in 0..(7u8.saturating_sub(our_mulligans)) {
-        state.sim_draw("us", 0, false);
+        sim_draw(&mut state, "us", 0, false, &catalog_map, rng);
     }
     for _ in 0..(7u8.saturating_sub(opp_mulligans)) {
-        state.sim_draw("opp", 0, false);
+        sim_draw(&mut state, "opp", 0, false, &catalog_map, rng);
     }
 
     let us_hand = state.hand_size("us");
