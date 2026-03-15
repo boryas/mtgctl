@@ -22,16 +22,17 @@
         toml::from_str(&toml).unwrap()
     }
 
-    /// Insert a permanent into `state.cards` for `who` and return its ObjId.
+    /// Insert a permanent into `state.objects` for `who` and return its ObjId.
     /// Also pre-registers and activates trigger/replacement instances so fire_triggers works.
     fn add_perm(state: &mut SimState, who: &str, name: &str, bf: BattlefieldState) -> ObjId {
         let id = state.alloc_id();
-        state.cards.insert(id, CardObject {
+        state.objects.insert(id, GameObject {
             id,
             name: name.to_string(),
             owner: who.to_string(),
             controller: who.to_string(),
             zone: CardZone::Battlefield,
+            is_token: false,
             spell: None,
             bf: Some(bf),
         });
@@ -57,12 +58,13 @@
 
     fn add_hand_card(state: &mut SimState, who: &str, name: &str) -> ObjId {
         let id = state.alloc_id();
-        state.cards.insert(id, CardObject {
+        state.objects.insert(id, GameObject {
             id,
             name: name.to_string(),
             owner: who.to_string(),
             controller: who.to_string(),
             zone: CardZone::Hand { known: false },
+            is_token: false,
             spell: None,
             bf: None,
         });
@@ -71,12 +73,13 @@
 
     fn add_graveyard_card(state: &mut SimState, who: &str, name: &str) -> ObjId {
         let id = state.alloc_id();
-        state.cards.insert(id, CardObject {
+        state.objects.insert(id, GameObject {
             id,
             name: name.to_string(),
             owner: who.to_string(),
             controller: who.to_string(),
             zone: CardZone::Graveyard,
+            is_token: false,
             spell: None,
             bf: None,
         });
@@ -85,12 +88,13 @@
 
     fn add_library_card(state: &mut SimState, who: &str, name: &str) -> ObjId {
         let id = state.alloc_id();
-        state.cards.insert(id, CardObject {
+        state.objects.insert(id, GameObject {
             id,
             name: name.to_string(),
             owner: who.to_string(),
             controller: who.to_string(),
             zone: CardZone::Library,
+            is_token: false,
             spell: None,
             bf: None,
         });
@@ -373,7 +377,7 @@
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        let step = Step { kind: StepKind::CombatDamage, prio: true };
         do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
 
         assert!(state.permanents_of("us").count() == 0, "attacker should die");
@@ -397,7 +401,7 @@
 
         let catalog = vec![atk_def, blk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        let step = Step { kind: StepKind::CombatDamage, prio: true };
         do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
 
         assert!(state.permanents_of("us").count() == 0, "attacker dies");
@@ -485,7 +489,7 @@
 
         assert!(card_id.is_some(), "spell should be cast");
         let card_id = card_id.unwrap();
-        let card = state.cards.get(&card_id).expect("card in state");
+        let card = state.objects.get(&card_id).expect("card in state");
         assert_eq!(card.name, "Dark Ritual");
         assert_eq!(state.player_id(&card.owner), state.us.id, "owner should be us player id");
         assert!(!state.hand_of("us").any(|c| c.name == "Dark Ritual"), "removed from hand");
@@ -865,7 +869,7 @@
 
         let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
         // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
-        let spell = state.cards[&card_id].spell.as_ref().expect("spell state populated").clone();
+        let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let annotation = &spell.annotation;
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -909,7 +913,7 @@
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
-        let spell = state.cards[&card_id].spell.as_ref().expect("spell state populated").clone();
+        let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let annotation = &spell.annotation;
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -1168,10 +1172,10 @@
             island_land(&mut state, "us");
             // Add Ninja to hand so try_ninjutsu can find it.
             add_hand_card(&mut state, "us", "Ninja");
-            // Also register the ninja in state.cards as a library card (so apply_ability_effect
+            // Also register the ninja in state.objects as a library card (so apply_ability_effect
             // can look up the ninja's name at resolution).
             let ninja_lib_id = state.alloc_id();
-            state.cards.insert(ninja_lib_id, CardObject::new(ninja_lib_id, "Ninja".to_string(), "us"));
+            state.objects.insert(ninja_lib_id, GameObject::new(ninja_lib_id, "Ninja".to_string(), "us"));
             let initial_hand = state.hand_size("us");
             let mut rng = StdRng::seed_from_u64(seed);
             handle_priority_round(&mut state, 1, "us", 3, &catalog_map, &mut rng);
@@ -1247,9 +1251,9 @@
         let mut state = make_state();
         // Simulate the adventure resolution inline: no effect, just exile.
         let borrower_id = state.alloc_id();
-        let mut borrower_obj = CardObject::new(borrower_id, "Brazen Borrower", "us");
+        let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", "us");
         borrower_obj.zone = CardZone::Exile { on_adventure: true };
-        state.cards.insert(borrower_id, borrower_obj);
+        state.objects.insert(borrower_id, borrower_obj);
 
         assert!(state.exile_of("us").any(|c| c.name == "Brazen Borrower"), "Borrower in exile");
         assert!(state.on_adventure_of("us").any(|c| c.name == "Brazen Borrower"), "Borrower on adventure");
@@ -1268,9 +1272,9 @@
         eff.call(&mut state, 1, &[Target::Object(bowmasters_id)], &HashMap::new(), &mut seeded_rng());
         // Then exile the card to on_adventure.
         let borrower_id = state.alloc_id();
-        let mut borrower_obj = CardObject::new(borrower_id, "Brazen Borrower", "us");
+        let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", "us");
         borrower_obj.zone = CardZone::Exile { on_adventure: true };
-        state.cards.insert(borrower_id, borrower_obj);
+        state.objects.insert(borrower_id, borrower_obj);
 
         assert!(state.permanents_of("opp").count() == 0, "Bowmasters bounced off board");
         assert_eq!(state.hand_size("opp"), initial_opp_hand + 1, "bounced to opp hand");
@@ -1297,9 +1301,9 @@
             state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
             state.current_ap = state.us.id;
             let borrower_id = state.alloc_id();
-            let mut borrower_obj = CardObject::new(borrower_id, "Brazen Borrower", "us");
+            let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", "us");
             borrower_obj.zone = CardZone::Exile { on_adventure: true };
-            state.cards.insert(borrower_id, borrower_obj);
+            state.objects.insert(borrower_id, borrower_obj);
             // 1UU mana: two Islands + one generic (Swamp)
             island_land(&mut state, "us");
             add_perm(&mut state, "us", "Island2", BattlefieldState {
@@ -1513,7 +1517,7 @@
         let catalog = vec![creature("Ragavan, Nimble Pilferer", 2, 1)];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         fire_bowmasters_etb("opp", &mut state, &catalog_map);
-        check_lethal_damage("us", &mut state, 1, &catalog_map, &mut seeded_rng());
+        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
         assert_eq!(state.us.life, initial_life, "life total unchanged when creature is targeted");
         assert!(!state.permanents_of("us").any(|p| p.name == "Ragavan, Nimble Pilferer"),
             "Ragavan dies to 1 damage");
@@ -1530,7 +1534,7 @@
         let catalog = vec![creature("Troll", 3, 3), creature("Orcish Bowmasters", 1, 1)];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
         fire_bowmasters_etb("opp", &mut state, &catalog_map);
-        check_lethal_damage("us", &mut state, 1, &catalog_map, &mut seeded_rng());
+        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
         assert!(!state.permanents_of("us").any(|p| p.name == "Orcish Bowmasters"),
             "opposing Bowmasters is killed");
         assert!(state.permanents_of("us").any(|p| p.name == "Troll"), "Troll survives");
@@ -1818,12 +1822,13 @@
         add_library_card(&mut state, "us", "Plains");
         // Manually place Brainstorm on stack with its effect.
         let id = state.alloc_id();
-        state.cards.insert(id, CardObject {
+        state.objects.insert(id, GameObject {
             id,
             name: "Brainstorm".to_string(),
             owner: "us".to_string(),
             controller: "us".to_string(),
             zone: CardZone::Stack,
+            is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_draw("us", 3).then(eff_put_back("us", 2))),
                 chosen_targets: vec![],
@@ -1892,7 +1897,7 @@
         // Move hand card to graveyard — Leyline should redirect to exile
         change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
         // Card should be in Exile, not Graveyard
-        assert_eq!(state.cards[&hand_id].zone, CardZone::Exile { on_adventure: false });
+        assert_eq!(state.objects[&hand_id].zone, CardZone::Exile { on_adventure: false });
     }
 
     #[test]
@@ -1907,5 +1912,138 @@
         // Now move a card to GY — should stay in GY
         let hand_id = add_hand_card(&mut state, "us", "Ponder");
         change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
-        assert_eq!(state.cards[&hand_id].zone, CardZone::Graveyard);
+        assert_eq!(state.objects[&hand_id].zone, CardZone::Graveyard);
+    }
+
+    // ── Section 12: State-Based Action Tests ──────────────────────────────────
+
+    fn add_token(state: &mut SimState, who: &str, name: &str) -> ObjId {
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject {
+            id,
+            name: name.to_string(),
+            owner: who.to_string(),
+            controller: who.to_string(),
+            zone: CardZone::Battlefield,
+            is_token: true,
+            spell: None,
+            bf: Some(BattlefieldState::new(vec![])),
+        });
+        id
+    }
+
+    #[test]
+    fn test_sba_life_zero_sets_reroll() {
+        let mut state = make_state();
+        state.us.life = 0;
+        let catalog: HashMap<&str, &CardDef> = HashMap::new();
+        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        assert!(state.reroll, "us at 0 life → reroll");
+    }
+
+    #[test]
+    fn test_sba_life_negative_sets_reroll() {
+        let mut state = make_state();
+        state.us.life = -3;
+        let catalog: HashMap<&str, &CardDef> = HashMap::new();
+        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        assert!(state.reroll);
+    }
+
+    #[test]
+    fn test_sba_token_leaves_battlefield_ceases_to_exist() {
+        let mut state = make_state();
+        let token_id = add_token(&mut state, "us", "Orc Army");
+        // Move token to graveyard (as if it died without SBA running yet).
+        state.objects.get_mut(&token_id).unwrap().zone = CardZone::Graveyard;
+        state.objects.get_mut(&token_id).unwrap().bf = None;
+        let catalog: HashMap<&str, &CardDef> = HashMap::new();
+        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        assert!(!state.objects.contains_key(&token_id), "token in GY ceases to exist");
+    }
+
+    #[test]
+    fn test_sba_token_on_battlefield_not_removed() {
+        let mut state = make_state();
+        let token_id = add_token(&mut state, "us", "Orc Army");
+        let catalog: HashMap<&str, &CardDef> = HashMap::new();
+        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        assert!(state.objects.contains_key(&token_id), "token on battlefield survives SBA");
+    }
+
+    #[test]
+    fn test_sba_zero_toughness_creature_dies() {
+        let mut state = make_state();
+        // A 1/-1 creature (e.g. after -1/-2 effect) has toughness ≤ 0.
+        let _id = add_perm(&mut state, "us", "Weakened", BattlefieldState::new(vec![]));
+        let def = {
+            let toml = "name = \"Weakened\"\ncard_type = \"creature\"\npower = 1\ntoughness = -1\n";
+            toml::from_str::<CardDef>(toml).unwrap()
+        };
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        assert!(state.graveyard_of("us").any(|c| c.name == "Weakened"),
+            "creature with toughness ≤ 0 goes to graveyard");
+    }
+
+    #[test]
+    fn test_sba_lethal_damage_creature_dies() {
+        let mut state = make_state();
+        let _id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
+            damage: 2,
+            ..BattlefieldState::new(vec![])
+        });
+        let def = creature("Ragavan", 2, 2);
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        assert!(state.graveyard_of("us").any(|c| c.name == "Ragavan"),
+            "creature with damage = toughness goes to graveyard");
+    }
+
+    #[test]
+    fn test_sba_planeswalker_loyalty_zero_dies() {
+        let mut state = make_state();
+        let _id = add_perm(&mut state, "us", "Jace", BattlefieldState {
+            loyalty: 0,
+            ..BattlefieldState::new(vec![])
+        });
+        let toml = "name = \"Jace\"\ncard_type = \"planeswalker\"\nmana_cost = \"3U\"\nloyalty = 3\n";
+        let def: CardDef = toml::from_str(toml).unwrap();
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        assert!(state.graveyard_of("us").any(|c| c.name == "Jace"),
+            "planeswalker with loyalty 0 goes to graveyard");
+    }
+
+    #[test]
+    fn test_sba_legend_rule_second_copy_dies() {
+        let mut state = make_state();
+        let _first = add_default_perm(&mut state, "us", "Bowmasters");
+        let _second = add_default_perm(&mut state, "us", "Bowmasters");
+        let toml = "name = \"Bowmasters\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\nlegendary = true\n";
+        let def: CardDef = toml::from_str(toml).unwrap();
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        // Exactly one survives.
+        assert_eq!(state.permanents_of("us").filter(|c| c.name == "Bowmasters").count(), 1,
+            "legend rule: one copy survives");
+        assert_eq!(state.graveyard_of("us").filter(|c| c.name == "Bowmasters").count(), 1,
+            "legend rule: one copy goes to graveyard");
+    }
+
+    #[test]
+    fn test_sba_legend_rule_only_one_copy_untouched() {
+        let mut state = make_state();
+        add_default_perm(&mut state, "us", "Bowmasters");
+        let toml = "name = \"Bowmasters\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\nlegendary = true\n";
+        let def: CardDef = toml::from_str(toml).unwrap();
+        let catalog = vec![def];
+        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        assert_eq!(state.permanents_of("us").filter(|c| c.name == "Bowmasters").count(), 1,
+            "single legendary permanent unaffected by legend rule");
     }

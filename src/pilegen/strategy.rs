@@ -169,7 +169,7 @@ fn nap_action(
                 }
                 if let Some(action) = respond_with_counter(state, idx, who, catalog_map, rng, true) {
                     if let PriorityAction::CastSpell { card_id, .. } = action {
-                        let spell_name = state.cards.get(&card_id).map_or("?", |c| c.name.as_str());
+                        let spell_name = state.objects.get(&card_id).map_or("?", |c| c.name.as_str());
                         eprintln!("[decision] {}: NAP counter {} targeting {}", who, spell_name, item_name);
                     }
                     return action;
@@ -199,7 +199,7 @@ fn ap_react(
     let top_id = state.stack[top_idx];
     let top_is_counterable = state.stack_item_is_counterable(top_id);
     let top_owner = state.stack_item_owner(top_id);
-    let top_chosen = state.cards.get(&top_id)
+    let top_chosen = state.objects.get(&top_id)
         .and_then(|c| c.spell.as_ref())
         .map(|s| s.chosen_targets.clone())
         .unwrap_or_default();
@@ -210,7 +210,7 @@ fn ap_react(
             .and_then(|t| if let Target::Object(id) = t { Some(id) } else { None })
             .and_then(|id| state.stack.iter().find(|&&s| s == *id).map(|_| *id))
             .is_some_and(|id| {
-                state.cards.get(&id)
+                state.objects.get(&id)
                     .map(|c| c.name == "Doomsday" && state.player_id(&c.owner) == us_id)
                     .unwrap_or(false)
             });
@@ -292,7 +292,7 @@ fn ap_proactive(
 
     let spell_name = |a: &PriorityAction| -> Option<String> {
         if let PriorityAction::CastSpell { card_id, .. } = a {
-            state.cards.get(card_id).map(|c| c.name.clone())
+            state.objects.get(card_id).map(|c| c.name.clone())
         } else { None }
     };
 
@@ -320,7 +320,7 @@ fn ap_proactive(
     };
 
     if let PriorityAction::CastSpell { card_id, .. } = &action {
-        let name = state.cards.get(card_id).map_or("?".to_string(), |c| c.name.clone());
+        let name = state.objects.get(card_id).map_or("?".to_string(), |c| c.name.clone());
         let options = actions.iter().filter_map(|a| spell_name(a)).collect::<Vec<_>>().join(", ");
         eprintln!("[decision] {}: proactive cast {} (options: {})", who, name, options);
     }
@@ -433,7 +433,7 @@ pub(super) fn declare_blockers(
     let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
     let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
     for &atk_id in &state.combat_attackers {
-        let (atk_name, atk_pow, atk_tgh) = match state.cards.get(&atk_id)
+        let (atk_name, atk_pow, atk_tgh) = match state.objects.get(&atk_id)
             .and_then(|p| p.bf.as_ref().map(|bf| (p.name.clone(), bf)))
         {
             Some((name, bf)) => {

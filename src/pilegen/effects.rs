@@ -60,12 +60,10 @@ pub(crate) fn eff_draw(who: impl Into<String>, n: usize) -> Effect {
 /// Moves `n` hand cards back to Library zone (unknown — just sets zone).
 pub(crate) fn eff_put_back(who: impl Into<String>, n: usize) -> Effect {
     let who = who.into();
-    Effect(Arc::new(move |state, _t, _targets, _catalog, _rng| {
+    Effect(Arc::new(move |state, t, _targets, catalog, rng| {
         let ids: Vec<ObjId> = state.hand_of(&who).map(|c| c.id).take(n).collect();
         for id in ids {
-            if let Some(card) = state.cards.get_mut(&id) {
-                card.zone = CardZone::Library;
-            }
+            change_zone(id, ZoneId::Library, state, t, &who, catalog, rng);
         }
     }))
 }
@@ -174,12 +172,13 @@ pub(crate) fn eff_enter_permanent(
             preregister_instances(def, new_id, &owner, state);
         }
         activate_instances(new_id, state);
-        state.cards.insert(new_id, CardObject {
+        state.objects.insert(new_id, GameObject {
             id: new_id,
             name: card_name.clone(),
             owner: owner.clone(),
             controller: owner.clone(),
             zone: CardZone::Battlefield,
+            is_token: false,
             spell: None,
             bf: Some(BattlefieldState {
                 annotation: ann,
@@ -215,7 +214,7 @@ pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
         let pos = state.stack.iter().position(|&id| id == target_id);
         if let Some(pos) = pos {
             state.stack.remove(pos);
-            if let Some(card) = state.cards.get_mut(&target_id) {
+            if let Some(card) = state.objects.get_mut(&target_id) {
                 let name = card.name.clone();
                 card.zone = CardZone::Graveyard;
                 card.spell = None;
@@ -278,7 +277,7 @@ pub(crate) fn eff_fetch_search(
                     change_zone(chosen_id, ZoneId::Battlefield, state, t, &who, catalog, rng);
                 }
                 "hand" => {
-                    if let Some(card) = state.cards.get_mut(&chosen_id) {
+                    if let Some(card) = state.objects.get_mut(&chosen_id) {
                         card.zone = CardZone::Hand { known: true };
                     }
                     state.log(t, &who, format!("{} ability → {} (to hand)", source_name, name));

@@ -304,6 +304,7 @@ impl CardDef {
     pub(crate) fn legendary(&self) -> bool {
         match &self.kind {
             CardKind::Creature(c) => c.legendary,
+            CardKind::Planeswalker(_) => true,  // all PWs are legendary since 2013
             _ => false,
         }
     }
@@ -961,7 +962,7 @@ fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: &str) -> Opt
 /// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
 /// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
 fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
-    state.cards.get(&id).map(|c| card_zone_to_id(&c.zone)).unwrap_or(ZoneId::Hand)
+    state.objects.get(&id).map(|c| card_zone_to_id(&c.zone)).unwrap_or(ZoneId::Hand)
 }
 
 // ── Enters-tapped ETB replacement ─────────────────────────────────────────────
@@ -973,7 +974,7 @@ fn build_enters_tapped_effect(_source_id: ObjId, controller: &str) -> Effect {
         let id = *id;
         let from = current_zone_id(id, state);
         let (card_name, card_type_s) = {
-            let name = state.cards.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let name = state.objects.get(&id).map(|c| c.name.clone()).unwrap_or_default();
             let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("land").to_string();
             (name, ct)
         };
@@ -1002,7 +1003,7 @@ fn build_enter_with_loyalty_effect(_source_id: ObjId, controller: &str) -> Effec
         let id = *id;
         let from = current_zone_id(id, state);
         let (card_name, card_type_s, base_loyalty) = {
-            let name = state.cards.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let name = state.objects.get(&id).map(|c| c.name.clone()).unwrap_or_default();
             let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("planeswalker").to_string();
             let loyalty = catalog.get(name.as_str())
                 .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
