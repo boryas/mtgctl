@@ -117,23 +117,17 @@ mana_abilities = [{tap_self = true}]   # produces = "" → generic only
 name = "Tamiyo, Inquisitive Student"
 card_type = "creature"
 legendary = true
-flipped_name = "Tamiyo, Seasoned Scholar"
-flipped_card_type = "planeswalker"
-flipped_loyalty = 4
+layout = "double_faced"
 generates_clues = true
 mana_cost = "U"
 power = 0
 toughness = 3
 
-[[cards]]
+[cards.back]
 name = "Tamiyo, Seasoned Scholar"
 card_type = "planeswalker"
-is_token = true   # created by flipping, never in a library
-loyalty = 2
-
-[[cards.abilities]]
-loyalty_cost = 2
-effect = "tamiyo_plus_two"
+loyalty = 4
+abilities = [{loyalty_cost = 2, effect = "tamiyo_plus_two"}]
 
 [[cards]]
 name = "Orcish Bowmasters"
@@ -301,11 +295,18 @@ abilities = [{zone = "hand", discard_self = true, sacrifice_land = true, effect 
 [[cards]]
 name = "Brazen Borrower"
 card_type = "creature"
+layout = "split"
 mana_cost = "1UU"
 blue = true
 power = 3
 toughness = 1
-adventure = {name = "Petty Theft", card_type = "instant", mana_cost = "1U", target = "opp:permanent_nonland", effects = ["bounce"]}
+
+[cards.back]
+name = "Petty Theft"
+card_type = "instant"
+mana_cost = "1U"
+target = "opp:permanent_nonland"
+effects = ["bounce"]
 
 [[cards]]
 name = "Ingenious Infiltrator"

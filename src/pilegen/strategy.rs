@@ -585,11 +585,11 @@ fn collect_hand_actions(
 
         // Adventure spell face.
         if let Some(face) = def.adventure() {
-            if !face.mana_cost.is_empty() {
-                let cost = parse_mana_cost(&face.mana_cost);
+            if !face.mana_cost().is_empty() {
+                let cost = parse_mana_cost(face.mana_cost());
                 if !state.potential_mana(who).can_pay(&cost) { continue; }
             }
-            if let Some(ref tgt) = face.target {
+            if let Some(tgt) = face.target() {
                 if !has_valid_target(tgt, state, who) { continue; }
             }
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Adventure, preferred_cost: None });

@@ -339,6 +339,16 @@ pub(super) fn recompute(state: &SimState, catalog: &HashMap<&str, &CardDef>) -> 
         let Some(&base) = catalog.get(obj.catalog_key.as_str()) else { continue };
         let mut def = base.clone();
 
+        // Step 0: for double-faced cards on their back face, substitute the back-face kind
+        // and name before folding. This ensures fold sees the correct variant (e.g. Planeswalker
+        // instead of Creature for flipped Tamiyo) and CEs apply to the active face.
+        if obj.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
+            if let Some(ref back) = def.back.take() {
+                def.name = back.name.clone();
+                def.kind = back.kind.clone();
+            }
+        }
+
         // Step 1: fold game-accumulated state (counters, temporary mods) into the clone.
         fold_game_state_into_def(&mut def, obj);
 
@@ -1810,18 +1820,18 @@ fn cast_spell(
 
     if face == SpellFace::Adventure {
         let adv = def.adventure()?.clone();
-        let is_sorcery = adv.card_type == "sorcery";
+        let is_sorcery = adv.is_sorcery();
         if is_sorcery && !state.stack.is_empty() {
             eprintln!("[priority] BUG: adventure sorcery {} on non-empty stack, treating as Pass", adv.name);
             return None;
         }
-        let cost = parse_mana_cost(&adv.mana_cost);
+        let cost = parse_mana_cost(adv.mana_cost());
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
-        let (adv_spec, adv_eff) = build_adventure_effect(&adv, who);
+        let (adv_spec, adv_eff) = build_spell_effect(&adv, who);
         let adv_targets = choose_spell_target(&adv_spec, who, state, rng)
             .into_iter().collect::<Vec<_>>();
-        state.log(t, who, format!("Cast {} (adventure, {}) [hand: {}]", adv.name, adv.mana_cost, state.hand_size(who)));
+        state.log(t, who, format!("Cast {} (adventure, {}) [hand: {}]", adv.name, adv.mana_cost(), state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
             card.zone = CardZone::Stack;
             card.spell = Some(SpellState {
@@ -2082,19 +2092,19 @@ fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
     state.log(t, controller, "Clue Token created");
 }
 
-fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
-    // catalog: reading the printed starting loyalty of the flipped face. The object mutates
-    // in-place (same ObjId, new catalog_key), so materialized has no entry for this face yet.
-    let loyalty = catalog_map.get("Tamiyo, Seasoned Scholar")
-        .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
-        .unwrap_or(2);
-    // Mutate in place via state.objects — same ObjId, preserves damage/entered_this_turn.
-    if let Some(card) = state.objects.get_mut(&source_id) {
-        card.catalog_key = "Tamiyo, Seasoned Scholar".to_string();
-        if let Some(bf) = card.bf.as_mut() {
-            bf.loyalty = loyalty;
-            bf.active_face = 1;
-        }
+fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u8) {
+    // Read the back-face starting loyalty from the front-face materialized def.
+    // The front face is still current in materialized at the moment the trigger resolves
+    // (active_face == 0). `back` carries the printed PW data for the flipped face.
+    let loyalty = state.materialized.defs.get(&source_id)
+        .and_then(|d| d.back.as_ref())
+        .and_then(|b| if let CardKind::Planeswalker(ref p) = b.kind { Some(p.loyalty) } else { None })
+        .unwrap_or(4);
+    // Set active_face = 1. catalog_key is intentionally NOT changed — recompute substitutes
+    // the back-face kind into the materialized def whenever active_face == 1.
+    if let Some(bf) = state.objects.get_mut(&source_id).and_then(|c| c.bf.as_mut()) {
+        bf.loyalty = loyalty;
+        bf.active_face = 1;
     }
     state.log(t, controller, format!("Tamiyo flips → Tamiyo, Seasoned Scholar [loyalty: {}]", loyalty));
 }

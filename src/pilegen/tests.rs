@@ -1687,10 +1687,13 @@ produces = "B""#).unwrap();
 
         let mut state2 = state;
         result[0].effect.call(&mut state2, 1, &[], &HashMap::new(), &mut rand::thread_rng());
-        assert!(!state2.permanents_of("us").any(|p| p.catalog_key == "Tamiyo, Inquisitive Student"),
-            "original Tamiyo removed");
-        assert!(state2.permanents_of("us").any(|p| p.catalog_key == "Tamiyo, Seasoned Scholar"),
-            "Tamiyo, Seasoned Scholar enters");
+        // The flip mutates in-place: catalog_key stays as front face; active_face flips to 1.
+        let tamiyo_bf = state2.permanents_of("us")
+            .find(|p| p.catalog_key == "Tamiyo, Inquisitive Student")
+            .and_then(|p| p.bf.as_ref())
+            .expect("Tamiyo should still be on the battlefield (same object, same catalog_key)");
+        assert_eq!(tamiyo_bf.active_face, 1, "active_face == 1 after flip");
+        assert_eq!(tamiyo_bf.loyalty, 4, "starting loyalty of Tamiyo, Seasoned Scholar");
     }
 
     #[test]

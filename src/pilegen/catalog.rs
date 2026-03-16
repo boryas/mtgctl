@@ -138,7 +138,6 @@ pub(crate) struct CreatureData {
     #[serde(default)] pub(crate) delve: bool,
     #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
     #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
-    #[serde(default)] pub(crate) adventure: Option<AdventureFace>,
     #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
     #[serde(default)] pub(crate) keywords: Vec<String>,
 }
@@ -183,16 +182,6 @@ impl NinjutsuAbility {
     }
 }
 
-/// The adventure face of an adventure card (the instant/sorcery half).
-#[derive(Deserialize, Clone)]
-pub(crate) struct AdventureFace {
-    pub(crate) name: String,
-    #[serde(default)] pub(crate) card_type: String,  // "instant" or "sorcery"
-    #[serde(default)] pub(crate) mana_cost: String,
-    #[serde(default)] pub(crate) target: Option<String>,
-    #[serde(default)] pub(crate) effects: Vec<String>,
-}
-
 /// Spell data shared by Instant and Sorcery variants.
 #[derive(Deserialize, Clone, Default)]
 pub(crate) struct SpellData {
@@ -226,6 +215,18 @@ pub(crate) enum CardKind {
     Enchantment,
 }
 
+/// Layout of a multi-face card. Determines how `back` is interpreted at cast/flip time.
+/// `Normal` = single-faced (default). `DoubleFaced` = transform DFC (e.g. Tamiyo).
+/// `Split` = two castable halves (split cards, adventures).
+#[derive(Deserialize, Clone, Default, Debug, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CardLayout {
+    #[default]
+    Normal,
+    DoubleFaced,
+    Split,
+}
+
 // ── CardDef wrapper ───────────────────────────────────────────────────────────
 
 /// A card the generator knows about. Cards not in the catalog are treated as
@@ -249,6 +250,12 @@ pub(crate) struct CardDef {
     #[allow(dead_code)]
     pub(crate) play_weight: Option<u32>,
     pub(super) kind: CardKind,
+    /// Layout of a multi-face card (Normal / DoubleFaced / Split).
+    pub(crate) layout: CardLayout,
+    /// Back/second face for DFCs and split/adventure cards.
+    /// For DoubleFaced cards, this is the transformed face.
+    /// For Split cards (including adventures), this is the second castable half.
+    pub(crate) back: Option<Box<CardDef>>,
     /// Trigger check functions for this card (populated at load time, not from TOML).
     pub(super) trigger_defs: Vec<TriggerCheckFn>,
     /// Replacement effect definitions for this card (populated at load time, not from TOML).
@@ -377,11 +384,9 @@ impl CardDef {
         }
     }
 
-    pub(crate) fn adventure(&self) -> Option<&AdventureFace> {
-        match &self.kind {
-            CardKind::Creature(c) => c.adventure.as_ref(),
-            _ => None,
-        }
+    /// Returns the adventure/split second face if this is a `Split`-layout card.
+    pub(crate) fn adventure(&self) -> Option<&CardDef> {
+        if self.layout == CardLayout::Split { self.back.as_deref() } else { None }
     }
 
     pub(crate) fn ninjutsu(&self) -> Option<&NinjutsuAbility> {
@@ -442,13 +447,16 @@ pub(crate) struct RawCardDef {
     #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
     #[serde(default)] pub(crate) delve: bool,
     #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
-    #[serde(default)] pub(crate) adventure: Option<AdventureFace>,
     #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
     #[serde(default)] pub(crate) keywords: Vec<String>,
     #[serde(default)] pub(crate) effects: Vec<String>,
     /// Named static abilities to register as ContinuousInstances at ETB.
     /// Each string maps to a `StaticAbilityDef` factory via `static_ability_def_from_str`.
     #[serde(default)] pub(crate) static_abilities: Vec<String>,
+    /// Layout of a multi-face card (normal / double_faced / split). Defaults to normal.
+    #[serde(default)] pub(crate) layout: CardLayout,
+    /// Back/second face for DFCs and split/adventure cards.
+    #[serde(default)] pub(crate) back: Option<Box<RawCardDef>>,
 }
 
 impl From<RawCardDef> for CardDef {
@@ -473,7 +481,6 @@ impl From<RawCardDef> for CardDef {
                 delve: r.delve,
                 abilities: r.abilities,
                 mana_abilities: r.mana_abilities.clone(),
-                adventure: r.adventure,
                 ninjutsu: r.ninjutsu,
                 keywords: r.keywords,
             }),
@@ -531,7 +538,8 @@ impl From<RawCardDef> for CardDef {
         let static_ability_defs: Vec<StaticAbilityDef> = r.static_abilities.iter()
             .filter_map(|s| static_ability_def_from_str(s))
             .collect();
-        CardDef { name: r.name, play_weight: r.play_weight, kind, trigger_defs, replacement_defs, static_ability_defs }
+        let back = r.back.map(|b| Box::new(CardDef::from(*b)));
+        CardDef { name: r.name, play_weight: r.play_weight, kind, layout: r.layout, back, trigger_defs, replacement_defs, static_ability_defs }
     }
 }
 
@@ -668,8 +676,10 @@ fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: 
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, catalog, _rng| {
-                    do_flip_tamiyo(source_id, &ctl, state, t, catalog);
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                    // Guard: only flip if still on front face (active_face == 0).
+                    if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
+                    do_flip_tamiyo(source_id, &ctl, state, t);
                 })),
             });
         }
@@ -888,28 +898,6 @@ pub(super) fn build_spell_effect(
     (target_spec, eff)
 }
 
-/// Build a `(TargetSpec, Effect)` for an adventure face at cast time.
-pub(super) fn build_adventure_effect(face: &AdventureFace, who: &str) -> (TargetSpec, Effect) {
-    let target_spec = target_spec_from_str(face.target.as_deref());
-    let effects = &face.effects;
-    if effects.is_empty() {
-        return (TargetSpec::None, Effect(std::sync::Arc::new(|_,_,_,_,_| {})));
-    }
-    // Use a dummy CardDef for build_single_effect (effects don't need def info currently).
-    let dummy_def = CardDef {
-        name: face.name.clone(),
-        play_weight: None,
-        kind: CardKind::Instant(SpellData::default()),
-        trigger_defs: vec![],
-        replacement_defs: vec![],
-        static_ability_defs: vec![],
-    };
-    let mut eff = build_single_effect(effects[0].as_str(), who, &dummy_def);
-    for e in &effects[1..] {
-        eff = eff.then(build_single_effect(e.as_str(), who, &dummy_def));
-    }
-    (target_spec, eff)
-}
 
 /// Pre-register trigger and replacement instances for a card object at simulation init.
 /// Reads directly from `card_def.trigger_defs` and `card_def.replacement_defs` — no table lookup.
