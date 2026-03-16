@@ -1895,8 +1895,7 @@ produces = "B""#).unwrap();
             spell: Some(SpellState {
                 effect: Some(eff_draw("us", 3).then(eff_put_back("us", 2))),
                 chosen_targets: vec![],
-                is_adventure_face: false,
-                adventure_card_name: None,
+                split_back_name: None,
             }),
             bf: None,
         });

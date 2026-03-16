@@ -60,8 +60,9 @@ pub(super) enum CardZone {
 struct SpellState {
     effect: Option<Effect>,
     chosen_targets: Vec<Target>,
-    is_adventure_face: bool,
-    adventure_card_name: Option<String>,
+    /// Set when the back face of a split card was cast (e.g. an adventure).
+    /// Holds the front-face name for logging; `None` for main-face casts.
+    split_back_name: Option<String>,
 }
 
 /// In-play state for any permanent (land, creature, artifact, planeswalker, enchantment, token).
@@ -419,9 +420,9 @@ impl Phase {
 
 // ── Priority actions ──────────────────────────────────────────────────────────
 
-/// Which face of a card to cast.
+/// Which face of a card to cast. `Back` = adventure/split second half.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum SpellFace { Main, Adventure }
+enum SpellFace { Main, Back }
 
 #[derive(Clone)]
 enum PriorityAction {
@@ -1818,11 +1819,11 @@ fn cast_spell(
         .cloned()
         .or_else(|| catalog_map.get(name.as_str()).map(|&d| d.clone()))?;
 
-    if face == SpellFace::Adventure {
+    if face == SpellFace::Back {
         let adv = def.adventure()?.clone();
         let is_sorcery = adv.is_sorcery();
         if is_sorcery && !state.stack.is_empty() {
-            eprintln!("[priority] BUG: adventure sorcery {} on non-empty stack, treating as Pass", adv.name);
+            eprintln!("[priority] BUG: split-back sorcery {} on non-empty stack, treating as Pass", adv.name);
             return None;
         }
         let cost = parse_mana_cost(adv.mana_cost());
@@ -1831,14 +1832,13 @@ fn cast_spell(
         let (adv_spec, adv_eff) = build_spell_effect(&adv, who);
         let adv_targets = choose_spell_target(&adv_spec, who, state, rng)
             .into_iter().collect::<Vec<_>>();
-        state.log(t, who, format!("Cast {} (adventure, {}) [hand: {}]", adv.name, adv.mana_cost(), state.hand_size(who)));
+        state.log(t, who, format!("Cast {} ({}, {}) [hand: {}]", adv.name, adv.mana_cost(), name, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
             card.zone = CardZone::Stack;
             card.spell = Some(SpellState {
                 effect: Some(adv_eff),
                 chosen_targets: adv_targets,
-                is_adventure_face: true,
-                adventure_card_name: Some(name),
+                split_back_name: Some(name),
             });
         }
         return Some(card_id);
@@ -1920,8 +1920,7 @@ fn cast_spell(
         card.spell = Some(SpellState {
             effect: Some(spell_eff),
             chosen_targets: spell_chosen_targets,
-            is_adventure_face: false,
-            adventure_card_name: None,
+            split_back_name: None,
         });
     }
 
@@ -2128,23 +2127,32 @@ fn resolve_top_of_stack(
         let spell = state.objects[&id].spell.clone().unwrap_or_else(|| SpellState {
             effect: None,
             chosen_targets: vec![],
-            is_adventure_face: false,
-            adventure_card_name: None,
+            split_back_name: None,
         });
         let owner_str = state.objects[&id].owner.clone();
         let name = state.objects[&id].catalog_key.clone();
 
-        if spell.is_adventure_face {
+        // Back face of a split card whose back has subtype "adventure" → exile to on_adventure.
+        let is_adventure = spell.split_back_name.is_some()
+            && catalog_map.get(name.as_str())
+                .and_then(|d| d.back.as_ref())
+                .map_or(false, |b| b.has_subtype("adventure"));
+
+        if is_adventure {
             if let Some(ref eff) = spell.effect {
                 let rng_dyn: &mut dyn rand::RngCore = rng;
                 eff.call(state, t, &spell.chosen_targets, catalog_map, rng_dyn);
             }
-            let card_name = spell.adventure_card_name.as_deref().unwrap_or(&name).to_string();
+            let back_name = catalog_map.get(name.as_str())
+                .and_then(|d| d.back.as_ref())
+                .map(|b| b.name.as_str())
+                .unwrap_or(name.as_str())
+                .to_string();
             if let Some(card_obj) = state.objects.get_mut(&id) {
                 card_obj.zone = CardZone::Exile { on_adventure: true };
                 card_obj.spell = None;
             }
-            state.log(t, &owner_str, format!("{} resolves → {} on adventure in exile", name, card_name));
+            state.log(t, &owner_str, format!("{} resolves → {} on adventure in exile", back_name, name));
         } else if let Some(ref eff) = spell.effect {
             let is_perm = state.materialized.defs.get(&id)
                 .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
@@ -2277,9 +2285,17 @@ fn handle_priority_round(
             }
             PriorityAction::CastSpell { card_id, face, ref preferred_cost } => {
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-                // Sorcery-speed check for main-face non-instants.
-                let is_instant = face == SpellFace::Adventure || state.materialized.defs.get(&card_id)
-                    .map(|d| d.is_instant()).unwrap_or(false);
+                // Sorcery-speed check: for the main face read the materialized def; for the back
+                // face read the back def's kind (the back face might be instant even if the front
+                // face creature isn't).
+                let is_instant = match face {
+                    SpellFace::Main => state.materialized.defs.get(&card_id)
+                        .map(|d| d.is_instant()).unwrap_or(false),
+                    SpellFace::Back => state.materialized.defs.get(&card_id)
+                        .and_then(|d| d.back.as_ref())
+                        .map(|b| b.is_instant())
+                        .unwrap_or(false),
+                };
                 if !is_instant && !state.stack.is_empty() {
                     eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack, treating as Pass", name);
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);

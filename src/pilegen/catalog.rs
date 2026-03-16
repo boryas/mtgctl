@@ -195,6 +195,8 @@ pub(crate) struct SpellData {
     #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
     #[serde(default)] pub(crate) delve: bool,
     #[serde(default)] pub(crate) effects: Vec<String>,
+    /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
+    #[serde(default)] pub(crate) subtypes: Vec<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -406,6 +408,14 @@ impl CardDef {
     pub(crate) fn has_keyword(&self, kw: &str) -> bool {
         self.keywords().iter().any(|k| k == kw)
     }
+
+    /// Returns true if this card has the given subtype (e.g. `"adventure"`).
+    pub(crate) fn has_subtype(&self, st: &str) -> bool {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.subtypes.iter().any(|t| t == st),
+            _ => false,
+        }
+    }
 }
 
 // ── TOML deserialization: two-step via RawCardDef ─────────────────────────────
@@ -450,6 +460,8 @@ pub(crate) struct RawCardDef {
     #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
     #[serde(default)] pub(crate) keywords: Vec<String>,
     #[serde(default)] pub(crate) effects: Vec<String>,
+    /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
+    #[serde(default)] pub(crate) subtypes: Vec<String>,
     /// Named static abilities to register as ContinuousInstances at ETB.
     /// Each string maps to a `StaticAbilityDef` factory via `static_ability_def_from_str`.
     #[serde(default)] pub(crate) static_abilities: Vec<String>,
@@ -494,6 +506,7 @@ impl From<RawCardDef> for CardDef {
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
                 effects: r.effects,
+                subtypes: r.subtypes,
             }),
             CardType::Sorcery => CardKind::Sorcery(SpellData {
                 mana_cost: r.mana_cost,
@@ -505,6 +518,7 @@ impl From<RawCardDef> for CardDef {
                 alternate_costs: r.alternate_costs,
                 delve: r.delve,
                 effects: r.effects,
+                subtypes: r.subtypes,
             }),
             CardType::Artifact => CardKind::Artifact(ArtifactData {
                 mana_cost: r.mana_cost,

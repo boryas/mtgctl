@@ -304,6 +304,7 @@ toughness = 1
 [cards.back]
 name = "Petty Theft"
 card_type = "instant"
+subtypes = ["adventure"]
 mana_cost = "1U"
 target = "opp:permanent_nonland"
 effects = ["bounce"]

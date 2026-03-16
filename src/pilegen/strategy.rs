@@ -592,7 +592,7 @@ fn collect_hand_actions(
             if let Some(tgt) = face.target() {
                 if !has_valid_target(tgt, state, who) { continue; }
             }
-            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Adventure, preferred_cost: None });
+            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None });
         }
     }
 
