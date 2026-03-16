@@ -2099,7 +2099,7 @@ fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u
     let loyalty = state.materialized.defs.get(&source_id)
         .and_then(|d| d.back.as_ref())
         .and_then(|b| if let CardKind::Planeswalker(ref p) = b.kind { Some(p.loyalty) } else { None })
-        .unwrap_or(4);
+        .unwrap_or(2);
     // Set active_face = 1. catalog_key is intentionally NOT changed — recompute substitutes
     // the back-face kind into the materialized def whenever active_face == 1.
     if let Some(bf) = state.objects.get_mut(&source_id).and_then(|c| c.bf.as_mut()) {

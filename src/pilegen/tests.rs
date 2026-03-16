@@ -1693,7 +1693,7 @@ produces = "B""#).unwrap();
             .and_then(|p| p.bf.as_ref())
             .expect("Tamiyo should still be on the battlefield (same object, same catalog_key)");
         assert_eq!(tamiyo_bf.active_face, 1, "active_face == 1 after flip");
-        assert_eq!(tamiyo_bf.loyalty, 4, "starting loyalty of Tamiyo, Seasoned Scholar");
+        assert_eq!(tamiyo_bf.loyalty, 2, "starting loyalty of Tamiyo, Seasoned Scholar");
     }
 
     #[test]

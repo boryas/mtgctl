@@ -126,7 +126,7 @@ toughness = 3
 [cards.back]
 name = "Tamiyo, Seasoned Scholar"
 card_type = "planeswalker"
-loyalty = 4
+loyalty = 2
 abilities = [{loyalty_cost = 2, effect = "tamiyo_plus_two"}]
 
 [[cards]]
