@@ -242,7 +242,7 @@ pub(crate) enum CardLayout {
 #[derive(Clone, Copy)]
 pub(super) struct ReplacementDef {
     pub(super) check: ReplacementCheckFn,
-    pub(super) build_effect: fn(ObjId, &str) -> Effect,
+    pub(super) build_effect: fn(ObjId, &str, &CardDef) -> Effect,
 }
 
 #[derive(Clone)]
@@ -933,7 +933,7 @@ pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, contro
             source_id,
             controller: controller.to_string(),
             check: repl.check,
-            effect: (repl.build_effect)(source_id, controller),
+            effect: (repl.build_effect)(source_id, controller, card_def),
             active: false,
         });
     }
@@ -985,7 +985,7 @@ fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &str) -> Opt
     }
 }
 
-fn build_leyline_effect(_source_id: ObjId, controller: &str) -> Effect {
+fn build_leyline_effect(_source_id: ObjId, controller: &str, _def: &CardDef) -> Effect {
     let ctl = controller.to_string();
     Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
         if let Some(Target::Object(id)) = targets.first() {
@@ -1014,22 +1014,19 @@ fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
 
 // ── Enters-tapped ETB replacement ─────────────────────────────────────────────
 
-fn build_enters_tapped_effect(_source_id: ObjId, controller: &str) -> Effect {
+fn build_enters_tapped_effect(_source_id: ObjId, controller: &str, def: &CardDef) -> Effect {
     let ctl = controller.to_string();
+    let card_type_s = card_type_str(def).to_string();
     Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
         let Some(Target::Object(id)) = targets.first() else { return; };
         let id = *id;
         let from = current_zone_id(id, state);
-        let (card_name, card_type_s) = {
-            let name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-            let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("land").to_string();
-            (name, ct)
-        };
+        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
         // Re-fire the ETB: do_effect creates BattlefieldState (tapped = false); ETB triggers fire.
         // This replacement is in repl_applied so it will not intercept the re-fired event.
         fire_event(
             GameEvent::ZoneChange {
-                id, actor: ctl.clone(), card: card_name, card_type: card_type_s,
+                id, actor: ctl.clone(), card: card_name, card_type: card_type_s.clone(),
                 from, to: ZoneId::Battlefield, controller: ctl.clone(),
             },
             state, t, &ctl, catalog, rng,
@@ -1043,24 +1040,19 @@ fn build_enters_tapped_effect(_source_id: ObjId, controller: &str) -> Effect {
 
 // ── Planeswalker enters-with-loyalty ETB replacement ─────────────────────────
 
-fn build_enter_with_loyalty_effect(_source_id: ObjId, controller: &str) -> Effect {
+fn build_enter_with_loyalty_effect(_source_id: ObjId, controller: &str, def: &CardDef) -> Effect {
     let ctl = controller.to_string();
+    let card_type_s = card_type_str(def).to_string();
+    let base_loyalty = if let CardKind::Planeswalker(ref p) = def.kind { p.loyalty } else { 0 };
     Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
         let Some(Target::Object(id)) = targets.first() else { return; };
         let id = *id;
         let from = current_zone_id(id, state);
-        let (card_name, card_type_s, base_loyalty) = {
-            let name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-            let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("planeswalker").to_string();
-            let loyalty = catalog.get(name.as_str())
-                .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
-                .unwrap_or(0);
-            (name, ct, loyalty)
-        };
+        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
         // Re-fire the ETB: do_effect creates BattlefieldState (loyalty = 0); ETB triggers fire.
         fire_event(
             GameEvent::ZoneChange {
-                id, actor: ctl.clone(), card: card_name, card_type: card_type_s,
+                id, actor: ctl.clone(), card: card_name, card_type: card_type_s.clone(),
                 from, to: ZoneId::Battlefield, controller: ctl.clone(),
             },
             state, t, &ctl, catalog, rng,
@@ -1083,14 +1075,14 @@ fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> 
     None
 }
 
-fn build_murktide_etb_effect(_source_id: ObjId, controller: &str) -> Effect {
+fn build_murktide_etb_effect(_source_id: ObjId, controller: &str, _def: &CardDef) -> Effect {
     let ctl = controller.to_string();
     Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
         let Some(Target::Object(id)) = targets.first() else { return; };
         let id = *id;
-        // Count instant/sorcery cards in controller's exile
+        // Count instant/sorcery cards in controller's exile via materialized (no catalog read).
         let exile_count = state.exile_of(&ctl)
-            .filter(|c| catalog.get(c.catalog_key.as_str())
+            .filter(|c| state.materialized.defs.get(&c.id)
                 .map_or(false, |d| d.is_instant() || d.is_sorcery()))
             .count() as i32;
         // Set counters on the already-created BattlefieldState
