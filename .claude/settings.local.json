@@ -44,7 +44,12 @@
       "Bash(git stash:*)",
       "Bash(git:*)",
       "Bash(toml-check:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "Bash(perl:*)",
+      "Bash(for f:*)",
+      "Bash(do echo:*)",
+      "Read(//home/bo/repos/mtgctl/**)",
+      "Bash(awk:*)"
     ],
     "deny": []
   }
