@@ -127,8 +127,10 @@ pub(crate) struct LandData {
 #[derive(Deserialize, Clone)]
 pub(crate) struct CreatureData {
     #[serde(default)] pub(crate) mana_cost: String,
-    pub(crate) power: i32,
-    pub(crate) toughness: i32,
+    // `power` and `toughness` are private — always read through `MaterializedState.defs`
+    // (which folds in counters and CE modifiers). Write only via `adjust_pt`.
+    power: i32,
+    toughness: i32,
     #[serde(default)] pub(crate) black: bool,
     #[serde(default)] pub(crate) blue: bool,
     #[allow(dead_code)]
@@ -153,6 +155,22 @@ pub(crate) struct ArtifactData {
 #[derive(Deserialize, Clone)]
 pub(crate) struct NinjutsuAbility {
     pub(crate) mana_cost: String,
+}
+
+impl CreatureData {
+    /// Read effective power — call only on a value from `MaterializedState.defs`, never
+    /// directly from `catalog_map`, so continuous effects are always reflected.
+    pub(crate) fn power(&self) -> i32 { self.power }
+
+    /// Read effective toughness — same rule as `power()`.
+    pub(crate) fn toughness(&self) -> i32 { self.toughness }
+
+    /// Apply a power/toughness delta. Used exclusively by `fold_game_state_into_def`
+    /// (counters + temporary mods) and `ContinuousModFn` closures in CE machinery.
+    pub(super) fn adjust_pt(&mut self, delta_power: i32, delta_toughness: i32) {
+        self.power     += delta_power;
+        self.toughness += delta_toughness;
+    }
 }
 
 impl NinjutsuAbility {
@@ -214,7 +232,7 @@ pub(crate) enum CardKind {
 /// A card the generator knows about. Cards not in the catalog are treated as
 /// generic non-land spells: hand-eligible, not permanent candidates, not exileable.
 ///
-/// Wrapper struct preserving direct `.name` access and stable HashMap keys while
+/// Wrapper struct preserving direct `.catalog_key` access and stable HashMap keys while
 /// holding a typed `kind` that enforces card-category invariants.
 /// A replacement effect definition stored directly on a `CardDef`.
 /// `check` returns `Some(targets)` if the replacement applies to an event; `build_effect` builds
@@ -236,7 +254,16 @@ pub(crate) struct CardDef {
     pub(super) trigger_defs: Vec<TriggerCheckFn>,
     /// Replacement effect definitions for this card (populated at load time, not from TOML).
     pub(super) replacement_defs: Vec<ReplacementDef>,
+    /// Static ability factories. Called at ETB to register a `ContinuousInstance` for this
+    /// object. The CI has `expiry: WhileSourceOnBattlefield` and is removed on LTB.
+    /// Populated from TOML `static_abilities` strings and/or hardcoded per-card logic.
+    pub(super) static_ability_defs: Vec<StaticAbilityDef>,
 }
+
+/// Factory that creates a `ContinuousInstance` for a specific game object.
+/// Called when the object enters the battlefield; `source_id` and `controller` are bound then.
+pub(super) type StaticAbilityDef =
+    std::sync::Arc<dyn Fn(ObjId, &str) -> ContinuousInstance + Send + Sync>;
 
 impl CardDef {
     pub(crate) fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
@@ -428,6 +455,9 @@ pub(crate) struct RawCardDef {
     #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
     #[serde(default)] pub(crate) keywords: Vec<String>,
     #[serde(default)] pub(crate) effects: Vec<String>,
+    /// Named static abilities to register as ContinuousInstances at ETB.
+    /// Each string maps to a `StaticAbilityDef` factory via `static_ability_def_from_str`.
+    #[serde(default)] pub(crate) static_abilities: Vec<String>,
 }
 
 impl From<RawCardDef> for CardDef {
@@ -492,9 +522,9 @@ impl From<RawCardDef> for CardDef {
             CardType::Enchantment => CardKind::Enchantment,
         };
         let trigger_defs: Vec<TriggerCheckFn> = match r.name.as_str() {
-            "Orcish Bowmasters"           => vec![bowmasters_check],
-            "Murktide Regent"             => vec![murktide_check],
-            "Tamiyo, Inquisitive Student" => vec![tamiyo_check],
+            "Orcish Bowmasters"           => vec![std::sync::Arc::new(bowmasters_check)],
+            "Murktide Regent"             => vec![std::sync::Arc::new(murktide_check)],
+            "Tamiyo, Inquisitive Student" => vec![std::sync::Arc::new(tamiyo_check)],
             _ => vec![],
         };
         let mut replacement_defs: Vec<ReplacementDef> = match r.name.as_str() {
@@ -508,7 +538,32 @@ impl From<RawCardDef> for CardDef {
         if is_planeswalker {
             replacement_defs.push(ReplacementDef { check: etb_self_check, build_effect: build_enter_with_loyalty_effect });
         }
-        CardDef { name: r.name, play_weight: r.play_weight, kind, trigger_defs, replacement_defs }
+        let static_ability_defs: Vec<StaticAbilityDef> = r.static_abilities.iter()
+            .filter_map(|s| static_ability_def_from_str(s))
+            .collect();
+        CardDef { name: r.name, play_weight: r.play_weight, kind, trigger_defs, replacement_defs, static_ability_defs }
+    }
+}
+
+/// Build a `StaticAbilityDef` factory for the named keyword ability.
+/// Returns `None` for unrecognized strings (ignored with a warning-free `filter_map`).
+fn static_ability_def_from_str(s: &str) -> Option<StaticAbilityDef> {
+    match s {
+        "flying" => Some(std::sync::Arc::new(|source_id, controller: &str| ContinuousInstance {
+            source_id,
+            controller: controller.to_string(),
+            layer: ContinuousLayer::L6AbilityEffects,
+            filter: std::sync::Arc::new(move |id, _| id == source_id),
+            modifier: std::sync::Arc::new(|def, _state| {
+                if let CardKind::Creature(c) = &mut def.kind {
+                    if !c.keywords.contains(&"flying".to_string()) {
+                        c.keywords.push("flying".to_string());
+                    }
+                }
+            }),
+            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+        })),
+        _ => None,
     }
 }
 
@@ -633,25 +688,14 @@ fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: 
 }
 
 
-/// Check every active trigger instance for the given event, then check `state.active_effects`.
+/// Check every active trigger instance for the given event.
 /// Returns any triggered ability contexts that should be pushed onto the stack.
 pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerContext> {
     let mut pending: Vec<TriggerContext> = Vec::new();
-
     for inst in &state.trigger_instances {
         if !inst.active { continue; }
         (inst.check)(event, inst.source_id, &inst.controller, &mut pending);
     }
-
-    // Effect-based triggers registered in active_effects.
-    for effect in &state.active_effects {
-        if let Some(on_event) = &effect.on_event {
-            if let Some(ctx) = on_event(event, &effect.controller) {
-                pending.push(ctx);
-            }
-        }
-    }
-
     pending
 }
 
@@ -675,57 +719,43 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
     }
 }
 
-/// Build a TriggerContext for the Tamiyo +2 per-attacker trigger.
-/// Extracted to keep the on_event closure in `tamiyo_plus_two_effect` readable.
-fn tamiyo_plus_two_fire_ctx(_tamiyo_id: ObjId, tamiyo_ctl: String, attacker_id: ObjId, _attacker_ctl: String) -> TriggerContext {
-    let ctl = tamiyo_ctl.clone();
-    TriggerContext {
-        source_name: "Tamiyo, Seasoned Scholar".into(),
-        controller: tamiyo_ctl,
-        target_spec: TargetSpec::None,
-        effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
-            let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
-            let still_in_play = state.permanent_bf(attacker_id).is_some();
-            if still_in_play {
-                if let Some(bf) = state.permanent_bf_mut(attacker_id) {
-                    bf.power_mod -= 1;
-                }
-                state.active_effects.push(ContinuousEffect {
-                    controller: ctl.clone(),
-                    expires: EffectExpiry::EndOfTurn,
-                    on_event: None,
-                    stat_mod: Some(StatModData {
-                        target_id: attacker_id,
-                        power_delta: -1,
-                        toughness_delta: 0,
-                    }),
-                });
-            }
-            state.log(t, &ctl, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
-        })),
-    }
-}
-
-/// Build a ContinuousEffect for Tamiyo's +2 loyalty ability.
-/// `tamiyo_id` is the ObjId of the Tamiyo permanent activating the ability.
-pub(super) fn tamiyo_plus_two_effect(controller: &str, tamiyo_id: ObjId) -> ContinuousEffect {
-    ContinuousEffect {
-        controller: controller.to_string(),
-        expires: EffectExpiry::StartOfControllerNextTurn,
-        on_event: Some(std::sync::Arc::new(move |event, effect_controller| {
-            if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
-                if attacker_controller != effect_controller {
-                    return Some(tamiyo_plus_two_fire_ctx(
-                        tamiyo_id,
-                        effect_controller.to_string(),
-                        *attacker_id,
-                        attacker_controller.clone(),
-                    ));
-                }
-            }
-            None
-        })),
-        stat_mod: None,
+/// Trigger check for Tamiyo +2: fires for each opposing creature that attacks.
+/// Produces a trigger whose effect registers a -1/0 ContinuousInstance (L7) for that attacker.
+pub(super) fn tamiyo_plus_two_check(
+    event: &GameEvent,
+    source_id: ObjId,
+    controller: &str,
+    pending: &mut Vec<TriggerContext>,
+) {
+    if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
+        if attacker_controller != controller {
+            let attacker_id = *attacker_id;
+            let tamiyo_id = source_id;
+            let ctl = controller.to_string();
+            pending.push(TriggerContext {
+                source_name: "Tamiyo, Seasoned Scholar".into(),
+                controller: ctl.clone(),
+                target_spec: TargetSpec::None,
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                    let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
+                    if state.permanent_bf(attacker_id).is_some() {
+                        state.continuous_instances.push(ContinuousInstance {
+                            source_id: tamiyo_id,
+                            controller: ctl.clone(),
+                            layer: ContinuousLayer::L7PowerToughness,
+                            filter: std::sync::Arc::new(move |id, _| id == attacker_id),
+                            modifier: std::sync::Arc::new(|def, _state| {
+                                if let CardKind::Creature(c) = &mut def.kind {
+                                    c.adjust_pt(-1, 0);
+                                }
+                            }),
+                            expiry: ContinuousExpiry::EndOfTurn,
+                        });
+                    }
+                    state.log(t, &ctl, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
+                })),
+            });
+        }
     }
 }
 
@@ -737,8 +767,16 @@ type NamedEffectBuilder = fn(&str, ObjId) -> Effect;
 fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
     let who = who.to_string();
     Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
-        state.active_effects.push(tamiyo_plus_two_effect(&who, source_id));
         let source_name = state.permanent_name(source_id).unwrap_or_default();
+        // Register a floating trigger watcher that fires for each opposing attacker.
+        // Expires at the start of our next turn (StartOfControllerNextTurn).
+        state.trigger_instances.push(TriggerInstance {
+            source_id,
+            controller: who.clone(),
+            check: std::sync::Arc::new(tamiyo_plus_two_check),
+            expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
+            active: true,
+        });
         state.log(t, &who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
     }))
 }
@@ -875,6 +913,7 @@ pub(super) fn build_adventure_effect(face: &AdventureFace, who: &str) -> (Target
         kind: CardKind::Instant(SpellData::default()),
         trigger_defs: vec![],
         replacement_defs: vec![],
+        static_ability_defs: vec![],
     };
     let mut eff = build_single_effect(effects[0].as_str(), who, &dummy_def);
     for e in &effects[1..] {
@@ -887,11 +926,12 @@ pub(super) fn build_adventure_effect(face: &AdventureFace, who: &str) -> (Target
 /// Reads directly from `card_def.trigger_defs` and `card_def.replacement_defs` — no table lookup.
 /// Instances start with `active: false`; they are activated when the card enters the battlefield.
 pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, controller: &str, state: &mut SimState) {
-    for &check in &card_def.trigger_defs {
+    for check in card_def.trigger_defs.iter().cloned() {
         state.trigger_instances.push(TriggerInstance {
             source_id,
             controller: controller.to_string(),
             check,
+            expiry: None,
             active: false,
         });
     }
@@ -909,16 +949,29 @@ pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, contro
 }
 
 /// Activate all trigger and replacement instances for a card entering the battlefield.
-pub(super) fn activate_instances(source_id: ObjId, state: &mut SimState) {
+/// Also registers any static-ability `ContinuousInstance`s from `def.static_ability_defs`.
+/// `def` is `None` only in test helpers that bypass the catalog — static ability CIs won't fire.
+pub(super) fn activate_instances(
+    source_id: ObjId,
+    controller: &str,
+    def: Option<&CardDef>,
+    state: &mut SimState,
+) {
     for inst in &mut state.trigger_instances {
         if inst.source_id == source_id { inst.active = true; }
     }
     for inst in &mut state.replacement_instances {
         if inst.source_id == source_id { inst.active = true; }
     }
+    if let Some(card_def) = def {
+        for factory in &card_def.static_ability_defs {
+            state.continuous_instances.push(factory(source_id, controller));
+        }
+    }
 }
 
 /// Deactivate all trigger and replacement instances for a card leaving the battlefield.
+/// Also removes static-ability ContinuousInstances (WhileSourceOnBattlefield) for this object.
 pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
     for inst in &mut state.trigger_instances {
         if inst.source_id == source_id { inst.active = false; }
@@ -926,6 +979,9 @@ pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
     for inst in &mut state.replacement_instances {
         if inst.source_id == source_id { inst.active = false; }
     }
+    state.continuous_instances.retain(|ci| {
+        !(ci.source_id == source_id && ci.expiry == ContinuousExpiry::WhileSourceOnBattlefield)
+    });
 }
 
 // ── Leyline of the Void ───────────────────────────────────────────────────────
@@ -974,7 +1030,7 @@ fn build_enters_tapped_effect(_source_id: ObjId, controller: &str) -> Effect {
         let id = *id;
         let from = current_zone_id(id, state);
         let (card_name, card_type_s) = {
-            let name = state.objects.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
             let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("land").to_string();
             (name, ct)
         };
@@ -1003,7 +1059,7 @@ fn build_enter_with_loyalty_effect(_source_id: ObjId, controller: &str) -> Effec
         let id = *id;
         let from = current_zone_id(id, state);
         let (card_name, card_type_s, base_loyalty) = {
-            let name = state.objects.get(&id).map(|c| c.name.clone()).unwrap_or_default();
+            let name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
             let ct = catalog.get(name.as_str()).map(|d| card_type_str(d)).unwrap_or("planeswalker").to_string();
             let loyalty = catalog.get(name.as_str())
                 .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
@@ -1043,7 +1099,7 @@ fn build_murktide_etb_effect(_source_id: ObjId, controller: &str) -> Effect {
         let id = *id;
         // Count instant/sorcery cards in controller's exile
         let exile_count = state.exile_of(&ctl)
-            .filter(|c| catalog.get(c.name.as_str())
+            .filter(|c| catalog.get(c.catalog_key.as_str())
                 .map_or(false, |d| d.is_instant() || d.is_sorcery()))
             .count() as i32;
         // Set counters on the already-created BattlefieldState

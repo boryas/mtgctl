@@ -81,7 +81,7 @@ pub(crate) fn choose_trigger_target(
             let target_who = who.resolve(controller);
             state.permanents_of(target_who)
                 .find(|p| {
-                    catalog_map.get(p.name.as_str())
+                    catalog_map.get(p.catalog_key.as_str())
                         .map(|d| {
                             let basic = d.as_land().map_or(false, |l| l.basic);
                             matches_target_type(filter, &d.kind, basic, Some(d))
@@ -95,7 +95,7 @@ pub(crate) fn choose_trigger_target(
             state.graveyard_of(target_who)
                 .find(|c| {
                     if filter.is_empty() || filter == "any" { return true; }
-                    catalog_map.get(c.name.as_str())
+                    catalog_map.get(c.catalog_key.as_str())
                         .map(|d| matches_target_type(filter, &d.kind, false, Some(d)))
                         .unwrap_or(false)
                 })
@@ -107,10 +107,13 @@ pub(crate) fn choose_trigger_target(
             // Non-killable creatures are lower priority than planeswalker or player.
             if let Some(id) = state.permanents_of(opp)
                 .filter(|p| {
-                    let def = catalog_map.get(p.name.as_str());
+                    let def = catalog_map.get(p.catalog_key.as_str());
                     if !def.map(|d| d.is_creature()).unwrap_or(false) { return false; }
                     let bf = p.bf.as_ref().unwrap();
-                    let (_, tgh) = creature_stats(bf, def.copied());
+                    let tgh = state.materialized.defs.get(&p.id)
+                        .and_then(|d| d.as_creature())
+                        .map(|c| c.toughness())
+                        .unwrap_or(1);
                     tgh - bf.damage <= 1 && tgh > 0
                 })
                 .map(|p| p.id)
@@ -158,7 +161,7 @@ pub(crate) fn choose_spell_target(
             let candidates: Vec<ObjId> = state.graveyard_of(&target_who)
                 .filter(|c| {
                     if filter.is_empty() || filter == "any" { return true; }
-                    catalog_map.get(c.name.as_str())
+                    catalog_map.get(c.catalog_key.as_str())
                         .map(|d| matches_target_type(filter, &d.kind, false, Some(d)))
                         .unwrap_or(false)
                 })
@@ -171,7 +174,7 @@ pub(crate) fn choose_spell_target(
             let target_who = who.resolve(caster).to_string();
             let candidates: Vec<ObjId> = state.permanents_of(&target_who)
                 .filter(|p| {
-                    catalog_map.get(p.name.as_str())
+                    catalog_map.get(p.catalog_key.as_str())
                         .map(|d| {
                             let basic = d.as_land().map_or(false, |l| l.basic);
                             matches_target_type(filter, &d.kind, basic, Some(d))
@@ -252,7 +255,7 @@ fn has_valid_target_spec(
         TargetSpec::Permanent { controller: who, filter } => {
             let target_who = who.resolve(actor);
             state.permanents_of(target_who).any(|p| {
-                match catalog_map.get(p.name.as_str()).copied() {
+                match catalog_map.get(p.catalog_key.as_str()).copied() {
                     Some(d) => {
                         let basic = d.as_land().map_or(false, |l| l.basic);
                         matches_target_type(filter, &d.kind, basic, Some(d))
@@ -265,7 +268,7 @@ fn has_valid_target_spec(
             let target_who = who.resolve(actor);
             state.graveyard_of(target_who).any(|c| {
                 if filter.is_empty() || filter == "any" { return true; }
-                catalog_map.get(c.name.as_str())
+                catalog_map.get(c.catalog_key.as_str())
                     .map(|d| matches_target_type(filter, &d.kind, false, Some(d)))
                     .unwrap_or(false)
             })
@@ -289,7 +292,7 @@ pub(crate) fn choose_permanent_target(
 
     let mut candidates: Vec<ObjId> = Vec::new();
     for perm in state.permanents_of(&target_who) {
-        let def = catalog_map.get(perm.name.as_str()).copied();
+        let def = catalog_map.get(perm.catalog_key.as_str()).copied();
         let matched = match def {
             Some(d) => {
                 let basic = d.as_land().map_or(false, |l| l.basic);

@@ -102,11 +102,12 @@ impl BattlefieldState {
 }
 
 /// A card as a game object — follows the card through all zone changes.
-/// The immutable blueprint (CardDef) is looked up by name from the catalog.
+/// Carries only game-accumulated state. The card's characteristics are derived
+/// by looking up `catalog_key` in the catalog and applying continuous effects.
 #[derive(Clone)]
 struct GameObject {
     id: ObjId,
-    name: String,
+    catalog_key: String,  // foreign key into the CardDef catalog
     owner: String,        // "us" or "opp" — kept as String for compat with existing player(&str) API
     controller: String,
     zone: CardZone,
@@ -116,10 +117,10 @@ struct GameObject {
 }
 
 impl GameObject {
-    fn new(id: ObjId, name: impl Into<String>, owner: impl Into<String>) -> Self {
+    fn new(id: ObjId, catalog_key: impl Into<String>, owner: impl Into<String>) -> Self {
         let owner = owner.into();
         GameObject {
-            id, name: name.into(), controller: owner.clone(), owner,
+            id, catalog_key: catalog_key.into(), controller: owner.clone(), owner,
             zone: CardZone::Library, is_token: false, bf: None, spell: None,
         }
     }
@@ -207,44 +208,12 @@ pub(crate) struct TriggerContext {
     pub(crate) effect: Effect,
 }
 
-// ── Continuous effects ────────────────────────────────────────────────────────
-
-/// When a continuous effect expires.
-#[derive(Clone, PartialEq)]
-enum EffectExpiry {
-    /// Removed at the start of the controlling player's next Untap step.
-    StartOfControllerNextTurn,
-    /// Removed during the Cleanup step of the current turn.
-    EndOfTurn,
-}
-
-/// A reversible power/toughness modification. Kept as structured data so
-/// Cleanup can undo it precisely without the closure needing mutable access at expiry.
-#[derive(Clone)]
-struct StatModData {
-    target_id: ObjId,
-    power_delta: i32,
-    toughness_delta: i32,
-}
-
-/// A continuous effect that persists across steps or turns.
-#[derive(Clone)]
-struct ContinuousEffect {
-    /// Player who registered this effect (controls the source permanent).
-    controller: String,
-    expires: EffectExpiry,
-    /// Called for each game event. Returns a TriggerContext if this effect fires a triggered
-    /// ability in response to that event. None means the effect is purely passive.
-    on_event: Option<std::sync::Arc<dyn Fn(&GameEvent, &str) -> Option<TriggerContext> + Send + Sync>>,
-    /// If Some, a stat modification that Cleanup must reverse when this effect expires.
-    stat_mod: Option<StatModData>,
-}
-
 // ── Triggers and replacement effects ─────────────────────────────────────────
 
 /// Signature for a per-card trigger check function.
 /// Inspects the event, and if a trigger fires, appends a `TriggerContext` to `pending`.
-pub(super) type TriggerCheckFn = fn(&GameEvent, ObjId, &str, &mut Vec<TriggerContext>);
+pub(super) type TriggerCheckFn =
+    std::sync::Arc<dyn Fn(&GameEvent, ObjId, &str, &mut Vec<TriggerContext>) + Send + Sync>;
 
 /// Signature for a per-card replacement check function.
 /// Returns Some(targets) if this replacement applies to the event; None otherwise.
@@ -253,11 +222,13 @@ pub(super) type ReplacementCheckFn = fn(&GameEvent, ObjId, &str) -> Option<Vec<T
 
 /// One trigger registration per card object in the simulation.
 /// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
-/// `prototype_id` indexes into `CARD_TRIGGERS` in catalog.rs.
+/// Dynamically-created triggers (e.g. Tamiyo +2 watcher) start with `active: true`.
 pub(super) struct TriggerInstance {
     pub(super) source_id: ObjId,
     pub(super) controller: String,
     pub(super) check: TriggerCheckFn,
+    /// None for permanent (card-based) triggers; Some for floating triggers created by abilities.
+    pub(super) expiry: Option<ContinuousExpiry>,
     pub(super) active: bool,
 }
 
@@ -271,6 +242,123 @@ pub(super) struct ReplacementInstance {
     pub(super) check: ReplacementCheckFn,
     pub(super) effect: Effect,
     pub(super) active: bool,
+}
+
+// ── Continuous effects (new model) ───────────────────────────────────────────
+
+/// The seven layers in which continuous effects are applied (MTG rule 613).
+/// Ordering is derived: effects in earlier layers apply before later ones.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(super) enum ContinuousLayer {
+    L1CopyEffects      = 1,
+    L2ControlEffects   = 2,
+    L3TextEffects      = 3,
+    L4TypeEffects      = 4,
+    L5ColorEffects     = 5,
+    L6AbilityEffects   = 6,
+    L7PowerToughness   = 7,
+}
+
+/// Closure that mutates a cloned `CardDef` to apply a continuous effect modifier.
+/// Receives `&SimState` so CDAs (characteristic-defining abilities) can read live game state.
+pub(super) type ContinuousModFn =
+    std::sync::Arc<dyn Fn(&mut CardDef, &SimState) + Send + Sync>;
+
+/// Predicate that decides whether a continuous effect applies to a given object.
+/// Receives (target_id, target_controller).
+pub(super) type ContinuousFilterFn =
+    std::sync::Arc<dyn Fn(ObjId, &str) -> bool + Send + Sync>;
+
+/// When a `ContinuousInstance` expires and should be removed.
+#[derive(Clone, PartialEq, Debug)]
+pub(super) enum ContinuousExpiry {
+    /// Removed during the Cleanup step of the current turn.
+    EndOfTurn,
+    /// Removed at the start of the controlling player's next Untap step.
+    StartOfControllerNextTurn,
+    /// Tied to a permanent being on the battlefield; removed when it leaves play.
+    /// Used for static abilities (intrinsic CEs that a card grants to itself).
+    WhileSourceOnBattlefield,
+}
+
+/// A single registered continuous-effect instance.
+/// Created when a spell or ability that grants a CE resolves.
+/// Removed when `expiry` is met.
+pub(super) struct ContinuousInstance {
+    /// Object that generated this effect (for expiry tracking and logging).
+    pub(super) source_id: ObjId,
+    /// Controller of the source at the time the effect was created.
+    pub(super) controller: String,
+    /// Which layer this modifier applies in (determines application order).
+    pub(super) layer: ContinuousLayer,
+    /// Determines which game objects this CE affects.
+    pub(super) filter: ContinuousFilterFn,
+    /// Mutates the target object's cloned `CardDef`.
+    pub(super) modifier: ContinuousModFn,
+    /// When this instance should be removed.
+    pub(super) expiry: ContinuousExpiry,
+}
+
+/// Snapshot of all objects' effective `CardDef` after continuous effects are applied.
+/// Produced by `recompute` after each state-mutating tick (generation advance).
+/// Strategy and display code read from this; they never access raw `CardDef` fields directly.
+pub(super) struct MaterializedState {
+    /// Generation counter from the `SimState` at the time of recompute.
+    pub(super) generation: u64,
+    /// Effective `CardDef` per battlefield object, post-CE application.
+    pub(super) defs: HashMap<ObjId, CardDef>,
+}
+
+// ── Recompute ─────────────────────────────────────────────────────────────────
+
+/// Fold game-accumulated object state (counters, temporary P/T mods) into a cloned `CardDef`
+/// before continuous-effect modifiers run. This makes counters and other game-state
+/// deltas visible to layer modifiers that inspect P/T (e.g. Tarmogoyf's self-referential
+/// P/T which would interact with a CE modifying it).
+fn fold_game_state_into_def(def: &mut CardDef, obj: &GameObject) {
+    let Some(bf) = &obj.bf else { return };
+    if let CardKind::Creature(c) = &mut def.kind {
+        c.adjust_pt(bf.counters + bf.power_mod, bf.counters + bf.toughness_mod);
+    }
+}
+
+/// Produce a `MaterializedState` snapshot by applying all active `ContinuousInstance`s
+/// to clones of each battlefield object's `CardDef`.
+///
+/// Called after every `fire_event` at recursion depth 0 (each "tick"). Strategy and display
+/// code use the resulting snapshot; they never read raw `CardDef` fields directly.
+///
+/// Application order: instances sorted by `layer` ascending (L1 before L7), then by
+/// insertion order within the same layer (stable sort preserves registration order).
+fn recompute(state: &SimState, catalog: &HashMap<&str, &CardDef>) -> MaterializedState {
+    let mut defs: HashMap<ObjId, CardDef> = HashMap::new();
+
+    for (id, obj) in &state.objects {
+        // Only battlefield objects have an effective CardDef in the materialized view.
+        // Stack abilities (no catalog_key) and non-battlefield objects are excluded.
+        if !matches!(obj.zone, CardZone::Battlefield) { continue; }
+        let Some(&base) = catalog.get(obj.catalog_key.as_str()) else { continue };
+        let mut def = base.clone();
+
+        // Step 1: fold game-accumulated state (counters, temporary mods) into the clone.
+        fold_game_state_into_def(&mut def, obj);
+
+        // Step 2: collect applicable continuous instances and sort by layer.
+        let mut applicable: Vec<&ContinuousInstance> = state.continuous_instances
+            .iter()
+            .filter(|ci| (ci.filter)(*id, &obj.controller))
+            .collect();
+        applicable.sort_by_key(|ci| ci.layer);
+
+        // Step 3: apply each modifier in layer order. Pass `state` so CDAs can read live data.
+        for ci in applicable {
+            (ci.modifier)(&mut def, state);
+        }
+
+        defs.insert(*id, def);
+    }
+
+    MaterializedState { generation: state.generation, defs }
 }
 
 // ── Turn structure ────────────────────────────────────────────────────────────
@@ -575,8 +663,6 @@ pub(crate) struct SimState {
     combat_blocks: Vec<(ObjId, ObjId)>,
     /// Triggered abilities waiting to be pushed onto the stack at the next priority window.
     pending_triggers: Vec<TriggerContext>,
-    /// Active continuous effects (from loyalty abilities, spells, etc.).
-    active_effects: Vec<ContinuousEffect>,
     /// Spell/ability stack. Items are resolved last-in-first-out. Populated by
     /// handle_priority_round; empty between priority rounds.
     pub(crate) stack: Vec<ObjId>,
@@ -598,6 +684,16 @@ pub(crate) struct SimState {
     repl_applied: HashSet<ObjId>,
     /// Recursion depth for fire_event (used to clear repl_applied at the top level).
     repl_depth: u32,
+    /// Monotonically increasing counter — incremented by every `fire_event` call at depth 0.
+    /// `MaterializedState.generation` must match before the snapshot is trusted.
+    pub(super) generation: u64,
+    /// All active continuous-effect instances. Checked at `recompute` time; expired entries
+    /// are removed at Cleanup / start-of-turn as appropriate.
+    pub(super) continuous_instances: Vec<ContinuousInstance>,
+    /// Cached post-CE snapshot of every battlefield permanent's effective CardDef.
+    /// Rebuilt by `recompute` at the end of every top-level `fire_event` call.
+    /// Always current when strategy or display code runs.
+    pub(super) materialized: MaterializedState,
 }
 
 impl SimState {
@@ -615,7 +711,6 @@ impl SimState {
             combat_attackers: Vec::new(),
             combat_blocks: Vec::new(),
             pending_triggers: Vec::new(),
-            active_effects: Vec::new(),
             stack: Vec::new(),
             abilities: HashMap::new(),
             objects: HashMap::new(),
@@ -625,6 +720,9 @@ impl SimState {
             replacement_instances: Vec::new(),
             repl_applied: HashSet::new(),
             repl_depth: 0,
+            generation: 0,
+            continuous_instances: Vec::new(),
+            materialized: MaterializedState { generation: 0, defs: HashMap::new() },
         };
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();
@@ -727,7 +825,7 @@ impl SimState {
     fn permanent_name(&self, id: ObjId) -> Option<String> {
         self.objects.get(&id)
             .filter(|c| c.zone == CardZone::Battlefield)
-            .map(|c| c.name.clone())
+            .map(|c| c.catalog_key.clone())
     }
 
     /// Mana accessible right now for `who`: pool + what untapped permanents can still produce.
@@ -771,7 +869,7 @@ impl SimState {
                             .find(|ma| (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char))
                             .map(|ma| ma.sacrifice_self)
                             .unwrap_or(false);
-                        (*id, c.name.clone(), sac)
+                        (*id, c.catalog_key.clone(), sac)
                     });
                 if let Some((id, name, sac)) = found {
                     if sac {
@@ -812,7 +910,7 @@ impl SimState {
                         .find(|ma| !ma.tap_self || !bf.tapped)
                         .map(|ma| ma.sacrifice_self)
                         .unwrap_or(false);
-                    (*id, c.name.clone(), sac)
+                    (*id, c.catalog_key.clone(), sac)
                 });
             if let Some((id, name, sac)) = found {
                 if sac {
@@ -890,7 +988,7 @@ impl SimState {
 
     pub(crate) fn stack_item_display_name(&self, id: ObjId) -> &str {
         if let Some(card) = self.objects.get(&id) {
-            return card.name.as_str();
+            return card.catalog_key.as_str();
         }
         if let Some(ab) = self.abilities.get(&id) {
             return ab.source_name.as_str();
@@ -928,7 +1026,7 @@ impl SimState {
     fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: &str) -> std::fmt::Result {
         let mut visible: Vec<&str> = self.hand_of(who)
             .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
-            .map(|c| c.name.as_str())
+            .map(|c| c.catalog_key.as_str())
             .collect();
         visible.sort();
         let hidden = self.hand_of(who)
@@ -943,7 +1041,7 @@ impl SimState {
         let gy: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
             .filter(|c| c.owner == who)
-            .map(|c| c.name.clone())
+            .map(|c| c.catalog_key.clone())
             .collect();
         if !gy.is_empty() {
             writeln!(f, "  Graveyard : {}", Self::collapse_counts(gy).join(", "))?;
@@ -951,9 +1049,9 @@ impl SimState {
 
         let mut exile: Vec<String> = self.exile_of(who)
             .map(|c| if matches!(c.zone, CardZone::Exile { on_adventure: true }) {
-                format!("{} (adv)", c.name)
+                format!("{} (adv)", c.catalog_key)
             } else {
-                c.name.clone()
+                c.catalog_key.clone()
             })
             .collect();
         if !exile.is_empty() {
@@ -987,7 +1085,7 @@ impl SimState {
             if bf.loyalty > 0   { tags.push(format!("loy:{}", bf.loyalty)); }
             if bf.tapped         { tags.push("tapped".into()); }
             let suffix = if tags.is_empty() { String::new() } else { format!(" [{}]", tags.join(", ")) };
-            Some(format!("{}{}", card.name, suffix))
+            Some(format!("{}{}", card.catalog_key, suffix))
         };
 
         let mut lands: Vec<&GameObject> = self.permanents_of(who)
@@ -996,7 +1094,7 @@ impl SimState {
         let tapped_first = |a: &&GameObject, b: &&GameObject| {
             let a_tap = a.bf.as_ref().map_or(false, |bf| bf.tapped);
             let b_tap = b.bf.as_ref().map_or(false, |bf| bf.tapped);
-            b_tap.cmp(&a_tap).then(a.name.cmp(&b.name))
+            b_tap.cmp(&a_tap).then(a.catalog_key.cmp(&b.catalog_key))
         };
         lands.sort_by(tapped_first);
 
@@ -1241,7 +1339,7 @@ fn sim_play_land(
 ) {
     if !state.player(who).land_drop_available { return; }
     let land_name = match state.objects.get(&card_id) {
-        Some(c) if matches!(c.zone, CardZone::Hand { .. }) => c.name.clone(),
+        Some(c) if matches!(c.zone, CardZone::Hand { .. }) => c.catalog_key.clone(),
         _ => return,
     };
     state.log(t, who, format!("Play {} [hand: {}]", land_name, state.hand_size(who)));
@@ -1338,6 +1436,16 @@ pub(super) fn fire_event(
     state.pending_triggers.extend(triggers);
 
     state.repl_depth -= 1;
+    if state.repl_depth == 0 {
+        // Each top-level fire_event is one game-state tick.
+        // Advance generation so consumers can detect staleness.
+        state.generation += 1;
+        // Rebuild the materialized snapshot after every top-level tick so that
+        // strategy, display, and combat damage always see a current, CE-adjusted view.
+        // The new generation is embedded in the snapshot.
+        let mat = recompute(state, catalog_map);
+        state.materialized = mat;
+    }
 }
 
 fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
@@ -1365,7 +1473,7 @@ fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str
                     if from == ZoneId::Battlefield { card.bf = None; }
                 }
                 if to == ZoneId::Battlefield && card.bf.is_none() {
-                    let mana_abs = catalog_map.get(card.name.as_str())
+                    let mana_abs = catalog_map.get(card.catalog_key.as_str())
                         .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
                     card.bf = Some(BattlefieldState {
                         mana_abilities: mana_abs,
@@ -1436,14 +1544,17 @@ pub(super) fn change_zone(
             None => return,
         };
         let from = card_zone_to_id(&card.zone);
-        let ct = catalog_map.get(card.name.as_str())
+        let ct = catalog_map.get(card.catalog_key.as_str())
             .map(|d| card_type_str(d))
             .unwrap_or("permanent");
-        (card.name.clone(), card.controller.clone(), from, ct)
+        (card.catalog_key.clone(), card.controller.clone(), from, ct)
     };
     // Activate/deactivate instances BEFORE firing the event so replacement checks see the right state.
     if from == ZoneId::Battlefield { deactivate_instances(id, state); }
-    if to == ZoneId::Battlefield   { activate_instances(id, state); }
+    if to == ZoneId::Battlefield {
+        let def = catalog_map.get(name.as_str()).copied();
+        activate_instances(id, &controller, def, state);
+    }
     fire_event(
         GameEvent::ZoneChange {
             id,
@@ -1480,7 +1591,7 @@ fn pay_activation_cost(
     _catalog_map: &HashMap<&str, &CardDef>,
 ) {
     let source_name = state.permanent_name(source_id)
-        .or_else(|| state.hand_of(who).find(|c| c.id == source_id).map(|c| c.name.clone()))
+        .or_else(|| state.hand_of(who).find(|c| c.id == source_id).map(|c| c.catalog_key.clone()))
         .unwrap_or_default();
     state.log(t, who, format!("Activate {} ability", source_name));
 
@@ -1512,7 +1623,7 @@ fn pay_activation_cost(
     if ability.discard_self {
         // Find the hand card by name.
         let hand_card_id = state.hand_of(who)
-            .find(|c| c.name == source_name)
+            .find(|c| c.catalog_key == source_name)
             .map(|c| c.id);
         if let Some(hid) = hand_card_id {
             state.set_card_zone(hid, CardZone::Graveyard);
@@ -1523,7 +1634,7 @@ fn pay_activation_cost(
     if ability.ninjutsu {
         // Find the ninja in hand by name and move it to a neutral zone (it will enter BF via effect).
         let ninja_hand_id = state.hand_of(who)
-            .find(|c| c.name == source_name)
+            .find(|c| c.catalog_key == source_name)
             .map(|c| c.id);
         if let Some(nid) = ninja_hand_id {
             // Keep it in cards but mark as Stack (it "enters via ninjutsu" when the ability resolves).
@@ -1533,7 +1644,7 @@ fn pay_activation_cost(
         }
         let unblocked_attacker = state.permanents_of(who)
             .find(|c| c.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked))
-            .map(|c| (c.id, c.name.clone(), c.bf.as_ref().and_then(|bf| bf.attack_target)));
+            .map(|c| (c.id, c.catalog_key.clone(), c.bf.as_ref().and_then(|bf| bf.attack_target)));
         if let Some((atk_id, atk_name, _atk_target)) = unblocked_attacker {
             if let Some(card) = state.objects.get_mut(&atk_id) {
                 card.zone = CardZone::Hand { known: false };
@@ -1594,7 +1705,7 @@ fn can_pay_alternate_cost(
     }
     if cost.exile_blue_from_hand {
         let has_pitch = state.hand_of(who)
-            .any(|c| c.name != source_name && catalog_map.get(c.name.as_str())
+            .any(|c| c.catalog_key != source_name && catalog_map.get(c.catalog_key.as_str())
                 .map_or(false, |d| !d.is_land() && d.is_blue()));
         if !has_pitch {
             return false;
@@ -1623,9 +1734,9 @@ fn apply_alt_cost_components(
     if cost.exile_blue_from_hand {
         // Collect pitch candidates from hand.
         let pitch_ids: Vec<(ObjId, String)> = state.hand_of(who)
-            .filter(|c| c.name != source_name
-                && catalog_map.get(c.name.as_str()).map_or(false, |d| !d.is_land() && d.is_blue()))
-            .map(|c| (c.id, c.name.clone()))
+            .filter(|c| c.catalog_key != source_name
+                && catalog_map.get(c.catalog_key.as_str()).map_or(false, |d| !d.is_land() && d.is_blue()))
+            .map(|c| (c.id, c.catalog_key.clone()))
             .collect();
         let idx = rng.gen_range(0..pitch_ids.len());
         let (pitch_id, pitch_name) = pitch_ids[idx].clone();
@@ -1635,7 +1746,7 @@ fn apply_alt_cost_components(
     if cost.bounce_island {
         let bounce = state.permanents_of(who)
             .find(|c| c.bf.as_ref().map_or(false, |bf| bf.mana_abilities.iter().any(|ma| ma.produces.contains('U'))))
-            .map(|c| (c.id, c.name.clone()))
+            .map(|c| (c.id, c.catalog_key.clone()))
             .unwrap();
         let (bounce_id, land_name) = bounce;
         if let Some(card) = state.objects.get_mut(&bounce_id) {
@@ -1681,7 +1792,7 @@ fn cast_spell(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
-    let name = state.objects.get(&card_id)?.name.clone();
+    let name = state.objects.get(&card_id)?.catalog_key.clone();
     let def = *catalog_map.get(name.as_str())?;
 
     if face == SpellFace::Adventure {
@@ -1716,7 +1827,7 @@ fn cast_spell(
 
     // Delve: reduce generic cost by exiling cards from the caster's graveyard.
     let to_exile_ids: Vec<(ObjId, String)> = if def.delve() && cost.generic > 0 {
-        let gy: Vec<(ObjId, String)> = state.graveyard_of(who).map(|c| (c.id, c.name.clone())).collect();
+        let gy: Vec<(ObjId, String)> = state.graveyard_of(who).map(|c| (c.id, c.catalog_key.clone())).collect();
         let mut cards = Vec::new();
         for (id, card_name) in &gy {
             if cards.len() as i32 >= cost.generic { break; }
@@ -1811,19 +1922,14 @@ fn cast_spell(
 
 
 
-// ── Combat helpers ────────────────────────────────────────────────────────────
-
-/// Return (power, toughness) for a permanent, adding any +1/+1 counters and temporary mods.
-fn creature_stats(bf: &BattlefieldState, def: Option<&CardDef>) -> (i32, i32) {
-    let power     = def.and_then(|d| d.as_creature()).map(|c| c.power).unwrap_or(1);
-    let toughness = def.and_then(|d| d.as_creature()).map(|c| c.toughness).unwrap_or(1);
-    (power + bf.counters + bf.power_mod, toughness + bf.counters + bf.toughness_mod)
-}
-
 // ── Keyword helpers ───────────────────────────────────────────────────────────
 
-fn creature_has_keyword(name: &str, kw: &str, catalog_map: &HashMap<&str, &CardDef>) -> bool {
-    catalog_map.get(name).map(|d| d.has_keyword(kw)).unwrap_or(false)
+/// Return true if the permanent with `id` has the given keyword in the materialized (CE-applied) view.
+/// Always reads from materialized state so CEs that grant or remove keywords are respected.
+pub(super) fn creature_has_keyword(id: ObjId, kw: &str, state: &SimState) -> bool {
+    state.materialized.defs.get(&id)
+        .map(|d| d.has_keyword(kw))
+        .unwrap_or(false)
 }
 
 
@@ -1835,6 +1941,11 @@ fn check_state_based_actions(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut dyn rand::RngCore,
 ) {
+    // Ensure materialized state is current before reading it for SBA checks.
+    // (It may be stale if state was mutated outside fire_event, e.g. directly in tests.)
+    let mat = recompute(state, catalog_map);
+    state.materialized = mat;
+
     loop {
         let mut any = false;
 
@@ -1863,9 +1974,12 @@ fn check_state_based_actions(
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
-                    let def = catalog_map.get(card.name.as_str()).copied();
+                    let def = catalog_map.get(card.catalog_key.as_str()).copied();
                     if !def.map_or(false, |d| d.is_creature()) { return None; }
-                    let (_, tgh) = creature_stats(bf, def);
+                    let tgh = state.materialized.defs.get(&card.id)
+                        .and_then(|d| d.as_creature())
+                        .map(|c| c.toughness())
+                        .unwrap_or(1);
                     if tgh <= 0 || bf.damage >= tgh { Some(card.id) } else { None }
                 })
                 .collect();
@@ -1880,7 +1994,7 @@ fn check_state_based_actions(
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
-                    let def = catalog_map.get(card.name.as_str())?;
+                    let def = catalog_map.get(card.catalog_key.as_str())?;
                     if !matches!(def.kind, CardKind::Planeswalker(_)) { return None; }
                     if bf.loyalty <= 0 { Some(card.id) } else { None }
                 })
@@ -1899,10 +2013,10 @@ fn check_state_based_actions(
             let mut extras: Vec<ObjId> = Vec::new();
             let legendaries: Vec<(String, ObjId)> = state.permanents_of(who)
                 .filter(|card| {
-                    catalog_map.get(card.name.as_str())
+                    catalog_map.get(card.catalog_key.as_str())
                         .map_or(false, |d| d.legendary())
                 })
-                .map(|card| (card.name.clone(), card.id))
+                .map(|card| (card.catalog_key.clone(), card.id))
                 .collect();
             for (name, id) in legendaries {
                 if let Some(_existing) = seen.get(&name) {
@@ -1927,7 +2041,7 @@ fn opp_of(who: &str) -> &'static str {
 
 fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
     let army_id: Option<ObjId> = state.permanents_of(controller)
-        .find(|c| c.name == "Orc Army")
+        .find(|c| c.catalog_key == "Orc Army")
         .map(|c| c.id);
     if let Some(army_id) = army_id {
         if let Some(bf) = state.permanent_bf_mut(army_id) {
@@ -1939,7 +2053,7 @@ fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
         let new_id = state.alloc_id();
         state.objects.insert(new_id, GameObject {
             id: new_id,
-            name: "Orc Army".to_string(),
+            catalog_key: "Orc Army".to_string(),
             owner: controller.to_string(),
             controller: controller.to_string(),
             zone: CardZone::Battlefield,
@@ -1958,7 +2072,7 @@ fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
     let new_id = state.alloc_id();
     state.objects.insert(new_id, GameObject {
         id: new_id,
-        name: "Clue Token".to_string(),
+        catalog_key: "Clue Token".to_string(),
         owner: controller.to_string(),
         controller: controller.to_string(),
         zone: CardZone::Battlefield,
@@ -1975,7 +2089,7 @@ fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u
         .unwrap_or(2);
     // Mutate in place via state.objects — same ObjId, preserves damage/entered_this_turn.
     if let Some(card) = state.objects.get_mut(&source_id) {
-        card.name = "Tamiyo, Seasoned Scholar".to_string();
+        card.catalog_key = "Tamiyo, Seasoned Scholar".to_string();
         if let Some(bf) = card.bf.as_mut() {
             bf.loyalty = loyalty;
             bf.active_face = 1;
@@ -2008,7 +2122,7 @@ fn resolve_top_of_stack(
             annotation: None,
         });
         let owner_str = state.objects[&id].owner.clone();
-        let name = state.objects[&id].name.clone();
+        let name = state.objects[&id].catalog_key.clone();
 
         if spell.is_adventure_face {
             if let Some(ref eff) = spell.effect {
@@ -2090,7 +2204,7 @@ fn handle_priority_round(
                     continue;
                 }
                 let source_name_for_stack = state.permanent_name(source_id)
-                    .or_else(|| state.objects.get(&source_id).map(|c| c.name.clone()))
+                    .or_else(|| state.objects.get(&source_id).map(|c| c.catalog_key.clone()))
                     .unwrap_or_default();
                 let (ability_effect, ability_targets): (Option<Effect>, Vec<Target>) = if ability.ninjutsu {
                     let attack_target = state.permanents_of(&who)
@@ -2099,7 +2213,7 @@ fn handle_priority_round(
                     let who_str = who.clone();
                     let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets, catalog_map, _rng| {
                         let ninja_name = state.objects.get(&source_id)
-                            .map(|c| c.name.clone())
+                            .map(|c| c.catalog_key.clone())
                             .unwrap_or_default();
                         if ninja_name.is_empty() { return; }
                         let mana_abs = catalog_map.get(ninja_name.as_str())
@@ -2107,7 +2221,7 @@ fn handle_priority_round(
                         let new_id = state.alloc_id();
                         state.objects.insert(new_id, GameObject {
                             id: new_id,
-                            name: ninja_name.clone(),
+                            catalog_key: ninja_name.clone(),
                             owner: who_str.clone(),
                             controller: who_str.clone(),
                             zone: CardZone::Battlefield,
@@ -2155,7 +2269,7 @@ fn handle_priority_round(
                 last_passer = None;
             }
             PriorityAction::CastSpell { card_id, face, ref preferred_cost } => {
-                let name = state.objects.get(&card_id).map(|c| c.name.clone()).unwrap_or_default();
+                let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
                 // Sorcery-speed check for main-face non-instants.
                 let is_instant = face == SpellFace::Adventure || catalog_map.get(name.as_str())
                     .map(|d| d.is_instant()).unwrap_or(false);
@@ -2215,6 +2329,12 @@ fn do_step(
     catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) {
+    // Ensure materialized state is current at the start of every step.
+    // Strategy calls (declare_attackers, declare_blockers) and combat damage run against
+    // this snapshot; fire_event also rebuilds it after each tick.
+    let mat = recompute(state, catalog_map);
+    state.materialized = mat;
+
     state.current_phase = Some(TurnPosition::Step(step.kind));
     match step.kind {
         StepKind::Untap => {
@@ -2229,9 +2349,12 @@ fn do_step(
             state.player_mut(ap).land_drop_available = true;
             state.player_mut(ap).spells_cast_this_turn = 0;
             state.player_mut(ap).draws_this_turn = 0;
-            // Expire "until your next turn" effects whose controller is now the active player.
-            state.active_effects.retain(|e| {
-                !(e.expires == EffectExpiry::StartOfControllerNextTurn && e.controller == ap)
+            // Expire "until your next turn" trigger and continuous instances for the active player.
+            state.trigger_instances.retain(|ti| {
+                !(ti.expiry == Some(ContinuousExpiry::StartOfControllerNextTurn) && ti.controller == ap)
+            });
+            state.continuous_instances.retain(|ci| {
+                !(ci.expiry == ContinuousExpiry::StartOfControllerNextTurn && ci.controller == ap)
             });
         }
         StepKind::Draw => {
@@ -2251,20 +2374,9 @@ fn do_step(
                     bf.damage = 0;
                 }
             }
-            // Expire EndOfTurn continuous effects, undoing any StatMod they applied.
-            let expiring: Vec<ContinuousEffect> = state.active_effects.iter()
-                .filter(|e| e.expires == EffectExpiry::EndOfTurn)
-                .cloned()
-                .collect();
-            state.active_effects.retain(|e| e.expires != EffectExpiry::EndOfTurn);
-            for effect in expiring {
-                if let Some(sm) = &effect.stat_mod {
-                    if let Some(bf) = state.permanent_bf_mut(sm.target_id) {
-                        bf.power_mod -= sm.power_delta;
-                        bf.toughness_mod -= sm.toughness_delta;
-                    }
-                }
-            }
+            // Expire EndOfTurn continuous and trigger instances.
+            state.continuous_instances.retain(|ci| ci.expiry != ContinuousExpiry::EndOfTurn);
+            state.trigger_instances.retain(|ti| ti.expiry != Some(ContinuousExpiry::EndOfTurn));
         }
         StepKind::DeclareAttackers => {
             // Strategy decides who attacks and what each attacker targets.
@@ -2284,7 +2396,7 @@ fn do_step(
                     let target_name = p.bf.as_ref()?.attack_target
                         .and_then(|id| state.permanent_name(id))
                         .unwrap_or_else(|| "player".to_string());
-                    Some(format!("{} → {}", p.name, target_name))
+                    Some(format!("{} → {}", p.catalog_key, target_name))
                 }).collect();
                 state.log(t, ap, format!("Declare attackers: {}", atk_descs.join(", ")));
             }
@@ -2306,8 +2418,8 @@ fn do_step(
             // Strategy decides which blockers to assign.
             let blocks = declare_blockers(ap, state, catalog_map);
             for &(atk_id, blk_id) in &blocks {
-                let atk_name = state.objects.get(&atk_id).map(|p| p.name.as_str()).unwrap_or("");
-                let blk_name = state.objects.get(&blk_id).map(|p| p.name.clone()).unwrap_or_default();
+                let atk_name = state.objects.get(&atk_id).map(|p| p.catalog_key.as_str()).unwrap_or("");
+                let blk_name = state.objects.get(&blk_id).map(|p| p.catalog_key.clone()).unwrap_or_default();
                 state.log(t, nap, format!("{} blocks {}", blk_name, atk_name));
             }
             state.combat_blocks = blocks;
@@ -2333,11 +2445,13 @@ fn do_step(
                 let mut player_damage = 0i32;
 
                 for &(atk_id, blk_id) in &block_pairs {
-                    let atk_pow = state.objects.get(&atk_id)
-                        .and_then(|p| p.bf.as_ref().map(|bf| creature_stats(bf, catalog_map.get(p.name.as_str()).copied()).0))
+                    let atk_pow = state.materialized.defs.get(&atk_id)
+                        .and_then(|d| d.as_creature())
+                        .map(|c| c.power())
                         .unwrap_or(1);
-                    let blk_pow = state.objects.get(&blk_id)
-                        .and_then(|p| p.bf.as_ref().map(|bf| creature_stats(bf, catalog_map.get(p.name.as_str()).copied()).0))
+                    let blk_pow = state.materialized.defs.get(&blk_id)
+                        .and_then(|d| d.as_creature())
+                        .map(|c| c.power())
                         .unwrap_or(1);
                     if let Some(bf) = state.permanent_bf_mut(atk_id) {
                         bf.damage += blk_pow;
@@ -2350,11 +2464,13 @@ fn do_step(
                 let mut pw_damage: HashMap<ObjId, i32> = HashMap::new();
                 for &atk_id in &attackers {
                     if !blocked_atk_ids.contains(&atk_id) {
-                        let (atk_pow, attack_target) = state.objects.get(&atk_id)
-                            .and_then(|p| p.bf.as_ref().map(|bf| {
-                                (creature_stats(bf, catalog_map.get(p.name.as_str()).copied()).0, bf.attack_target)
-                            }))
-                            .unwrap_or((1, None));
+                        let atk_pow = state.materialized.defs.get(&atk_id)
+                            .and_then(|d| d.as_creature())
+                            .map(|c| c.power())
+                            .unwrap_or(1);
+                        let attack_target = state.objects.get(&atk_id)
+                            .and_then(|p| p.bf.as_ref())
+                            .and_then(|bf| bf.attack_target);
                         match attack_target {
                             None => player_damage += atk_pow,
                             Some(pw_id) => *pw_damage.entry(pw_id).or_insert(0) += atk_pow,

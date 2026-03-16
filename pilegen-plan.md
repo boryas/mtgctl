@@ -372,13 +372,169 @@ effects are already declared.
 
 **DONE** — see Steps 10 and 11.
 
-### Characteristic changing abilities
-once we have truly rich characteristics
-tag a card with "has a characteristic changing ability"
-and then when you look at a characteristic of that card, you have to run the ability on it first
-e.g. barrowgoyf p/t, kaito hexproof creature on owner turn
+### Continuous Effects
+https://yawgatog.com/resources/magic-rules/#R611
+
+Full design: `pilegen-continuous-effects-design.md`
+
+#### Step 13a — Clean up `GameObject` **DONE**
+
+Renamed `GameObject.name` → `GameObject.catalog_key` throughout. `CardDef.name`
+and `AdventureFace.name` are unchanged. The foreign-key relationship between
+game objects and catalog entries is now explicit in the type.
+
+#### Step 13b — Define CE types + `recompute` **DONE**
+
+Added to `mod.rs`:
+- `ContinuousLayer` (L1–L7, `Ord`-derived for sort)
+- `ContinuousModFn` / `ContinuousFilterFn` — Arc closures
+- `ContinuousExpiry` — `EndOfTurn` | `StartOfControllerNextTurn`
+- `ContinuousInstance` — one registered CE (source_id, controller, layer, filter, modifier, expiry)
+- `MaterializedState` — snapshot: `generation: u64` + `defs: HashMap<ObjId, CardDef>`
+- Added `generation: u64` and `continuous_instances: Vec<ContinuousInstance>` to `SimState`
+- `fold_game_state_into_def` — folds counters + power_mod/toughness_mod into cloned `CardDef`
+- `recompute` — iterates battlefield objects, folds game state, sorts/applies CEs by layer
+
+Two new tests: `test_recompute_pt_modifier` and `test_recompute_counters_fold_before_ce`.
+128 tests pass.
+
+#### Step 13c — Thread `MaterializedState` through the engine **DONE**
+
+Added `materialized: MaterializedState` to `SimState` (initialized empty).
+At the end of `fire_event` at depth 0, calls `recompute` and stores the result.
+Also rebuilds at the start of `do_step` and `check_state_based_actions` to handle
+callers that don't go through `fire_event` (including tests).
+
+Replaced all `creature_stats(bf, catalog_map.get(...))` callsites:
+- `mod.rs`: SBA creature-dying check, both blocked-combat power reads, unblocked attacker power
+- `strategy.rs`: blocker power (nap_blockers), attacker toughness (survive-attack check), attacker P/T (blocker evaluation), blocker P/T
+- `predicates.rs`: killable-creature filter in `choose_trigger_target`
+
+Deleted `creature_stats`. Removed 3 now-redundant unit tests for it.
+125 tests pass.
+
+#### Step 13d — Increment `generation` on every tick **DONE**
+
+`state.generation` is incremented in `fire_event` when `repl_depth` returns to 0 (before
+`recompute`). The resulting `MaterializedState.generation` carries the current generation, so
+consumers can detect staleness by comparing against `state.generation`.
+126 tests pass.
+
+#### Step 13e — Make `CreatureData.power`/`toughness` private; enforce write discipline **DONE**
+
+`CreatureData.power` and `CreatureData.toughness` are now private to `catalog.rs`.
+
+Added to `CreatureData`:
+- `pub(crate) fn power(&self) -> i32` — read accessor (for materialized-def callers)
+- `pub(crate) fn toughness(&self) -> i32` — read accessor
+- `pub(super) fn adjust_pt(&mut self, delta_p, delta_t)` — the only write path (pilegen-internal)
+
+Updated all call sites:
+- `fold_game_state_into_def` → `c.adjust_pt(...)` instead of direct field mutation
+- CE modifier closure in tests → `c.adjust_pt(2, 1)`
+- All 15 read sites (mod.rs, strategy.rs, predicates.rs, tests.rs) → `c.power()` / `c.toughness()`
+
+The compiler now prevents any accidental assignment to raw `power`/`toughness` outside the
+CE machinery. Read discipline (going through `MaterializedState.defs`) remains a convention
+enforced by code review, not yet by types — the `power()`/`toughness()` methods exist on
+both raw-catalog and materialized defs. Full type-level enforcement (raw vs materialized
+distinct types) is deferred to a later step.
+126 tests pass.
+
+#### Step 13f — Replace `state.active_effects` with `ContinuousInstance`s **DONE**
+
+Deleted `ContinuousEffect`, `EffectExpiry`, `StatModData`, and `state.active_effects`.
+- Tamiyo +2 stat mod → L7 `ContinuousInstance` (filter by attacker ObjId, EndOfTurn expiry)
+- Tamiyo +2 trigger watcher → floating `TriggerInstance` (StartOfControllerNextTurn expiry)
+- `TriggerCheckFn` changed from fn ptr to `Arc<dyn Fn(...)>` to support closure captures
+- `TriggerInstance` gains `expiry: Option<ContinuousExpiry>` for floating trigger lifetimes
+- Untap/Cleanup step logic updated to expire TriggerInstances and ContinuousInstances
+
+129 tests pass.
+
+#### Step 13g — Static abilities from TOML + first CDA **DONE**
+
+- `StaticAbilityDef = Arc<dyn Fn(ObjId, &str) -> ContinuousInstance + Send + Sync>` (factory type)
+- `CardDef.static_ability_defs: Vec<StaticAbilityDef>` — built at load time from TOML `static_abilities`
+- `ContinuousExpiry::WhileSourceOnBattlefield` — removed by `deactivate_instances` at LTB
+- `activate_instances(id, controller, def, state)` — registers static ability CIs at ETB
+- `deactivate_instances` — removes `WhileSourceOnBattlefield` CIs when card leaves play
+- `ContinuousModFn` now `Arc<dyn Fn(&mut CardDef, &SimState)>` — CDAs can read live state
+- `creature_has_keyword(id, kw, state)` now reads materialized state (CE-granted keywords visible)
+- `declare_attackers`/`declare_blockers` in strategy.rs now use materialized state for flying
+- TOML `static_abilities = ["flying"]` supported via `static_ability_def_from_str`
+- Tests: `test_static_ability_def_grants_flying_at_etb`, `test_static_ability_def_removed_at_ltb`,
+  `test_cda_power_equals_graveyard_count` (CDA reads live GY count from state)
+
+129 tests pass.
+
+#### Problem
+
+Continuous effects can modify any aspect of a card.
+
+illustrative examples:
+
+- **Barrowgoyf**: P/T = (number of distinct card types across all graveyards) / (that + 1).
+  Changes *numeric* characteristics. The game state (all GY objects + catalog) must be
+  consulted every time P/T is read.
+
+- **Kaito, Bane of Nightmares**: During its controller's turn, Kaito IS a creature with
+  hexproof (in addition to being a planeswalker). Changes *card type* and *keyword
+  abilities* dynamically based on whose turn it is.
+  
+- **Blood Moon**: All nonbasic lands are mountains
+- **Yavimaya, Cradle of Growth**: All lands are forests in addition to their other types
+
+The engine currently reads cards directly from struct fields (`creature_data.power`,
+`def.is_creature()`, `def.has_keyword("flying")`, etc.). A continuous effect cannot intercept these reads —
+there is no hook. The `creature_stats` function is an ad-hoc partial solution for P/T, but
+it is not general and does not cover type or abilities.
+
+In the limit: access to every aspect of a card must be capable of going through continuous effects without the
+engine knowing anything special about the access.
+
+#### The crux: central dispatch on every property read
+
+The question "when do we call compute_characteristics?" has exactly one correct answer:
+**always, for every property read, with no exceptions**. Not "when we suspect a CDA might
+apply" — that requires knowing ahead of time which cards have CDAs, which is the hardcoding
+we are trying to eliminate.
+
+The guarantee must be structural: it must be **impossible** to read any property of a game
+object without going through the central dispatch. That means all characteristic fields on
+`CardDef`, `CreatureData`, etc. are private. The only way to ask "what is the power of this permanent?" is through the dispatch.
+
+#### Strategy
+
+**single api entry point for accessing card internals**
+I don't care strongly about the implementation. a typed dispatch or some kind of macro system both seem plausible to me. Here, even strings seem reasonable enough. The point is we need: get(Object, Property) and for get() to first call `apply_continuous_effects(obj)` which applies the (ultimately extremely complex) rules for continuous effects to the object before returning the information. It is debatable whether we should do it per property or to get an instantiated atomically coherent view of the whole object. Both have plusses and minuses (the former is always uptodate as continuous effects are always applied instantaneously in the rules, the latter is more efficient and prevents code from accidentally weaving a state change between two reads that should actually happen "at the same time")
+
+naturally, `apply_continuous_effects` needs to use the same pattern as replacements/triggers for deciding whether to apply or not: registration and predicate filtering. If we have an active continuous effect and the object matches, we apply it. There are very complex (some of the most complex in the game) rules for the ordering of continuous effects which we may eventually implement but to start we can do any old order and go from there.
+
+**Architectural parallel:**
+The engine already enforces this pattern for state *mutations*: all game state changes go
+through `fire_event`, which can be intercepted by replacement effects and triggers. No one
+mutates state directly.
+
+`get` and `apply_continuous_effects` is the exact same pattern for state *reads*: all reads go through it. Two central dispatches; one for writes, one for reads. Neither can be bypassed.
+
+#### Enforcing the discipline with Rust's type system
+
+"Discipline" is not enough; the **compiler** must enforce it. Rust's module privacy does this:
+
+- All fields on `CardDef`, `CreatureData`, `LandData`, etc. become **private**
+  (no `pub`). This includes `kind`, `power`, `toughness`, `keywords`, `abilities`,
+  `mana_abilities`, `loyalty`, `mana_cost`, `colors`, subtypes — everything about a card could be modified by a continuous effect.
+
+The same technique could be applied to the write side: make `SimState`'s mutable game
+fields private so that only `do_effect` (called from `fire_event`) can write them directly.
+All other code would be forced through `fire_event`, making replacement hooks and trigger
+hooks impossible to bypass by accident. This is a significant refactor but the approach is
+the same: module privacy as the compiler-enforced guarantee. Worth a dedicated step once the
+read side is complete.
 
 ### State-based actions
+DONE
 SBAs (creatures with lethal damage, players at 0 life, pw with 0 loyalty, two of a legend, etc.) are currently checked inline at specific points. A proper `check_state_based_actions` pass before every priority invocation would make the engine more correct and remove special-case checks.
 
 ### Searching
@@ -429,6 +585,7 @@ attacking / blocking strategy is in `do_step` for DeclareAttackers/DeclareBlocke
 share 'unblocked' state between ninjutsu and damage? or derive it naturally from attacking/blocked/step?
 
 ### `activate_planeswalkers`
+DONE
 "pending actions" type logic should all be in strategy, not main engine.
 
 ## review / cleanups

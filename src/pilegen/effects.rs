@@ -129,7 +129,7 @@ pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filt
         let target_who = target.resolve(&caster).to_string();
         for _ in 0..n {
             let candidates: Vec<ObjId> = state.hand_of(&target_who)
-                .filter(|c| filter.is_empty() || filter == "any" || catalog.get(c.name.as_str())
+                .filter(|c| filter.is_empty() || filter == "any" || catalog.get(c.catalog_key.as_str())
                     .map_or(true, |d| matches_target_type(&filter, &d.kind, false, Some(d))))
                 .map(|c| c.id)
                 .collect();
@@ -168,13 +168,14 @@ pub(crate) fn eff_enter_permanent(
         let new_id = state.alloc_id();
         // Pre-register and immediately activate instances before the event fires,
         // so ETB replacement checks (e.g. Murktide self-ETB) can intercept the event.
-        if let Some(def) = catalog.get(card_name.as_str()) {
+        let card_def = catalog.get(card_name.as_str()).copied();
+        if let Some(def) = card_def {
             preregister_instances(def, new_id, &owner, state);
         }
-        activate_instances(new_id, state);
+        activate_instances(new_id, &owner, card_def, state);
         state.objects.insert(new_id, GameObject {
             id: new_id,
-            name: card_name.clone(),
+            catalog_key: card_name.clone(),
             owner: owner.clone(),
             controller: owner.clone(),
             zone: CardZone::Battlefield,
@@ -215,7 +216,7 @@ pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
         if let Some(pos) = pos {
             state.stack.remove(pos);
             if let Some(card) = state.objects.get_mut(&target_id) {
-                let name = card.name.clone();
+                let name = card.catalog_key.clone();
                 card.zone = CardZone::Graveyard;
                 card.spell = None;
                 state.log(t, &caster, format!("→ {} countered", name));
@@ -255,8 +256,8 @@ pub(crate) fn eff_fetch_search(
         let source_name = state.permanent_name(source_id).unwrap_or_default();
         // Collect candidates from Library zone.
         let candidates: Vec<(ObjId, String)> = state.library_of(&who)
-            .filter(|c| catalog.get(c.name.as_str()).map_or(false, |d| matches_search_filter(&filter, d)))
-            .map(|c| (c.id, c.name.clone()))
+            .filter(|c| catalog.get(c.catalog_key.as_str()).map_or(false, |d| matches_search_filter(&filter, d)))
+            .map(|c| (c.id, c.catalog_key.clone()))
             .collect();
         if !candidates.is_empty() {
             // Prefer a black-producing land if available.
