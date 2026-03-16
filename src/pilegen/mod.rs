@@ -62,10 +62,6 @@ struct SpellState {
     chosen_targets: Vec<Target>,
     is_adventure_face: bool,
     adventure_card_name: Option<String>,
-    /// Pre-computed annotation (e.g. "+3" for Murktide). Captured in the Effect
-    /// closure at cast time; stored here for inspection/debugging.
-    #[allow(dead_code)]
-    annotation: Option<String>,
 }
 
 /// In-play state for any permanent (land, creature, artifact, planeswalker, enchantment, token).
@@ -84,19 +80,17 @@ struct BattlefieldState {
     attacking: bool,
     unblocked: bool,
     attack_target: Option<ObjId>,  // None = attacking player, Some = attacking planeswalker
-    annotation: Option<String>,
-    mana_abilities: Vec<ManaAbility>,  // cached from CardDef at entry
     /// Active face index for double-faced cards (0 = front, 1 = back). Flip sets this to 1.
     active_face: u8,
 }
 
 impl BattlefieldState {
-    fn new(mana_abilities: Vec<ManaAbility>) -> Self {
+    fn new() -> Self {
         BattlefieldState {
             tapped: false, damage: 0, entered_this_turn: true, counters: 0,
             power_mod: 0, toughness_mod: 0, loyalty: 0, pw_activated_this_turn: false,
             attacking: false, unblocked: false, attack_target: None,
-            annotation: None, mana_abilities, active_face: 0,
+            active_face: 0,
         }
     }
 }
@@ -299,13 +293,15 @@ pub(super) struct ContinuousInstance {
     pub(super) expiry: ContinuousExpiry,
 }
 
-/// Snapshot of all objects' effective `CardDef` after continuous effects are applied.
+/// Snapshot of all game objects' effective `CardDef` after continuous effects are applied.
+/// Covers every zone (battlefield, hand, library, GY, exile, stack) so that zone-spanning CEs
+/// (e.g. Painter's Servant, Mycosynth Lattice) are reflected everywhere.
 /// Produced by `recompute` after each state-mutating tick (generation advance).
 /// Strategy and display code read from this; they never access raw `CardDef` fields directly.
 pub(super) struct MaterializedState {
     /// Generation counter from the `SimState` at the time of recompute.
     pub(super) generation: u64,
-    /// Effective `CardDef` per battlefield object, post-CE application.
+    /// Effective `CardDef` per game object (all zones), post-CE application.
     pub(super) defs: HashMap<ObjId, CardDef>,
 }
 
@@ -323,20 +319,23 @@ fn fold_game_state_into_def(def: &mut CardDef, obj: &GameObject) {
 }
 
 /// Produce a `MaterializedState` snapshot by applying all active `ContinuousInstance`s
-/// to clones of each battlefield object's `CardDef`.
+/// to clones of each game object's `CardDef`.
+///
+/// All zones are covered: CEs such as Painter's Servant and Mycosynth Lattice can modify
+/// per-card characteristics in every zone (hand, library, GY, exile, stack, battlefield).
+/// Objects with no entry in the catalog (e.g. naked stack abilities) are silently skipped
+/// by the `catalog.get()` guard below.
 ///
 /// Called after every `fire_event` at recursion depth 0 (each "tick"). Strategy and display
 /// code use the resulting snapshot; they never read raw `CardDef` fields directly.
 ///
 /// Application order: instances sorted by `layer` ascending (L1 before L7), then by
 /// insertion order within the same layer (stable sort preserves registration order).
-fn recompute(state: &SimState, catalog: &HashMap<&str, &CardDef>) -> MaterializedState {
+pub(super) fn recompute(state: &SimState, catalog: &HashMap<&str, &CardDef>) -> MaterializedState {
     let mut defs: HashMap<ObjId, CardDef> = HashMap::new();
 
     for (id, obj) in &state.objects {
-        // Only battlefield objects have an effective CardDef in the materialized view.
-        // Stack abilities (no catalog_key) and non-battlefield objects are excluded.
-        if !matches!(obj.zone, CardZone::Battlefield) { continue; }
+        // Objects with no catalog entry (naked stack abilities) are excluded.
         let Some(&base) = catalog.get(obj.catalog_key.as_str()) else { continue };
         let mut def = base.clone();
 
@@ -833,7 +832,8 @@ impl SimState {
         let mut p = self.player(who).pool.clone();
         for card in self.permanents_of(who) {
             if let Some(bf) = &card.bf {
-                accumulate_source_potential(&bf.mana_abilities, bf.tapped, &mut p);
+                let mas = self.materialized.defs.get(&card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
+                accumulate_source_potential(mas, bf.tapped, &mut p);
             }
         }
         p
@@ -857,15 +857,17 @@ impl SimState {
             while remaining > 0 {
                 // Find a battlefield permanent controlled by `who` with the right ability.
                 let found = self.objects.iter()
-                    .find(|(_, c)| {
+                    .find(|(id, c)| {
                         c.controller == who && c.zone == CardZone::Battlefield &&
-                        c.bf.as_ref().map_or(false, |bf| bf.mana_abilities.iter().any(|ma| {
-                            (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char)
-                        }))
+                        c.bf.as_ref().map_or(false, |bf| {
+                            self.materialized.defs.get(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
+                                .iter().any(|ma| (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char))
+                        })
                     })
                     .map(|(id, c)| {
                         let bf = c.bf.as_ref().unwrap();
-                        let sac = bf.mana_abilities.iter()
+                        let sac = self.materialized.defs.get(id).map(|d| d.mana_abilities()).unwrap_or(&[])
+                            .iter()
                             .find(|ma| (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char))
                             .map(|ma| ma.sacrifice_self)
                             .unwrap_or(false);
@@ -897,16 +899,17 @@ impl SimState {
         let mut remaining_generic = cost.generic;
         while remaining_generic > 0 {
             let found = self.objects.iter()
-                .find(|(_, c)| {
+                .find(|(id, c)| {
                     c.controller == who && c.zone == CardZone::Battlefield &&
                     c.bf.as_ref().map_or(false, |bf| {
-                        !bf.mana_abilities.is_empty() &&
-                        bf.mana_abilities.iter().any(|ma| !ma.tap_self || !bf.tapped)
+                        let mas = self.materialized.defs.get(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
+                        !mas.is_empty() && mas.iter().any(|ma| !ma.tap_self || !bf.tapped)
                     })
                 })
                 .map(|(id, c)| {
                     let bf = c.bf.as_ref().unwrap();
-                    let sac = bf.mana_abilities.iter()
+                    let sac = self.materialized.defs.get(id).map(|d| d.mana_abilities()).unwrap_or(&[])
+                        .iter()
                         .find(|ma| !ma.tap_self || !bf.tapped)
                         .map(|ma| ma.sacrifice_self)
                         .unwrap_or(false);
@@ -1080,7 +1083,6 @@ impl SimState {
         let fmt_perm = |card: &&GameObject| -> Option<String> {
             let bf = card.bf.as_ref()?;
             let mut tags: Vec<String> = Vec::new();
-            if let Some(ann) = &bf.annotation { tags.push(ann.clone()); }
             if bf.counters != 0 { tags.push(format!("{:+}", bf.counters)); }
             if bf.loyalty > 0   { tags.push(format!("loy:{}", bf.loyalty)); }
             if bf.tapped         { tags.push("tapped".into()); }
@@ -1089,7 +1091,7 @@ impl SimState {
         };
 
         let mut lands: Vec<&GameObject> = self.permanents_of(who)
-            .filter(|c| c.bf.as_ref().map_or(false, |bf| !bf.mana_abilities.is_empty()))
+            .filter(|c| c.bf.is_some() && !self.materialized.defs.get(&c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty())
             .collect();
         let tapped_first = |a: &&GameObject, b: &&GameObject| {
             let a_tap = a.bf.as_ref().map_or(false, |bf| bf.tapped);
@@ -1099,7 +1101,7 @@ impl SimState {
         lands.sort_by(tapped_first);
 
         let mut others: Vec<&GameObject> = self.permanents_of(who)
-            .filter(|c| c.bf.as_ref().map_or(true, |bf| bf.mana_abilities.is_empty()))
+            .filter(|c| c.bf.is_none() || self.materialized.defs.get(&c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty())
             .collect();
         others.sort_by(tapped_first);
 
@@ -1448,7 +1450,7 @@ pub(super) fn fire_event(
     }
 }
 
-fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
+fn do_effect(event: &GameEvent, state: &mut SimState, _catalog_map: &HashMap<&str, &CardDef>) {
     match event {
         GameEvent::ZoneChange { id, from, to, .. } => {
             let id = *id;
@@ -1473,12 +1475,9 @@ fn do_effect(event: &GameEvent, state: &mut SimState, catalog_map: &HashMap<&str
                     if from == ZoneId::Battlefield { card.bf = None; }
                 }
                 if to == ZoneId::Battlefield && card.bf.is_none() {
-                    let mana_abs = catalog_map.get(card.catalog_key.as_str())
-                        .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
                     card.bf = Some(BattlefieldState {
-                        mana_abilities: mana_abs,
                         entered_this_turn: true,
-                        ..BattlefieldState::new(vec![])
+                        ..BattlefieldState::new()
                     });
                 }
             }
@@ -1544,7 +1543,7 @@ pub(super) fn change_zone(
             None => return,
         };
         let from = card_zone_to_id(&card.zone);
-        let ct = catalog_map.get(card.catalog_key.as_str())
+        let ct = state.materialized.defs.get(&id)
             .map(|d| card_type_str(d))
             .unwrap_or("permanent");
         (card.catalog_key.clone(), card.controller.clone(), from, ct)
@@ -1552,6 +1551,9 @@ pub(super) fn change_zone(
     // Activate/deactivate instances BEFORE firing the event so replacement checks see the right state.
     if from == ZoneId::Battlefield { deactivate_instances(id, state); }
     if to == ZoneId::Battlefield {
+        // catalog: activate_instances needs the static ability list to register triggered
+        // and replacement instances. The ObjId exists but materialized isn't updated until
+        // after this event resolves — bootstrapping from catalog is required here.
         let def = catalog_map.get(name.as_str()).copied();
         activate_instances(id, &controller, def, state);
     }
@@ -1660,7 +1662,7 @@ fn pay_activation_cost(
     if ability.sacrifice_land {
         // Prefer permanents with no mana abilities to preserve mana sources.
         let land_to_sac = state.permanents_of(who)
-            .find(|c| c.bf.as_ref().map_or(false, |bf| bf.mana_abilities.is_empty()))
+            .find(|c| c.bf.is_some() && state.materialized.defs.get(&c.id).map(|d| d.mana_abilities().is_empty()).unwrap_or(true))
             .or_else(|| state.permanents_of(who).next())
             .map(|c| c.id);
         if let Some(sac_id) = land_to_sac {
@@ -1705,14 +1707,17 @@ fn can_pay_alternate_cost(
     }
     if cost.exile_blue_from_hand {
         let has_pitch = state.hand_of(who)
-            .any(|c| c.catalog_key != source_name && catalog_map.get(c.catalog_key.as_str())
-                .map_or(false, |d| !d.is_land() && d.is_blue()));
+            .any(|c| c.catalog_key != source_name && {
+                let is_blue_non_land = |d: &CardDef| !d.is_land() && d.is_blue();
+                state.materialized.defs.get(&c.id).map(is_blue_non_land)
+                    .unwrap_or_else(|| catalog_map.get(c.catalog_key.as_str()).map_or(false, |d| is_blue_non_land(d)))
+            });
         if !has_pitch {
             return false;
         }
     }
     if cost.bounce_island {
-        if !state.permanents_of(who).any(|c| c.bf.as_ref().map_or(false, |bf| bf.mana_abilities.iter().any(|ma| ma.produces.contains('U')))) {
+        if !state.permanents_of(who).any(|c| c.bf.is_some() && state.materialized.defs.get(&c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false)) {
             return false;
         }
     }
@@ -1734,8 +1739,11 @@ fn apply_alt_cost_components(
     if cost.exile_blue_from_hand {
         // Collect pitch candidates from hand.
         let pitch_ids: Vec<(ObjId, String)> = state.hand_of(who)
-            .filter(|c| c.catalog_key != source_name
-                && catalog_map.get(c.catalog_key.as_str()).map_or(false, |d| !d.is_land() && d.is_blue()))
+            .filter(|c| c.catalog_key != source_name && {
+                let is_blue_non_land = |d: &CardDef| !d.is_land() && d.is_blue();
+                state.materialized.defs.get(&c.id).map(is_blue_non_land)
+                    .unwrap_or_else(|| catalog_map.get(c.catalog_key.as_str()).map_or(false, |d| is_blue_non_land(d)))
+            })
             .map(|c| (c.id, c.catalog_key.clone()))
             .collect();
         let idx = rng.gen_range(0..pitch_ids.len());
@@ -1745,7 +1753,7 @@ fn apply_alt_cost_components(
     }
     if cost.bounce_island {
         let bounce = state.permanents_of(who)
-            .find(|c| c.bf.as_ref().map_or(false, |bf| bf.mana_abilities.iter().any(|ma| ma.produces.contains('U'))))
+            .find(|c| c.bf.is_some() && state.materialized.defs.get(&c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false))
             .map(|c| (c.id, c.catalog_key.clone()))
             .unwrap();
         let (bounce_id, land_name) = bounce;
@@ -1793,7 +1801,12 @@ fn cast_spell(
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
-    let def = *catalog_map.get(name.as_str())?;
+    // Prefer the post-CE materialized def (current in normal game flow where recompute
+    // runs before every priority window). Fall back to catalog for tests that call
+    // cast_spell directly without a preceding recompute.
+    let def = state.materialized.defs.get(&card_id)
+        .cloned()
+        .or_else(|| catalog_map.get(name.as_str()).map(|&d| d.clone()))?;
 
     if face == SpellFace::Adventure {
         let adv = def.adventure()?.clone();
@@ -1806,7 +1819,7 @@ fn cast_spell(
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
         let (adv_spec, adv_eff) = build_adventure_effect(&adv, who);
-        let adv_targets = choose_spell_target(&adv_spec, who, state, catalog_map, rng)
+        let adv_targets = choose_spell_target(&adv_spec, who, state, rng)
             .into_iter().collect::<Vec<_>>();
         state.log(t, who, format!("Cast {} (adventure, {}) [hand: {}]", adv.name, adv.mana_cost, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
@@ -1816,7 +1829,6 @@ fn cast_spell(
                 chosen_targets: adv_targets,
                 is_adventure_face: true,
                 adventure_card_name: Some(name),
-                annotation: None,
             });
         }
         return Some(card_id);
@@ -1883,16 +1895,6 @@ fn cast_spell(
         change_zone(*exile_id, ZoneId::Exile, state, t, who, catalog_map, rng);
     }
 
-    // For delve permanents: encode +1/+1 counter count as "+N" in annotation.
-    let annotation: Option<String> = if def.delve() && def.is_creature() {
-        let count = to_exile_names.iter()
-            .filter(|n| catalog_map.get(n.as_str()).map(|d| d.as_spell().is_some()).unwrap_or(false))
-            .count() as i32;
-        if count > 0 { Some(format!("+{}", count)) } else { None }
-    } else {
-        None
-    };
-
     let delve_label = if to_exile_names.is_empty() {
         String::new()
     } else {
@@ -1900,8 +1902,8 @@ fn cast_spell(
     };
     state.log(t, who, format!("Cast {} ({}{}) [hand: {}]", name, cast_label, delve_label, state.hand_size(who)));
 
-    let (spell_target_spec, spell_eff) = build_spell_effect(def, who, annotation.clone());
-    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, catalog_map, rng)
+    let (spell_target_spec, spell_eff) = build_spell_effect(&def, who);
+    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, rng)
         .into_iter().collect::<Vec<_>>();
 
     if let Some(card) = state.objects.get_mut(&card_id) {
@@ -1910,7 +1912,6 @@ fn cast_spell(
             chosen_targets: spell_chosen_targets,
             is_adventure_face: false,
             adventure_card_name: None,
-            annotation,
         });
     }
 
@@ -1974,8 +1975,7 @@ fn check_state_based_actions(
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
-                    let def = catalog_map.get(card.catalog_key.as_str()).copied();
-                    if !def.map_or(false, |d| d.is_creature()) { return None; }
+                    if !state.materialized.defs.get(&card.id).map_or(false, |d| d.is_creature()) { return None; }
                     let tgh = state.materialized.defs.get(&card.id)
                         .and_then(|d| d.as_creature())
                         .map(|c| c.toughness())
@@ -1994,8 +1994,7 @@ fn check_state_based_actions(
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
-                    let def = catalog_map.get(card.catalog_key.as_str())?;
-                    if !matches!(def.kind, CardKind::Planeswalker(_)) { return None; }
+                    if !state.materialized.defs.get(&card.id).map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_))) { return None; }
                     if bf.loyalty <= 0 { Some(card.id) } else { None }
                 })
                 .collect();
@@ -2013,7 +2012,7 @@ fn check_state_based_actions(
             let mut extras: Vec<ObjId> = Vec::new();
             let legendaries: Vec<(String, ObjId)> = state.permanents_of(who)
                 .filter(|card| {
-                    catalog_map.get(card.catalog_key.as_str())
+                    state.materialized.defs.get(&card.id)
                         .map_or(false, |d| d.legendary())
                 })
                 .map(|card| (card.catalog_key.clone(), card.id))
@@ -2061,7 +2060,7 @@ fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
             spell: None,
             bf: Some(BattlefieldState {
                 counters: n,
-                ..BattlefieldState::new(vec![])
+                ..BattlefieldState::new()
             }),
         });
         state.log(t, controller, format!("Orc Army token created {n}/{n}"));
@@ -2078,12 +2077,14 @@ fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
         zone: CardZone::Battlefield,
         is_token: true,
         spell: None,
-        bf: Some(BattlefieldState::new(vec![])),
+        bf: Some(BattlefieldState::new()),
     });
     state.log(t, controller, "Clue Token created");
 }
 
 fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u8, catalog_map: &HashMap<&str, &CardDef>) {
+    // catalog: reading the printed starting loyalty of the flipped face. The object mutates
+    // in-place (same ObjId, new catalog_key), so materialized has no entry for this face yet.
     let loyalty = catalog_map.get("Tamiyo, Seasoned Scholar")
         .and_then(|d| if let CardKind::Planeswalker(ref p) = d.kind { Some(p.loyalty) } else { None })
         .unwrap_or(2);
@@ -2119,7 +2120,6 @@ fn resolve_top_of_stack(
             chosen_targets: vec![],
             is_adventure_face: false,
             adventure_card_name: None,
-            annotation: None,
         });
         let owner_str = state.objects[&id].owner.clone();
         let name = state.objects[&id].catalog_key.clone();
@@ -2136,7 +2136,7 @@ fn resolve_top_of_stack(
             }
             state.log(t, &owner_str, format!("{} resolves → {} on adventure in exile", name, card_name));
         } else if let Some(ref eff) = spell.effect {
-            let is_perm = catalog_map.get(name.as_str())
+            let is_perm = state.materialized.defs.get(&id)
                 .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
                     | CardKind::Planeswalker(_) | CardKind::Enchantment))
                 .unwrap_or(false);
@@ -2182,7 +2182,7 @@ fn handle_priority_round(
 
     loop {
         let queued = std::mem::take(&mut state.pending_triggers);
-        push_triggers(queued, state, catalog_map);
+        push_triggers(queued, state);
         check_state_based_actions(state, t, catalog_map, rng);
 
         let who = priority_holder.clone();
@@ -2211,13 +2211,11 @@ fn handle_priority_round(
                         .find(|p| p.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked))
                         .and_then(|p| p.bf.as_ref().and_then(|bf| bf.attack_target));
                     let who_str = who.clone();
-                    let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets, catalog_map, _rng| {
+                    let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets, _catalog_map, _rng| {
                         let ninja_name = state.objects.get(&source_id)
                             .map(|c| c.catalog_key.clone())
                             .unwrap_or_default();
                         if ninja_name.is_empty() { return; }
-                        let mana_abs = catalog_map.get(ninja_name.as_str())
-                            .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
                         let new_id = state.alloc_id();
                         state.objects.insert(new_id, GameObject {
                             id: new_id,
@@ -2230,11 +2228,10 @@ fn handle_priority_round(
                             bf: Some(BattlefieldState {
                                 tapped: true,
                                 entered_this_turn: true,
-                                mana_abilities: mana_abs,
                                 attacking: true,
                                 unblocked: true,
                                 attack_target,
-                                ..BattlefieldState::new(vec![])
+                                ..BattlefieldState::new()
                             }),
                         });
                         state.combat_attackers.push(new_id);
@@ -2271,7 +2268,7 @@ fn handle_priority_round(
             PriorityAction::CastSpell { card_id, face, ref preferred_cost } => {
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
                 // Sorcery-speed check for main-face non-instants.
-                let is_instant = face == SpellFace::Adventure || catalog_map.get(name.as_str())
+                let is_instant = face == SpellFace::Adventure || state.materialized.defs.get(&card_id)
                     .map(|d| d.is_instant()).unwrap_or(false);
                 if !is_instant && !state.stack.is_empty() {
                     eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack, treating as Pass", name);
@@ -2616,6 +2613,8 @@ fn simulate_game(
     state.turn = turn;
 
     // Populate state.objects with Library-zone objects for each player's mainboard.
+    // catalog: game setup — ObjIds are assigned here for the first time; materialized
+    // does not exist yet. Catalog is the only source of card definitions at this stage.
     for (name, qty, board) in all_cards {
         if board != "main" { continue; }
         if catalog_map.get(name.as_str()).is_none() { continue; }

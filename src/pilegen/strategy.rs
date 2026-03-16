@@ -7,23 +7,22 @@ fn pick_on_board_action(
     ap: &str,
     t: u8,
     dd_turn: u8,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
     let mut candidates: Vec<PriorityAction> = Vec::new();
 
     // 75% roll per land (permanent that is_land) with an available ability.
-    let land_ids: Vec<(ObjId, String)> = state.permanents_of(ap)
+    let land_ids: Vec<ObjId> = state.permanents_of(ap)
         .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
-        .filter(|p| catalog_map.get(p.catalog_key.as_str())
+        .filter(|p| state.materialized.defs.get(&p.id)
             .map_or(false, |def| def.is_land() && def.abilities().iter()
-                .any(|ab| ability_available(ab, state, ap, true, catalog_map))))
-        .map(|p| (p.id, p.catalog_key.clone()))
+                .any(|ab| ability_available(ab, state, ap, true))))
+        .map(|p| p.id)
         .collect();
-    for (land_id, name) in land_ids {
-        if let Some(def) = catalog_map.get(name.as_str()) {
+    for land_id in land_ids {
+        if let Some(def) = state.materialized.defs.get(&land_id) {
             if let Some(ab) = def.abilities().iter()
-                .find(|ab| ability_available(ab, state, ap, true, catalog_map))
+                .find(|ab| ability_available(ab, state, ap, true))
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
@@ -35,19 +34,19 @@ fn pick_on_board_action(
 
     // 75% roll per non-land permanent with an available non-loyalty ability.
     // Lands are already handled above; including them here would double-queue fetch abilities.
-    let perm_ids: Vec<(ObjId, String, bool)> = state.permanents_of(ap)
+    let perm_ids: Vec<(ObjId, bool)> = state.permanents_of(ap)
         .filter(|p| {
             let tapped = p.bf.as_ref().map_or(false, |bf| bf.tapped);
-            catalog_map.get(p.catalog_key.as_str())
+            state.materialized.defs.get(&p.id)
                 .map_or(false, |def| !def.is_land() && def.abilities().iter()
-                    .any(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped, catalog_map)))
+                    .any(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped)))
         })
-        .map(|p| (p.id, p.catalog_key.clone(), p.bf.as_ref().map_or(false, |bf| bf.tapped)))
+        .map(|p| (p.id, p.bf.as_ref().map_or(false, |bf| bf.tapped)))
         .collect();
-    for (perm_id, name, tapped) in perm_ids {
-        if let Some(def) = catalog_map.get(name.as_str()) {
+    for (perm_id, tapped) in perm_ids {
+        if let Some(def) = state.materialized.defs.get(&perm_id) {
             if let Some(ab) = def.abilities().iter()
-                .find(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped, catalog_map))
+                .find(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped))
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
@@ -60,17 +59,17 @@ fn pick_on_board_action(
     // Postcombat main phase: activate any un-activated planeswalkers (sorcery speed, empty stack).
     let is_postcombat_main = matches!(state.current_phase, Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
     if is_postcombat_main && state.stack.is_empty() {
-        let pw_data: Vec<(ObjId, String, i32)> = state.permanents_of(ap)
+        let pw_data: Vec<(ObjId, i32)> = state.permanents_of(ap)
             .filter(|p| {
                 let bf = p.bf.as_ref();
                 !bf.map_or(true, |bf| bf.pw_activated_this_turn)
-                    && catalog_map.get(p.catalog_key.as_str())
-                        .map_or(false, |def| matches!(def.kind, CardKind::Planeswalker(_)))
+                    && state.materialized.defs.get(&p.id)
+                        .map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_)))
             })
-            .map(|p| (p.id, p.catalog_key.clone(), p.bf.as_ref().map_or(0, |bf| bf.loyalty)))
+            .map(|p| (p.id, p.bf.as_ref().map_or(0, |bf| bf.loyalty)))
             .collect();
-        for (pw_id, name, loyalty) in pw_data {
-            if let Some(def) = catalog_map.get(name.as_str()) {
+        for (pw_id, loyalty) in pw_data {
+            if let Some(def) = state.materialized.defs.get(&pw_id) {
                 if let Some(ab) = def.abilities().iter()
                     .filter(|ab| {
                         let Some(cost) = ab.loyalty_cost else { return false; };
@@ -88,26 +87,26 @@ fn pick_on_board_action(
     // Fateful turn override: force-include fetch lands that can search for a black source,
     // if we have no black mana. (These bypass the 75% roll.)
     if ap == "us" && t == dd_turn && !state.has_black_mana("us") {
-        let can_search_black = |name: &str| catalog_map.get(name).map_or(false, |def|
-            def.abilities().iter().any(|ab|
-                ab.effect.starts_with("search:land-swamp")
-                    || ab.effect.starts_with("search:land-island|swamp")
-            )
-        );
-        let fetch_ids: Vec<(ObjId, String)> = state.permanents_of("us")
-            .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && can_search_black(&p.catalog_key))
-            .map(|p| (p.id, p.catalog_key.clone()))
+        let fetch_ids: Vec<ObjId> = state.permanents_of("us")
+            .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
+            .filter(|p| state.materialized.defs.get(&p.id).map_or(false, |def|
+                def.abilities().iter().any(|ab|
+                    ab.effect.starts_with("search:land-swamp")
+                        || ab.effect.starts_with("search:land-island|swamp")
+                )
+            ))
+            .map(|p| p.id)
             .collect();
         if !fetch_ids.is_empty() {
-            for (fid, name) in &fetch_ids {
+            for &fid in &fetch_ids {
                 // Force-include if not already a candidate (bypasses the 75% roll).
-                if !candidates.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _) if *id == *fid)) {
-                    if let Some(def) = catalog_map.get(name.as_str()) {
+                if !candidates.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _) if *id == fid)) {
+                    if let Some(def) = state.materialized.defs.get(&fid) {
                         if let Some(ab) = def.abilities().iter()
-                            .find(|ab| ability_available(ab, state, "us", true, catalog_map))
+                            .find(|ab| ability_available(ab, state, "us", true))
                             .cloned()
                         {
-                            candidates.push(PriorityAction::ActivateAbility(*fid, ab));
+                            candidates.push(PriorityAction::ActivateAbility(fid, ab));
                         }
                     }
                 }
@@ -119,9 +118,9 @@ fn pick_on_board_action(
     }
 
     // Adventure creatures in exile: 75% roll to cast the creature face.
-    let on_adventure: Vec<(ObjId, String)> = state.on_adventure_of(ap).map(|c| (c.id, c.catalog_key.clone())).collect();
-    for (card_id, card_name) in on_adventure {
-        if let Some(&def) = catalog_map.get(card_name.as_str()) {
+    let on_adventure: Vec<ObjId> = state.on_adventure_of(ap).map(|c| c.id).collect();
+    for card_id in on_adventure {
+        if let Some(def) = state.materialized.defs.get(&card_id) {
             let cost = parse_mana_cost(def.mana_cost());
             if !state.potential_mana(ap).can_pay(&cost) { continue; }
             if rng.gen_bool(0.75) {
@@ -135,8 +134,8 @@ fn pick_on_board_action(
 
 /// True if `name` is a spell the NAP considers worth spending a free counterspell (FoW / Daze) on.
 /// Cantrips and mana rituals are not worth pitching; permanents and combo pieces are.
-fn worth_countering(name: &str, catalog_map: &HashMap<&str, &CardDef>) -> bool {
-    if let Some(def) = catalog_map.get(name) {
+fn worth_countering(id: ObjId, name: &str, state: &SimState) -> bool {
+    if let Some(def) = state.materialized.defs.get(&id) {
         match &def.kind {
             CardKind::Creature(_) | CardKind::Planeswalker(_)
             | CardKind::Artifact(_) | CardKind::Enchantment => return true,
@@ -163,7 +162,7 @@ fn nap_action(
             let item_is_counterable = state.stack_item_is_counterable(item_id);
             let item_name = state.stack_item_display_name(item_id).to_string();
             if item_owner != state.player_id(who) && item_is_counterable {
-                if !worth_countering(&item_name, catalog_map) {
+                if !worth_countering(item_id, &item_name, state) {
                     eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, item_name);
                     break;
                 }
@@ -249,13 +248,13 @@ fn ap_proactive(
         if !dd_already_castable {
             let force = state.player(who).must_land_drop;
             let land_count = state.hand_of(who)
-                .filter(|c| catalog_map.get(c.catalog_key.as_str()).map_or(false, |d| d.is_land()))
+                .filter(|c| state.materialized.defs.get(&c.id).map_or(false, |d| d.is_land()))
                 .count();
             if land_count > 0 {
                 // T1=100%, T2=90%, T3=80%, T4+=70%; forced to 100% when must_land_drop is set.
                 let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
                 if rng.gen::<f64>() < prob {
-                    if let Some(id) = choose_land(state, who, catalog_map, fateful, rng) {
+                    if let Some(id) = choose_land(state, who, fateful, rng) {
                         state.player_mut(who).must_land_drop = false;
                         return PriorityAction::LandDrop(id);
                     }
@@ -267,7 +266,7 @@ fn ap_proactive(
     }
 
     // On-board actions: computed fresh from current state.
-    if let Some(action) = pick_on_board_action(state, who, t, dd_turn, catalog_map, rng) {
+    if let Some(action) = pick_on_board_action(state, who, t, dd_turn, rng) {
         return action;
     }
 
@@ -350,7 +349,7 @@ pub(super) fn decide_action(
         | Some(TurnPosition::Step(StepKind::CombatDamage))
         | Some(TurnPosition::Step(StepKind::EndCombat)));
     if in_ninjutsu_step {
-        if let Some(action) = try_ninjutsu(state, who, catalog_map, rng) {
+        if let Some(action) = try_ninjutsu(state, who, rng) {
             return action;
         }
         return PriorityAction::Pass;
@@ -377,7 +376,7 @@ pub(super) fn decide_action(
 pub(super) fn declare_attackers(
     ap: &str,
     state: &SimState,
-    catalog_map: &HashMap<&str, &CardDef>,
+    _catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Vec<(ObjId, Option<ObjId>)> {
     let nap = opp_of(ap);
@@ -385,7 +384,7 @@ pub(super) fn declare_attackers(
     let nap_blockers: Vec<(ObjId, i32)> = state.permanents_of(nap)
         .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
         .filter_map(|p| {
-            let def = catalog_map.get(p.catalog_key.as_str())?;
+            let def = state.materialized.defs.get(&p.id)?;
             if !def.is_creature() { return None; }
             let pow = state.materialized.defs.get(&p.id)
                 .and_then(|d| d.as_creature())
@@ -395,14 +394,14 @@ pub(super) fn declare_attackers(
         })
         .collect();
     let nap_pw_ids: Vec<ObjId> = state.permanents_of(nap)
-        .filter(|p| catalog_map.get(p.catalog_key.as_str())
+        .filter(|p| state.materialized.defs.get(&p.id)
             .map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_))))
         .map(|p| p.id)
         .collect();
     state.permanents_of(ap)
         .filter(|p| p.bf.as_ref().map_or(false, |bf| !bf.tapped && !bf.entered_this_turn))
         .filter_map(|p| {
-            let def = catalog_map.get(p.catalog_key.as_str())?;
+            let def = state.materialized.defs.get(&p.id)?;
             if !def.is_creature() { return None; }
             let atk_flies = creature_has_keyword(p.id, "flying", state);
             // Sum power of NAP creatures that can block this attacker.
@@ -433,7 +432,7 @@ pub(super) fn declare_attackers(
 pub(super) fn declare_blockers(
     ap: &str,
     state: &SimState,
-    catalog_map: &HashMap<&str, &CardDef>,
+    _catalog_map: &HashMap<&str, &CardDef>,
 ) -> Vec<(ObjId, ObjId)> {
     let nap = opp_of(ap);
     let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
@@ -459,8 +458,7 @@ pub(super) fn declare_blockers(
         let blocker = state.permanents_of(nap)
             .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
             .find_map(|p| {
-                let def = catalog_map.get(p.catalog_key.as_str()).copied();
-                if !def.map(|d| d.is_creature()).unwrap_or(false) { return None; }
+                if !state.materialized.defs.get(&p.id).map(|d| d.is_creature()).unwrap_or(false) { return None; }
                 // Flying attackers can only be blocked by flying creatures.
                 if atk_flies && !creature_has_keyword(p.id, "flying", state) { return None; }
                 let blk_pow = state.materialized.defs.get(&p.id)
@@ -491,7 +489,6 @@ fn ability_available(
     state: &SimState,
     who: &str,
     source_untapped: bool,
-    catalog_map: &HashMap<&str, &CardDef>,
 ) -> bool {
     if ability.tap_self && !source_untapped {
         return false;
@@ -503,7 +500,7 @@ fn ability_available(
         }
     }
     if let Some(tgt) = &ability.target {
-        if !has_valid_target(tgt, state, who, catalog_map) {
+        if !has_valid_target(tgt, state, who) {
             return false;
         }
     }
@@ -537,7 +534,7 @@ fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) ->
     }
     if ability.life_cost > 0 && player.life <= ability.life_cost { return false; }
     if ability.sacrifice_land && !state.permanents_of(who).any(|c| {
-        c.bf.as_ref().map_or(false, |bf| !bf.mana_abilities.is_empty())
+        c.bf.is_some() && !state.materialized.defs.get(&c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
     }) { return false; }
     true
 }
@@ -560,17 +557,17 @@ fn collect_hand_actions(
     let mut actions: Vec<PriorityAction> = Vec::new();
 
     for (card_id, name) in &hand_cards {
-        let Some(&def) = catalog_map.get(name.as_str()) else { continue; };
+        let Some(def) = state.materialized.defs.get(card_id) else { continue; };
         if def.is_land() { continue; }
         if !card_has_implementation(def) { continue; }
         if def.legendary() && state.permanents_of(who).any(|c| c.catalog_key == name.as_str()) { continue; }
         if let Some(tgt) = def.target() {
-            if !has_valid_target(tgt, state, who, catalog_map) { continue; }
+            if !has_valid_target(tgt, state, who) { continue; }
         }
         let ok = def.requires().iter().all(|req| match req.as_str() {
             "opp_hand_nonempty" => state.hand_size(opp_who) > 0,
             "us_gy_has_creature" => state.graveyard_of(who)
-                .any(|c| catalog_map.get(c.catalog_key.as_str()).map(|d| d.is_creature()).unwrap_or(false)),
+                .any(|c| state.materialized.defs.get(&c.id).map(|d| d.is_creature()).unwrap_or(false)),
             _ => true,
         });
         if !ok { continue; }
@@ -593,7 +590,7 @@ fn collect_hand_actions(
                 if !state.potential_mana(who).can_pay(&cost) { continue; }
             }
             if let Some(ref tgt) = face.target {
-                if !has_valid_target(tgt, state, who, catalog_map) { continue; }
+                if !has_valid_target(tgt, state, who) { continue; }
             }
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Adventure, preferred_cost: None });
         }
@@ -608,7 +605,6 @@ fn collect_hand_actions(
 fn choose_land(
     state: &SimState,
     who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
     fateful: bool,
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
@@ -618,7 +614,7 @@ fn choose_land(
     let need_black = fateful && !state.has_black_mana(who);
     let candidates: Vec<ObjId> = state.hand_of(who)
         .filter_map(|c| {
-            let def = catalog_map.get(c.catalog_key.as_str())?;
+            let def = state.materialized.defs.get(&c.id)?;
             let land = def.as_land()?;
             if need_black && !land.mana_abilities.iter().any(|ma| ma.produces.contains('B')) { return None; }
             Some(c.id)
@@ -665,26 +661,27 @@ fn respond_with_counter(
     probabilistic: bool,
 ) -> Option<PriorityAction> {
     let default_kind;
-    let target_name = state.stack_item_display_name(state.stack[target_idx]).to_string();
-    let target_kind: &CardKind = match catalog_map.get(target_name.as_str()) {
+    let target_id = state.stack[target_idx];
+    let target_kind: &CardKind = match state.materialized.defs.get(&target_id) {
         Some(d) => &d.kind,
         None => { default_kind = CardKind::Sorcery(SpellData::default()); &default_kind }
     };
 
-    let target_owner_str = state.who_str(state.stack_item_owner(state.stack[target_idx])).to_string();
+    let target_owner_str = state.who_str(state.stack_item_owner(target_id)).to_string();
     let target_has_untapped_lands = state.permanents_of(&target_owner_str).any(|c| {
-        c.bf.as_ref().map_or(false, |bf| !bf.tapped && !bf.mana_abilities.is_empty())
+        c.bf.as_ref().map_or(false, |bf| !bf.tapped) && !state.materialized.defs.get(&c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
     });
 
+    // Collect (ObjId, name) for each unique counterspell type in hand that can target the stack spell.
     let mut seen = std::collections::HashSet::new();
-    let counterspells: Vec<String> = state.hand_of(responding_who)
+    let counterspells: Vec<(ObjId, String)> = state.hand_of(responding_who)
         .filter_map(|c| {
-            let def = catalog_map.get(c.catalog_key.as_str())?;
+            let def = state.materialized.defs.get(&c.id)?;
             let filter = def.target().and_then(|t| t.strip_prefix("stack:"))?;
             if !stack_filter_matches(filter, target_kind) { return None; }
             if def.alternate_costs().is_empty() { return None; }
             if c.catalog_key == "Daze" && target_has_untapped_lands { return None; }
-            seen.insert(c.catalog_key.clone()).then(|| c.catalog_key.clone())
+            seen.insert(c.catalog_key.clone()).then(|| (c.id, c.catalog_key.clone()))
         })
         .collect();
 
@@ -695,31 +692,34 @@ fn respond_with_counter(
     let hand_size = state.hand_size(responding_who);
     let lib_size = state.library_size(responding_who) + hand_size as usize;
 
-    for cs_name in &counterspells {
+    for (cs_id, cs_name) in &counterspells {
+        let def = match state.materialized.defs.get(cs_id) {
+            Some(d) => d,
+            None => continue,
+        };
         if probabilistic {
             let copies = state.hand_of(responding_who).filter(|c| c.catalog_key == *cs_name).count();
             let p_have = p_card_in_hand(lib_size, hand_size, copies);
             if !rng.gen_bool(p_have.max(f64::MIN_POSITIVE)) { continue; }
 
-            let costs = catalog_map[cs_name.as_str()].alternate_costs();
+            let costs = def.alternate_costs();
             let strategic = costs.first().and_then(|c| c.prob).unwrap_or(0.5);
             if !rng.gen_bool(strategic) { continue; }
         }
 
-        let costs = catalog_map[cs_name.as_str()].alternate_costs().to_vec();
+        let costs = def.alternate_costs().to_vec();
         for cost in &costs {
             if probabilistic && cost.exile_blue_from_hand {
                 let n_blue = state.hand_of(responding_who)
-                    .filter(|c| c.catalog_key != *cs_name
-                        && catalog_map.get(c.catalog_key.as_str()).map_or(false, |d| !d.is_land() && d.is_blue()))
+                    .filter(|c| c.id != *cs_id
+                        && state.materialized.defs.get(&c.id).map_or(false, |d| !d.is_land() && d.is_blue()))
                     .count();
                 let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
                 if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
             }
             if can_pay_alternate_cost(cost, state, responding_who, cs_name, catalog_map) {
-                let card_id = state.hand_of(responding_who).find(|c| c.catalog_key == *cs_name).map(|c| c.id)?;
                 return Some(PriorityAction::CastSpell {
-                    card_id,
+                    card_id: *cs_id,
                     face: SpellFace::Main,
                     preferred_cost: Some(cost.clone()),
                 });
@@ -738,7 +738,6 @@ fn respond_with_counter(
 pub(super) fn try_ninjutsu(
     state: &SimState,
     who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
     if state.hand_size(who) <= 0 { return None; }
@@ -746,15 +745,15 @@ pub(super) fn try_ninjutsu(
         .any(|c| c.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked));
     if !has_unblocked { return None; }
     let ninjas: Vec<(ObjId, String)> = state.hand_of(who)
-        .filter(|c| catalog_map.get(c.catalog_key.as_str()).map_or(false, |d| d.ninjutsu().is_some()))
+        .filter(|c| state.materialized.defs.get(&c.id).map_or(false, |d| d.ninjutsu().is_some()))
         .map(|c| (c.id, c.catalog_key.clone()))
         .collect();
     if ninjas.is_empty() { return None; }
     // 35% roll: simulates probability of wanting to use it.
     if !rng.gen_bool(0.35) { return None; }
     let idx = rng.gen_range(0..ninjas.len());
-    let (ninja_id, ninja_name) = &ninjas[idx];
-    let ninja_def = catalog_map.get(ninja_name.as_str())?;
+    let (ninja_id, _) = &ninjas[idx];
+    let ninja_def = state.materialized.defs.get(ninja_id)?;
     let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
     if !state.potential_mana(who).can_pay(&ninjutsu_cost) { return None; }
     Some(PriorityAction::ActivateAbility(*ninja_id, ninja_def.ninjutsu()?.as_ability_def()))

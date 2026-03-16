@@ -46,10 +46,11 @@
 
     /// Insert a default permanent (untapped, no mana abilities).
     fn add_default_perm(state: &mut SimState, who: &str, name: &str) -> ObjId {
-        add_perm(state, who, name, BattlefieldState::new(vec![]))
+        add_perm(state, who, name, BattlefieldState::new())
     }
 
     /// Insert a permanent using a pre-built `CardDef` (full static_ability_defs included).
+    /// Also seeds `state.materialized.defs` so mana abilities and type checks work without recompute.
     fn add_perm_with_def(state: &mut SimState, who: &str, def: &CardDef, bf: BattlefieldState) -> ObjId {
         let id = state.alloc_id();
         state.objects.insert(id, GameObject {
@@ -64,13 +65,14 @@
         });
         preregister_instances(def, id, who, state);
         activate_instances(id, who, Some(def), state);
+        state.materialized.defs.insert(id, def.clone());
         id
     }
 
     fn make_land(state: &mut SimState, who: &str, name: &str, tapped: bool) -> ObjId {
         add_perm(state, who, name, BattlefieldState {
             tapped,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         })
     }
 
@@ -86,6 +88,12 @@
             spell: None,
             bf: None,
         });
+        id
+    }
+
+    fn add_hand_card_with_def(state: &mut SimState, who: &str, def: &CardDef) -> ObjId {
+        let id = add_hand_card(state, who, &def.name.clone());
+        state.materialized.defs.insert(id, def.clone());
         id
     }
 
@@ -168,7 +176,7 @@
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             tapped: true,
             entered_this_turn: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         state.us.spells_cast_this_turn = 2;
 
@@ -216,7 +224,7 @@
         let mut state = make_state();
         let rag_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             damage: 3,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
 
         let step = Step { kind: StepKind::Cleanup, prio: false };
@@ -232,7 +240,7 @@
         let ragavan_def = creature("Ragavan", 2, 4);
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             entered_this_turn: false,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
 
         let catalog = vec![ragavan_def];
@@ -251,7 +259,7 @@
         let blocker_def = creature("Mosscoat Construct", 3, 3);
         add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             entered_this_turn: false,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         add_default_perm(&mut state, "opp", "Mosscoat Construct");
 
@@ -286,7 +294,7 @@
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             entered_this_turn: false,
             tapped: false,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         let mosscoat_id = add_default_perm(&mut state, "opp", "Mosscoat Construct");
         state.combat_attackers = vec![ragavan_id];
@@ -307,7 +315,7 @@
         let blk_def = creature("Squirrel Token", 1, 1);
         let beast_id = add_perm(&mut state, "us", "Beast", BattlefieldState {
             entered_this_turn: false,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         add_default_perm(&mut state, "opp", "Squirrel Token");
         state.combat_attackers = vec![beast_id];
@@ -327,7 +335,7 @@
         let atk_def = creature("Ragavan", 2, 1);
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             tapped: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         state.combat_attackers = vec![ragavan_id];
 
@@ -347,7 +355,7 @@
         let blk_def = creature("Mosscoat Construct", 3, 3);
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             tapped: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         let construct_id = add_default_perm(&mut state, "opp", "Mosscoat Construct");
         state.combat_attackers = vec![ragavan_id];
@@ -368,7 +376,7 @@
         let blk_def = creature("Mosscoat Construct", 2, 2);
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             tapped: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         let construct_id = add_default_perm(&mut state, "opp", "Mosscoat Construct");
         state.combat_attackers = vec![ragavan_id];
@@ -392,7 +400,7 @@
         let blk_def = creature("Troll", 3, 3);
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             tapped: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         let troll_id = add_default_perm(&mut state, "opp", "Troll");
         state.combat_attackers = vec![ragavan_id];
@@ -428,10 +436,16 @@
     #[test]
     fn test_beginning_phase_untaps_and_draws() {
         let mut state = make_state();
-        let island_id = add_perm(&mut state, "us", "Island", BattlefieldState {
+        let island_def: CardDef = toml::from_str(r#"
+            name = "Island"
+            card_type = "land"
+            [[mana_abilities]]
+            tap_self = true
+            produces = "U"
+        "#).unwrap();
+        let island_id = add_perm_with_def(&mut state, "us", &island_def, BattlefieldState {
             tapped: true,
-            mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         add_library_card(&mut state, "us", "Swamp");
         let initial_hand = state.hand_size("us");
@@ -867,21 +881,17 @@
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
-        // annotation encodes "+3" (3 instants/sorceries: Ritual, Ponder, Consider)
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
-        let annotation = &spell.annotation;
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
-        assert_eq!(annotation.as_deref(), Some("+3"));
 
-        // Resolve via Effect path
+        // Resolve via Effect path — replacement effect counts exiled instants/sorceries.
         let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
         effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets, &catalog_map, rng_dyn);
 
         let murktide_bf = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
             .and_then(|p| p.bf.as_ref()).expect("Murktide on battlefield");
         assert_eq!(murktide_bf.counters, 3, "3 instants/sorceries exiled → 3 counters");
-        assert!(murktide_bf.annotation.is_none(), "counter annotation consumed");
 
         // recompute reflects counters in the materialized view
         let murktide_id = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
@@ -917,10 +927,8 @@
 
         let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
-        let annotation = &spell.annotation;
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
-        assert!(annotation.is_none(), "no instants/sorceries → no counter annotation");
 
         let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
         effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets, &catalog_map, rng_dyn);
@@ -944,7 +952,7 @@
         let murktide_id = add_perm(&mut state, "us", "Murktide Regent", BattlefieldState {
             counters: 3,
             entered_this_turn: false,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         // Opponent has a 5/5 blocker — Murktide's toughness 6 > opp power 5, safe to attack.
         let blocker_def = creature("Dragon", 5, 5);
@@ -1021,11 +1029,14 @@
     }
 
     fn island_land(state: &mut SimState, who: &str) -> ObjId {
-        add_perm(state, who, "Island", BattlefieldState {
-            tapped: false,
-            mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
-            ..BattlefieldState::new(vec![])
-        })
+        let def: CardDef = toml::from_str(r#"
+            name = "Island"
+            card_type = "land"
+            [[mana_abilities]]
+            tap_self = true
+            produces = "U"
+        "#).unwrap();
+        add_perm_with_def(state, who, &def, BattlefieldState::new())
     }
 
     #[test]
@@ -1034,7 +1045,7 @@
         let def = creature("Attacker", 2, 4);
         let atk_id = add_perm(&mut state, "us", "Attacker", BattlefieldState {
             entered_this_turn: false,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
 
         let catalog = vec![def];
@@ -1052,7 +1063,7 @@
         let attacker_id = add_perm(&mut state, "us", "Attacker", BattlefieldState {
             attacking: true,
             tapped: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         state.combat_attackers = vec![attacker_id];
         // No opp creatures → no blocker
@@ -1073,7 +1084,7 @@
         let ragavan_id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             attacking: true,
             tapped: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         add_default_perm(&mut state, "opp", "Wall");
         state.combat_attackers = vec![ragavan_id];
@@ -1093,7 +1104,7 @@
         let ninja_id = add_perm(&mut state, "us", "Ninja", BattlefieldState {
             attacking: true,
             unblocked: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         state.combat_attackers = vec![ninja_id];
 
@@ -1110,54 +1121,40 @@
     #[test]
     fn test_try_ninjutsu_no_hand_returns_none() {
         let mut state = make_state();
-        // No hand cards — hand_size returns 0
-        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new(vec![]) });
-        let ninja_catalog = ninja_def();
-        let catalog = vec![ninja_catalog];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        assert!(try_ninjutsu(&state, "us", &catalog_map, &mut seeded_rng()).is_none(), "no hand → None");
+        // No hand cards — hand_size returns 0; exits before any materialized lookup.
+        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new() });
+        assert!(try_ninjutsu(&state, "us", &mut seeded_rng()).is_none(), "no hand → None");
     }
 
     #[test]
     fn test_try_ninjutsu_no_unblocked_returns_none() {
         let mut state = make_state();
         add_hand_card(&mut state, "us", "Ninja");
-        add_hand_card(&mut state, "us", "Plains");
-        add_hand_card(&mut state, "us", "Island");
-        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: false, ..BattlefieldState::new(vec![]) });
+        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: false, ..BattlefieldState::new() });
         state.us.pool.u = 1; state.us.pool.total = 1;
-        let ninja_catalog = ninja_def();
-        let catalog = vec![ninja_catalog];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        assert!(try_ninjutsu(&state, "us", &catalog_map, &mut seeded_rng()).is_none(), "no unblocked attacker → None");
+        // Exits at the has_unblocked check before the hand scan; no materialized seeding needed.
+        assert!(try_ninjutsu(&state, "us", &mut seeded_rng()).is_none(), "no unblocked attacker → None");
     }
 
     #[test]
     fn test_try_ninjutsu_no_ninja_in_library_returns_none() {
         let mut state = make_state();
-        add_hand_card(&mut state, "us", "Brainstorm");
-        add_hand_card(&mut state, "us", "Plains");
-        add_hand_card(&mut state, "us", "Island");
-        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new(vec![]) });
-        state.us.pool.u = 1; state.us.pool.total = 1;
         let brainstorm_def = toml::from_str::<CardDef>("name=\"Brainstorm\"\ncard_type=\"instant\"\nmana_cost=\"U\"").unwrap();
-        let catalog = vec![brainstorm_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        assert!(try_ninjutsu(&state, "us", &catalog_map, &mut seeded_rng()).is_none(), "no ninja card → None");
+        add_hand_card_with_def(&mut state, "us", &brainstorm_def);
+        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new() });
+        state.us.pool.u = 1; state.us.pool.total = 1;
+        // Brainstorm has no ninjutsu; materialized entry present, filter returns false → None.
+        assert!(try_ninjutsu(&state, "us", &mut seeded_rng()).is_none(), "no ninja card → None");
     }
 
     #[test]
     fn test_try_ninjutsu_no_mana_returns_none() {
         let mut state = make_state();
-        add_hand_card(&mut state, "us", "Ninja");
-        add_hand_card(&mut state, "us", "Plains");
-        add_hand_card(&mut state, "us", "Island");
-        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new(vec![]) });
-        // No mana available
-        let ninja_catalog = ninja_def();
-        let catalog = vec![ninja_catalog];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        assert!(try_ninjutsu(&state, "us", &catalog_map, &mut seeded_rng()).is_none(), "no mana → None");
+        let def = ninja_def();
+        add_hand_card_with_def(&mut state, "us", &def);
+        add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new() });
+        // No mana available — ninja found in materialized, but mana check fails.
+        assert!(try_ninjutsu(&state, "us", &mut seeded_rng()).is_none(), "no mana → None");
     }
 
     #[test]
@@ -1165,7 +1162,12 @@
         // try_ninjutsu returns ActivateAbility; when committed via handle_priority_round
         // in a DeclareBlockers window, the ninja enters play and the attacker returns to hand.
         let def = ninja_def();
-        let catalog = vec![def.clone()];
+        let island_def: CardDef = toml::from_str(r#"name = "Island"
+card_type = "land"
+[[mana_abilities]]
+tap_self = true
+produces = "U""#).unwrap();
+        let catalog = vec![def.clone(), island_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         // Loop over seeds until ninjutsu fires (35% per attempt → statistically guaranteed within 50).
@@ -1174,11 +1176,11 @@
             state.current_phase = Some(TurnPosition::Step(StepKind::DeclareBlockers));
             state.current_ap = state.us.id;
             add_perm(&mut state, "us", "Ragavan", BattlefieldState {
-                attacking: true, unblocked: true, ..BattlefieldState::new(vec![])
+                attacking: true, unblocked: true, ..BattlefieldState::new()
             });
             island_land(&mut state, "us");
-            // Add Ninja to hand so try_ninjutsu can find it.
-            add_hand_card(&mut state, "us", "Ninja");
+            // Add Ninja to hand with materialized entry so try_ninjutsu can find it.
+            add_hand_card_with_def(&mut state, "us", &def);
             // Also register the ninja in state.objects as a library card (so apply_ability_effect
             // can look up the ninja's name at resolution).
             let ninja_lib_id = state.alloc_id();
@@ -1300,7 +1302,22 @@
             power = 3
             toughness = 1
         "#).unwrap();
-        let catalog = vec![borrower_def.clone()];
+        let island_def: CardDef = toml::from_str(r#"name = "Island"
+card_type = "land"
+[[mana_abilities]]
+tap_self = true
+produces = "U""#).unwrap();
+        let island2_def: CardDef = toml::from_str(r#"name = "Island2"
+card_type = "land"
+[[mana_abilities]]
+tap_self = true
+produces = "U""#).unwrap();
+        let swamp_def: CardDef = toml::from_str(r#"name = "Swamp"
+card_type = "land"
+[[mana_abilities]]
+tap_self = true
+produces = "B""#).unwrap();
+        let catalog = vec![borrower_def.clone(), island_def, island2_def, swamp_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         let make_fresh_state = || {
@@ -1313,14 +1330,22 @@
             state.objects.insert(borrower_id, borrower_obj);
             // 1UU mana: two Islands + one generic (Swamp)
             island_land(&mut state, "us");
-            add_perm(&mut state, "us", "Island2", BattlefieldState {
-                mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".into(), ..Default::default() }],
-                ..BattlefieldState::new(vec![])
-            });
-            add_perm(&mut state, "us", "Swamp", BattlefieldState {
-                mana_abilities: vec![ManaAbility { tap_self: true, produces: "B".into(), ..Default::default() }],
-                ..BattlefieldState::new(vec![])
-            });
+            {
+                let def: CardDef = toml::from_str(r#"name = "Island2"
+card_type = "land"
+[[mana_abilities]]
+tap_self = true
+produces = "U""#).unwrap();
+                add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
+            }
+            {
+                let def: CardDef = toml::from_str(r#"name = "Swamp"
+card_type = "land"
+[[mana_abilities]]
+tap_self = true
+produces = "B""#).unwrap();
+                add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
+            }
             state
         };
 
@@ -1359,7 +1384,7 @@
 
         let murktide_id = add_perm(&mut state, "us", "Murktide Regent", BattlefieldState {
             attacking: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         add_default_perm(&mut state, "opp", "Troll");
         state.combat_attackers = vec![murktide_id];
@@ -1381,7 +1406,7 @@
 
         let murktide_id = add_perm(&mut state, "us", "Murktide Regent", BattlefieldState {
             attacking: true,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         let subtlety_id = add_default_perm(&mut state, "opp", "Subtlety");
         state.combat_attackers = vec![murktide_id];
@@ -1405,7 +1430,7 @@
 
         let murktide_id = add_perm(&mut state, "us", "Murktide Regent", BattlefieldState {
             entered_this_turn: false,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         add_default_perm(&mut state, "opp", "Troll");
 
@@ -1478,7 +1503,7 @@
         let mat = recompute(state, catalog_map);
         state.materialized = mat;
         let ctx = bowmasters_etb_ctx(controller);
-        let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state, catalog_map)
+        let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state)
             .into_iter().collect();
         ctx.effect.call(state, 1, &targets, catalog_map, &mut rand::thread_rng());
     }
@@ -1499,7 +1524,7 @@
     fn test_apply_bowmasters_etb_grows_existing_army() {
         let mut state = make_state();
         add_default_perm(&mut state, "opp", "Orcish Bowmasters");
-        add_perm(&mut state, "opp", "Orc Army", BattlefieldState { counters: 2, ..BattlefieldState::new(vec![]) });
+        add_perm(&mut state, "opp", "Orc Army", BattlefieldState { counters: 2, ..BattlefieldState::new() });
         fire_bowmasters_etb("opp", &mut state, &HashMap::new());
         let army = state.permanents_of("opp").find(|p| p.catalog_key == "Orc Army").and_then(|p| p.bf.as_ref()).unwrap();
         assert_eq!(army.counters, 3, "Orc Army grows from 2 to 3");
@@ -1573,7 +1598,7 @@
     #[test]
     fn test_murktide_counter_on_instant_exile() {
         let mut state = make_state();
-        add_perm(&mut state, "us", "Murktide Regent", BattlefieldState { counters: 0, ..BattlefieldState::new(vec![]) });
+        add_perm(&mut state, "us", "Murktide Regent", BattlefieldState { counters: 0, ..BattlefieldState::new() });
 
         let ev = GameEvent::ZoneChange {
             id: ObjId::UNSET,
@@ -1615,7 +1640,7 @@
     #[test]
     fn test_tamiyo_clue_when_attacking() {
         let mut state = make_state();
-        add_perm(&mut state, "us", "Tamiyo, Inquisitive Student", BattlefieldState { attacking: true, ..BattlefieldState::new(vec![]) });
+        add_perm(&mut state, "us", "Tamiyo, Inquisitive Student", BattlefieldState { attacking: true, ..BattlefieldState::new() });
 
         let ev = GameEvent::EnteredStep {
             step: StepKind::DeclareAttackers,
@@ -1681,7 +1706,7 @@
         });
         // Opp has a 3/3 attacker.
         let atk_def = creature("Dragon", 3, 3);
-        add_perm(&mut state, "opp", "Dragon", BattlefieldState { entered_this_turn: false, ..BattlefieldState::new(vec![]) });
+        add_perm(&mut state, "opp", "Dragon", BattlefieldState { entered_this_turn: false, ..BattlefieldState::new() });
         add_default_perm(&mut state, "us", "Wall"); // blocker-sized (no block in this test)
 
         let catalog = vec![atk_def, creature("Wall", 0, 4)];
@@ -1725,7 +1750,7 @@
         // restoring the effective P/T of the affected permanent.
         let mut state = make_state();
         let atk_def = creature("Dragon", 3, 3);
-        let dragon_id = add_perm(&mut state, "opp", "Dragon", BattlefieldState::new(vec![]));
+        let dragon_id = add_perm(&mut state, "opp", "Dragon", BattlefieldState::new());
         let catalog = vec![atk_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
@@ -1869,7 +1894,6 @@
                 chosen_targets: vec![],
                 is_adventure_face: false,
                 adventure_card_name: None,
-                annotation: None,
             }),
             bf: None,
         });
@@ -1901,7 +1925,7 @@
         let mut state = make_state();
         state.us.life = 20;
         state.current_phase = Some(TurnPosition::Phase(PhaseKind::PostCombatMain));
-        let delta_id = add_perm(&mut state, "us", "Polluted Delta", BattlefieldState::new(vec![]));
+        let delta_id = add_perm(&mut state, "us", "Polluted Delta", BattlefieldState::new());
 
         // Simulate paying the sacrifice cost: permanent leaves the battlefield.
         state.set_card_zone(delta_id, CardZone::Graveyard);
@@ -1962,7 +1986,7 @@
             zone: CardZone::Battlefield,
             is_token: true,
             spell: None,
-            bf: Some(BattlefieldState::new(vec![])),
+            bf: Some(BattlefieldState::new()),
         });
         id
     }
@@ -2010,7 +2034,7 @@
     fn test_sba_zero_toughness_creature_dies() {
         let mut state = make_state();
         // A 1/-1 creature (e.g. after -1/-2 effect) has toughness ≤ 0.
-        let _id = add_perm(&mut state, "us", "Weakened", BattlefieldState::new(vec![]));
+        let _id = add_perm(&mut state, "us", "Weakened", BattlefieldState::new());
         let def = {
             let toml = "name = \"Weakened\"\ncard_type = \"creature\"\npower = 1\ntoughness = -1\n";
             toml::from_str::<CardDef>(toml).unwrap()
@@ -2027,7 +2051,7 @@
         let mut state = make_state();
         let _id = add_perm(&mut state, "us", "Ragavan", BattlefieldState {
             damage: 2,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         let def = creature("Ragavan", 2, 2);
         let catalog = vec![def];
@@ -2042,7 +2066,7 @@
         let mut state = make_state();
         let _id = add_perm(&mut state, "us", "Jace", BattlefieldState {
             loyalty: 0,
-            ..BattlefieldState::new(vec![])
+            ..BattlefieldState::new()
         });
         let toml = "name = \"Jace\"\ncard_type = \"planeswalker\"\nmana_cost = \"3U\"\nloyalty = 3\n";
         let def: CardDef = toml::from_str(toml).unwrap();
@@ -2135,7 +2159,7 @@
 
         // Add a 1/1 with two +1/+1 counters.
         let id = {
-            let bf = BattlefieldState { counters: 2, ..BattlefieldState::new(vec![]) };
+            let bf = BattlefieldState { counters: 2, ..BattlefieldState::new() };
             add_perm(&mut state, "us", "Llanowar Elves", bf)
         };
         let base_toml = "name = \"Llanowar Elves\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\n";
@@ -2191,7 +2215,7 @@
         let catalog = vec![def.clone()];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let id = add_perm_with_def(&mut state, "us", &def, BattlefieldState::new(vec![]));
+        let id = add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
 
         // recompute: CI from static_ability_def should add "flying" to materialized keywords.
         let mat = recompute(&state, &catalog_map);
@@ -2211,7 +2235,7 @@
         let catalog = vec![def.clone()];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let id = add_perm_with_def(&mut state, "us", &def, BattlefieldState::new(vec![]));
+        let id = add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
         assert_eq!(state.continuous_instances.len(), 1, "CI registered at ETB");
 
         // Simulate leaving the battlefield.
@@ -2237,7 +2261,7 @@
         let catalog = vec![base_def];
         let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
-        let id = add_perm(&mut state, "us", "GoyTest", BattlefieldState::new(vec![]));
+        let id = add_perm(&mut state, "us", "GoyTest", BattlefieldState::new());
 
         // Register a CDA CI: power = number of cards in "us" graveyard.
         state.continuous_instances.push(ContinuousInstance {
@@ -2271,4 +2295,27 @@
         let mat = recompute(&state, &catalog_map);
         let CardKind::Creature(c) = &mat.defs[&id].kind else { panic!() };
         assert_eq!(c.power(), 2, "2 GY cards → power 2");
+    }
+
+    /// recompute now covers all zones; a card in the graveyard must appear in materialized.defs.
+    #[test]
+    fn test_recompute_includes_graveyard_objects() {
+        let mut state = make_state();
+        let def: CardDef = toml::from_str(
+            "name = \"Goyf\"\ncard_type = \"creature\"\npower = 2\ntoughness = 3\n"
+        ).unwrap();
+        let catalog = vec![def.clone()];
+        let catalog_map: HashMap<&str, &CardDef> =
+            catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+
+        let gy_id = add_graveyard_card(&mut state, "us", "Goyf");
+
+        let mat = recompute(&state, &catalog_map);
+        assert!(
+            mat.defs.contains_key(&gy_id),
+            "graveyard card must appear in materialized snapshot"
+        );
+        let CardKind::Creature(c) = &mat.defs[&gy_id].kind else { panic!("expected creature") };
+        assert_eq!(c.power(), 2);
+        assert_eq!(c.toughness(), 3);
     }

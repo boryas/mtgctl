@@ -129,7 +129,7 @@ pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filt
         let target_who = target.resolve(&caster).to_string();
         for _ in 0..n {
             let candidates: Vec<ObjId> = state.hand_of(&target_who)
-                .filter(|c| filter.is_empty() || filter == "any" || catalog.get(c.catalog_key.as_str())
+                .filter(|c| filter.is_empty() || filter == "any" || state.materialized.defs.get(&c.id)
                     .map_or(true, |d| matches_target_type(&filter, &d.kind, false, Some(d))))
                 .map(|c| c.id)
                 .collect();
@@ -144,27 +144,10 @@ pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filt
 pub(crate) fn eff_enter_permanent(
     owner: impl Into<String>,
     card_name: impl Into<String>,
-    annotation: Option<String>,
 ) -> Effect {
     let owner = owner.into();
     let card_name = card_name.into();
     Effect(Arc::new(move |state, t, _targets, catalog, rng| {
-        use rand::Rng;
-        let (counters, ann) = match annotation.as_deref() {
-            Some(s) if s.starts_with('+') => (s[1..].parse::<i32>().unwrap_or(0), None),
-            _ => {
-                let ann = if annotation.is_some() {
-                    annotation.clone()
-                } else if let Some(d) = catalog.get(card_name.as_str()) {
-                    if !d.annotation_options().is_empty() {
-                        Some(d.annotation_options()[rng.gen_range(0..d.annotation_options().len())].clone())
-                    } else { None }
-                } else { None };
-                (0, ann)
-            }
-        };
-        let mana_abs = catalog.get(card_name.as_str())
-            .map_or_else(Vec::new, |d| d.mana_abilities().to_vec());
         let new_id = state.alloc_id();
         // Pre-register and immediately activate instances before the event fires,
         // so ETB replacement checks (e.g. Murktide self-ETB) can intercept the event.
@@ -182,11 +165,8 @@ pub(crate) fn eff_enter_permanent(
             is_token: false,
             spell: None,
             bf: Some(BattlefieldState {
-                annotation: ann,
-                counters,
-                mana_abilities: mana_abs,
                 entered_this_turn: true,
-                ..BattlefieldState::new(vec![])
+                ..BattlefieldState::new()
             }),
         });
         fire_event(
@@ -254,15 +234,15 @@ pub(crate) fn eff_fetch_search(
     Effect(Arc::new(move |state, t, _targets, catalog, rng| {
         use rand::Rng;
         let source_name = state.permanent_name(source_id).unwrap_or_default();
-        // Collect candidates from Library zone.
+        // Collect candidates from Library zone using materialized (covers all zones after Step 1).
         let candidates: Vec<(ObjId, String)> = state.library_of(&who)
-            .filter(|c| catalog.get(c.catalog_key.as_str()).map_or(false, |d| matches_search_filter(&filter, d)))
+            .filter(|c| state.materialized.defs.get(&c.id).map_or(false, |d| matches_search_filter(&filter, d)))
             .map(|c| (c.id, c.catalog_key.clone()))
             .collect();
         if !candidates.is_empty() {
             // Prefer a black-producing land if available.
             let black_candidates: Vec<(ObjId, String)> = candidates.iter()
-                .filter(|(_, n)| catalog.get(n.as_str()).and_then(|d| d.as_land()).map_or(false, |l| {
+                .filter(|(id, _)| state.materialized.defs.get(id).and_then(|d| d.as_land()).map_or(false, |l| {
                     l.land_types.swamp || l.mana_abilities.iter().any(|ma| ma.produces.contains('B'))
                 }))
                 .cloned()

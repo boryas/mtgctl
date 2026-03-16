@@ -119,7 +119,6 @@ pub(crate) struct LandTypes {
 pub(crate) struct LandData {
     #[serde(default)] pub(crate) basic: bool,
     #[serde(default)] pub(crate) land_types: LandTypes,
-    #[serde(default)] pub(crate) annotation_options: Vec<String>,
     #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
     #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
 }
@@ -249,7 +248,7 @@ pub(crate) struct CardDef {
     /// Relative likelihood of appearing as a permanent in play (default 100).
     #[allow(dead_code)]
     pub(crate) play_weight: Option<u32>,
-    pub(crate) kind: CardKind,
+    pub(super) kind: CardKind,
     /// Trigger check functions for this card (populated at load time, not from TOML).
     pub(super) trigger_defs: Vec<TriggerCheckFn>,
     /// Replacement effect definitions for this card (populated at load time, not from TOML).
@@ -333,13 +332,6 @@ impl CardDef {
             CardKind::Creature(c) => c.legendary,
             CardKind::Planeswalker(_) => true,  // all PWs are legendary since 2013
             _ => false,
-        }
-    }
-
-    pub(crate) fn annotation_options(&self) -> &[String] {
-        match &self.kind {
-            CardKind::Land(l) => &l.annotation_options,
-            _ => &[],
         }
     }
 
@@ -436,7 +428,6 @@ pub(crate) struct RawCardDef {
     #[serde(default)] pub(crate) basic: bool,
     #[serde(default)] pub(crate) land_types: LandTypes,
     #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
-    #[serde(default)] pub(crate) annotation_options: Vec<String>,
     #[serde(default)] pub(crate) mana_cost: String,
     #[serde(default)] pub(crate) power: Option<i32>,
     #[serde(default)] pub(crate) toughness: Option<i32>,
@@ -468,7 +459,6 @@ impl From<RawCardDef> for CardDef {
             CardType::Land => CardKind::Land(LandData {
                 basic: r.basic,
                 land_types: r.land_types,
-                annotation_options: r.annotation_options,
                 mana_abilities: r.mana_abilities.clone(),
                 abilities: r.abilities,
             }),
@@ -701,9 +691,9 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
 
 /// Push a vec of `TriggerContext`s onto the stack as uncounterable triggered ability items.
 /// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
-pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
+pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
     for ctx in triggers {
-        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state, catalog_map)
+        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state)
             .into_iter().collect();
         let ab_id = state.alloc_id();
         let ab_owner = state.player_id(&ctx.controller);
@@ -884,13 +874,12 @@ fn build_single_effect(effect: &str, who: &str, _def: &CardDef) -> Effect {
 pub(super) fn build_spell_effect(
     def: &CardDef,
     who: &str,
-    annotation: Option<String>,
 ) -> (TargetSpec, Effect) {
     let target_spec = target_spec_from_str(def.target());
     let effects = def.effects();
     if effects.is_empty() {
         // Permanent (or unrecognized spell): enters the battlefield.
-        return (TargetSpec::None, eff_enter_permanent(who.to_string(), def.name.clone(), annotation));
+        return (TargetSpec::None, eff_enter_permanent(who.to_string(), def.name.clone()));
     }
     let mut eff = build_single_effect(effects[0].as_str(), who, def);
     for e in &effects[1..] {

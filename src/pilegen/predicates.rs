@@ -71,7 +71,6 @@ pub(crate) fn choose_trigger_target(
     spec: &TargetSpec,
     controller: &str,
     state: &SimState,
-    catalog_map: &HashMap<&str, &CardDef>,
 ) -> Option<Target> {
     let opp = opp_of(controller);
     match spec {
@@ -81,7 +80,7 @@ pub(crate) fn choose_trigger_target(
             let target_who = who.resolve(controller);
             state.permanents_of(target_who)
                 .find(|p| {
-                    catalog_map.get(p.catalog_key.as_str())
+                    state.materialized.defs.get(&p.id)
                         .map(|d| {
                             let basic = d.as_land().map_or(false, |l| l.basic);
                             matches_target_type(filter, &d.kind, basic, Some(d))
@@ -95,7 +94,7 @@ pub(crate) fn choose_trigger_target(
             state.graveyard_of(target_who)
                 .find(|c| {
                     if filter.is_empty() || filter == "any" { return true; }
-                    catalog_map.get(c.catalog_key.as_str())
+                    state.materialized.defs.get(&c.id)
                         .map(|d| matches_target_type(filter, &d.kind, false, Some(d)))
                         .unwrap_or(false)
                 })
@@ -107,8 +106,7 @@ pub(crate) fn choose_trigger_target(
             // Non-killable creatures are lower priority than planeswalker or player.
             if let Some(id) = state.permanents_of(opp)
                 .filter(|p| {
-                    let def = catalog_map.get(p.catalog_key.as_str());
-                    if !def.map(|d| d.is_creature()).unwrap_or(false) { return false; }
+                    if !state.materialized.defs.get(&p.id).map(|d| d.is_creature()).unwrap_or(false) { return false; }
                     let bf = p.bf.as_ref().unwrap();
                     let tgh = state.materialized.defs.get(&p.id)
                         .and_then(|d| d.as_creature())
@@ -124,7 +122,7 @@ pub(crate) fn choose_trigger_target(
             // No killable creature: try non-creature sub-specs (planeswalker, player).
             for spec in specs {
                 if matches!(spec, TargetSpec::Permanent { filter, .. } if filter == "creature") { continue; }
-                if let Some(t) = choose_trigger_target(spec, controller, state, catalog_map) {
+                if let Some(t) = choose_trigger_target(spec, controller, state) {
                     return Some(t);
                 }
             }
@@ -133,10 +131,11 @@ pub(crate) fn choose_trigger_target(
         TargetSpec::StackEntry { filter } => {
             let caster_id = state.player_id(controller);
             // Pick the topmost opposing non-ability spell matching the filter.
+            // Stack abilities have no catalog_key and are excluded via stack_item_is_counterable.
             state.stack.iter().rev()
                 .find(|&&id| {
                     if state.stack_item_owner(id) == caster_id || !state.stack_item_is_counterable(id) { return false; }
-                    match catalog_map.get(state.stack_item_display_name(id)) {
+                    match state.materialized.defs.get(&id) {
                         Some(d) => stack_filter_matches(filter, &d.kind),
                         None    => filter == "any",
                     }
@@ -152,7 +151,6 @@ pub(crate) fn choose_spell_target(
     spec: &TargetSpec,
     caster: &str,
     state: &SimState,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<Target> {
     match spec {
@@ -161,7 +159,7 @@ pub(crate) fn choose_spell_target(
             let candidates: Vec<ObjId> = state.graveyard_of(&target_who)
                 .filter(|c| {
                     if filter.is_empty() || filter == "any" { return true; }
-                    catalog_map.get(c.catalog_key.as_str())
+                    state.materialized.defs.get(&c.id)
                         .map(|d| matches_target_type(filter, &d.kind, false, Some(d)))
                         .unwrap_or(false)
                 })
@@ -174,7 +172,7 @@ pub(crate) fn choose_spell_target(
             let target_who = who.resolve(caster).to_string();
             let candidates: Vec<ObjId> = state.permanents_of(&target_who)
                 .filter(|p| {
-                    catalog_map.get(p.catalog_key.as_str())
+                    state.materialized.defs.get(&p.id)
                         .map(|d| {
                             let basic = d.as_land().map_or(false, |l| l.basic);
                             matches_target_type(filter, &d.kind, basic, Some(d))
@@ -186,7 +184,7 @@ pub(crate) fn choose_spell_target(
             if candidates.is_empty() { return None; }
             Some(Target::Object(candidates[rng.gen_range(0..candidates.len())]))
         }
-        other => choose_trigger_target(other, caster, state, catalog_map),
+        other => choose_trigger_target(other, caster, state),
     }
 }
 
@@ -228,25 +226,24 @@ pub(crate) fn has_valid_target(
     target_str: &str,
     state: &SimState,
     actor: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
 ) -> bool {
-    has_valid_target_spec(&target_spec_from_str(Some(target_str)), state, actor, catalog_map)
+    has_valid_target_spec(&target_spec_from_str(Some(target_str)), state, actor)
 }
 
 fn has_valid_target_spec(
     spec: &TargetSpec,
     state: &SimState,
     actor: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
 ) -> bool {
     match spec {
         TargetSpec::None => false,
         TargetSpec::Player(_) => true,   // there is always an opponent
         TargetSpec::StackEntry { filter } => {
             let actor_id = state.player_id(actor);
+            // Stack abilities are excluded via stack_item_is_counterable.
             state.stack.iter().any(|&id| {
                 if state.stack_item_owner(id) == actor_id || !state.stack_item_is_counterable(id) { return false; }
-                match catalog_map.get(state.stack_item_display_name(id)) {
+                match state.materialized.defs.get(&id) {
                     Some(d) => stack_filter_matches(filter, &d.kind),
                     None    => filter == "any",
                 }
@@ -255,7 +252,7 @@ fn has_valid_target_spec(
         TargetSpec::Permanent { controller: who, filter } => {
             let target_who = who.resolve(actor);
             state.permanents_of(target_who).any(|p| {
-                match catalog_map.get(p.catalog_key.as_str()).copied() {
+                match state.materialized.defs.get(&p.id) {
                     Some(d) => {
                         let basic = d.as_land().map_or(false, |l| l.basic);
                         matches_target_type(filter, &d.kind, basic, Some(d))
@@ -268,13 +265,13 @@ fn has_valid_target_spec(
             let target_who = who.resolve(actor);
             state.graveyard_of(target_who).any(|c| {
                 if filter.is_empty() || filter == "any" { return true; }
-                catalog_map.get(c.catalog_key.as_str())
+                state.materialized.defs.get(&c.id)
                     .map(|d| matches_target_type(filter, &d.kind, false, Some(d)))
                     .unwrap_or(false)
             })
         }
         TargetSpec::CardInZone { .. } => false,
-        TargetSpec::Union(specs) => specs.iter().any(|s| has_valid_target_spec(s, state, actor, catalog_map)),
+        TargetSpec::Union(specs) => specs.iter().any(|s| has_valid_target_spec(s, state, actor)),
     }
 }
 
@@ -292,13 +289,15 @@ pub(crate) fn choose_permanent_target(
 
     let mut candidates: Vec<ObjId> = Vec::new();
     for perm in state.permanents_of(&target_who) {
-        let def = catalog_map.get(perm.catalog_key.as_str()).copied();
-        let matched = match def {
-            Some(d) => {
-                let basic = d.as_land().map_or(false, |l| l.basic);
-                matches_target_type(type_str, &d.kind, basic, Some(d))
-            }
-            None => type_str == "any",
+        // Prefer post-CE materialized snapshot; fall back to catalog if not yet recomputed.
+        let matched = if let Some(d) = state.materialized.defs.get(&perm.id) {
+            let basic = d.as_land().map_or(false, |l| l.basic);
+            matches_target_type(type_str, &d.kind, basic, Some(d))
+        } else if let Some(d) = catalog_map.get(perm.catalog_key.as_str()) {
+            let basic = d.as_land().map_or(false, |l| l.basic);
+            matches_target_type(type_str, &d.kind, basic, Some(d))
+        } else {
+            type_str == "any"
         };
         if matched { candidates.push(perm.id); }
     }
