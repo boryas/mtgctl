@@ -60,9 +60,8 @@ pub(super) enum CardZone {
 struct SpellState {
     effect: Option<Effect>,
     chosen_targets: Vec<Target>,
-    /// Set when the back face of a split card was cast (e.g. an adventure).
-    /// Holds the front-face name for logging; `None` for main-face casts.
-    split_back_name: Option<String>,
+    /// True when the back face of a split card was cast (e.g. an adventure instant).
+    is_back_face: bool,
 }
 
 /// In-play state for any permanent (land, creature, artifact, planeswalker, enchantment, token).
@@ -1838,7 +1837,7 @@ fn cast_spell(
             card.spell = Some(SpellState {
                 effect: Some(adv_eff),
                 chosen_targets: adv_targets,
-                split_back_name: Some(name),
+                is_back_face: true,
             });
         }
         return Some(card_id);
@@ -1920,7 +1919,7 @@ fn cast_spell(
         card.spell = Some(SpellState {
             effect: Some(spell_eff),
             chosen_targets: spell_chosen_targets,
-            split_back_name: None,
+            is_back_face: false,
         });
     }
 
@@ -2127,13 +2126,13 @@ fn resolve_top_of_stack(
         let spell = state.objects[&id].spell.clone().unwrap_or_else(|| SpellState {
             effect: None,
             chosen_targets: vec![],
-            split_back_name: None,
+            is_back_face: false,
         });
         let owner_str = state.objects[&id].owner.clone();
         let name = state.objects[&id].catalog_key.clone();
 
         // Back face of a split card whose back has subtype "adventure" → exile to on_adventure.
-        let is_adventure = spell.split_back_name.is_some()
+        let is_adventure = spell.is_back_face
             && catalog_map.get(name.as_str())
                 .and_then(|d| d.back.as_ref())
                 .map_or(false, |b| b.has_subtype("adventure"));
