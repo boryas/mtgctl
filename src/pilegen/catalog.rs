@@ -1,15 +1,12 @@
-use serde::Deserialize;
 use super::*;
 
 // ── Effect factories ──────────────────────────────────────────────────────────
 
 /// Factory for a spell effect: takes controller name, returns the resolved `Effect`.
-/// `TargetSpec` is still derived from `SpellData.target` via `target_spec_from_str`.
-/// Stored on Rust-defined spells (cards.rs); supersedes `effects: Vec<String>` when `Some`.
+/// `TargetSpec` is derived from `SpellData.target` via `target_spec_from_str`.
 pub(super) type SpellFactory = std::sync::Arc<dyn Fn(&str) -> Effect + Send + Sync>;
 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
-/// Supersedes `AbilityDef.effect: String` when `Some`.
 pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(&str, ObjId) -> Effect + Send + Sync>;
 
 /// One way to pay for a counterspell. Each option is tried in order; the first
@@ -22,19 +19,13 @@ pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(&str, ObjId) -> Effect + 
 ///   bounce_island       — return any blue-producing land from play to hand
 ///   hand_min            — minimum hand size required (inclusive of this spell)
 ///   prob                — probability this option is even attempted (default 1.0)
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct AlternateCost {
-    #[serde(default)]
     pub(crate) mana_cost: String,
-    #[serde(default)]
     pub(crate) exile_blue_from_hand: bool,
-    #[serde(default)]
     pub(crate) life_cost: i32,
-    #[serde(default)]
     pub(crate) bounce_island: bool,
-    #[serde(default)]
     pub(crate) hand_min: i32,
-    #[serde(default)]
     pub(crate) prob: Option<f64>,
 }
 
@@ -48,54 +39,42 @@ pub(crate) struct AlternateCost {
 ///   type ∈ { nonbasic_land, land, creature, planeswalker, artifact, any }
 ///
 /// effect ∈ { destroy, bounce, exile, fetch_land }
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct AbilityDef {
     // ── Cost ──────────────────────────────────────────────────────────────────
     /// Mana cost to activate (empty = no mana required).
-    #[serde(default)]
     pub(crate) mana_cost: String,
     /// Whether the source is tapped as part of the cost.
-    #[serde(default)]
     pub(crate) tap_self: bool,
     /// Whether the source is sacrificed as part of the cost.
-    #[serde(default)]
     pub(crate) sacrifice_self: bool,
     /// Life paid as part of the cost (e.g. 1 for fetchlands).
-    #[serde(default)]
     pub(crate) life_cost: i32,
 
     // ── Target (optional) ─────────────────────────────────────────────────────
     /// If set, a valid target must exist for the ability to be available,
     /// and the effect is applied to a randomly chosen valid target.
-    #[serde(default)]
     pub(crate) target: Option<String>,
 
     // ── Zone ──────────────────────────────────────────────────────────────────
     /// Zone the card must be in for this ability. Default "" / "play" = in play.
     /// Use "hand" for cycling/channel abilities.
-    #[serde(default)]
     pub(crate) zone: String,
     /// Discard this card as part of the cost (zone="hand" abilities).
-    #[serde(default)]
     pub(crate) discard_self: bool,
     /// Sacrifice a land you control as part of the cost (e.g. Edge of Autumn cycling).
-    #[serde(default)]
     pub(crate) sacrifice_land: bool,
 
     // ── Effect ────────────────────────────────────────────────────────────────
-    #[serde(default)]
     pub(crate) effect: String,
     /// Pre-built effect factory for Rust-defined abilities. Supersedes `effect` when `Some`.
-    #[serde(skip)]
     pub(crate) ability_factory: Option<AbilityFactory>,
     /// If true, this is a ninjutsu activation: cost includes returning an unblocked attacker to
     /// hand, and the effect puts the ninja into play tapped and attacking.
-    #[serde(default)]
     pub(crate) ninjutsu: bool,
     /// If Some, this is a loyalty ability with the given loyalty adjustment
     /// (positive = gain loyalty, negative = spend loyalty, 0 = 0-loyalty ability).
     /// Loyalty abilities are sorcery-speed and can only be activated once per turn per planeswalker.
-    #[serde(default)]
     pub(crate) loyalty_cost: Option<i32>,
 }
 
@@ -103,59 +82,58 @@ pub(crate) struct AbilityDef {
 
 /// How a permanent produces mana. `produces` is a string of color chars (e.g. "B", "U", "BU").
 /// Empty produces → contributes to generic total only (e.g. Cavern of Souls).
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ManaAbility {
-    #[serde(default)] pub(crate) tap_self: bool,
-    #[serde(default)] pub(crate) sacrifice_self: bool,
-    #[serde(default)] pub(crate) produces: String,
+    pub(crate) tap_self: bool,
+    pub(crate) sacrifice_self: bool,
+    pub(crate) produces: String,
 }
 
 /// The five basic land subtypes.
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct LandTypes {
-    #[serde(default)] pub(crate) plains: bool,
-    #[serde(default)] pub(crate) island: bool,
-    #[serde(default)] pub(crate) swamp: bool,
-    #[serde(default)] pub(crate) mountain: bool,
-    #[serde(default)] pub(crate) forest: bool,
+    pub(crate) plains: bool,
+    pub(crate) island: bool,
+    pub(crate) swamp: bool,
+    pub(crate) mountain: bool,
+    pub(crate) forest: bool,
 }
 
 // ── Per-variant data structs ──────────────────────────────────────────────────
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct LandData {
-    #[serde(default)] #[allow(dead_code)] pub(crate) basic: bool,  // feeds CardDef.supertypes at load time
-    #[serde(default)] pub(crate) land_types: LandTypes,
-    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
-    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
+    pub(crate) land_types: LandTypes,
+    pub(crate) mana_abilities: Vec<ManaAbility>,
+    pub(crate) abilities: Vec<AbilityDef>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Clone)]
 pub(crate) struct CreatureData {
-    #[serde(default)] pub(crate) mana_cost: String,
+    pub(crate) mana_cost: String,
     // `power` and `toughness` are private — always read through the materialized `CardDef`
     // (which folds in counters and CE modifiers). Write only via `adjust_pt`.
     power: i32,
     toughness: i32,
     #[allow(dead_code)]
-    #[serde(default)] pub(crate) exileable: bool,
-    #[serde(default)] pub(crate) legendary: bool,
-    #[serde(default)] pub(crate) delve: bool,
-    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
-    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
-    #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
-    #[serde(default)] pub(crate) keywords: Vec<String>,
+    pub(crate) exileable: bool,
+    pub(crate) legendary: bool,
+    pub(crate) delve: bool,
+    pub(crate) abilities: Vec<AbilityDef>,
+    pub(crate) mana_abilities: Vec<ManaAbility>,
+    pub(crate) ninjutsu: Option<NinjutsuAbility>,
+    pub(crate) keywords: Vec<String>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ArtifactData {
-    #[serde(default)] pub(crate) mana_cost: String,
-    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
-    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
+    pub(crate) mana_cost: String,
+    pub(crate) abilities: Vec<AbilityDef>,
+    pub(crate) mana_abilities: Vec<ManaAbility>,
 }
 
 /// The ninjutsu ability on a ninja creature.
-#[derive(Deserialize, Clone)]
+#[derive(Clone)]
 pub(crate) struct NinjutsuAbility {
     pub(crate) mana_cost: String,
 }
@@ -206,30 +184,27 @@ impl NinjutsuAbility {
 }
 
 /// Spell data shared by Instant and Sorcery variants.
-#[derive(Deserialize, Clone, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct SpellData {
-    #[serde(default)] pub(crate) mana_cost: String,
+    pub(crate) mana_cost: String,
     #[allow(dead_code)]
-    #[serde(default)] pub(crate) exileable: bool,
-    #[serde(default)] pub(crate) target: Option<String>,
-    #[serde(default)] pub(crate) requires: Vec<String>,
-    #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
-    #[serde(default)] pub(crate) delve: bool,
-    #[serde(default)] pub(crate) effects: Vec<String>,
+    pub(crate) exileable: bool,
+    pub(crate) target: Option<String>,
+    pub(crate) requires: Vec<String>,
+    pub(crate) alternate_costs: Vec<AlternateCost>,
+    pub(crate) delve: bool,
     /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
-    #[serde(default)] pub(crate) subtypes: Vec<String>,
-    /// Pre-built effect factory for Rust-defined spells. Supersedes `effects` when `Some`.
-    /// `TargetSpec` is still derived from `target` via `target_spec_from_str`.
-    #[serde(skip)]
+    pub(crate) subtypes: Vec<String>,
+    /// Pre-built effect factory for Rust-defined spells.
+    /// `TargetSpec` is derived from `target` via `target_spec_from_str`.
     pub(crate) spell_factory: Option<SpellFactory>,
 }
 
-#[derive(Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct PlaneswalkerData {
-    #[serde(default)] pub(crate) mana_cost: String,
-    #[serde(default)] pub(crate) loyalty: i32,
-    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
+    pub(crate) mana_cost: String,
+    pub(crate) loyalty: i32,
+    pub(crate) abilities: Vec<AbilityDef>,
 }
 
 #[derive(Clone)]
@@ -246,8 +221,7 @@ pub(crate) enum CardKind {
 /// Layout of a multi-face card. Determines how `back` is interpreted at cast/flip time.
 /// `Normal` = single-faced (default). `DoubleFaced` = transform DFC (e.g. Tamiyo).
 /// `Split` = two castable halves (split cards, adventures).
-#[derive(Deserialize, Clone, Default, Debug, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub(crate) enum CardLayout {
     #[default]
     Normal,
@@ -293,13 +267,12 @@ pub(crate) struct CardDef {
     /// For DoubleFaced cards, this is the transformed face.
     /// For Split cards (including adventures), this is the second castable half.
     pub(crate) back: Option<Box<CardDef>>,
-    /// Trigger check functions for this card (populated at load time, not from TOML).
+    /// Trigger check functions for this card (set at card definition time).
     pub(super) trigger_defs: Vec<TriggerCheckFn>,
-    /// Replacement effect definitions for this card (populated at load time, not from TOML).
+    /// Replacement effect definitions for this card (set at card definition time).
     pub(super) replacement_defs: Vec<ReplacementDef>,
     /// Static ability factories. Called at ETB to register a `ContinuousInstance` for this
     /// object. The CI has `expiry: WhileSourceOnBattlefield` and is removed on LTB.
-    /// Populated from TOML `static_abilities` strings and/or hardcoded per-card logic.
     pub(super) static_ability_defs: Vec<StaticAbilityDef>,
 }
 
@@ -346,13 +319,6 @@ impl CardDef {
         match &self.kind {
             CardKind::Instant(s) | CardKind::Sorcery(s) => s.target.as_deref(),
             _ => None,
-        }
-    }
-
-    pub(crate) fn effects(&self) -> &[String] {
-        match &self.kind {
-            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.effects,
-            _ => &[],
         }
     }
 
@@ -564,11 +530,10 @@ pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef 
     }
 }
 
-// ── TOML deserialization: two-step via RawCardDef ─────────────────────────────
+// ── Card type enum ─────────────────────────────────────────────────────────────
 
-/// Typed card category used only during TOML deserialization.
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
-#[serde(rename_all = "snake_case")]
+/// Card category used by the engine and predicates.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) enum CardType {
     Land,
     Creature,
@@ -580,42 +545,6 @@ pub(crate) enum CardType {
     Enchantment,
 }
 
-/// Flat deserialization target. Converted to `CardDef` by `From<RawCardDef>`.
-#[derive(Deserialize, Clone, Default)]
-pub(crate) struct RawCardDef {
-    pub(crate) name: String,
-    pub(crate) card_type: CardType,
-    #[serde(default)] pub(crate) enters_tapped: bool,
-    #[serde(default)] pub(crate) basic: bool,
-    #[serde(default)] pub(crate) land_types: LandTypes,
-    #[serde(default)] pub(crate) mana_abilities: Vec<ManaAbility>,
-    #[serde(default)] pub(crate) mana_cost: String,
-    #[serde(default)] pub(crate) power: Option<i32>,
-    #[serde(default)] pub(crate) toughness: Option<i32>,
-    #[serde(default)] pub(crate) loyalty: Option<i32>,
-    #[serde(default)] pub(crate) legendary: bool,
-    #[serde(default)] pub(crate) blue: bool,
-    #[serde(default)] pub(crate) black: bool,
-    #[serde(default)] pub(crate) target: Option<String>,
-    #[serde(default)] pub(crate) exileable: bool,
-    #[serde(default)] pub(crate) play_weight: Option<u32>,
-    #[serde(default)] pub(crate) requires: Vec<String>,
-    #[serde(default)] pub(crate) abilities: Vec<AbilityDef>,
-    #[serde(default)] pub(crate) delve: bool,
-    #[serde(default)] pub(crate) alternate_costs: Vec<AlternateCost>,
-    #[serde(default)] pub(crate) ninjutsu: Option<NinjutsuAbility>,
-    #[serde(default)] pub(crate) keywords: Vec<String>,
-    #[serde(default)] pub(crate) effects: Vec<String>,
-    /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
-    #[serde(default)] pub(crate) subtypes: Vec<String>,
-    /// Named static abilities to register as ContinuousInstances at ETB.
-    /// Each string maps to a `StaticAbilityDef` factory via `static_ability_def_from_str`.
-    #[serde(default)] pub(crate) static_abilities: Vec<String>,
-    /// Layout of a multi-face card (normal / double_faced / split). Defaults to normal.
-    #[serde(default)] pub(crate) layout: CardLayout,
-    /// Back/second face for DFCs and split/adventure cards.
-    #[serde(default)] pub(crate) back: Option<Box<RawCardDef>>,
-}
 
 /// Derive the color identity of a card from its mana cost string and explicit
 /// per-color override flags (used for cards whose cost doesn't reflect their color,
@@ -628,225 +557,6 @@ pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Colo
     if mana_cost.contains('R') { colors.push(Color::Red); }
     if mana_cost.contains('G') { colors.push(Color::Green); }
     colors
-}
-
-impl From<RawCardDef> for CardDef {
-    fn from(r: RawCardDef) -> Self {
-        let enters_tapped = r.enters_tapped;
-        let is_planeswalker = matches!(r.card_type, CardType::Planeswalker);
-        let kind = match r.card_type {
-            CardType::Land => CardKind::Land(LandData {
-                basic: r.basic,
-                land_types: r.land_types,
-                mana_abilities: r.mana_abilities.clone(),
-                abilities: r.abilities,
-            }),
-            CardType::Creature => CardKind::Creature(CreatureData {
-                mana_cost: r.mana_cost,
-                power: r.power.unwrap_or(1),
-                toughness: r.toughness.unwrap_or(1),
-                exileable: r.exileable,
-                legendary: r.legendary,
-                delve: r.delve,
-                abilities: r.abilities,
-                mana_abilities: r.mana_abilities.clone(),
-                ninjutsu: r.ninjutsu,
-                keywords: r.keywords,
-            }),
-            CardType::Instant => CardKind::Instant(SpellData {
-                mana_cost: r.mana_cost,
-                exileable: r.exileable,
-                target: r.target,
-                requires: r.requires,
-                alternate_costs: r.alternate_costs,
-                delve: r.delve,
-                effects: r.effects,
-                subtypes: r.subtypes,
-                spell_factory: None,
-            }),
-            CardType::Sorcery => CardKind::Sorcery(SpellData {
-                mana_cost: r.mana_cost,
-                exileable: r.exileable,
-                target: r.target,
-                requires: r.requires,
-                alternate_costs: r.alternate_costs,
-                delve: r.delve,
-                effects: r.effects,
-                subtypes: r.subtypes,
-                spell_factory: None,
-            }),
-            CardType::Artifact => CardKind::Artifact(ArtifactData {
-                mana_cost: r.mana_cost,
-                abilities: r.abilities,
-                mana_abilities: r.mana_abilities.clone(),
-            }),
-            CardType::Planeswalker => CardKind::Planeswalker(PlaneswalkerData {
-                mana_cost: r.mana_cost,
-                loyalty: r.loyalty.unwrap_or(0),
-                abilities: r.abilities,
-            }),
-            CardType::Enchantment => CardKind::Enchantment,
-        };
-        let trigger_defs: Vec<TriggerCheckFn> = match r.name.as_str() {
-            "Orcish Bowmasters"           => vec![std::sync::Arc::new(bowmasters_check)],
-            "Recruiter of the Guard"      => vec![std::sync::Arc::new(recruiter_check)],
-            "Murktide Regent"             => vec![std::sync::Arc::new(murktide_check)],
-            "Tamiyo, Inquisitive Student" => vec![std::sync::Arc::new(tamiyo_check)],
-            _ => vec![],
-        };
-        let card_type_s = match r.card_type {
-            CardType::Land        => "land",
-            CardType::Creature    => "creature",
-            CardType::Planeswalker => "planeswalker",
-            CardType::Artifact    => "artifact",
-            CardType::Instant     => "instant",
-            CardType::Sorcery     => "sorcery",
-            CardType::Enchantment => "enchantment",
-        }.to_string();
-        let mut replacement_defs: Vec<ReplacementDef> = match r.name.as_str() {
-            "Leyline of the Void" => vec![ReplacementDef {
-                check: leyline_check,
-                make_effect: std::sync::Arc::new(|_source_id, controller: &str| {
-                    let ctl = controller.to_string();
-                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-                        if let Some(Target::Object(id)) = targets.first() {
-                            change_zone(*id, ZoneId::Exile, state, t, &ctl, rng);
-                        }
-                    }))
-                }),
-            }],
-            "Murktide Regent" => vec![ReplacementDef {
-                check: murktide_etb_check,
-                make_effect: std::sync::Arc::new(|_source_id, controller: &str| {
-                    let ctl = controller.to_string();
-                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-                        let Some(Target::Object(id)) = targets.first() else { return; };
-                        let id = *id;
-                        let exile_count = state.exile_of(&ctl)
-                            .filter(|c| state.def_of(c.id)
-                                .map_or(false, |d| d.is_instant() || d.is_sorcery()))
-                            .count() as i32;
-                        if let Some(bf) = state.permanent_bf_mut(id) {
-                            bf.counters = exile_count;
-                        }
-                        fire_event(
-                            GameEvent::ZoneChange {
-                                id,
-                                actor: ctl.clone(),
-                                card: "Murktide Regent".to_string(),
-                                card_type: "creature".to_string(),
-                                from: ZoneId::Stack,
-                                to: ZoneId::Battlefield,
-                                controller: ctl.clone(),
-                            },
-                            state, t, &ctl, rng,
-                        );
-                    }))
-                }),
-            }],
-            _ => vec![],
-        };
-        if enters_tapped {
-            let ct = card_type_s.clone();
-            replacement_defs.push(ReplacementDef {
-                check: etb_self_check,
-                make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
-                    let ctl = controller.to_string();
-                    let ct = ct.clone();
-                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-                        let Some(Target::Object(id)) = targets.first() else { return; };
-                        let id = *id;
-                        let from = current_zone_id(id, state);
-                        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-                        fire_event(
-                            GameEvent::ZoneChange {
-                                id, actor: ctl.clone(), card: card_name, card_type: ct.clone(),
-                                from, to: ZoneId::Battlefield, controller: ctl.clone(),
-                            },
-                            state, t, &ctl, rng,
-                        );
-                        if let Some(bf) = state.permanent_bf_mut(id) {
-                            bf.tapped = true;
-                        }
-                    }))
-                }),
-            });
-        }
-        if is_planeswalker {
-            let ct = card_type_s.clone();
-            let base_loyalty = if let CardKind::Planeswalker(ref p) = kind { p.loyalty } else { 0 };
-            replacement_defs.push(ReplacementDef {
-                check: etb_self_check,
-                make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
-                    let ctl = controller.to_string();
-                    let ct = ct.clone();
-                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-                        let Some(Target::Object(id)) = targets.first() else { return; };
-                        let id = *id;
-                        let from = current_zone_id(id, state);
-                        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-                        fire_event(
-                            GameEvent::ZoneChange {
-                                id, actor: ctl.clone(), card: card_name, card_type: ct.clone(),
-                                from, to: ZoneId::Battlefield, controller: ctl.clone(),
-                            },
-                            state, t, &ctl, rng,
-                        );
-                        if let Some(bf) = state.permanent_bf_mut(id) {
-                            bf.loyalty = base_loyalty;
-                        }
-                    }))
-                }),
-            });
-        }
-        let static_ability_defs: Vec<StaticAbilityDef> = r.static_abilities.iter()
-            .filter_map(|s| static_ability_def_from_str(s))
-            .collect();
-        let back = r.back.map(|b| Box::new(CardDef::from(*b)));
-        let colors = parse_colors(
-            match &kind {
-                CardKind::Creature(c) => &c.mana_cost,
-                CardKind::Instant(s) | CardKind::Sorcery(s) => &s.mana_cost,
-                CardKind::Artifact(a) => &a.mana_cost,
-                CardKind::Planeswalker(p) => &p.mana_cost,
-                CardKind::Land(_) | CardKind::Enchantment => "",
-            },
-            r.blue, r.black,
-        );
-        let types = vec![r.card_type];
-        let mut supertypes = Vec::new();
-        if r.legendary { supertypes.push(Supertype::Legendary); }
-        if r.basic { supertypes.push(Supertype::Basic); }
-        CardDef { name: r.name, play_weight: r.play_weight, kind, colors, types, supertypes, layout: r.layout, back, trigger_defs, replacement_defs, static_ability_defs }
-    }
-}
-
-/// Build a `StaticAbilityDef` factory for the named keyword ability.
-/// Returns `None` for unrecognized strings (ignored with a warning-free `filter_map`).
-fn static_ability_def_from_str(s: &str) -> Option<StaticAbilityDef> {
-    match s {
-        "flying" => Some(std::sync::Arc::new(|source_id, controller: &str| ContinuousInstance {
-            source_id,
-            controller: controller.to_string(),
-            layer: ContinuousLayer::L6AbilityEffects,
-            filter: std::sync::Arc::new(move |id, _| id == source_id),
-            modifier: std::sync::Arc::new(|def, _state| {
-                if let CardKind::Creature(c) = &mut def.kind {
-                    if !c.keywords.contains(&"flying".to_string()) {
-                        c.keywords.push("flying".to_string());
-                    }
-                }
-            }),
-            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-        })),
-        _ => None,
-    }
-}
-
-impl<'de> Deserialize<'de> for CardDef {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        RawCardDef::deserialize(d).map(CardDef::from)
-    }
 }
 
 // ── Trigger check functions (one per trigger-having card) ─────────────────────
@@ -1055,8 +765,7 @@ pub(super) fn tamiyo_plus_two_check(
 }
 
 /// A named effect builder: given `(who, source_id)`, produces an `Effect` closure.
-/// Used by `NAMED_ABILITY_EFFECTS` to register card-specific ability effects by their
-/// TOML effect tag, the same way `CARD_TRIGGERS` registers card-specific trigger logic.
+/// Used by `NAMED_ABILITY_EFFECTS` to register card-specific ability effects by name.
 type NamedEffectBuilder = fn(&str, ObjId) -> Effect;
 
 pub(super) fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
@@ -1076,7 +785,7 @@ pub(super) fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
     }))
 }
 
-/// Registry of named ability effects. Each entry maps a TOML `effect` tag to a builder
+/// Registry of named ability effects. Each entry maps an effect tag to a builder
 /// function. New card-specific effects are added here rather than as inline branches.
 static NAMED_ABILITY_EFFECTS: &[(&str, NamedEffectBuilder)] = &[
     ("tamiyo_plus_two", build_tamiyo_plus_two),
@@ -1096,7 +805,7 @@ fn search_dest_from_str(dest: &str) -> ZoneId {
 /// Build an `Effect` closure for an activated ability at push time.
 ///
 /// For Rust-defined abilities: uses `ability_factory` from `AbilityDef`.
-/// For TOML/test abilities: falls back to string dispatch on `ability.effect`.
+/// Fallback: string dispatch on `ability.effect` for hand-constructed `AbilityDef`s in tests.
 pub(super) fn build_ability_effect(
     ability: &AbilityDef,
     who: &str,
@@ -1147,73 +856,21 @@ pub(super) fn build_ability_effect(
     Effect(std::sync::Arc::new(|_state, _t, _targets, _rng| {}))
 }
 
-/// Build an `Effect` for a single effect string (e.g. `"draw:3"`, `"destroy"`, `"win"`).
-fn build_single_effect(effect: &str, who: &str, _def: &CardDef) -> Effect {
-    if let Some(rest) = effect.strip_prefix("draw:") {
-        let n: usize = rest.parse().unwrap_or(1);
-        return eff_draw(who.to_string(), n);
-    }
-    if let Some(rest) = effect.strip_prefix("put_back:") {
-        let n: usize = rest.parse().unwrap_or(0);
-        return eff_put_back(who.to_string(), n);
-    }
-    if let Some(spec) = effect.strip_prefix("mana:") {
-        return eff_mana(who.to_string(), spec.to_string());
-    }
-    if let Some(rest) = effect.strip_prefix("life_loss:") {
-        let n: i32 = rest.parse().unwrap_or(0);
-        return eff_life_loss(who.to_string(), n);
-    }
-    if let Some(rest) = effect.strip_prefix("discard:") {
-        let mut parts = rest.splitn(2, ':');
-        let n: usize = parts.next().unwrap_or("1").parse().unwrap_or(1);
-        let filter = parts.next().unwrap_or("").to_string();
-        return eff_discard(who.to_string(), Who::Opp, n, filter);
-    }
-    if effect.starts_with("search:") {
-        let mut parts = effect.splitn(3, ':');
-        parts.next(); // "search"
-        let filter = parts.next().unwrap_or("land");
-        let dest = search_dest_from_str(parts.next().unwrap_or("play"));
-        return eff_fetch_search(who.to_string(), search_filter_pred(filter), dest);
-    }
-    match effect {
-        "win"       => eff_doomsday(),
-        "destroy"   => eff_destroy_target(who.to_string()),
-        "bounce"    => eff_bounce_target(who.to_string()),
-        "counter"   => eff_counter_target(who.to_string()),
-        "reanimate" => eff_reanimate(who.to_string()),
-        "cantrip"   => eff_draw(who.to_string(), 1),
-        _           => Effect(std::sync::Arc::new(|_,_,_,_| {})),
-    }
-}
-
 /// Build a `(TargetSpec, Effect)` for a spell at cast time.
 ///
-/// For Rust-defined cards: uses `spell_factory` from `SpellData`.
-/// For TOML/test cards: parses `effects: Vec<String>` via `build_single_effect`.
-/// If `effects` is empty and no factory: permanent spell → `eff_enter_permanent`.
+/// For Rust-defined spells: uses `spell_factory` from `SpellData`.
+/// For non-spell cards (permanents): returns `eff_enter_permanent`.
 pub(super) fn build_spell_effect(
     def: &CardDef,
     who: &str,
 ) -> (TargetSpec, Effect) {
     let target_spec = target_spec_from_str(def.target());
-    // Rust-defined cards: use the pre-built factory.
     if let CardKind::Instant(s) | CardKind::Sorcery(s) = &def.kind {
         if let Some(factory) = &s.spell_factory {
             return (target_spec, factory(who));
         }
     }
-    // TOML/test path.
-    let effects = def.effects();
-    if effects.is_empty() {
-        return (TargetSpec::None, eff_enter_permanent(who.to_string(), def.name.clone()));
-    }
-    let mut eff = build_single_effect(effects[0].as_str(), who, def);
-    for e in &effects[1..] {
-        eff = eff.then(build_single_effect(e.as_str(), who, def));
-    }
-    (target_spec, eff)
+    (TargetSpec::None, eff_enter_permanent(who.to_string(), def.name.clone()))
 }
 
 
