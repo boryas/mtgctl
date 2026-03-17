@@ -41,6 +41,8 @@
         let def: CardDef = toml::from_str(&toml).expect("add_perm: CardDef parse failed");
         preregister_instances(&def, id, who, state);
         activate_instances(id, who, Some(&def), state);
+        // Seed state.catalog so recompute() can find this object's base def.
+        state.catalog.entry(name.to_string()).or_insert(def);
         id
     }
 
@@ -66,6 +68,8 @@
         preregister_instances(def, id, who, state);
         activate_instances(id, who, Some(def), state);
         state.materialized.defs.insert(id, def.clone());
+        // Seed state.catalog so recompute() can find this object's base def.
+        state.catalog.entry(def.name.clone()).or_insert_with(|| def.clone());
         id
     }
 
@@ -181,8 +185,7 @@
         state.us.spells_cast_this_turn = 2;
 
         let step = Step { kind: StepKind::Untap, prio: false };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(!state.permanent_bf(land_id).unwrap().tapped, "land should be untapped");
         assert!(!state.permanent_bf(ragavan_id).unwrap().tapped, "permanent should be untapped");
@@ -198,9 +201,8 @@
         let initial_hand = state.hand_size("us");
 
         let step = Step { kind: StepKind::Draw, prio: false };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         // on_play=true, t=1, ap="us" → this_player_on_play=true → skip
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert_eq!(state.hand_size("us"), initial_hand, "no draw on the play turn 1");
     }
@@ -212,9 +214,8 @@
         let initial_hand = state.hand_size("us");
 
         let step = Step { kind: StepKind::Draw, prio: false };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         // on_play=false → this_player_on_play=false → no skip
-        do_step(&mut state, 1, "us", &step, 3, false, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, false, &mut seeded_rng());
 
         assert_eq!(state.hand_size("us"), initial_hand + 1, "should draw one card");
     }
@@ -228,8 +229,7 @@
         });
 
         let step = Step { kind: StepKind::Cleanup, prio: false };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert_eq!(state.permanent_bf(rag_id).unwrap().damage, 0);
     }
@@ -244,9 +244,9 @@
         });
 
         let catalog = vec![ragavan_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.combat_attackers.contains(&ragavan_id), "should attack");
         assert!(state.permanent_bf(ragavan_id).unwrap().tapped, "attacker should be tapped");
@@ -264,9 +264,9 @@
         add_default_perm(&mut state, "opp", "Mosscoat Construct");
 
         let catalog = vec![attacker_def, blocker_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.combat_attackers.is_empty(), "should not attack into 3/3");
     }
@@ -279,9 +279,9 @@
         add_default_perm(&mut state, "us", "Ragavan");
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.combat_attackers.is_empty(), "sickness prevents attack");
     }
@@ -300,9 +300,9 @@
         state.combat_attackers = vec![ragavan_id];
 
         let catalog = vec![atk_def, blk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert_eq!(state.combat_blocks.len(), 1);
         assert_eq!(state.combat_blocks[0], (ragavan_id, mosscoat_id));
@@ -321,9 +321,9 @@
         state.combat_attackers = vec![beast_id];
 
         let catalog = vec![atk_def, blk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.combat_blocks.is_empty(), "should not chump block");
     }
@@ -340,9 +340,9 @@
         state.combat_attackers = vec![ragavan_id];
 
         let catalog = vec![atk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert_eq!(state.opp.life, initial_life - 2);
     }
@@ -362,9 +362,9 @@
         state.combat_blocks = vec![(ragavan_id, construct_id)];
 
         let catalog = vec![atk_def, blk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert_eq!(state.opp.life, initial_life, "blocked — no player damage");
     }
@@ -383,9 +383,9 @@
         state.combat_blocks = vec![(ragavan_id, construct_id)];
 
         let catalog = vec![atk_def, blk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: true };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.permanents_of("us").count() == 0, "attacker should die");
         assert!(state.permanents_of("opp").count() == 0, "blocker should die");
@@ -407,9 +407,9 @@
         state.combat_blocks = vec![(ragavan_id, troll_id)];
 
         let catalog = vec![atk_def, blk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: true };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.permanents_of("us").count() == 0, "attacker dies");
         assert!(state.permanents_of("opp").count() > 0, "blocker survives");
@@ -424,8 +424,7 @@
         state.combat_blocks = vec![(dummy_id, dummy_id2)];
 
         let step = Step { kind: StepKind::EndCombat, prio: false };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.combat_attackers.is_empty());
         assert!(state.combat_blocks.is_empty());
@@ -450,9 +449,8 @@
         add_library_card(&mut state, "us", "Swamp");
         let initial_hand = state.hand_size("us");
 
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         // t=2, on_play=false → draw fires (this_player_on_play=false)
-        do_phase(&mut state, 2, "us", &beginning_phase(), 3, false, &catalog_map, &mut seeded_rng());
+        do_phase(&mut state, 2, "us", &beginning_phase(), 3, false, &mut seeded_rng());
 
         assert!(!state.permanent_bf(island_id).unwrap().tapped, "land should be untapped");
         assert_eq!(state.hand_size("us"), initial_hand + 1, "should have drawn one card");
@@ -461,8 +459,7 @@
     #[test]
     fn test_combat_phase_full_cycle() {
         let mut state = make_state();
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        do_phase(&mut state, 1, "us", &combat_phase(), 3, true, &catalog_map, &mut seeded_rng());
+        do_phase(&mut state, 1, "us", &combat_phase(), 3, true, &mut seeded_rng());
 
         assert!(state.combat_attackers.is_empty());
         assert!(state.combat_blocks.is_empty());
@@ -474,8 +471,7 @@
     fn test_priority_round_both_pass_empty_stack() {
         let mut state = make_state();
         // current_phase is "" (not "Main") → both players pass immediately
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        handle_priority_round(&mut state, 1, "us", 3, &catalog_map, &mut seeded_rng());
+        handle_priority_round(&mut state, 1, "us", 3, &mut seeded_rng());
 
         assert_eq!(state.us.life, 20);
         assert_eq!(state.opp.life, 20);
@@ -496,9 +492,9 @@
         let dark_ritual_id = add_hand_card(&mut state, "us", "Dark Ritual");
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, "us", dark_ritual_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
+        let card_id = cast_spell(&mut state, 1, "us", dark_ritual_id, SpellFace::Main, None, &mut seeded_rng());
 
         assert!(card_id.is_some(), "spell should be cast");
         let card_id = card_id.unwrap();
@@ -521,8 +517,8 @@
         let doomsday_id = add_hand_card(&mut state, "us", "Doomsday");
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let item = cast_spell(&mut state, 1, "us", doomsday_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        let item = cast_spell(&mut state, 1, "us", doomsday_id, SpellFace::Main, None, &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast with no mana");
     }
@@ -547,7 +543,7 @@
             blue = true
         "#).unwrap();
         let catalog = vec![fow_def.clone(), brainstorm_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         // Add FoW and Brainstorm to hand (FoW pitches itself? No — Brainstorm is the pitch card)
         let fow_id = add_hand_card(&mut state, "us", "Force of Will");
@@ -556,7 +552,7 @@
         let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
-        let item = cast_spell(&mut state, 1, "us", fow_id, SpellFace::Main, Some(alt_cost), &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", fow_id, SpellFace::Main, Some(alt_cost), &mut seeded_rng());
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
@@ -569,7 +565,7 @@
     #[test]
     fn test_effect_doomsday_sets_success() {
         let mut state = make_state();
-        eff_doomsday().call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+        eff_doomsday().call(&mut state, 1, &[], &mut seeded_rng());
 
         assert!(state.success);
     }
@@ -579,7 +575,7 @@
         let mut state = make_state();
         add_library_card(&mut state, "us", "Island");
         let initial_hand = state.hand_size("us");
-        eff_draw("us", 1).call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+        eff_draw("us", 1).call(&mut state, 1, &[], &mut seeded_rng());
 
         assert_eq!(state.hand_size("us"), initial_hand + 1, "cantrip increments hand count");
     }
@@ -593,7 +589,7 @@
         add_library_card(&mut state, "us", "Plains");
         let initial = state.hand_size("us");
         eff_draw("us", 3).then(eff_put_back("us", 2))
-            .call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+            .call(&mut state, 1, &[], &mut seeded_rng());
 
         assert_eq!(state.hand_size("us"), initial + 1, "Brainstorm nets +1 card");
     }
@@ -607,7 +603,7 @@
         add_library_card(&mut state, "us", "Swamp");
         add_library_card(&mut state, "us", "Plains");
         eff_draw("us", 3).then(eff_put_back("us", 2))
-            .call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+            .call(&mut state, 1, &[], &mut seeded_rng());
 
         // Three Draw events queued → three OBM triggers pending (all non-natural draws).
         let bowmasters_triggers = state.pending_triggers.iter()
@@ -627,7 +623,7 @@
         add_library_card(&mut state, "us", "Swamp");
         add_library_card(&mut state, "us", "Plains");
         eff_draw("us", 3).then(eff_put_back("us", 2))
-            .call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+            .call(&mut state, 1, &[], &mut seeded_rng());
 
         let flip_triggers = state.pending_triggers.iter()
             .filter(|tc| tc.source_name == "Tamiyo, Inquisitive Student")
@@ -639,7 +635,7 @@
     fn test_effect_life_loss_reduces_caster_life() {
         let mut state = make_state();
         let initial = state.us.life;
-        eff_life_loss("us", 2).call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+        eff_life_loss("us", 2).call(&mut state, 1, &[], &mut seeded_rng());
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -647,7 +643,7 @@
     #[test]
     fn test_effect_mana_adds_to_pool() {
         let mut state = make_state();
-        eff_mana("us", "BBB").call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+        eff_mana("us", "BBB").call(&mut state, 1, &[], &mut seeded_rng());
 
         assert_eq!(state.us.pool.b, 3, "should add 3 black mana");
         assert_eq!(state.us.pool.total, 3);
@@ -658,7 +654,7 @@
         let mut state = make_state();
         add_hand_card(&mut state, "opp", "Counterspell");
         let initial_opp_hand = state.hand_size("opp");
-        eff_discard("us", Who::Opp, 1, "").call(&mut state, 1, &[], &HashMap::new(), &mut seeded_rng());
+        eff_discard("us", Who::Opp, 1, "").call(&mut state, 1, &[], &mut seeded_rng());
 
         assert_eq!(state.hand_size("opp"), initial_opp_hand - 1, "opp hand decremented");
         assert!(state.graveyard_of("opp").any(|c| c.catalog_key == "Counterspell"), "Counterspell in graveyard");
@@ -676,8 +672,7 @@
             mana_cost = "B"
             effect = "cantrip"
         "#).unwrap();
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
         assert_eq!(state.us.pool.total, 1);
@@ -692,8 +687,7 @@
             life_cost = 2
             effect = "cantrip"
         "#).unwrap();
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability);
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -707,8 +701,7 @@
             sacrifice_self = true
             effect = "mana:B"
         "#).unwrap();
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        pay_activation_cost(&mut state, 1, "us", petal_id, &ability, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", petal_id, &ability);
 
         assert!(state.permanents_of("us").count() == 0, "Lotus Petal should be sacrificed");
         assert!(state.graveyard_of("us").any(|c| c.catalog_key == "Lotus Petal"));
@@ -722,7 +715,7 @@
     fn test_effect_destroy_spell_removes_opp_land() {
         let mut state = make_state();
         let id = make_land(&mut state, "opp", "Bayou", false);
-        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &HashMap::new(), &mut seeded_rng());
+        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &mut seeded_rng());
 
         assert!(state.permanents_of("opp").count() == 0, "Bayou should be destroyed");
         assert!(state.graveyard_of("opp").any(|c| c.catalog_key == "Bayou"));
@@ -732,7 +725,7 @@
     fn test_effect_destroy_spell_removes_opp_creature() {
         let mut state = make_state();
         let id = add_default_perm(&mut state, "opp", "Troll");
-        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &HashMap::new(), &mut seeded_rng());
+        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &mut seeded_rng());
 
         assert!(state.permanents_of("opp").count() == 0, "Troll should be destroyed");
         assert!(state.graveyard_of("opp").any(|c| c.catalog_key == "Troll"));
@@ -760,12 +753,12 @@
         "#).unwrap();
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let targets: Vec<Target> = choose_permanent_target("opp:nonbasic_land", "us", &state, &catalog_map, &mut seeded_rng())
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        let targets: Vec<Target> = choose_permanent_target("opp:nonbasic_land", "us", &state, &mut seeded_rng())
             .map(|id| vec![Target::Object(id)])
             .unwrap_or_default();
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
-        eff.call(&mut state, 1, &targets, &catalog_map, &mut seeded_rng());
+        eff.call(&mut state, 1, &targets, &mut seeded_rng());
 
         assert!(state.permanents_of("opp").count() == 0, "Bayou should be destroyed");
         assert!(state.graveyard_of("opp").any(|c| c.catalog_key == "Bayou"));
@@ -782,12 +775,12 @@
         "#).unwrap();
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let targets: Vec<Target> = choose_permanent_target("opp:nonbasic_land", "us", &state, &catalog_map, &mut seeded_rng())
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        let targets: Vec<Target> = choose_permanent_target("opp:nonbasic_land", "us", &state, &mut seeded_rng())
             .map(|id| vec![Target::Object(id)])
             .unwrap_or_default();
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
-        eff.call(&mut state, 1, &targets, &catalog_map, &mut seeded_rng());
+        eff.call(&mut state, 1, &targets, &mut seeded_rng());
 
         assert!(state.permanents_of("opp").count() > 0, "basic Forest should survive");
         assert!(state.graveyard_of("opp").count() == 0, "no cards in graveyard");
@@ -814,9 +807,9 @@
         state.us.pool.total = 1; // only 1 mana in pool — delve pays the other 7
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, "us", tc_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", tc_id, SpellFace::Main, None, &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.graveyard_of("us").count(), 0, "all 7 graveyard cards exiled");
@@ -841,9 +834,9 @@
         state.us.pool.total = 1; // covers the 1 remaining generic after delve
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.graveyard_of("us").count(), 0, "both graveyard cards exiled");
@@ -878,16 +871,16 @@
         state.us.pool.total = 3;
 
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
+        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &mut seeded_rng()).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
 
         // Resolve via Effect path — replacement effect counts exiled instants/sorceries.
         let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
-        effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets, &catalog_map, rng_dyn);
+        effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets, rng_dyn);
 
         let murktide_bf = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
             .and_then(|p| p.bf.as_ref()).expect("Murktide on battlefield");
@@ -896,7 +889,7 @@
         // recompute reflects counters in the materialized view
         let murktide_id = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
             .map(|p| p.id).expect("Murktide on battlefield");
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let eff = mat.defs.get(&murktide_id).expect("Murktide materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!((c.power(), c.toughness()), (6, 6));
@@ -923,22 +916,22 @@
         state.us.pool.total = 6;
 
         let catalog = vec![murktide_def.clone(), ragavan_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng()).unwrap();
+        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &mut seeded_rng()).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
 
         let rng_dyn: &mut dyn rand::RngCore = &mut seeded_rng();
-        effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets, &catalog_map, rng_dyn);
+        effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets, rng_dyn);
 
         let murktide_bf = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
             .and_then(|p| p.bf.as_ref()).expect("Murktide on battlefield");
         assert_eq!(murktide_bf.counters, 0);
         let murktide_id = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
             .map(|p| p.id).expect("Murktide on battlefield");
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let eff = mat.defs.get(&murktide_id).expect("Murktide materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!((c.power(), c.toughness()), (3, 3));
@@ -959,9 +952,9 @@
         add_default_perm(&mut state, "opp", "Dragon");
 
         let catalog = vec![murktide_def, blocker_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.combat_attackers.contains(&murktide_id),
             "6/6 Murktide should attack into a 5-power blocker");
@@ -984,9 +977,9 @@
         // no mana
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &catalog_map, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast — 1 generic still unpaid");
         assert_eq!(state.graveyard_of("us").count(), 2, "graveyard unchanged on failed cast");
@@ -1004,12 +997,12 @@
             effect = "exile"
         "#).unwrap();
         let catalog = vec![troll_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        let targets: Vec<Target> = choose_permanent_target("opp:creature", "us", &state, &catalog_map, &mut seeded_rng())
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        let targets: Vec<Target> = choose_permanent_target("opp:creature", "us", &state, &mut seeded_rng())
             .map(|id| vec![Target::Object(id)])
             .unwrap_or_default();
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
-        eff.call(&mut state, 1, &targets, &catalog_map, &mut seeded_rng());
+        eff.call(&mut state, 1, &targets, &mut seeded_rng());
 
         assert!(state.permanents_of("opp").count() == 0, "Troll should be exiled");
         assert!(state.exile_of("opp").any(|c| c.catalog_key == "Troll"), "Troll should be in exile");
@@ -1049,9 +1042,9 @@
         });
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.permanent_bf(atk_id).unwrap().attacking, "declared attacker gets attacking=true");
     }
@@ -1069,9 +1062,9 @@
         // No opp creatures → no blocker
 
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.permanent_bf(attacker_id).unwrap().unblocked, "unblocked attacker gets unblocked=true");
     }
@@ -1090,9 +1083,9 @@
         state.combat_attackers = vec![ragavan_id];
 
         let catalog = vec![atk_def, blk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(!state.permanent_bf(ragavan_id).unwrap().unblocked, "blocked attacker stays unblocked=false");
         assert_eq!(state.combat_blocks.len(), 1, "blocker declared");
@@ -1109,8 +1102,7 @@
         state.combat_attackers = vec![ninja_id];
 
         let step = Step { kind: StepKind::EndCombat, prio: false };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(!state.permanent_bf(ninja_id).unwrap().attacking, "attacking cleared at EndCombat");
         assert!(!state.permanent_bf(ninja_id).unwrap().unblocked, "unblocked cleared at EndCombat");
@@ -1168,11 +1160,11 @@ card_type = "land"
 tap_self = true
 produces = "U""#).unwrap();
         let catalog = vec![def.clone(), island_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         // Loop over seeds until ninjutsu fires (35% per attempt → statistically guaranteed within 50).
         for seed in 0u64..50 {
             let mut state = make_state();
+            for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
             state.current_phase = Some(TurnPosition::Step(StepKind::DeclareBlockers));
             state.current_ap = state.us.id;
             add_perm(&mut state, "us", "Ragavan", BattlefieldState {
@@ -1187,7 +1179,7 @@ produces = "U""#).unwrap();
             state.objects.insert(ninja_lib_id, GameObject::new(ninja_lib_id, "Ninja".to_string(), "us"));
             let initial_hand = state.hand_size("us");
             let mut rng = StdRng::seed_from_u64(seed);
-            handle_priority_round(&mut state, 1, "us", 3, &catalog_map, &mut rng);
+            handle_priority_round(&mut state, 1, "us", 3, &mut rng);
 
             if state.permanents_of("us").any(|p| p.catalog_key == "Ninja") {
                 let ninja = state.permanents_of("us").find(|p| p.catalog_key == "Ninja").unwrap();
@@ -1213,9 +1205,8 @@ produces = "U""#).unwrap();
         add_library_card(&mut state, "us", "Island");
         let initial = state.hand_size("us");
         let ability: AbilityDef = toml::from_str(r#"effect = "draw:1""#).unwrap();
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
-        eff.call(&mut state, 1, &[], &catalog_map, &mut seeded_rng());
+        eff.call(&mut state, 1, &[], &mut seeded_rng());
         assert_eq!(state.hand_size("us"), initial + 1, "cycling draws one card");
     }
 
@@ -1238,13 +1229,13 @@ produces = "U""#).unwrap();
             effect = "draw:1"
         "#).unwrap();
         let catalog = vec![wraith_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         // Add Street Wraith to hand and a library card to draw
         let wraith_id = add_hand_card(&mut state, "us", "Street Wraith");
         add_library_card(&mut state, "us", "Island");
         let initial_hand = state.hand_size("us");
 
-        pay_activation_cost(&mut state, 1, "us", wraith_id, &ability, &catalog_map);
+        pay_activation_cost(&mut state, 1, "us", wraith_id, &ability);
 
         assert!(!state.hand_of("us").any(|c| c.catalog_key == "Street Wraith"), "Street Wraith removed from hand");
         assert!(state.graveyard_of("us").any(|c| c.catalog_key == "Street Wraith"), "in graveyard");
@@ -1278,7 +1269,7 @@ produces = "U""#).unwrap();
 
         // Run the Effect directly (as the new adventure resolution path does).
         let eff = eff_bounce_target("us");
-        eff.call(&mut state, 1, &[Target::Object(bowmasters_id)], &HashMap::new(), &mut seeded_rng());
+        eff.call(&mut state, 1, &[Target::Object(bowmasters_id)], &mut seeded_rng());
         // Then exile the card to on_adventure.
         let borrower_id = state.alloc_id();
         let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", "us");
@@ -1318,10 +1309,10 @@ card_type = "land"
 tap_self = true
 produces = "B""#).unwrap();
         let catalog = vec![borrower_def.clone(), island_def, island2_def, swamp_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         let make_fresh_state = || {
             let mut state = make_state();
+            for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
             state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
             state.current_ap = state.us.id;
             let borrower_id = state.alloc_id();
@@ -1354,7 +1345,7 @@ produces = "B""#).unwrap();
         for seed in 0u64..20 {
             let mut state = make_fresh_state();
             let mut rng = StdRng::seed_from_u64(seed);
-            handle_priority_round(&mut state, 1, "us", 3, &catalog_map, &mut rng);
+            handle_priority_round(&mut state, 1, "us", 3, &mut rng);
             if state.permanents_of("us").any(|p| p.catalog_key == "Brazen Borrower") {
                 assert!(!state.on_adventure_of("us").any(|c| c.catalog_key == "Brazen Borrower"), "removed from on_adventure");
                 assert!(!state.exile_of("us").any(|c| c.catalog_key == "Brazen Borrower"), "removed from exile");
@@ -1390,9 +1381,9 @@ produces = "B""#).unwrap();
         state.combat_attackers = vec![murktide_id];
 
         let catalog = vec![flyer, ground];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.combat_blocks.is_empty(), "ground creature cannot block a flyer");
     }
@@ -1412,9 +1403,9 @@ produces = "B""#).unwrap();
         state.combat_attackers = vec![murktide_id];
 
         let catalog = vec![flyer_atk, flyer_blk];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         assert_eq!(state.combat_blocks.len(), 1, "flyer can block flyer");
         assert_eq!(state.combat_blocks[0], (murktide_id, subtlety_id));
@@ -1435,9 +1426,9 @@ produces = "B""#).unwrap();
         add_default_perm(&mut state, "opp", "Troll");
 
         let catalog = vec![flyer, ground];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "us", &step, 3, true, &mut seeded_rng());
 
         // Murktide's toughness (3) > relevant blocking power (0 — Troll can't block flyer).
         assert!(state.combat_attackers.contains(&murktide_id),
@@ -1498,14 +1489,14 @@ produces = "B""#).unwrap();
     }
 
     /// Fire a Bowmasters ETB trigger for `controller`, choose its target, and apply it.
-    fn fire_bowmasters_etb(controller: &str, state: &mut SimState, catalog_map: &HashMap<&str, &CardDef>) {
+    fn fire_bowmasters_etb(controller: &str, state: &mut SimState) {
         // Rebuild materialized so choose_trigger_target sees current P/T.
-        let mat = recompute(state, catalog_map);
+        let mat = recompute(state);
         state.materialized = mat;
         let ctx = bowmasters_etb_ctx(controller);
         let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state)
             .into_iter().collect();
-        ctx.effect.call(state, 1, &targets, catalog_map, &mut rand::thread_rng());
+        ctx.effect.call(state, 1, &targets, &mut rand::thread_rng());
     }
 
     #[test]
@@ -1513,7 +1504,7 @@ produces = "B""#).unwrap();
         let mut state = make_state();
         add_default_perm(&mut state, "opp", "Orcish Bowmasters");
         let initial_life = state.us.life;
-        fire_bowmasters_etb("opp", &mut state, &HashMap::new());
+        fire_bowmasters_etb("opp", &mut state);
         assert_eq!(state.us.life, initial_life - 1, "ETB deals 1 to us");
         assert!(state.permanents_of("opp").any(|p| p.catalog_key == "Orc Army"), "Orc Army token created");
         let army = state.permanents_of("opp").find(|p| p.catalog_key == "Orc Army").and_then(|p| p.bf.as_ref()).unwrap();
@@ -1525,7 +1516,7 @@ produces = "B""#).unwrap();
         let mut state = make_state();
         add_default_perm(&mut state, "opp", "Orcish Bowmasters");
         add_perm(&mut state, "opp", "Orc Army", BattlefieldState { counters: 2, ..BattlefieldState::new() });
-        fire_bowmasters_etb("opp", &mut state, &HashMap::new());
+        fire_bowmasters_etb("opp", &mut state);
         let army = state.permanents_of("opp").find(|p| p.catalog_key == "Orc Army").and_then(|p| p.bf.as_ref()).unwrap();
         assert_eq!(army.counters, 3, "Orc Army grows from 2 to 3");
     }
@@ -1537,8 +1528,8 @@ produces = "B""#).unwrap();
         let initial_life = state.us.life;
         add_default_perm(&mut state, "us", "Troll");
         let catalog = vec![creature("Troll", 3, 3)];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        fire_bowmasters_etb("opp", &mut state, &catalog_map);
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        fire_bowmasters_etb("opp", &mut state);
         assert_eq!(state.us.life, initial_life - 1, "damage hits face when no killable creature");
         assert!(state.permanents_of("us").any(|p| p.catalog_key == "Troll"), "Troll survives");
     }
@@ -1550,9 +1541,9 @@ produces = "B""#).unwrap();
         let initial_life = state.us.life;
         add_default_perm(&mut state, "us", "Ragavan, Nimble Pilferer");
         let catalog = vec![creature("Ragavan, Nimble Pilferer", 2, 1)];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        fire_bowmasters_etb("opp", &mut state, &catalog_map);
-        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        fire_bowmasters_etb("opp", &mut state);
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert_eq!(state.us.life, initial_life, "life total unchanged when creature is targeted");
         assert!(!state.permanents_of("us").any(|p| p.catalog_key == "Ragavan, Nimble Pilferer"),
             "Ragavan dies to 1 damage");
@@ -1567,9 +1558,9 @@ produces = "B""#).unwrap();
         add_default_perm(&mut state, "us", "Troll");
         add_default_perm(&mut state, "us", "Orcish Bowmasters");
         let catalog = vec![creature("Troll", 3, 3), creature("Orcish Bowmasters", 1, 1)];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        fire_bowmasters_etb("opp", &mut state, &catalog_map);
-        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        fire_bowmasters_etb("opp", &mut state);
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(!state.permanents_of("us").any(|p| p.catalog_key == "Orcish Bowmasters"),
             "opposing Bowmasters is killed");
         assert!(state.permanents_of("us").any(|p| p.catalog_key == "Troll"), "Troll survives");
@@ -1614,7 +1605,7 @@ produces = "B""#).unwrap();
         assert_eq!(result[0].source_name, "Murktide Regent");
 
         let mut state2 = state;
-        result[0].effect.call(&mut state2, 1, &[], &HashMap::new(), &mut rand::thread_rng());
+        result[0].effect.call(&mut state2, 1, &[], &mut rand::thread_rng());
         let murktide = state2.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent").and_then(|p| p.bf.as_ref()).unwrap();
         assert_eq!(murktide.counters, 1, "Murktide gains +1/+1 counter");
     }
@@ -1651,7 +1642,7 @@ produces = "B""#).unwrap();
         assert_eq!(result[0].source_name, "Tamiyo, Inquisitive Student");
 
         let mut state2 = state;
-        result[0].effect.call(&mut state2, 1, &[], &HashMap::new(), &mut rand::thread_rng());
+        result[0].effect.call(&mut state2, 1, &[], &mut rand::thread_rng());
         assert!(state2.permanents_of("us").any(|p| p.catalog_key == "Clue Token"),
             "Clue Token created when Tamiyo attacks");
     }
@@ -1669,7 +1660,7 @@ produces = "B""#).unwrap();
         // Trigger queues (Tamiyo is in play), but resolves to nothing (not attacking).
         if let Some(ctx) = result.first() {
             let mut state2 = state;
-            ctx.effect.call(&mut state2, 1, &[], &HashMap::new(), &mut rand::thread_rng());
+            ctx.effect.call(&mut state2, 1, &[], &mut rand::thread_rng());
             assert!(!state2.permanents_of("us").any(|p| p.catalog_key == "Clue Token"),
                 "no Clue Token if Tamiyo is not attacking");
         }
@@ -1686,7 +1677,7 @@ produces = "B""#).unwrap();
         assert_eq!(result[0].source_name, "Tamiyo, Inquisitive Student");
 
         let mut state2 = state;
-        result[0].effect.call(&mut state2, 1, &[], &HashMap::new(), &mut rand::thread_rng());
+        result[0].effect.call(&mut state2, 1, &[], &mut rand::thread_rng());
         // The flip mutates in-place: catalog_key stays as front face; active_face flips to 1.
         let tamiyo_bf = state2.permanents_of("us")
             .find(|p| p.catalog_key == "Tamiyo, Inquisitive Student")
@@ -1713,15 +1704,15 @@ produces = "B""#).unwrap();
         add_default_perm(&mut state, "us", "Wall"); // blocker-sized (no block in this test)
 
         let catalog = vec![atk_def, creature("Wall", 0, 4)];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let mut rng = seeded_rng();
         do_step(&mut state, 1, "opp", &Step { kind: StepKind::DeclareAttackers, prio: true },
-            3, true, &catalog_map, &mut rng);
+            3, true, &mut rng);
 
         let dragon_id = state.permanents_of("opp").find(|p| p.catalog_key == "Dragon").map(|p| p.id).unwrap();
         // The -1 comes from a ContinuousInstance (L7), not bf.power_mod.
         // recompute reflects the CE modifier in the materialized view.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let eff = mat.defs.get(&dragon_id).expect("Dragon materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!(c.power(), 2, "Dragon's effective power is 3 + (-1) = 2");
@@ -1741,8 +1732,7 @@ produces = "B""#).unwrap();
 
         // Untap step for "us" should expire the floating trigger watcher.
         let step = Step { kind: StepKind::Untap, prio: false };
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        do_step(&mut state, 2, "us", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 2, "us", &step, 3, true, &mut seeded_rng());
 
         assert!(state.trigger_instances.is_empty(), "Floating trigger expires at controller's next Untap");
     }
@@ -1755,7 +1745,7 @@ produces = "B""#).unwrap();
         let atk_def = creature("Dragon", 3, 3);
         let dragon_id = add_perm(&mut state, "opp", "Dragon", BattlefieldState::new());
         let catalog = vec![atk_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         // Register an EndOfTurn L7 CI that applies -1 power to the dragon.
         state.continuous_instances.push(ContinuousInstance {
@@ -1770,15 +1760,15 @@ produces = "B""#).unwrap();
         });
 
         // Before Cleanup: effective power = 2.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let CardKind::Creature(c) = &mat.defs[&dragon_id].kind else { panic!() };
         assert_eq!(c.power(), 2, "CI applies -1 before Cleanup");
 
         let step = Step { kind: StepKind::Cleanup, prio: false };
-        do_step(&mut state, 1, "opp", &step, 3, true, &catalog_map, &mut seeded_rng());
+        do_step(&mut state, 1, "opp", &step, 3, true, &mut seeded_rng());
 
         // After Cleanup: CI removed, effective power restored to 3.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let CardKind::Creature(c) = &mat.defs[&dragon_id].kind else { panic!() };
         assert_eq!(c.power(), 3, "effective power restored after Cleanup");
         assert!(state.continuous_instances.is_empty(), "EndOfTurn CI removed at Cleanup");
@@ -1811,7 +1801,7 @@ produces = "B""#).unwrap();
                                 source_name: format!("test-{:?}", step_kind),
                                 controller: "us".to_string(),
                                 target_spec: TargetSpec::None,
-                                effect: Effect(std::sync::Arc::new(|_, _, _, _, _| {})),
+                                effect: Effect(std::sync::Arc::new(|_, _, _, _| {})),
                             });
                         }
                     }
@@ -1820,7 +1810,7 @@ produces = "B""#).unwrap();
                 active: true,
             });
             let ev = GameEvent::EnteredStep { step: step_kind, active_player: "us".to_string() };
-            fire_event(ev, &mut state, 1, "us", &HashMap::new(), &mut seeded_rng());
+            fire_event(ev, &mut state, 1, "us", &mut seeded_rng());
             assert!(
                 !state.pending_triggers.is_empty(),
                 "EnteredStep {:?} should have produced a pending trigger", step_kind
@@ -1843,7 +1833,7 @@ produces = "B""#).unwrap();
                                 source_name: format!("test-{:?}", phase_kind),
                                 controller: "us".to_string(),
                                 target_spec: TargetSpec::None,
-                                effect: Effect(std::sync::Arc::new(|_, _, _, _, _| {})),
+                                effect: Effect(std::sync::Arc::new(|_, _, _, _| {})),
                             });
                         }
                     }
@@ -1852,7 +1842,7 @@ produces = "B""#).unwrap();
                 active: true,
             });
             let ev = GameEvent::EnteredPhase { phase: phase_kind };
-            fire_event(ev, &mut state, 1, "us", &HashMap::new(), &mut seeded_rng());
+            fire_event(ev, &mut state, 1, "us", &mut seeded_rng());
             assert!(
                 !state.pending_triggers.is_empty(),
                 "EnteredPhase {:?} should have produced a pending trigger", phase_kind
@@ -1900,8 +1890,7 @@ produces = "B""#).unwrap();
             bf: None,
         });
         state.stack.push(id);
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
-        resolve_top_of_stack(&mut state, 1, "us", &catalog_map, &mut seeded_rng());
+        resolve_top_of_stack(&mut state, 1, "us", &mut seeded_rng());
         let log = state.log.join("\n");
         assert!(log.contains("Brainstorm resolves"), "should log 'resolves'");
         assert!(!log.contains("countered"), "resolving an instant must not produce 'countered' in the log");
@@ -1922,9 +1911,9 @@ produces = "B""#).unwrap();
             effect = "search:land-island|swamp:play"
         "#).unwrap();
         let catalog = vec![fetch_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
 
         let mut state = make_state();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         state.us.life = 20;
         state.current_phase = Some(TurnPosition::Phase(PhaseKind::PostCombatMain));
         let delta_id = add_perm(&mut state, "us", "Polluted Delta", BattlefieldState::new());
@@ -1937,7 +1926,7 @@ produces = "B""#).unwrap();
         // regardless of how many times it is called.
         for seed in 0..50u64 {
             let mut rng = StdRng::seed_from_u64(seed);
-            let action = decide_action(&mut state, 1, "us", "us", 99, &PriorityAction::Pass, &catalog_map, &mut rng);
+            let action = decide_action(&mut state, 1, "us", "us", 99, &PriorityAction::Pass, &mut rng);
             assert!(
                 !matches!(action, PriorityAction::ActivateAbility(id, _) if id == delta_id),
                 "seed {}: offered ability for sacrificed permanent — effect would fire without a stack item",
@@ -1950,13 +1939,12 @@ produces = "B""#).unwrap();
     fn test_leyline_redirects_gy_to_exile() {
         let mut state = make_state();
         let mut rng = seeded_rng();
-        let catalog: HashMap<&str, &CardDef> = HashMap::new();
         // Place Leyline on battlefield (add_perm now pre-registers and activates instances)
         let _leyline_id = add_default_perm(&mut state, "opp", "Leyline of the Void");
         // Put a card in hand
         let hand_id = add_hand_card(&mut state, "us", "Ponder");
         // Move hand card to graveyard — Leyline should redirect to exile
-        change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
+        change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &mut rng);
         // Card should be in Exile, not Graveyard
         assert_eq!(state.objects[&hand_id].zone, CardZone::Exile { on_adventure: false });
     }
@@ -1965,14 +1953,13 @@ produces = "B""#).unwrap();
     fn test_leyline_removed_no_redirect() {
         let mut state = make_state();
         let mut rng = seeded_rng();
-        let catalog: HashMap<&str, &CardDef> = HashMap::new();
         // add_perm pre-registers and activates Leyline's replacement
         let leyline_id = add_default_perm(&mut state, "opp", "Leyline of the Void");
         // Destroy Leyline (deactivates its replacement via change_zone → deactivate_instances)
-        change_zone(leyline_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
+        change_zone(leyline_id, ZoneId::Graveyard, &mut state, 1, "us", &mut rng);
         // Now move a card to GY — should stay in GY
         let hand_id = add_hand_card(&mut state, "us", "Ponder");
-        change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &catalog, &mut rng);
+        change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, "us", &mut rng);
         assert_eq!(state.objects[&hand_id].zone, CardZone::Graveyard);
     }
 
@@ -1997,8 +1984,7 @@ produces = "B""#).unwrap();
     fn test_sba_life_zero_sets_reroll() {
         let mut state = make_state();
         state.us.life = 0;
-        let catalog: HashMap<&str, &CardDef> = HashMap::new();
-        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(state.reroll, "us at 0 life → reroll");
     }
 
@@ -2006,8 +1992,7 @@ produces = "B""#).unwrap();
     fn test_sba_life_negative_sets_reroll() {
         let mut state = make_state();
         state.us.life = -3;
-        let catalog: HashMap<&str, &CardDef> = HashMap::new();
-        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(state.reroll);
     }
 
@@ -2018,8 +2003,7 @@ produces = "B""#).unwrap();
         // Move token to graveyard (as if it died without SBA running yet).
         state.objects.get_mut(&token_id).unwrap().zone = CardZone::Graveyard;
         state.objects.get_mut(&token_id).unwrap().bf = None;
-        let catalog: HashMap<&str, &CardDef> = HashMap::new();
-        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(!state.objects.contains_key(&token_id), "token in GY ceases to exist");
     }
 
@@ -2027,8 +2011,7 @@ produces = "B""#).unwrap();
     fn test_sba_token_on_battlefield_not_removed() {
         let mut state = make_state();
         let token_id = add_token(&mut state, "us", "Orc Army");
-        let catalog: HashMap<&str, &CardDef> = HashMap::new();
-        check_state_based_actions(&mut state, 1, &catalog, &mut seeded_rng());
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(state.objects.contains_key(&token_id), "token on battlefield survives SBA");
     }
 
@@ -2042,8 +2025,8 @@ produces = "B""#).unwrap();
             toml::from_str::<CardDef>(toml).unwrap()
         };
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(state.graveyard_of("us").any(|c| c.catalog_key == "Weakened"),
             "creature with toughness ≤ 0 goes to graveyard");
     }
@@ -2057,8 +2040,8 @@ produces = "B""#).unwrap();
         });
         let def = creature("Ragavan", 2, 2);
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(state.graveyard_of("us").any(|c| c.catalog_key == "Ragavan"),
             "creature with damage = toughness goes to graveyard");
     }
@@ -2073,8 +2056,8 @@ produces = "B""#).unwrap();
         let toml = "name = \"Jace\"\ncard_type = \"planeswalker\"\nmana_cost = \"3U\"\nloyalty = 3\n";
         let def: CardDef = toml::from_str(toml).unwrap();
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert!(state.graveyard_of("us").any(|c| c.catalog_key == "Jace"),
             "planeswalker with loyalty 0 goes to graveyard");
     }
@@ -2087,8 +2070,8 @@ produces = "B""#).unwrap();
         let toml = "name = \"Bowmasters\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\nlegendary = true\n";
         let def: CardDef = toml::from_str(toml).unwrap();
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         // Exactly one survives.
         assert_eq!(state.permanents_of("us").filter(|c| c.catalog_key == "Bowmasters").count(), 1,
             "legend rule: one copy survives");
@@ -2103,8 +2086,8 @@ produces = "B""#).unwrap();
         let toml = "name = \"Bowmasters\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\nlegendary = true\n";
         let def: CardDef = toml::from_str(toml).unwrap();
         let catalog = vec![def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-        check_state_based_actions(&mut state, 1, &catalog_map, &mut seeded_rng());
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        check_state_based_actions(&mut state, 1, &mut seeded_rng());
         assert_eq!(state.permanents_of("us").filter(|c| c.catalog_key == "Bowmasters").count(), 1,
             "single legendary permanent unaffected by legend rule");
     }
@@ -2121,12 +2104,11 @@ produces = "B""#).unwrap();
         let id = add_default_perm(&mut state, "us", "Grizzly Bears");
         let base_toml = "name = \"Grizzly Bears\"\ncard_type = \"creature\"\npower = 2\ntoughness = 2\n";
         let base_def: CardDef = toml::from_str(base_toml).unwrap();
-        let catalog = vec![base_def];
-        let catalog_map: HashMap<&str, &CardDef> =
-            catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        // Override the 1/1 stub inserted by add_default_perm with the real 2/2 def.
+        state.catalog.insert(base_def.name.clone(), base_def);
 
         // Baseline: recompute without any CEs → effective P/T is 2/2.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         assert_eq!(mat.generation, 0);
         let eff = mat.defs.get(&id).expect("should be in materialized defs");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
@@ -2147,7 +2129,7 @@ produces = "B""#).unwrap();
         });
 
         // Recompute: effective P/T should now be 4/3.
-        let mat2 = recompute(&state, &catalog_map);
+        let mat2 = recompute(&state);
         let eff2 = mat2.defs.get(&id).expect("should be in materialized defs after CE");
         let CardKind::Creature(c2) = &eff2.kind else { panic!("expected creature") };
         assert_eq!((c2.power(), c2.toughness()), (4, 3), "CE should produce 4/3");
@@ -2164,14 +2146,8 @@ produces = "B""#).unwrap();
             let bf = BattlefieldState { counters: 2, ..BattlefieldState::new() };
             add_perm(&mut state, "us", "Llanowar Elves", bf)
         };
-        let base_toml = "name = \"Llanowar Elves\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\n";
-        let base_def: CardDef = toml::from_str(base_toml).unwrap();
-        let catalog = vec![base_def];
-        let catalog_map: HashMap<&str, &CardDef> =
-            catalog.iter().map(|c| (c.name.as_str(), c)).collect();
-
         // Without any CE: counters fold in → effective 3/3.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let eff = mat.defs.get(&id).expect("creature should be materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!((c.power(), c.toughness()), (3, 3), "two +1/+1 counters should yield 3/3");
@@ -2185,13 +2161,12 @@ produces = "B""#).unwrap();
         assert_eq!(state.generation, 0, "initial generation is 0");
         assert_eq!(state.materialized.generation, 0, "initial materialized generation is 0");
 
-        let catalog_map: HashMap<&str, &CardDef> = HashMap::new();
         let mut rng = seeded_rng();
 
         // Fire one top-level event.
         fire_event(
             GameEvent::EnteredStep { step: StepKind::Upkeep, active_player: "us".to_string() },
-            &mut state, 1, "us", &catalog_map, &mut rng,
+            &mut state, 1, "us", &mut rng,
         );
         assert_eq!(state.generation, 1, "one tick → generation 1");
         assert_eq!(state.materialized.generation, 1, "snapshot generation matches");
@@ -2199,7 +2174,7 @@ produces = "B""#).unwrap();
         // Fire a second event.
         fire_event(
             GameEvent::EnteredStep { step: StepKind::Draw, active_player: "us".to_string() },
-            &mut state, 1, "us", &catalog_map, &mut rng,
+            &mut state, 1, "us", &mut rng,
         );
         assert_eq!(state.generation, 2, "second tick → generation 2");
         assert_eq!(state.materialized.generation, 2, "snapshot generation matches");
@@ -2215,12 +2190,12 @@ produces = "B""#).unwrap();
         let toml = "name = \"Flyer\"\ncard_type = \"creature\"\npower = 2\ntoughness = 2\nstatic_abilities = [\"flying\"]\n";
         let def: CardDef = toml::from_str(toml).unwrap();
         let catalog = vec![def.clone()];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         let id = add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
 
         // recompute: CI from static_ability_def should add "flying" to materialized keywords.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         assert!(mat.defs[&id].has_keyword("flying"), "flying granted via static_ability_def at ETB");
         // Commit to state.materialized so creature_has_keyword (which reads the snapshot) sees it.
         state.materialized = mat;
@@ -2235,7 +2210,7 @@ produces = "B""#).unwrap();
         let toml = "name = \"Flyer\"\ncard_type = \"creature\"\npower = 2\ntoughness = 2\nstatic_abilities = [\"flying\"]\n";
         let def: CardDef = toml::from_str(toml).unwrap();
         let catalog = vec![def.clone()];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         let id = add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
         assert_eq!(state.continuous_instances.len(), 1, "CI registered at ETB");
@@ -2245,7 +2220,7 @@ produces = "B""#).unwrap();
         assert!(state.continuous_instances.is_empty(), "CI removed at LTB");
 
         // Materialized view no longer has flying.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let mat_def = mat.defs.get(&id);
         // After deactivate_instances, the object may still be on the battlefield
         // in state.objects (we didn't change_zone), but the CI is gone.
@@ -2261,7 +2236,7 @@ produces = "B""#).unwrap();
         let mut state = make_state();
         let base_def = creature("GoyTest", 0, 3);
         let catalog = vec![base_def];
-        let catalog_map: HashMap<&str, &CardDef> = catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         let id = add_perm(&mut state, "us", "GoyTest", BattlefieldState::new());
 
@@ -2282,19 +2257,19 @@ produces = "B""#).unwrap();
         });
 
         // No cards in GY → power = 0.
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let CardKind::Creature(c) = &mat.defs[&id].kind else { panic!() };
         assert_eq!(c.power(), 0, "no GY cards → power 0");
 
         // Add a card to "us" graveyard.
         add_graveyard_card(&mut state, "us", "SomeCard");
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let CardKind::Creature(c) = &mat.defs[&id].kind else { panic!() };
         assert_eq!(c.power(), 1, "1 GY card → power 1");
 
         // Add a second card.
         add_graveyard_card(&mut state, "us", "AnotherCard");
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         let CardKind::Creature(c) = &mat.defs[&id].kind else { panic!() };
         assert_eq!(c.power(), 2, "2 GY cards → power 2");
     }
@@ -2306,13 +2281,11 @@ produces = "B""#).unwrap();
         let def: CardDef = toml::from_str(
             "name = \"Goyf\"\ncard_type = \"creature\"\npower = 2\ntoughness = 3\n"
         ).unwrap();
-        let catalog = vec![def.clone()];
-        let catalog_map: HashMap<&str, &CardDef> =
-            catalog.iter().map(|c| (c.name.as_str(), c)).collect();
+        state.catalog.insert(def.name.clone(), def);
 
         let gy_id = add_graveyard_card(&mut state, "us", "Goyf");
 
-        let mat = recompute(&state, &catalog_map);
+        let mat = recompute(&state);
         assert!(
             mat.defs.contains_key(&gy_id),
             "graveyard card must appear in materialized snapshot"

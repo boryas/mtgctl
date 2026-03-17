@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use rand::Rng;
 use super::*;
 
@@ -281,7 +280,6 @@ pub(crate) fn choose_permanent_target(
     target_str: &str,
     actor: &str,
     state: &SimState,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
     let (who_rel, type_str) = target_str.split_once(':')?;
@@ -289,11 +287,11 @@ pub(crate) fn choose_permanent_target(
 
     let mut candidates: Vec<ObjId> = Vec::new();
     for perm in state.permanents_of(&target_who) {
-        // Prefer post-CE materialized snapshot; fall back to catalog if not yet recomputed.
+        // Prefer post-CE materialized snapshot; fall back to state.catalog if not yet recomputed.
         let matched = if let Some(d) = state.materialized.defs.get(&perm.id) {
             let basic = d.as_land().map_or(false, |l| l.basic);
             matches_target_type(type_str, &d.kind, basic, Some(d))
-        } else if let Some(d) = catalog_map.get(perm.catalog_key.as_str()) {
+        } else if let Some(d) = state.catalog.get(perm.catalog_key.as_str()) {
             let basic = d.as_land().map_or(false, |l| l.basic);
             matches_target_type(type_str, &d.kind, basic, Some(d))
         } else {

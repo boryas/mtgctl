@@ -1,5 +1,4 @@
 use rand::Rng;
-use std::collections::HashMap;
 use super::*;
 
 fn pick_on_board_action(
@@ -151,7 +150,6 @@ fn nap_action(
     state: &SimState,
     who: &str,
     last_action: &PriorityAction,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     let other_acted = matches!(last_action, PriorityAction::CastSpell { .. } | PriorityAction::ActivateAbility(..));
@@ -166,7 +164,7 @@ fn nap_action(
                     eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, item_name);
                     break;
                 }
-                if let Some(action) = respond_with_counter(state, idx, who, catalog_map, rng, true) {
+                if let Some(action) = respond_with_counter(state, idx, who, rng, true) {
                     if let PriorityAction::CastSpell { card_id, .. } = action {
                         let spell_name = state.objects.get(&card_id).map_or("?", |c| c.catalog_key.as_str());
                         eprintln!("[decision] {}: NAP counter {} targeting {}", who, spell_name, item_name);
@@ -188,7 +186,6 @@ fn ap_react(
     state: &mut SimState,
     t: u8,
     who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
     if who != "us" || state.stack.is_empty() {
@@ -217,7 +214,7 @@ fn ap_react(
         return None;
     }
     Some(
-        if let Some(action) = respond_with_counter(state, top_idx, "us", catalog_map, rng, false) {
+        if let Some(action) = respond_with_counter(state, top_idx, "us", rng, false) {
             action
         } else {
             state.log(t, "us", "⚠ Doomsday countered — could not protect");
@@ -234,7 +231,6 @@ fn ap_proactive(
     t: u8,
     who: &str,
     dd_turn: u8,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     // Land drop (sorcery speed: requires empty stack).
@@ -275,7 +271,7 @@ fn ap_proactive(
         return PriorityAction::Pass;
     }
 
-    let actions = collect_hand_actions(state, who, catalog_map);
+    let actions = collect_hand_actions(state, who);
     if actions.is_empty() {
         let pool = &state.player(who).pool;
         let hand = state.hand_size(who);
@@ -336,12 +332,11 @@ pub(super) fn decide_action(
     who: &str,
     dd_turn: u8,
     last_action: &PriorityAction,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     if who != ap {
         if state.stack.is_empty() { return PriorityAction::Pass; }
-        return nap_action(state, who, last_action, catalog_map, rng);
+        return nap_action(state, who, last_action, rng);
     }
     // Ninjutsu: AP can activate during DeclareBlockers / CombatDamage / EndCombat.
     let in_ninjutsu_step = matches!(state.current_phase,
@@ -360,10 +355,10 @@ pub(super) fn decide_action(
     if !in_main_phase {
         return PriorityAction::Pass;
     }
-    if let Some(action) = ap_react(state, t, who, catalog_map, rng) {
+    if let Some(action) = ap_react(state, t, who, rng) {
         return action;
     }
-    ap_proactive(state, t, who, dd_turn, catalog_map, rng)
+    ap_proactive(state, t, who, dd_turn, rng)
 }
 
 // ── Combat strategy ───────────────────────────────────────────────────────────
@@ -376,7 +371,6 @@ pub(super) fn decide_action(
 pub(super) fn declare_attackers(
     ap: &str,
     state: &SimState,
-    _catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
 ) -> Vec<(ObjId, Option<ObjId>)> {
     let nap = opp_of(ap);
@@ -432,7 +426,6 @@ pub(super) fn declare_attackers(
 pub(super) fn declare_blockers(
     ap: &str,
     state: &SimState,
-    _catalog_map: &HashMap<&str, &CardDef>,
 ) -> Vec<(ObjId, ObjId)> {
     let nap = opp_of(ap);
     let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
@@ -515,7 +508,6 @@ fn spell_is_affordable(
     def: &CardDef,
     state: &SimState,
     who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
 ) -> bool {
     let mut cost = parse_mana_cost(def.mana_cost());
     if def.delve() && cost.generic > 0 {
@@ -524,7 +516,7 @@ fn spell_is_affordable(
     }
     let mana_is_usable = !def.mana_cost().is_empty() && state.potential_mana(who).can_pay(&cost);
     if mana_is_usable { return true; }
-    def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name, catalog_map))
+    def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name))
 }
 
 fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) -> bool {
@@ -542,7 +534,6 @@ fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) ->
 fn collect_hand_actions(
     state: &SimState,
     who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
 ) -> Vec<PriorityAction> {
     if state.hand_size(who) <= 0 {
         return Vec::new();
@@ -571,7 +562,7 @@ fn collect_hand_actions(
             _ => true,
         });
         if !ok { continue; }
-        if !spell_is_affordable(name, def, state, who, catalog_map) { continue; }
+        if !spell_is_affordable(name, def, state, who) { continue; }
         if seen_names.insert(name.clone()) {
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None });
         }
@@ -656,7 +647,6 @@ fn respond_with_counter(
     state: &SimState,
     target_idx: usize,
     responding_who: &str,
-    catalog_map: &HashMap<&str, &CardDef>,
     rng: &mut impl Rng,
     probabilistic: bool,
 ) -> Option<PriorityAction> {
@@ -717,7 +707,7 @@ fn respond_with_counter(
                 let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
                 if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
             }
-            if can_pay_alternate_cost(cost, state, responding_who, cs_name, catalog_map) {
+            if can_pay_alternate_cost(cost, state, responding_who, cs_name) {
                 return Some(PriorityAction::CastSpell {
                     card_id: *cs_id,
                     face: SpellFace::Main,

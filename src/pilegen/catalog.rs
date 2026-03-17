@@ -554,9 +554,9 @@ impl From<RawCardDef> for CardDef {
                 check: leyline_check,
                 make_effect: std::sync::Arc::new(|_source_id, controller: &str| {
                     let ctl = controller.to_string();
-                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
                         if let Some(Target::Object(id)) = targets.first() {
-                            change_zone(*id, ZoneId::Exile, state, t, &ctl, catalog, rng);
+                            change_zone(*id, ZoneId::Exile, state, t, &ctl, rng);
                         }
                     }))
                 }),
@@ -565,7 +565,7 @@ impl From<RawCardDef> for CardDef {
                 check: murktide_etb_check,
                 make_effect: std::sync::Arc::new(|_source_id, controller: &str| {
                     let ctl = controller.to_string();
-                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
                         let Some(Target::Object(id)) = targets.first() else { return; };
                         let id = *id;
                         let exile_count = state.exile_of(&ctl)
@@ -585,7 +585,7 @@ impl From<RawCardDef> for CardDef {
                                 to: ZoneId::Battlefield,
                                 controller: ctl.clone(),
                             },
-                            state, t, &ctl, catalog, rng,
+                            state, t, &ctl, rng,
                         );
                     }))
                 }),
@@ -599,7 +599,7 @@ impl From<RawCardDef> for CardDef {
                 make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
                     let ctl = controller.to_string();
                     let ct = ct.clone();
-                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
                         let Some(Target::Object(id)) = targets.first() else { return; };
                         let id = *id;
                         let from = current_zone_id(id, state);
@@ -609,7 +609,7 @@ impl From<RawCardDef> for CardDef {
                                 id, actor: ctl.clone(), card: card_name, card_type: ct.clone(),
                                 from, to: ZoneId::Battlefield, controller: ctl.clone(),
                             },
-                            state, t, &ctl, catalog, rng,
+                            state, t, &ctl, rng,
                         );
                         if let Some(bf) = state.permanent_bf_mut(id) {
                             bf.tapped = true;
@@ -626,7 +626,7 @@ impl From<RawCardDef> for CardDef {
                 make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
                     let ctl = controller.to_string();
                     let ct = ct.clone();
-                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                    Effect(std::sync::Arc::new(move |state, t, targets, rng| {
                         let Some(Target::Object(id)) = targets.first() else { return; };
                         let id = *id;
                         let from = current_zone_id(id, state);
@@ -636,7 +636,7 @@ impl From<RawCardDef> for CardDef {
                                 id, actor: ctl.clone(), card: card_name, card_type: ct.clone(),
                                 from, to: ZoneId::Battlefield, controller: ctl.clone(),
                             },
-                            state, t, &ctl, catalog, rng,
+                            state, t, &ctl, rng,
                         );
                         if let Some(bf) = state.permanent_bf_mut(id) {
                             bf.loyalty = base_loyalty;
@@ -690,7 +690,7 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static
         source_name: "Orcish Bowmasters".into(),
         controller: ctl.clone(),
         target_spec: target_spec_from_str(Some("any_target")),
-        effect: Effect(std::sync::Arc::new(move |state, t, targets, _catalog, _rng| {
+        effect: Effect(std::sync::Arc::new(move |state, t, targets, _rng| {
             // Apply 1 damage to the chosen target, then amass.
             match targets.first() {
                 Some(Target::Player(id)) => {
@@ -748,7 +748,7 @@ fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &str, pending
                 source_name: "Murktide Regent".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
                     if let Some(bf) = state.permanent_bf_mut(source_id) {
                         bf.counters += 1;
                         state.log(t, &ctl, "Murktide: inst/sorc exiled → +1/+1 counter");
@@ -770,7 +770,7 @@ fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: 
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
                     if state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
                         do_create_clue(&ctl, state, t);
                     }
@@ -786,7 +786,7 @@ fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: 
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
                     // Guard: only flip if still on front face (active_face == 0).
                     if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
                     do_flip_tamiyo(source_id, &ctl, state, t);
@@ -846,7 +846,7 @@ pub(super) fn tamiyo_plus_two_check(
                 source_name: "Tamiyo, Seasoned Scholar".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
                     let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
                     if state.permanent_bf(attacker_id).is_some() {
                         state.continuous_instances.push(ContinuousInstance {
@@ -876,7 +876,7 @@ type NamedEffectBuilder = fn(&str, ObjId) -> Effect;
 
 fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
     let who = who.to_string();
-    Effect(std::sync::Arc::new(move |state, t, _targets, _catalog, _rng| {
+    Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
         let source_name = state.permanent_name(source_id).unwrap_or_default();
         // Register a floating trigger watcher that fires for each opposing attacker.
         // Expires at the start of our next turn (StartOfControllerNextTurn).
@@ -933,15 +933,15 @@ pub(super) fn build_ability_effect(
             _        => ZoneId::Graveyard,  // "destroy" and anything else
         };
         let who_c = who.clone();
-        return Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+        return Effect(std::sync::Arc::new(move |state, t, targets, rng| {
             if let Some(Target::Object(id)) = targets.first() {
-                change_zone(*id, to, state, t, &who_c, catalog, rng);
+                change_zone(*id, to, state, t, &who_c, rng);
             }
         }));
     }
 
     // No-op (ability with no effect string — e.g. loyalty ability that just adjusts loyalty).
-    Effect(std::sync::Arc::new(|_state, _t, _targets, _catalog, _rng| {}))
+    Effect(std::sync::Arc::new(|_state, _t, _targets, _rng| {}))
 }
 
 /// Build an `Effect` for a single effect string (e.g. `"draw:3"`, `"destroy"`, `"win"`).
@@ -981,7 +981,7 @@ fn build_single_effect(effect: &str, who: &str, _def: &CardDef) -> Effect {
         "counter"   => eff_counter_target(who.to_string()),
         "reanimate" => eff_reanimate(who.to_string()),
         "cantrip"   => eff_draw(who.to_string(), 1),
-        _           => Effect(std::sync::Arc::new(|_,_,_,_,_| {})),
+        _           => Effect(std::sync::Arc::new(|_,_,_,_| {})),
     }
 }
 
