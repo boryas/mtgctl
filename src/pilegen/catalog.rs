@@ -239,10 +239,12 @@ pub(crate) enum CardLayout {
 /// A replacement effect definition stored directly on a `CardDef`.
 /// `check` returns `Some(targets)` if the replacement applies to an event; `build_effect` builds
 /// the closure that runs instead of the original event.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct ReplacementDef {
     pub(super) check: ReplacementCheckFn,
-    pub(super) build_effect: fn(ObjId, &str, &CardDef) -> Effect,
+    /// Factory: called at instance-registration time with `(source_id, controller)`.
+    /// CardDef-specific data is captured inside the factory at card-load time.
+    pub(super) make_effect: std::sync::Arc<dyn Fn(ObjId, &str) -> Effect + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -538,16 +540,110 @@ impl From<RawCardDef> for CardDef {
             "Tamiyo, Inquisitive Student" => vec![std::sync::Arc::new(tamiyo_check)],
             _ => vec![],
         };
+        let card_type_s = match r.card_type {
+            CardType::Land        => "land",
+            CardType::Creature    => "creature",
+            CardType::Planeswalker => "planeswalker",
+            CardType::Artifact    => "artifact",
+            CardType::Instant     => "instant",
+            CardType::Sorcery     => "sorcery",
+            CardType::Enchantment => "enchantment",
+        }.to_string();
         let mut replacement_defs: Vec<ReplacementDef> = match r.name.as_str() {
-            "Leyline of the Void" => vec![ReplacementDef { check: leyline_check,      build_effect: build_leyline_effect }],
-            "Murktide Regent"     => vec![ReplacementDef { check: murktide_etb_check, build_effect: build_murktide_etb_effect }],
+            "Leyline of the Void" => vec![ReplacementDef {
+                check: leyline_check,
+                make_effect: std::sync::Arc::new(|_source_id, controller: &str| {
+                    let ctl = controller.to_string();
+                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                        if let Some(Target::Object(id)) = targets.first() {
+                            change_zone(*id, ZoneId::Exile, state, t, &ctl, catalog, rng);
+                        }
+                    }))
+                }),
+            }],
+            "Murktide Regent" => vec![ReplacementDef {
+                check: murktide_etb_check,
+                make_effect: std::sync::Arc::new(|_source_id, controller: &str| {
+                    let ctl = controller.to_string();
+                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                        let Some(Target::Object(id)) = targets.first() else { return; };
+                        let id = *id;
+                        let exile_count = state.exile_of(&ctl)
+                            .filter(|c| state.materialized.defs.get(&c.id)
+                                .map_or(false, |d| d.is_instant() || d.is_sorcery()))
+                            .count() as i32;
+                        if let Some(bf) = state.permanent_bf_mut(id) {
+                            bf.counters = exile_count;
+                        }
+                        fire_event(
+                            GameEvent::ZoneChange {
+                                id,
+                                actor: ctl.clone(),
+                                card: "Murktide Regent".to_string(),
+                                card_type: "creature".to_string(),
+                                from: ZoneId::Stack,
+                                to: ZoneId::Battlefield,
+                                controller: ctl.clone(),
+                            },
+                            state, t, &ctl, catalog, rng,
+                        );
+                    }))
+                }),
+            }],
             _ => vec![],
         };
         if enters_tapped {
-            replacement_defs.push(ReplacementDef { check: etb_self_check, build_effect: build_enters_tapped_effect });
+            let ct = card_type_s.clone();
+            replacement_defs.push(ReplacementDef {
+                check: etb_self_check,
+                make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
+                    let ctl = controller.to_string();
+                    let ct = ct.clone();
+                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                        let Some(Target::Object(id)) = targets.first() else { return; };
+                        let id = *id;
+                        let from = current_zone_id(id, state);
+                        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
+                        fire_event(
+                            GameEvent::ZoneChange {
+                                id, actor: ctl.clone(), card: card_name, card_type: ct.clone(),
+                                from, to: ZoneId::Battlefield, controller: ctl.clone(),
+                            },
+                            state, t, &ctl, catalog, rng,
+                        );
+                        if let Some(bf) = state.permanent_bf_mut(id) {
+                            bf.tapped = true;
+                        }
+                    }))
+                }),
+            });
         }
         if is_planeswalker {
-            replacement_defs.push(ReplacementDef { check: etb_self_check, build_effect: build_enter_with_loyalty_effect });
+            let ct = card_type_s.clone();
+            let base_loyalty = if let CardKind::Planeswalker(ref p) = kind { p.loyalty } else { 0 };
+            replacement_defs.push(ReplacementDef {
+                check: etb_self_check,
+                make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
+                    let ctl = controller.to_string();
+                    let ct = ct.clone();
+                    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
+                        let Some(Target::Object(id)) = targets.first() else { return; };
+                        let id = *id;
+                        let from = current_zone_id(id, state);
+                        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
+                        fire_event(
+                            GameEvent::ZoneChange {
+                                id, actor: ctl.clone(), card: card_name, card_type: ct.clone(),
+                                from, to: ZoneId::Battlefield, controller: ctl.clone(),
+                            },
+                            state, t, &ctl, catalog, rng,
+                        );
+                        if let Some(bf) = state.permanent_bf_mut(id) {
+                            bf.loyalty = base_loyalty;
+                        }
+                    }))
+                }),
+            });
         }
         let static_ability_defs: Vec<StaticAbilityDef> = r.static_abilities.iter()
             .filter_map(|s| static_ability_def_from_str(s))
@@ -933,7 +1029,7 @@ pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, contro
             source_id,
             controller: controller.to_string(),
             check: repl.check,
-            effect: (repl.build_effect)(source_id, controller, card_def),
+            effect: (repl.make_effect)(source_id, controller),
             active: false,
         });
     }
@@ -985,15 +1081,6 @@ fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &str) -> Opt
     }
 }
 
-fn build_leyline_effect(_source_id: ObjId, controller: &str, _def: &CardDef) -> Effect {
-    let ctl = controller.to_string();
-    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
-        if let Some(Target::Object(id)) = targets.first() {
-            change_zone(*id, ZoneId::Exile, state, t, &ctl, catalog, rng);
-        }
-    }))
-}
-
 // ── Shared ETB-self check ─────────────────────────────────────────────────────
 
 /// Matches any ZoneChange where this permanent is the object entering the battlefield.
@@ -1012,58 +1099,6 @@ fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
     state.objects.get(&id).map(|c| card_zone_to_id(&c.zone)).unwrap_or(ZoneId::Hand)
 }
 
-// ── Enters-tapped ETB replacement ─────────────────────────────────────────────
-
-fn build_enters_tapped_effect(_source_id: ObjId, controller: &str, def: &CardDef) -> Effect {
-    let ctl = controller.to_string();
-    let card_type_s = card_type_str(def).to_string();
-    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
-        let Some(Target::Object(id)) = targets.first() else { return; };
-        let id = *id;
-        let from = current_zone_id(id, state);
-        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-        // Re-fire the ETB: do_effect creates BattlefieldState (tapped = false); ETB triggers fire.
-        // This replacement is in repl_applied so it will not intercept the re-fired event.
-        fire_event(
-            GameEvent::ZoneChange {
-                id, actor: ctl.clone(), card: card_name, card_type: card_type_s.clone(),
-                from, to: ZoneId::Battlefield, controller: ctl.clone(),
-            },
-            state, t, &ctl, catalog, rng,
-        );
-        // Chain: set tapped now that BattlefieldState exists.
-        if let Some(bf) = state.permanent_bf_mut(id) {
-            bf.tapped = true;
-        }
-    }))
-}
-
-// ── Planeswalker enters-with-loyalty ETB replacement ─────────────────────────
-
-fn build_enter_with_loyalty_effect(_source_id: ObjId, controller: &str, def: &CardDef) -> Effect {
-    let ctl = controller.to_string();
-    let card_type_s = card_type_str(def).to_string();
-    let base_loyalty = if let CardKind::Planeswalker(ref p) = def.kind { p.loyalty } else { 0 };
-    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
-        let Some(Target::Object(id)) = targets.first() else { return; };
-        let id = *id;
-        let from = current_zone_id(id, state);
-        let card_name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-        // Re-fire the ETB: do_effect creates BattlefieldState (loyalty = 0); ETB triggers fire.
-        fire_event(
-            GameEvent::ZoneChange {
-                id, actor: ctl.clone(), card: card_name, card_type: card_type_s.clone(),
-                from, to: ZoneId::Battlefield, controller: ctl.clone(),
-            },
-            state, t, &ctl, catalog, rng,
-        );
-        // Chain: set loyalty now that BattlefieldState exists.
-        if let Some(bf) = state.permanent_bf_mut(id) {
-            bf.loyalty = base_loyalty;
-        }
-    }))
-}
-
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────
 
 fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> Option<Vec<Target>> {
@@ -1075,33 +1110,3 @@ fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> 
     None
 }
 
-fn build_murktide_etb_effect(_source_id: ObjId, controller: &str, _def: &CardDef) -> Effect {
-    let ctl = controller.to_string();
-    Effect(std::sync::Arc::new(move |state, t, targets, catalog, rng| {
-        let Some(Target::Object(id)) = targets.first() else { return; };
-        let id = *id;
-        // Count instant/sorcery cards in controller's exile via materialized (no catalog read).
-        let exile_count = state.exile_of(&ctl)
-            .filter(|c| state.materialized.defs.get(&c.id)
-                .map_or(false, |d| d.is_instant() || d.is_sorcery()))
-            .count() as i32;
-        // Set counters on the already-created BattlefieldState
-        if let Some(bf) = state.permanent_bf_mut(id) {
-            bf.counters = exile_count;
-        }
-        // Re-fire the ETB event so triggers (Bowmasters, etc.) run.
-        // Murktide's replacement is now in repl_applied, so it won't fire again.
-        fire_event(
-            GameEvent::ZoneChange {
-                id,
-                actor: ctl.clone(),
-                card: "Murktide Regent".to_string(),
-                card_type: "creature".to_string(),
-                from: ZoneId::Stack,
-                to: ZoneId::Battlefield,
-                controller: ctl.clone(),
-            },
-            state, t, &ctl, catalog, rng,
-        );
-    }))
-}
