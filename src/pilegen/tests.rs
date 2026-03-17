@@ -1,5 +1,4 @@
     use super::*;
-    use std::collections::HashMap;
     use rand::{SeedableRng, rngs::StdRng};
 
     // ── Test helpers ──────────────────────────────────────────────────────────
@@ -14,12 +13,19 @@
         StdRng::seed_from_u64(42)
     }
 
+    fn test_catalog() -> std::collections::HashMap<String, CardDef> {
+        super::card_defs::build_catalog()
+    }
+
+    fn catalog_card(name: &str) -> CardDef {
+        test_catalog().remove(name).unwrap_or_else(|| panic!("card not found in catalog: {name}"))
+    }
+
     fn creature(name: &str, power: i32, toughness: i32) -> CardDef {
-        let toml = format!(
-            "name = {:?}\ncard_type = \"creature\"\npower = {}\ntoughness = {}\n",
-            name, power, toughness
-        );
-        toml::from_str(&toml).unwrap()
+        CardDef::new(
+            name, CardKind::Creature(CreatureData::new("", power, toughness)),
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
+        )
     }
 
     /// Insert a permanent into `state.objects` for `who` and return its ObjId.
@@ -35,10 +41,14 @@
             is_token: false,
             spell: None,
             bf: Some(bf),
+            materialized: None,
         });
-        // Build a minimal CardDef so From<RawCardDef> sets trigger/replacement defs by name.
-        let toml = format!("name = {:?}\ncard_type = \"creature\"\npower = 1\ntoughness = 1\n", name);
-        let def: CardDef = toml::from_str(&toml).expect("add_perm: CardDef parse failed");
+        // Look up the real CardDef (including triggers/replacements) from the catalog; fall back
+        // to a minimal 1/1 stub for anonymous test creatures that have no special behaviour.
+        let def = test_catalog().remove(name).unwrap_or_else(|| {
+            CardDef::new(name, CardKind::Creature(CreatureData::new("", 1, 1)),
+                         vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![])
+        });
         preregister_instances(&def, id, who, state);
         activate_instances(id, who, Some(&def), state);
         // Seed state.catalog so recompute() can find this object's base def.
@@ -64,10 +74,11 @@
             is_token: false,
             spell: None,
             bf: Some(bf),
+            materialized: None,
         });
         preregister_instances(def, id, who, state);
         activate_instances(id, who, Some(def), state);
-        state.materialized.defs.insert(id, def.clone());
+        state.objects.get_mut(&id).unwrap().materialized = Some(def.clone());
         // Seed state.catalog so recompute() can find this object's base def.
         state.catalog.entry(def.name.clone()).or_insert_with(|| def.clone());
         id
@@ -91,13 +102,14 @@
             is_token: false,
             spell: None,
             bf: None,
+            materialized: None,
         });
         id
     }
 
     fn add_hand_card_with_def(state: &mut SimState, who: &str, def: &CardDef) -> ObjId {
         let id = add_hand_card(state, who, &def.name.clone());
-        state.materialized.defs.insert(id, def.clone());
+        state.objects.get_mut(&id).unwrap().materialized = Some(def.clone());
         id
     }
 
@@ -112,6 +124,7 @@
             is_token: false,
             spell: None,
             bf: None,
+            materialized: None,
         });
         id
     }
@@ -127,6 +140,7 @@
             is_token: false,
             spell: None,
             bf: None,
+            materialized: None,
         });
         id
     }
@@ -435,13 +449,7 @@
     #[test]
     fn test_beginning_phase_untaps_and_draws() {
         let mut state = make_state();
-        let island_def: CardDef = toml::from_str(r#"
-            name = "Island"
-            card_type = "land"
-            [[mana_abilities]]
-            tap_self = true
-            produces = "U"
-        "#).unwrap();
+        let island_def = catalog_card("Island");
         let island_id = add_perm_with_def(&mut state, "us", &island_def, BattlefieldState {
             tapped: true,
             ..BattlefieldState::new()
@@ -482,11 +490,7 @@
     #[test]
     fn test_cast_spell_normal_cost_removes_from_library() {
         let mut state = make_state();
-        let def: CardDef = toml::from_str(r#"
-            name = "Dark Ritual"
-            card_type = "instant"
-            mana_cost = "B"
-        "#).unwrap();
+        let def = catalog_card("Dark Ritual");
         state.us.pool.b = 1;
         state.us.pool.total = 1;
         let dark_ritual_id = add_hand_card(&mut state, "us", "Dark Ritual");
@@ -508,11 +512,7 @@
     #[test]
     fn test_cast_spell_unaffordable_returns_none() {
         let mut state = make_state();
-        let def: CardDef = toml::from_str(r#"
-            name = "Doomsday"
-            card_type = "instant"
-            mana_cost = "BBB"
-        "#).unwrap();
+        let def = catalog_card("Doomsday");
         // No mana in pool, no lands
         let doomsday_id = add_hand_card(&mut state, "us", "Doomsday");
 
@@ -526,22 +526,8 @@
     #[test]
     fn test_cast_spell_alt_cost_exiles_pitch_card() {
         let mut state = make_state();
-        let fow_def: CardDef = toml::from_str(r#"
-            name = "Force of Will"
-            card_type = "instant"
-            mana_cost = "3UU"
-            blue = true
-            [[alternate_costs]]
-            mana_cost = ""
-            exile_blue_from_hand = true
-            life_cost = 1
-        "#).unwrap();
-        let brainstorm_def: CardDef = toml::from_str(r#"
-            name = "Brainstorm"
-            card_type = "instant"
-            mana_cost = "U"
-            blue = true
-        "#).unwrap();
+        let fow_def = catalog_card("Force of Will");
+        let brainstorm_def = catalog_card("Brainstorm");
         let catalog = vec![fow_def.clone(), brainstorm_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
@@ -668,10 +654,7 @@
         let mut state = make_state();
         state.us.pool.b = 2;
         state.us.pool.total = 2;
-        let ability: AbilityDef = toml::from_str(r#"
-            mana_cost = "B"
-            effect = "cantrip"
-        "#).unwrap();
+        let ability = AbilityDef { mana_cost: "B".to_string(), effect: "cantrip".to_string(), ..Default::default() };
         pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
@@ -682,11 +665,7 @@
     fn test_pay_activation_cost_life() {
         let mut state = make_state();
         let initial = state.us.life;
-        let ability: AbilityDef = toml::from_str(r#"
-            mana_cost = ""
-            life_cost = 2
-            effect = "cantrip"
-        "#).unwrap();
+        let ability = AbilityDef { life_cost: 2, effect: "cantrip".to_string(), ..Default::default() };
         pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability);
 
         assert_eq!(state.us.life, initial - 2);
@@ -696,11 +675,7 @@
     fn test_pay_activation_cost_sacrifice_self() {
         let mut state = make_state();
         let petal_id = add_default_perm(&mut state, "us", "Lotus Petal");
-        let ability: AbilityDef = toml::from_str(r#"
-            mana_cost = ""
-            sacrifice_self = true
-            effect = "mana:B"
-        "#).unwrap();
+        let ability = AbilityDef { sacrifice_self: true, effect: "mana:B".to_string(), ..Default::default() };
         pay_activation_cost(&mut state, 1, "us", petal_id, &ability);
 
         assert!(state.permanents_of("us").count() == 0, "Lotus Petal should be sacrificed");
@@ -734,23 +709,19 @@
     // Ability resolution: target is chosen at push time via choose_permanent_target.
 
     fn land_def(name: &str, basic: bool) -> CardDef {
-        let basic_str = if basic { "true" } else { "false" };
-        let toml = format!(
-            "name = {:?}\ncard_type = \"land\"\nbasic = {}\n",
-            name, basic_str
-        );
-        toml::from_str(&toml).unwrap()
+        CardDef::new(
+            name, CardKind::Land(LandData::default()),
+            vec![], None,
+            if basic { vec![Supertype::Basic] } else { vec![] },
+            CardLayout::Normal, None, vec![], vec![], vec![],
+        )
     }
 
     #[test]
     fn test_effect_destroy_ability_removes_nonbasic_land() {
         let mut state = make_state();
         make_land(&mut state, "opp", "Bayou", false);
-        let ability: AbilityDef = toml::from_str(r#"
-            mana_cost = ""
-            target = "opp:nonbasic_land"
-            effect = "destroy"
-        "#).unwrap();
+        let ability = AbilityDef { target: Some("opp:nonbasic_land".to_string()), effect: "destroy".to_string(), ..Default::default() };
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -768,11 +739,7 @@
     fn test_effect_destroy_ability_ignores_basic_land() {
         let mut state = make_state();
         make_land(&mut state, "opp", "Forest", false);
-        let ability: AbilityDef = toml::from_str(r#"
-            mana_cost = ""
-            target = "opp:nonbasic_land"
-            effect = "destroy"
-        "#).unwrap();
+        let ability = AbilityDef { target: Some("opp:nonbasic_land".to_string()), effect: "destroy".to_string(), ..Default::default() };
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -793,12 +760,7 @@
         // Spell costs 3 generic + U. Two graveyard cards reduce generic to 1.
         // Pool supplies the remaining 1 generic + 1 blue.
         let mut state = make_state();
-        let def: CardDef = toml::from_str(r#"
-            name = "Treasure Cruise"
-            card_type = "instant"
-            mana_cost = "7U"
-            delve = true
-        "#).unwrap();
+        let def = CardDef::new("Treasure Cruise", CardKind::Instant(SpellData { mana_cost: "7U".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
         for name in &["A", "B", "C", "D", "E", "F", "G"] {
             add_graveyard_card(&mut state, "us", name);
         }
@@ -822,12 +784,7 @@
         // Spell costs 3 generic. Graveyard has 2 cards — reduces cost to 1.
         // Pool must cover the remaining 1 generic.
         let mut state = make_state();
-        let def: CardDef = toml::from_str(r#"
-            name = "Dead Drop"
-            card_type = "sorcery"
-            mana_cost = "3"
-            delve = true
-        "#).unwrap();
+        let def = CardDef::new("Dead Drop", CardKind::Sorcery(SpellData { mana_cost: "3".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
         add_graveyard_card(&mut state, "us", "Ritual");
         add_graveyard_card(&mut state, "us", "Ponder");
         let dead_drop_id = add_hand_card(&mut state, "us", "Dead Drop");
@@ -848,17 +805,10 @@
     fn test_murktide_counters_from_exiled_instants_sorceries() {
         // Murktide exiles 4 cards via delve; 3 are instants/sorceries → enters as 6/6.
         let mut state = make_state();
-        let murktide_def: CardDef = toml::from_str(r#"
-            name = "Murktide Regent"
-            card_type = "creature"
-            mana_cost = "5UU"
-            delve = true
-            power = 3
-            toughness = 3
-        "#).unwrap();
-        let ritual_def: CardDef   = toml::from_str("name = \"Dark Ritual\"\ncard_type = \"instant\"\nmana_cost = \"B\"").unwrap();
-        let ponder_def: CardDef   = toml::from_str("name = \"Ponder\"\ncard_type = \"sorcery\"\nmana_cost = \"U\"").unwrap();
-        let consider_def: CardDef = toml::from_str("name = \"Consider\"\ncard_type = \"instant\"\nmana_cost = \"U\"").unwrap();
+        let murktide_def = catalog_card("Murktide Regent");
+        let ritual_def   = catalog_card("Dark Ritual");
+        let ponder_def   = catalog_card("Ponder");
+        let consider_def = catalog_card("Consider");
         let ragavan_def  = creature("Ragavan", 2, 1); // creature — does NOT count
 
         add_graveyard_card(&mut state, "us", "Dark Ritual");
@@ -889,8 +839,8 @@
         // recompute reflects counters in the materialized view
         let murktide_id = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
             .map(|p| p.id).expect("Murktide on battlefield");
-        let mat = recompute(&state);
-        let eff = mat.defs.get(&murktide_id).expect("Murktide materialized");
+        recompute(&mut state);
+        let eff = state.def_of(murktide_id).expect("Murktide materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!((c.power(), c.toughness()), (6, 6));
     }
@@ -899,14 +849,7 @@
     fn test_murktide_zero_counters_when_no_instants_exiled() {
         // Delve only exiles a creature — no instants/sorceries → enters as base 3/3.
         let mut state = make_state();
-        let murktide_def: CardDef = toml::from_str(r#"
-            name = "Murktide Regent"
-            card_type = "creature"
-            mana_cost = "5UU"
-            delve = true
-            power = 3
-            toughness = 3
-        "#).unwrap();
+        let murktide_def = catalog_card("Murktide Regent");
         let ragavan_def = creature("Ragavan", 2, 1);
 
         add_graveyard_card(&mut state, "us", "Ragavan");
@@ -931,8 +874,8 @@
         assert_eq!(murktide_bf.counters, 0);
         let murktide_id = state.permanents_of("us").find(|p| p.catalog_key == "Murktide Regent")
             .map(|p| p.id).expect("Murktide on battlefield");
-        let mat = recompute(&state);
-        let eff = mat.defs.get(&murktide_id).expect("Murktide materialized");
+        recompute(&mut state);
+        let eff = state.def_of(murktide_id).expect("Murktide materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!((c.power(), c.toughness()), (3, 3));
     }
@@ -965,12 +908,7 @@
         // Spell costs 3 generic. Graveyard has 2 cards — reduces cost to 1.
         // Pool is empty — still can't cast.
         let mut state = make_state();
-        let def: CardDef = toml::from_str(r#"
-            name = "Dead Drop"
-            card_type = "sorcery"
-            mana_cost = "3"
-            delve = true
-        "#).unwrap();
+        let def = CardDef::new("Dead Drop", CardKind::Sorcery(SpellData { mana_cost: "3".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
         add_graveyard_card(&mut state, "us", "Ritual");
         add_graveyard_card(&mut state, "us", "Ponder");
         let dead_drop_id = add_hand_card(&mut state, "us", "Dead Drop");
@@ -991,11 +929,7 @@
         let mut state = make_state();
         add_default_perm(&mut state, "opp", "Troll");
         let troll_def = creature("Troll", 2, 2);
-        let ability: AbilityDef = toml::from_str(r#"
-            mana_cost = ""
-            target = "opp:creature"
-            effect = "exile"
-        "#).unwrap();
+        let ability = AbilityDef { target: Some("opp:creature".to_string()), effect: "exile".to_string(), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<Target> = choose_permanent_target("opp:creature", "us", &state, &mut seeded_rng())
@@ -1012,24 +946,13 @@
     // ── Section 10: Ninjutsu ──────────────────────────────────────────────────
 
     fn ninja_def() -> CardDef {
-        toml::from_str(r#"
-            name = "Ninja"
-            card_type = "creature"
-            power = 2
-            toughness = 1
-            ninjutsu = {mana_cost = "U"}
-        "#).unwrap()
+        let mut data = CreatureData::new("", 2, 1);
+        data.ninjutsu = Some(NinjutsuAbility { mana_cost: "U".to_string() });
+        CardDef::new("Ninja", CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![])
     }
 
     fn island_land(state: &mut SimState, who: &str) -> ObjId {
-        let def: CardDef = toml::from_str(r#"
-            name = "Island"
-            card_type = "land"
-            [[mana_abilities]]
-            tap_self = true
-            produces = "U"
-        "#).unwrap();
-        add_perm_with_def(state, who, &def, BattlefieldState::new())
+        add_perm_with_def(state, who, &catalog_card("Island"), BattlefieldState::new())
     }
 
     #[test]
@@ -1131,7 +1054,7 @@
     #[test]
     fn test_try_ninjutsu_no_ninja_in_library_returns_none() {
         let mut state = make_state();
-        let brainstorm_def = toml::from_str::<CardDef>("name=\"Brainstorm\"\ncard_type=\"instant\"\nmana_cost=\"U\"").unwrap();
+        let brainstorm_def = catalog_card("Brainstorm");
         add_hand_card_with_def(&mut state, "us", &brainstorm_def);
         add_perm(&mut state, "us", "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new() });
         state.us.pool.u = 1; state.us.pool.total = 1;
@@ -1154,11 +1077,7 @@
         // try_ninjutsu returns ActivateAbility; when committed via handle_priority_round
         // in a DeclareBlockers window, the ninja enters play and the attacker returns to hand.
         let def = ninja_def();
-        let island_def: CardDef = toml::from_str(r#"name = "Island"
-card_type = "land"
-[[mana_abilities]]
-tap_self = true
-produces = "U""#).unwrap();
+        let island_def = catalog_card("Island");
         let catalog = vec![def.clone(), island_def];
 
         // Loop over seeds until ninjutsu fires (35% per attempt → statistically guaranteed within 50).
@@ -1204,7 +1123,7 @@ produces = "U""#).unwrap();
         let mut state = make_state();
         add_library_card(&mut state, "us", "Island");
         let initial = state.hand_size("us");
-        let ability: AbilityDef = toml::from_str(r#"effect = "draw:1""#).unwrap();
+        let ability = AbilityDef { effect: "draw:1".to_string(), ..Default::default() };
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
         eff.call(&mut state, 1, &[], &mut seeded_rng());
         assert_eq!(state.hand_size("us"), initial + 1, "cycling draws one card");
@@ -1215,19 +1134,8 @@ produces = "U""#).unwrap();
         // pay_activation_cost with discard_self=true removes the card from hand
         // and sends it to the graveyard.
         let mut state = make_state();
-        let wraith_def: CardDef = toml::from_str(r#"
-            name = "Street Wraith"
-            card_type = "creature"
-            mana_cost = "3BB"
-            power = 3
-            toughness = 4
-        "#).unwrap();
-        let ability: AbilityDef = toml::from_str(r#"
-            zone = "hand"
-            discard_self = true
-            life_cost = 2
-            effect = "draw:1"
-        "#).unwrap();
+        let wraith_def = catalog_card("Street Wraith");
+        let ability = AbilityDef { zone: "hand".to_string(), discard_self: true, life_cost: 2, effect: "draw:1".to_string(), ..Default::default() };
         let catalog = vec![wraith_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         // Add Street Wraith to hand and a library card to draw
@@ -1285,30 +1193,12 @@ produces = "U""#).unwrap();
     fn test_cast_from_adventure_enters_play() {
         // pick_on_board_action detects adventure creatures in exile and picks the cast action
         // (75% roll). Run with multiple seeds to confirm it fires and the creature enters play.
-        let borrower_def: CardDef = toml::from_str(r#"
-            name = "Brazen Borrower"
-            card_type = "creature"
-            mana_cost = "1UU"
-            blue = true
-            power = 3
-            toughness = 1
-        "#).unwrap();
-        let island_def: CardDef = toml::from_str(r#"name = "Island"
-card_type = "land"
-[[mana_abilities]]
-tap_self = true
-produces = "U""#).unwrap();
-        let island2_def: CardDef = toml::from_str(r#"name = "Island2"
-card_type = "land"
-[[mana_abilities]]
-tap_self = true
-produces = "U""#).unwrap();
-        let swamp_def: CardDef = toml::from_str(r#"name = "Swamp"
-card_type = "land"
-[[mana_abilities]]
-tap_self = true
-produces = "B""#).unwrap();
-        let catalog = vec![borrower_def.clone(), island_def, island2_def, swamp_def];
+        let borrower_def = catalog_card("Brazen Borrower");
+        let island2_def = CardDef::new("Island2", CardKind::Land(LandData {
+            mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".to_string(), ..Default::default() }],
+            ..Default::default()
+        }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let catalog = vec![borrower_def.clone(), catalog_card("Island"), island2_def.clone(), catalog_card("Swamp")];
 
         let make_fresh_state = || {
             let mut state = make_state();
@@ -1321,22 +1211,8 @@ produces = "B""#).unwrap();
             state.objects.insert(borrower_id, borrower_obj);
             // 1UU mana: two Islands + one generic (Swamp)
             island_land(&mut state, "us");
-            {
-                let def: CardDef = toml::from_str(r#"name = "Island2"
-card_type = "land"
-[[mana_abilities]]
-tap_self = true
-produces = "U""#).unwrap();
-                add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
-            }
-            {
-                let def: CardDef = toml::from_str(r#"name = "Swamp"
-card_type = "land"
-[[mana_abilities]]
-tap_self = true
-produces = "B""#).unwrap();
-                add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
-            }
+            add_perm_with_def(&mut state, "us", &island2_def, BattlefieldState::new());
+            add_perm_with_def(&mut state, "us", &catalog_card("Swamp"), BattlefieldState::new());
             state
         };
 
@@ -1359,11 +1235,9 @@ produces = "B""#).unwrap();
     // ── Section 8: Keyword Tests ──────────────────────────────────────────────
 
     fn flying_creature(name: &str, power: i32, toughness: i32) -> CardDef {
-        let toml = format!(
-            "name = {:?}\ncard_type = \"creature\"\npower = {}\ntoughness = {}\nkeywords = [\"flying\"]\n",
-            name, power, toughness
-        );
-        toml::from_str(&toml).unwrap()
+        let mut data = CreatureData::new("", power, toughness);
+        data.keywords = vec!["flying".to_string()];
+        CardDef::new(name, CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![])
     }
 
     #[test]
@@ -1491,8 +1365,7 @@ produces = "B""#).unwrap();
     /// Fire a Bowmasters ETB trigger for `controller`, choose its target, and apply it.
     fn fire_bowmasters_etb(controller: &str, state: &mut SimState) {
         // Rebuild materialized so choose_trigger_target sees current P/T.
-        let mat = recompute(state);
-        state.materialized = mat;
+        recompute(state);
         let ctx = bowmasters_etb_ctx(controller);
         let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state)
             .into_iter().collect();
@@ -1712,8 +1585,8 @@ produces = "B""#).unwrap();
         let dragon_id = state.permanents_of("opp").find(|p| p.catalog_key == "Dragon").map(|p| p.id).unwrap();
         // The -1 comes from a ContinuousInstance (L7), not bf.power_mod.
         // recompute reflects the CE modifier in the materialized view.
-        let mat = recompute(&state);
-        let eff = mat.defs.get(&dragon_id).expect("Dragon materialized");
+        recompute(&mut state);
+        let eff = state.def_of(dragon_id).expect("Dragon materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!(c.power(), 2, "Dragon's effective power is 3 + (-1) = 2");
     }
@@ -1760,16 +1633,16 @@ produces = "B""#).unwrap();
         });
 
         // Before Cleanup: effective power = 2.
-        let mat = recompute(&state);
-        let CardKind::Creature(c) = &mat.defs[&dragon_id].kind else { panic!() };
+        recompute(&mut state);
+        let CardKind::Creature(c) = &state.def_of(dragon_id).unwrap().kind.clone() else { panic!() };
         assert_eq!(c.power(), 2, "CI applies -1 before Cleanup");
 
         let step = Step { kind: StepKind::Cleanup, prio: false };
         do_step(&mut state, 1, "opp", &step, 3, true, &mut seeded_rng());
 
         // After Cleanup: CI removed, effective power restored to 3.
-        let mat = recompute(&state);
-        let CardKind::Creature(c) = &mat.defs[&dragon_id].kind else { panic!() };
+        recompute(&mut state);
+        let CardKind::Creature(c) = &state.def_of(dragon_id).unwrap().kind.clone() else { panic!() };
         assert_eq!(c.power(), 3, "effective power restored after Cleanup");
         assert!(state.continuous_instances.is_empty(), "EndOfTurn CI removed at Cleanup");
     }
@@ -1888,6 +1761,7 @@ produces = "B""#).unwrap();
                 is_back_face: false,
             }),
             bf: None,
+            materialized: None,
         });
         state.stack.push(id);
         resolve_top_of_stack(&mut state, 1, "us", &mut seeded_rng());
@@ -1902,14 +1776,7 @@ produces = "B""#).unwrap();
     /// an ability whose cost has already been paid.
     #[test]
     fn test_no_ability_offered_after_sacrifice_cost_paid() {
-        let fetch_def: CardDef = toml::from_str(r#"
-            name = "Polluted Delta"
-            card_type = "land"
-            [[abilities]]
-            sacrifice_self = true
-            life_cost = 1
-            effect = "search:land-island|swamp:play"
-        "#).unwrap();
+        let fetch_def = catalog_card("Polluted Delta");
         let catalog = vec![fetch_def];
 
         let mut state = make_state();
@@ -1976,6 +1843,7 @@ produces = "B""#).unwrap();
             is_token: true,
             spell: None,
             bf: Some(BattlefieldState::new()),
+            materialized: None,
         });
         id
     }
@@ -2020,10 +1888,7 @@ produces = "B""#).unwrap();
         let mut state = make_state();
         // A 1/-1 creature (e.g. after -1/-2 effect) has toughness ≤ 0.
         let _id = add_perm(&mut state, "us", "Weakened", BattlefieldState::new());
-        let def = {
-            let toml = "name = \"Weakened\"\ncard_type = \"creature\"\npower = 1\ntoughness = -1\n";
-            toml::from_str::<CardDef>(toml).unwrap()
-        };
+        let def = creature("Weakened", 1, -1);
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         check_state_based_actions(&mut state, 1, &mut seeded_rng());
@@ -2053,8 +1918,7 @@ produces = "B""#).unwrap();
             loyalty: 0,
             ..BattlefieldState::new()
         });
-        let toml = "name = \"Jace\"\ncard_type = \"planeswalker\"\nmana_cost = \"3U\"\nloyalty = 3\n";
-        let def: CardDef = toml::from_str(toml).unwrap();
+        let def = CardDef::new("Jace", CardKind::Planeswalker(PlaneswalkerData { mana_cost: "3U".to_string(), loyalty: 3, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         check_state_based_actions(&mut state, 1, &mut seeded_rng());
@@ -2067,8 +1931,9 @@ produces = "B""#).unwrap();
         let mut state = make_state();
         let _first = add_default_perm(&mut state, "us", "Bowmasters");
         let _second = add_default_perm(&mut state, "us", "Bowmasters");
-        let toml = "name = \"Bowmasters\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\nlegendary = true\n";
-        let def: CardDef = toml::from_str(toml).unwrap();
+        let mut bowmasters_data = CreatureData::new("1B", 1, 1);
+        bowmasters_data.legendary = true;
+        let def = CardDef::new("Bowmasters", CardKind::Creature(bowmasters_data), parse_colors("1B", false, true), None, vec![Supertype::Legendary], CardLayout::Normal, None, vec![], vec![], vec![]);
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         check_state_based_actions(&mut state, 1, &mut seeded_rng());
@@ -2083,8 +1948,9 @@ produces = "B""#).unwrap();
     fn test_sba_legend_rule_only_one_copy_untouched() {
         let mut state = make_state();
         add_default_perm(&mut state, "us", "Bowmasters");
-        let toml = "name = \"Bowmasters\"\ncard_type = \"creature\"\npower = 1\ntoughness = 1\nlegendary = true\n";
-        let def: CardDef = toml::from_str(toml).unwrap();
+        let mut bowmasters_data = CreatureData::new("1B", 1, 1);
+        bowmasters_data.legendary = true;
+        let def = CardDef::new("Bowmasters", CardKind::Creature(bowmasters_data), parse_colors("1B", false, true), None, vec![Supertype::Legendary], CardLayout::Normal, None, vec![], vec![], vec![]);
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         check_state_based_actions(&mut state, 1, &mut seeded_rng());
@@ -2102,15 +1968,13 @@ produces = "B""#).unwrap();
 
         // Add a 2/2 creature for "us".
         let id = add_default_perm(&mut state, "us", "Grizzly Bears");
-        let base_toml = "name = \"Grizzly Bears\"\ncard_type = \"creature\"\npower = 2\ntoughness = 2\n";
-        let base_def: CardDef = toml::from_str(base_toml).unwrap();
+        let base_def = creature("Grizzly Bears", 2, 2);
         // Override the 1/1 stub inserted by add_default_perm with the real 2/2 def.
         state.catalog.insert(base_def.name.clone(), base_def);
 
         // Baseline: recompute without any CEs → effective P/T is 2/2.
-        let mat = recompute(&state);
-        assert_eq!(mat.generation, 0);
-        let eff = mat.defs.get(&id).expect("should be in materialized defs");
+        recompute(&mut state);
+        let eff = state.def_of(id).expect("should be in materialized defs");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!((c.power(), c.toughness()), (2, 2), "baseline P/T should be 2/2");
 
@@ -2129,8 +1993,8 @@ produces = "B""#).unwrap();
         });
 
         // Recompute: effective P/T should now be 4/3.
-        let mat2 = recompute(&state);
-        let eff2 = mat2.defs.get(&id).expect("should be in materialized defs after CE");
+        recompute(&mut state);
+        let eff2 = state.def_of(id).expect("should be in materialized defs after CE");
         let CardKind::Creature(c2) = &eff2.kind else { panic!("expected creature") };
         assert_eq!((c2.power(), c2.toughness()), (4, 3), "CE should produce 4/3");
     }
@@ -2147,68 +2011,55 @@ produces = "B""#).unwrap();
             add_perm(&mut state, "us", "Llanowar Elves", bf)
         };
         // Without any CE: counters fold in → effective 3/3.
-        let mat = recompute(&state);
-        let eff = mat.defs.get(&id).expect("creature should be materialized");
+        recompute(&mut state);
+        let eff = state.def_of(id).expect("creature should be materialized");
         let CardKind::Creature(c) = &eff.kind else { panic!("expected creature") };
         assert_eq!((c.power(), c.toughness()), (3, 3), "two +1/+1 counters should yield 3/3");
     }
 
-    /// Every top-level fire_event advances state.generation by 1, and the resulting
-    /// MaterializedState.generation reflects the generation at which it was built.
-    #[test]
-    fn test_generation_advances_per_tick() {
-        let mut state = make_state();
-        assert_eq!(state.generation, 0, "initial generation is 0");
-        assert_eq!(state.materialized.generation, 0, "initial materialized generation is 0");
-
-        let mut rng = seeded_rng();
-
-        // Fire one top-level event.
-        fire_event(
-            GameEvent::EnteredStep { step: StepKind::Upkeep, active_player: "us".to_string() },
-            &mut state, 1, "us", &mut rng,
-        );
-        assert_eq!(state.generation, 1, "one tick → generation 1");
-        assert_eq!(state.materialized.generation, 1, "snapshot generation matches");
-
-        // Fire a second event.
-        fire_event(
-            GameEvent::EnteredStep { step: StepKind::Draw, active_player: "us".to_string() },
-            &mut state, 1, "us", &mut rng,
-        );
-        assert_eq!(state.generation, 2, "second tick → generation 2");
-        assert_eq!(state.materialized.generation, 2, "snapshot generation matches");
-    }
 
     // ── Section 13g: StaticAbilityDef + CDA ──────────────────────────────────
 
-    /// A creature with `static_abilities = ["flying"]` in TOML should have the keyword
-    /// in its materialized def after ETB, and lose it after LTB.
+    fn flying_static_ability() -> StaticAbilityDef {
+        std::sync::Arc::new(|source_id, controller: &str| ContinuousInstance {
+            source_id,
+            controller: controller.to_string(),
+            layer: ContinuousLayer::L6AbilityEffects,
+            filter: std::sync::Arc::new(move |id, _| id == source_id),
+            modifier: std::sync::Arc::new(|def, _state| {
+                if let CardKind::Creature(c) = &mut def.kind {
+                    if !c.keywords.contains(&"flying".to_string()) {
+                        c.keywords.push("flying".to_string());
+                    }
+                }
+            }),
+            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+        })
+    }
+
+    /// A creature with a flying static ability should have the keyword in its materialized
+    /// def after ETB, and lose it after LTB.
     #[test]
     fn test_static_ability_def_grants_flying_at_etb() {
         let mut state = make_state();
-        let toml = "name = \"Flyer\"\ncard_type = \"creature\"\npower = 2\ntoughness = 2\nstatic_abilities = [\"flying\"]\n";
-        let def: CardDef = toml::from_str(toml).unwrap();
+        let def = CardDef::new("Flyer", CardKind::Creature(CreatureData::new("", 2, 2)), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![flying_static_ability()]);
         let catalog = vec![def.clone()];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         let id = add_perm_with_def(&mut state, "us", &def, BattlefieldState::new());
 
         // recompute: CI from static_ability_def should add "flying" to materialized keywords.
-        let mat = recompute(&state);
-        assert!(mat.defs[&id].has_keyword("flying"), "flying granted via static_ability_def at ETB");
-        // Commit to state.materialized so creature_has_keyword (which reads the snapshot) sees it.
-        state.materialized = mat;
+        recompute(&mut state);
+        assert!(state.def_of(id).unwrap().has_keyword("flying"), "flying granted via static_ability_def at ETB");
         assert!(creature_has_keyword(id, "flying", &state), "creature_has_keyword uses materialized state");
     }
 
-    /// A creature with `static_abilities = ["flying"]` should lose the keyword CI when it
+    /// A creature with a flying static ability should lose the keyword CI when it
     /// leaves the battlefield (deactivate_instances removes WhileSourceOnBattlefield CIs).
     #[test]
     fn test_static_ability_def_removed_at_ltb() {
         let mut state = make_state();
-        let toml = "name = \"Flyer\"\ncard_type = \"creature\"\npower = 2\ntoughness = 2\nstatic_abilities = [\"flying\"]\n";
-        let def: CardDef = toml::from_str(toml).unwrap();
+        let def = CardDef::new("Flyer", CardKind::Creature(CreatureData::new("", 2, 2)), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![flying_static_ability()]);
         let catalog = vec![def.clone()];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
@@ -2220,11 +2071,10 @@ produces = "B""#).unwrap();
         assert!(state.continuous_instances.is_empty(), "CI removed at LTB");
 
         // Materialized view no longer has flying.
-        let mat = recompute(&state);
-        let mat_def = mat.defs.get(&id);
+        recompute(&mut state);
         // After deactivate_instances, the object may still be on the battlefield
         // in state.objects (we didn't change_zone), but the CI is gone.
-        if let Some(d) = mat_def {
+        if let Some(d) = state.def_of(id) {
             assert!(!d.has_keyword("flying"), "flying removed when CI deactivated");
         }
     }
@@ -2257,20 +2107,20 @@ produces = "B""#).unwrap();
         });
 
         // No cards in GY → power = 0.
-        let mat = recompute(&state);
-        let CardKind::Creature(c) = &mat.defs[&id].kind else { panic!() };
+        recompute(&mut state);
+        let CardKind::Creature(c) = &state.def_of(id).unwrap().kind.clone() else { panic!() };
         assert_eq!(c.power(), 0, "no GY cards → power 0");
 
         // Add a card to "us" graveyard.
         add_graveyard_card(&mut state, "us", "SomeCard");
-        let mat = recompute(&state);
-        let CardKind::Creature(c) = &mat.defs[&id].kind else { panic!() };
+        recompute(&mut state);
+        let CardKind::Creature(c) = &state.def_of(id).unwrap().kind.clone() else { panic!() };
         assert_eq!(c.power(), 1, "1 GY card → power 1");
 
         // Add a second card.
         add_graveyard_card(&mut state, "us", "AnotherCard");
-        let mat = recompute(&state);
-        let CardKind::Creature(c) = &mat.defs[&id].kind else { panic!() };
+        recompute(&mut state);
+        let CardKind::Creature(c) = &state.def_of(id).unwrap().kind.clone() else { panic!() };
         assert_eq!(c.power(), 2, "2 GY cards → power 2");
     }
 
@@ -2278,19 +2128,169 @@ produces = "B""#).unwrap();
     #[test]
     fn test_recompute_includes_graveyard_objects() {
         let mut state = make_state();
-        let def: CardDef = toml::from_str(
-            "name = \"Goyf\"\ncard_type = \"creature\"\npower = 2\ntoughness = 3\n"
-        ).unwrap();
+        let def = creature("Goyf", 2, 3);
         state.catalog.insert(def.name.clone(), def);
 
         let gy_id = add_graveyard_card(&mut state, "us", "Goyf");
 
-        let mat = recompute(&state);
+        recompute(&mut state);
         assert!(
-            mat.defs.contains_key(&gy_id),
+            state.def_of(gy_id).is_some(),
             "graveyard card must appear in materialized snapshot"
         );
-        let CardKind::Creature(c) = &mat.defs[&gy_id].kind else { panic!("expected creature") };
+        let CardKind::Creature(c) = &state.def_of(gy_id).unwrap().kind.clone() else { panic!("expected creature") };
         assert_eq!(c.power(), 2);
         assert_eq!(c.toughness(), 3);
+    }
+
+    // ── Section 14: Library Search Tests ─────────────────────────────────────
+
+    /// Personal Tutor finds a sorcery and puts it on top of the library (stays in library).
+    /// An instant in the same library is not moved.
+    #[test]
+    fn test_personal_tutor_finds_sorcery() {
+        let doomsday_def = catalog_card("Doomsday");
+        let fow_def = catalog_card("Force of Will");
+        let mut state = make_state();
+        state.catalog.insert(doomsday_def.name.clone(), doomsday_def);
+        state.catalog.insert(fow_def.name.clone(), fow_def);
+        let dd_id  = add_library_card(&mut state, "us", "Doomsday");
+        let fow_id = add_library_card(&mut state, "us", "Force of Will");
+
+        let eff = eff_fetch_search("us", search_filter_pred("sorcery"), ZoneId::Library);
+        eff.call(&mut state, 1, &[], &mut seeded_rng());
+
+        // Both stay in library: Doomsday was "put on top" (Library ≡ top until ordering tracked),
+        // FoW was never selected.
+        assert_eq!(state.objects[&dd_id].zone,  CardZone::Library, "Doomsday should remain in library");
+        assert_eq!(state.objects[&fow_id].zone, CardZone::Library, "FoW should remain in library");
+        let log = state.log.join("\n");
+        assert!(log.contains("search → Doomsday"), "should log the searched card name");
+        assert!(!log.contains("Force of Will"), "FoW should not appear in search log");
+    }
+
+    /// Recruiter of the Guard ETB: searches library for a creature with toughness ≤ 2 and puts it
+    /// in hand. A creature with toughness > 2 should stay in the library.
+    #[test]
+    fn test_recruiter_etb_finds_low_toughness_creature() {
+        let recruiter_def = catalog_card("Recruiter of the Guard");
+        let small_def = creature("Mother of Runes", 1, 1);
+        let big_def = creature("Tarmogoyf", 0, 3);
+        let mut state = make_state();
+        state.catalog.insert(recruiter_def.name.clone(), recruiter_def.clone());
+        state.catalog.insert(small_def.name.clone(), small_def.clone());
+        state.catalog.insert(big_def.name.clone(), big_def.clone());
+
+        let small_id = add_library_card(&mut state, "us", "Mother of Runes");
+        let big_id   = add_library_card(&mut state, "us", "Tarmogoyf");
+
+        let hand_before = state.hand_of("us").count();
+        // eff_enter_permanent pre-registers instances, fires the ZoneChange ETB event,
+        // and thereby pushes the Recruiter trigger to state.pending_triggers.
+        let mut rng = seeded_rng();
+        eff_enter_permanent("us", "Recruiter of the Guard")
+            .call(&mut state, 1, &[], &mut rng);
+
+        // Resolve all pending ETB triggers.
+        let pending = std::mem::take(&mut state.pending_triggers);
+        for ctx in pending {
+            ctx.effect.call(&mut state, 1, &[], &mut rng);
+        }
+
+        assert_eq!(state.hand_of("us").count(), hand_before + 1, "hand should grow by one");
+        assert_eq!(state.objects[&small_id].zone, CardZone::Hand { known: false }, "Mother of Runes should be in hand");
+        assert_eq!(state.objects[&big_id].zone,   CardZone::Library, "Tarmogoyf (toughness 3) should stay in library");
+    }
+
+    /// Urza's Saga chapter III: finds an artifact with no colored pips and MV ≤ 1
+    /// and puts it on the battlefield. An artifact with MV > 1 stays in library.
+    #[test]
+    fn test_urza_saga_finds_low_cost_colorless_artifact() {
+        let lotus_def = catalog_card("Lotus Petal");
+        let fow_def = catalog_card("Force of Will");
+        let mut state = make_state();
+        state.catalog.insert(lotus_def.name.clone(), lotus_def.clone());
+        state.catalog.insert(fow_def.name.clone(), fow_def.clone());
+        let lotus_id = add_library_card(&mut state, "us", "Lotus Petal");
+        let fow_id   = add_library_card(&mut state, "us", "Force of Will");
+
+        let pred = search_filter_pred("artifact-cost01");
+        let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
+        eff.call(&mut state, 1, &[], &mut seeded_rng());
+
+        assert_eq!(state.objects[&lotus_id].zone, CardZone::Battlefield, "Lotus Petal should enter battlefield");
+        assert_eq!(state.objects[&fow_id].zone,   CardZone::Library,     "FoW should stay in library");
+    }
+
+    /// Urza's Saga does not fetch an artifact with a colored pip (e.g. {W}).
+    #[test]
+    fn test_urza_saga_ignores_colored_artifact() {
+        let white_art_def = CardDef::new("White Artifact", CardKind::Artifact(ArtifactData { mana_cost: "W".to_string(), ..Default::default() }), parse_colors("W", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let mut state = make_state();
+        state.catalog.insert(white_art_def.name.clone(), white_art_def);
+        add_library_card(&mut state, "us", "White Artifact");
+
+        let pred = search_filter_pred("artifact-cost01");
+        let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
+        eff.call(&mut state, 1, &[], &mut seeded_rng());
+
+        // No candidate matched; library unchanged
+        assert_eq!(state.library_of("us").count(), 1, "colored artifact must not be fetched");
+    }
+
+    /// Urza's Saga does not fetch an artifact with MV > 1 (e.g. {2}).
+    #[test]
+    fn test_urza_saga_ignores_high_mv_artifact() {
+        let sol_ring_def = CardDef::new("Sol Ring", CardKind::Artifact(ArtifactData { mana_cost: "2".to_string(), ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let mut state = make_state();
+        state.catalog.insert(sol_ring_def.name.clone(), sol_ring_def);
+        add_library_card(&mut state, "us", "Sol Ring");
+
+        let pred = search_filter_pred("artifact-cost01");
+        let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
+        eff.call(&mut state, 1, &[], &mut seeded_rng());
+
+        assert_eq!(state.library_of("us").count(), 1, "MV 2 artifact must not be fetched");
+    }
+
+    /// Green Sun's Zenith finds a green creature and puts it on the battlefield.
+    /// A non-green creature in the same library is not moved.
+    #[test]
+    fn test_gsz_finds_green_creature() {
+        let troll_def = CardDef::new("Elvish Reclaimer", CardKind::Creature(CreatureData::new("G", 1, 1)), parse_colors("G", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let ragavan_def = CardDef::new("Ragavan, Nimble Pilferer", CardKind::Creature(CreatureData::new("R", 2, 1)), parse_colors("R", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let mut state = make_state();
+        state.catalog.insert(troll_def.name.clone(), troll_def);
+        state.catalog.insert(ragavan_def.name.clone(), ragavan_def);
+        let green_id = add_library_card(&mut state, "us", "Elvish Reclaimer");
+        let red_id   = add_library_card(&mut state, "us", "Ragavan, Nimble Pilferer");
+
+        let pred = search_filter_pred("creature-green");
+        let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
+        eff.call(&mut state, 1, &[], &mut seeded_rng());
+
+        assert_eq!(state.objects[&green_id].zone, CardZone::Battlefield, "green creature should enter battlefield");
+        assert_eq!(state.objects[&red_id].zone,   CardZone::Library,     "non-green creature should stay");
+    }
+
+    /// Fetchland regression: island-or-swamp search still works via build_ability_effect.
+    #[test]
+    fn test_fetchland_search_via_build_ability_effect() {
+        let delta_ability = AbilityDef { sacrifice_self: true, life_cost: 1, effect: "search:land-island|swamp:play".to_string(), ..Default::default() };
+        let island_def = catalog_card("Underground Sea");
+        let forest_def = CardDef::new("Forest", CardKind::Land(LandData {
+            land_types: LandTypes { forest: true, ..Default::default() },
+            ..Default::default()
+        }), vec![], None, vec![Supertype::Basic], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let mut state = make_state();
+        state.catalog.insert(island_def.name.clone(), island_def);
+        state.catalog.insert(forest_def.name.clone(), forest_def);
+        let sea_id    = add_library_card(&mut state, "us", "Underground Sea");
+        let forest_id = add_library_card(&mut state, "us", "Forest");
+
+        let eff = build_ability_effect(&delta_ability, "us", ObjId::UNSET);
+        eff.call(&mut state, 1, &[], &mut seeded_rng());
+
+        assert_eq!(state.objects[&sea_id].zone,    CardZone::Battlefield, "Underground Sea should enter play");
+        assert_eq!(state.objects[&forest_id].zone, CardZone::Library,     "Forest should remain in library");
     }

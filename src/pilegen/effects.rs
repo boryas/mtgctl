@@ -122,13 +122,13 @@ pub(crate) fn eff_doomsday() -> Effect {
 pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filter: impl Into<String>) -> Effect {
     let caster = caster.into();
     let filter = filter.into();
+    let discard_pred = zone_pred_from_str(&filter);
     Effect(Arc::new(move |state, t, _targets, rng| {
         use rand::Rng;
         let target_who = target.resolve(&caster).to_string();
         for _ in 0..n {
             let candidates: Vec<ObjId> = state.hand_of(&target_who)
-                .filter(|c| filter.is_empty() || filter == "any" || state.materialized.defs.get(&c.id)
-                    .map_or(true, |d| matches_target_type(&filter, &d.kind, false, Some(d))))
+                .filter(|c| state.def_of(c.id).map_or(true, |d| discard_pred(d)))
                 .map(|c| c.id)
                 .collect();
             if candidates.is_empty() { break; }
@@ -166,6 +166,7 @@ pub(crate) fn eff_enter_permanent(
                 entered_this_turn: true,
                 ..BattlefieldState::new()
             }),
+            materialized: None,
         });
         fire_event(
             GameEvent::ZoneChange {
@@ -218,51 +219,30 @@ pub(crate) fn eff_reanimate(actor: impl Into<String>) -> Effect {
     }))
 }
 
-/// Search the library for a land matching `filter` and put it into `dest` ("play" or "hand").
-/// Used for fetchland abilities (e.g. `search:land-island|swamp:play`).
+/// Search `who`'s library for a card matching `predicate` and move it to `dest`.
+/// `predicate` and `dest` are built at load time — no string dispatch at simulation time.
 pub(crate) fn eff_fetch_search(
     who: impl Into<String>,
-    source_id: ObjId,
-    filter: impl Into<String>,
-    dest: impl Into<String>,
+    predicate: CardPredicate,
+    dest: ZoneId,
 ) -> Effect {
     let who = who.into();
-    let filter = filter.into();
-    let dest = dest.into();
     Effect(Arc::new(move |state, t, _targets, rng| {
         use rand::Rng;
-        let source_name = state.permanent_name(source_id).unwrap_or_default();
-        // Collect candidates from Library zone using materialized (covers all zones after Step 1).
-        let candidates: Vec<(ObjId, String)> = state.library_of(&who)
-            .filter(|c| state.materialized.defs.get(&c.id).map_or(false, |d| matches_search_filter(&filter, d)))
-            .map(|c| (c.id, c.catalog_key.clone()))
+        // Library cards have no materialized state; fall back to catalog for the predicate check.
+        let candidates: Vec<ObjId> = state.library_of(&who)
+            .filter(|c| {
+                state.def_of(c.id)
+                    .or_else(|| state.catalog.get(c.catalog_key.as_str()))
+                    .map_or(false, |d| predicate(d))
+            })
+            .map(|c| c.id)
             .collect();
         if !candidates.is_empty() {
-            // Prefer a black-producing land if available.
-            let black_candidates: Vec<(ObjId, String)> = candidates.iter()
-                .filter(|(id, _)| state.materialized.defs.get(id).and_then(|d| d.as_land()).map_or(false, |l| {
-                    l.land_types.swamp || l.mana_abilities.iter().any(|ma| ma.produces.contains('B'))
-                }))
-                .cloned()
-                .collect();
-            let pool = if !black_candidates.is_empty() { &black_candidates } else { &candidates };
-            let (chosen_id, name) = pool[rng.gen_range(0..pool.len())].clone();
-            match dest.as_str() {
-                "play" => {
-                    // Log before entering so the message precedes any ETB trigger logs.
-                    state.log(t, &who, format!("{} ability → {}", source_name, name));
-                    // Go through change_zone so do_effect handles BattlefieldState init,
-                    // including enters_tapped, mana_abilities, and ETB trigger dispatch.
-                    change_zone(chosen_id, ZoneId::Battlefield, state, t, &who, rng);
-                }
-                "hand" => {
-                    if let Some(card) = state.objects.get_mut(&chosen_id) {
-                        card.zone = CardZone::Hand { known: true };
-                    }
-                    state.log(t, &who, format!("{} ability → {} (to hand)", source_name, name));
-                }
-                _ => {}
-            }
+            let chosen_id = candidates[rng.gen_range(0..candidates.len())];
+            let name = state.objects.get(&chosen_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
+            state.log(t, &who, format!("search → {}", name));
+            change_zone(chosen_id, dest, state, t, &who, rng);
         }
     }))
 }

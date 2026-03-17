@@ -12,6 +12,8 @@ use crate::db::{establish_connection, models::*};
 mod catalog;
 pub(crate) use catalog::*;
 
+mod card_defs;
+
 mod effects;
 pub(crate) use effects::*;
 
@@ -108,6 +110,8 @@ struct GameObject {
     is_token: bool,
     bf: Option<BattlefieldState>,      // Some only when zone == Battlefield
     spell: Option<SpellState>,         // Some only when zone == Stack (spell on stack)
+    /// Inlined post-CE materialized snapshot. Rebuilt by `recompute` after each state-mutating tick.
+    materialized: Option<CardDef>,
 }
 
 impl GameObject {
@@ -116,6 +120,7 @@ impl GameObject {
         GameObject {
             id, catalog_key: catalog_key.into(), controller: owner.clone(), owner,
             zone: CardZone::Library, is_token: false, bf: None, spell: None,
+            materialized: None,
         }
     }
 }
@@ -240,9 +245,19 @@ pub(super) struct ReplacementInstance {
 
 // ── Continuous effects (new model) ───────────────────────────────────────────
 
+/// The five colors of Magic.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Color { White, Blue, Black, Red, Green }
+
+/// Card supertypes (Legendary, Basic, Snow, World, Ongoing).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[allow(dead_code)] // Snow defined for completeness; not yet used
+pub(crate) enum Supertype { Legendary, Basic, Snow }
+
 /// The seven layers in which continuous effects are applied (MTG rule 613).
 /// Ordering is derived: effects in earlier layers apply before later ones.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[allow(dead_code)] // L1–L5 are defined for completeness; only L6–L7 are currently used
 pub(super) enum ContinuousLayer {
     L1CopyEffects      = 1,
     L2ControlEffects   = 2,
@@ -293,17 +308,6 @@ pub(super) struct ContinuousInstance {
     pub(super) expiry: ContinuousExpiry,
 }
 
-/// Snapshot of all game objects' effective `CardDef` after continuous effects are applied.
-/// Covers every zone (battlefield, hand, library, GY, exile, stack) so that zone-spanning CEs
-/// (e.g. Painter's Servant, Mycosynth Lattice) are reflected everywhere.
-/// Produced by `recompute` after each state-mutating tick (generation advance).
-/// Strategy and display code read from this; they never access raw `CardDef` fields directly.
-pub(super) struct MaterializedState {
-    /// Generation counter from the `SimState` at the time of recompute.
-    pub(super) generation: u64,
-    /// Effective `CardDef` per game object (all zones), post-CE application.
-    pub(super) defs: HashMap<ObjId, CardDef>,
-}
 
 // ── Recompute ─────────────────────────────────────────────────────────────────
 
@@ -318,8 +322,8 @@ fn fold_game_state_into_def(def: &mut CardDef, obj: &GameObject) {
     }
 }
 
-/// Produce a `MaterializedState` snapshot by applying all active `ContinuousInstance`s
-/// to clones of each game object's `CardDef`.
+/// Rebuild each game object's inlined `materialized` field by applying all active
+/// `ContinuousInstance`s to clones of the object's `CardDef` from the catalog.
 ///
 /// All zones are covered: CEs such as Painter's Servant and Mycosynth Lattice can modify
 /// per-card characteristics in every zone (hand, library, GY, exile, stack, battlefield).
@@ -327,47 +331,55 @@ fn fold_game_state_into_def(def: &mut CardDef, obj: &GameObject) {
 /// by the `catalog.get()` guard below.
 ///
 /// Called after every `fire_event` at recursion depth 0 (each "tick"). Strategy and display
-/// code use the resulting snapshot; they never read raw `CardDef` fields directly.
+/// code read `state.def_of(id)` which returns the inlined snapshot; they never access raw
+/// `CardDef` fields directly.
 ///
 /// Application order: instances sorted by `layer` ascending (L1 before L7), then by
 /// insertion order within the same layer (stable sort preserves registration order).
-pub(super) fn recompute(state: &SimState) -> MaterializedState {
-    let mut defs: HashMap<ObjId, CardDef> = HashMap::new();
-
-    for (id, obj) in &state.objects {
-        // Objects with no catalog entry (naked stack abilities) are excluded.
-        let Some(base) = state.catalog.get(obj.catalog_key.as_str()) else { continue };
+pub(super) fn recompute(state: &mut SimState) {
+    let ids: Vec<ObjId> = state.objects.keys().copied().collect();
+    for id in ids {
+        let Some(catalog_key) = state.objects.get(&id).map(|o| o.catalog_key.clone()) else { continue };
+        let Some(base) = state.catalog.get(&catalog_key) else { continue };
         let mut def = base.clone();
 
         // Step 0: for double-faced cards on their back face, substitute the back-face kind
         // and name before folding. This ensures fold sees the correct variant (e.g. Planeswalker
         // instead of Creature for flipped Tamiyo) and CEs apply to the active face.
-        if obj.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
-            if let Some(ref back) = def.back.take() {
-                def.name = back.name.clone();
-                def.kind = back.kind.clone();
+        {
+            let obj = state.objects.get(&id).unwrap();
+            if obj.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
+                if let Some(ref back) = def.back.take() {
+                    def.name = back.name.clone();
+                    def.kind = back.kind.clone();
+                }
             }
         }
 
         // Step 1: fold game-accumulated state (counters, temporary mods) into the clone.
-        fold_game_state_into_def(&mut def, obj);
-
-        // Step 2: collect applicable continuous instances and sort by layer.
-        let mut applicable: Vec<&ContinuousInstance> = state.continuous_instances
-            .iter()
-            .filter(|ci| (ci.filter)(*id, &obj.controller))
-            .collect();
-        applicable.sort_by_key(|ci| ci.layer);
-
-        // Step 3: apply each modifier in layer order. Pass `state` so CDAs can read live data.
-        for ci in applicable {
-            (ci.modifier)(&mut def, state);
+        {
+            let obj = state.objects.get(&id).unwrap();
+            fold_game_state_into_def(&mut def, obj);
         }
 
-        defs.insert(*id, def);
-    }
+        // Step 2: collect applicable CI indices (not references) and sort by layer.
+        let controller = state.objects.get(&id).unwrap().controller.clone();
+        let mut applicable: Vec<(usize, ContinuousLayer)> = state.continuous_instances.iter()
+            .enumerate()
+            .filter(|(_, ci)| (ci.filter)(id, &controller))
+            .map(|(i, ci)| (i, ci.layer))
+            .collect();
+        applicable.sort_by_key(|&(_, l)| l);
 
-    MaterializedState { generation: state.generation, defs }
+        // Step 3: apply modifiers — clone the Arc to release borrow on state.continuous_instances
+        // while calling the modifier with &*state.
+        for (idx, _) in applicable {
+            let modifier = std::sync::Arc::clone(&state.continuous_instances[idx].modifier);
+            (modifier)(&mut def, state);
+        }
+
+        state.objects.get_mut(&id).unwrap().materialized = Some(def);
+    }
 }
 
 // ── Turn structure ────────────────────────────────────────────────────────────
@@ -693,20 +705,21 @@ pub(crate) struct SimState {
     repl_applied: HashSet<ObjId>,
     /// Recursion depth for fire_event (used to clear repl_applied at the top level).
     repl_depth: u32,
-    /// Monotonically increasing counter — incremented by every `fire_event` call at depth 0.
-    /// `MaterializedState.generation` must match before the snapshot is trusted.
-    pub(super) generation: u64,
     /// All active continuous-effect instances. Checked at `recompute` time; expired entries
     /// are removed at Cleanup / start-of-turn as appropriate.
     pub(super) continuous_instances: Vec<ContinuousInstance>,
-    /// Cached post-CE snapshot of every battlefield permanent's effective CardDef.
-    /// Rebuilt by `recompute` at the end of every top-level `fire_event` call.
-    /// Always current when strategy or display code runs.
-    pub(super) materialized: MaterializedState,
     /// Owned card catalog — populated once at sim init, never mutated.
-    /// All runtime card-definition reads go through `state.materialized.defs` (live objects)
+    /// All runtime card-definition reads go through `state.def_of(id)` (live objects)
     /// or `state.catalog` (bootstrap / non-battlefield lookups).
     pub(super) catalog: HashMap<String, CardDef>,
+}
+
+impl SimState {
+    /// Return the post-CE materialized `CardDef` for the object with the given id, if any.
+    /// Returns `None` for naked stack abilities (no catalog entry) or unknown ids.
+    pub(super) fn def_of(&self, id: ObjId) -> Option<&CardDef> {
+        self.objects.get(&id)?.materialized.as_ref()
+    }
 }
 
 impl SimState {
@@ -733,9 +746,7 @@ impl SimState {
             replacement_instances: Vec::new(),
             repl_applied: HashSet::new(),
             repl_depth: 0,
-            generation: 0,
             continuous_instances: Vec::new(),
-            materialized: MaterializedState { generation: 0, defs: HashMap::new() },
             catalog: HashMap::new(),
         };
         s.us.id = s.alloc_id();
@@ -847,7 +858,7 @@ impl SimState {
         let mut p = self.player(who).pool.clone();
         for card in self.permanents_of(who) {
             if let Some(bf) = &card.bf {
-                let mas = self.materialized.defs.get(&card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
+                let mas = self.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
                 accumulate_source_potential(mas, bf.tapped, &mut p);
             }
         }
@@ -875,13 +886,13 @@ impl SimState {
                     .find(|(id, c)| {
                         c.controller == who && c.zone == CardZone::Battlefield &&
                         c.bf.as_ref().map_or(false, |bf| {
-                            self.materialized.defs.get(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
+                            self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[])
                                 .iter().any(|ma| (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char))
                         })
                     })
                     .map(|(id, c)| {
                         let bf = c.bf.as_ref().unwrap();
-                        let sac = self.materialized.defs.get(id).map(|d| d.mana_abilities()).unwrap_or(&[])
+                        let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
                             .iter()
                             .find(|ma| (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char))
                             .map(|ma| ma.sacrifice_self)
@@ -917,13 +928,13 @@ impl SimState {
                 .find(|(id, c)| {
                     c.controller == who && c.zone == CardZone::Battlefield &&
                     c.bf.as_ref().map_or(false, |bf| {
-                        let mas = self.materialized.defs.get(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
+                        let mas = self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[]);
                         !mas.is_empty() && mas.iter().any(|ma| !ma.tap_self || !bf.tapped)
                     })
                 })
                 .map(|(id, c)| {
                     let bf = c.bf.as_ref().unwrap();
-                    let sac = self.materialized.defs.get(id).map(|d| d.mana_abilities()).unwrap_or(&[])
+                    let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
                         .iter()
                         .find(|ma| !ma.tap_self || !bf.tapped)
                         .map(|ma| ma.sacrifice_self)
@@ -1106,7 +1117,7 @@ impl SimState {
         };
 
         let mut lands: Vec<&GameObject> = self.permanents_of(who)
-            .filter(|c| c.bf.is_some() && !self.materialized.defs.get(&c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty())
+            .filter(|c| c.bf.is_some() && !self.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty())
             .collect();
         let tapped_first = |a: &&GameObject, b: &&GameObject| {
             let a_tap = a.bf.as_ref().map_or(false, |bf| bf.tapped);
@@ -1116,7 +1127,7 @@ impl SimState {
         lands.sort_by(tapped_first);
 
         let mut others: Vec<&GameObject> = self.permanents_of(who)
-            .filter(|c| c.bf.is_none() || self.materialized.defs.get(&c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty())
+            .filter(|c| c.bf.is_none() || self.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty())
             .collect();
         others.sort_by(tapped_first);
 
@@ -1186,7 +1197,7 @@ pub struct PilegenArgs {}
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn run(_args: PilegenArgs) {
-    let config = load_config();
+    let catalog = card_defs::build_catalog();
 
     let (deck_name, _) =
         match select_deck("Select your Doomsday deck", Some("doomsday")) {
@@ -1203,11 +1214,11 @@ pub fn run(_args: PilegenArgs) {
     let all_cards = load_deck_cards(&deck_name);
     let opp_cards = load_deck_cards(&opp_deck_name);
 
-    warn_unimplemented_cards(&all_cards, &deck_name, &config);
-    warn_unimplemented_cards(&opp_cards, &opp_display, &config);
+    warn_unimplemented_cards(&all_cards, &deck_name, &catalog);
+    warn_unimplemented_cards(&opp_cards, &opp_display, &catalog);
 
     loop {
-        let state = generate_scenario(&deck_name, &opp_display, &config, &all_cards, &opp_cards);
+        let state = generate_scenario(&deck_name, &opp_display, &catalog, &all_cards, &opp_cards);
         println!("{}", state);
 
         println!();
@@ -1218,22 +1229,6 @@ pub fn run(_args: PilegenArgs) {
             .unwrap_or(false)
         {
             break;
-        }
-    }
-}
-
-// ── Config loading ────────────────────────────────────────────────────────────
-
-fn load_config() -> PilegenConfig {
-    let path = "definitions/pilegen.toml";
-    match std::fs::read_to_string(path) {
-        Ok(content) => toml::from_str(&content).unwrap_or_else(|e| {
-            eprintln!("Warning: could not parse {}: {}", path, e);
-            PilegenConfig::default()
-        }),
-        Err(_) => {
-            eprintln!("Warning: {} not found, using defaults", path);
-            PilegenConfig::default()
         }
     }
 }
@@ -1452,14 +1447,9 @@ pub(super) fn fire_event(
 
     state.repl_depth -= 1;
     if state.repl_depth == 0 {
-        // Each top-level fire_event is one game-state tick.
-        // Advance generation so consumers can detect staleness.
-        state.generation += 1;
-        // Rebuild the materialized snapshot after every top-level tick so that
+        // Rebuild the inlined materialized snapshot after every top-level tick so that
         // strategy, display, and combat damage always see a current, CE-adjusted view.
-        // The new generation is embedded in the snapshot.
-        let mat = recompute(state);
-        state.materialized = mat;
+        recompute(state);
     }
 }
 
@@ -1555,7 +1545,7 @@ pub(super) fn change_zone(
             None => return,
         };
         let from = card_zone_to_id(&card.zone);
-        let ct = state.materialized.defs.get(&id)
+        let ct = state.def_of(id)
             .map(|d| card_type_str(d))
             .unwrap_or("permanent");
         (card.catalog_key.clone(), card.controller.clone(), from, ct)
@@ -1673,7 +1663,7 @@ fn pay_activation_cost(
     if ability.sacrifice_land {
         // Prefer permanents with no mana abilities to preserve mana sources.
         let land_to_sac = state.permanents_of(who)
-            .find(|c| c.bf.is_some() && state.materialized.defs.get(&c.id).map(|d| d.mana_abilities().is_empty()).unwrap_or(true))
+            .find(|c| c.bf.is_some() && state.def_of(c.id).map(|d| d.mana_abilities().is_empty()).unwrap_or(true))
             .or_else(|| state.permanents_of(who).next())
             .map(|c| c.id);
         if let Some(sac_id) = land_to_sac {
@@ -1719,7 +1709,7 @@ fn can_pay_alternate_cost(
         let has_pitch = state.hand_of(who)
             .any(|c| c.catalog_key != source_name && {
                 let is_blue_non_land = |d: &CardDef| !d.is_land() && d.is_blue();
-                state.materialized.defs.get(&c.id).map(is_blue_non_land)
+                state.def_of(c.id).map(is_blue_non_land)
                     .unwrap_or_else(|| state.catalog.get(c.catalog_key.as_str()).map_or(false, |d| is_blue_non_land(d)))
             });
         if !has_pitch {
@@ -1727,7 +1717,7 @@ fn can_pay_alternate_cost(
         }
     }
     if cost.bounce_island {
-        if !state.permanents_of(who).any(|c| c.bf.is_some() && state.materialized.defs.get(&c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false)) {
+        if !state.permanents_of(who).any(|c| c.bf.is_some() && state.def_of(c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false)) {
             return false;
         }
     }
@@ -1750,7 +1740,7 @@ fn apply_alt_cost_components(
         let pitch_ids: Vec<(ObjId, String)> = state.hand_of(who)
             .filter(|c| c.catalog_key != source_name && {
                 let is_blue_non_land = |d: &CardDef| !d.is_land() && d.is_blue();
-                state.materialized.defs.get(&c.id).map(is_blue_non_land)
+                state.def_of(c.id).map(is_blue_non_land)
                     .unwrap_or_else(|| state.catalog.get(c.catalog_key.as_str()).map_or(false, |d| is_blue_non_land(d)))
             })
             .map(|c| (c.id, c.catalog_key.clone()))
@@ -1762,7 +1752,7 @@ fn apply_alt_cost_components(
     }
     if cost.bounce_island {
         let bounce = state.permanents_of(who)
-            .find(|c| c.bf.is_some() && state.materialized.defs.get(&c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false))
+            .find(|c| c.bf.is_some() && state.def_of(c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false))
             .map(|c| (c.id, c.catalog_key.clone()))
             .unwrap();
         let (bounce_id, land_name) = bounce;
@@ -1812,7 +1802,7 @@ fn cast_spell(
     // Prefer the post-CE materialized def (current in normal game flow where recompute
     // runs before every priority window). Fall back to state.catalog for tests that call
     // cast_spell directly without a preceding recompute.
-    let def = state.materialized.defs.get(&card_id)
+    let def = state.def_of(card_id)
         .cloned()
         .or_else(|| state.catalog.get(name.as_str()).cloned())?;
 
@@ -1934,7 +1924,7 @@ fn cast_spell(
 /// Return true if the permanent with `id` has the given keyword in the materialized (CE-applied) view.
 /// Always reads from materialized state so CEs that grant or remove keywords are respected.
 pub(super) fn creature_has_keyword(id: ObjId, kw: &str, state: &SimState) -> bool {
-    state.materialized.defs.get(&id)
+    state.def_of(id)
         .map(|d| d.has_keyword(kw))
         .unwrap_or(false)
 }
@@ -1949,8 +1939,7 @@ fn check_state_based_actions(
 ) {
     // Ensure materialized state is current before reading it for SBA checks.
     // (It may be stale if state was mutated outside fire_event, e.g. directly in tests.)
-    let mat = recompute(state);
-    state.materialized = mat;
+    recompute(state);
 
     loop {
         let mut any = false;
@@ -1980,8 +1969,8 @@ fn check_state_based_actions(
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
-                    if !state.materialized.defs.get(&card.id).map_or(false, |d| d.is_creature()) { return None; }
-                    let tgh = state.materialized.defs.get(&card.id)
+                    if !state.def_of(card.id).map_or(false, |d| d.is_creature()) { return None; }
+                    let tgh = state.def_of(card.id)
                         .and_then(|d| d.as_creature())
                         .map(|c| c.toughness())
                         .unwrap_or(1);
@@ -1999,7 +1988,7 @@ fn check_state_based_actions(
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
-                    if !state.materialized.defs.get(&card.id).map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_))) { return None; }
+                    if !state.def_of(card.id).map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_))) { return None; }
                     if bf.loyalty <= 0 { Some(card.id) } else { None }
                 })
                 .collect();
@@ -2017,7 +2006,7 @@ fn check_state_based_actions(
             let mut extras: Vec<ObjId> = Vec::new();
             let legendaries: Vec<(String, ObjId)> = state.permanents_of(who)
                 .filter(|card| {
-                    state.materialized.defs.get(&card.id)
+                    state.def_of(card.id)
                         .map_or(false, |d| d.legendary())
                 })
                 .map(|card| (card.catalog_key.clone(), card.id))
@@ -2067,6 +2056,7 @@ fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
                 counters: n,
                 ..BattlefieldState::new()
             }),
+            materialized: None,
         });
         state.log(t, controller, format!("Orc Army token created {n}/{n}"));
     }
@@ -2083,6 +2073,7 @@ fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
         is_token: true,
         spell: None,
         bf: Some(BattlefieldState::new()),
+        materialized: None,
     });
     state.log(t, controller, "Clue Token created");
 }
@@ -2091,7 +2082,7 @@ fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u
     // Read the back-face starting loyalty from the front-face materialized def.
     // The front face is still current in materialized at the moment the trigger resolves
     // (active_face == 0). `back` carries the printed PW data for the flipped face.
-    let loyalty = state.materialized.defs.get(&source_id)
+    let loyalty = state.def_of(source_id)
         .and_then(|d| d.back.as_ref())
         .and_then(|b| if let CardKind::Planeswalker(ref p) = b.kind { Some(p.loyalty) } else { None })
         .unwrap_or(2);
@@ -2149,7 +2140,7 @@ fn resolve_top_of_stack(
             }
             state.log(t, &owner_str, format!("{} resolves → {} on adventure in exile", back_name, name));
         } else if let Some(ref eff) = spell.effect {
-            let is_perm = state.materialized.defs.get(&id)
+            let is_perm = state.def_of(id)
                 .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
                     | CardKind::Planeswalker(_) | CardKind::Enchantment))
                 .unwrap_or(false);
@@ -2245,6 +2236,7 @@ fn handle_priority_round(
                                 attack_target,
                                 ..BattlefieldState::new()
                             }),
+                            materialized: None,
                         });
                         state.combat_attackers.push(new_id);
                         state.log(t, &who_str, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
@@ -2283,9 +2275,9 @@ fn handle_priority_round(
                 // face read the back def's kind (the back face might be instant even if the front
                 // face creature isn't).
                 let is_instant = match face {
-                    SpellFace::Main => state.materialized.defs.get(&card_id)
+                    SpellFace::Main => state.def_of(card_id)
                         .map(|d| d.is_instant()).unwrap_or(false),
-                    SpellFace::Back => state.materialized.defs.get(&card_id)
+                    SpellFace::Back => state.def_of(card_id)
                         .and_then(|d| d.back.as_ref())
                         .map(|b| b.is_instant())
                         .unwrap_or(false),
@@ -2348,8 +2340,7 @@ fn do_step(
     // Ensure materialized state is current at the start of every step.
     // Strategy calls (declare_attackers, declare_blockers) and combat damage run against
     // this snapshot; fire_event also rebuilds it after each tick.
-    let mat = recompute(state);
-    state.materialized = mat;
+    recompute(state);
 
     state.current_phase = Some(TurnPosition::Step(step.kind));
     match step.kind {
@@ -2461,11 +2452,11 @@ fn do_step(
                 let mut player_damage = 0i32;
 
                 for &(atk_id, blk_id) in &block_pairs {
-                    let atk_pow = state.materialized.defs.get(&atk_id)
+                    let atk_pow = state.def_of(atk_id)
                         .and_then(|d| d.as_creature())
                         .map(|c| c.power())
                         .unwrap_or(1);
-                    let blk_pow = state.materialized.defs.get(&blk_id)
+                    let blk_pow = state.def_of(blk_id)
                         .and_then(|d| d.as_creature())
                         .map(|c| c.power())
                         .unwrap_or(1);
@@ -2480,7 +2471,7 @@ fn do_step(
                 let mut pw_damage: HashMap<ObjId, i32> = HashMap::new();
                 for &atk_id in &attackers {
                     if !blocked_atk_ids.contains(&atk_id) {
-                        let atk_pow = state.materialized.defs.get(&atk_id)
+                        let atk_pow = state.def_of(atk_id)
                             .and_then(|d| d.as_creature())
                             .map(|c| c.power())
                             .unwrap_or(1);
@@ -2610,7 +2601,7 @@ fn do_turn(
 fn simulate_game(
     deck_name: &str,
     opponent: &str,
-    config: &PilegenConfig,
+    catalog: &HashMap<String, CardDef>,
     all_cards: &[(String, i32, String)],
     opp_cards: &[(String, i32, String)],
     rng: &mut impl Rng,
@@ -2623,7 +2614,7 @@ fn simulate_game(
     let us = PlayerState::new(deck_name, our_mulligans);
     let opp = PlayerState::new(opponent, opp_mulligans);
     let mut state = SimState::new(us, opp);
-    state.catalog = config.cards.iter().map(|c| (c.name.clone(), c.clone())).collect();
+    state.catalog = catalog.clone();
     state.on_play = on_play;
     state.turn = turn;
 
@@ -2728,14 +2719,14 @@ fn load_deck_cards(deck_name: &str) -> Vec<(String, i32, String)> {
 fn generate_scenario(
     deck_name: &str,
     opp_display: &str,
-    config: &PilegenConfig,
+    catalog: &HashMap<String, CardDef>,
     all_cards: &[(String, i32, String)],
     opp_cards: &[(String, i32, String)],
 ) -> SimState {
     let mut rng = rand::thread_rng();
     loop {
         if let Some(state) =
-            simulate_game(deck_name, opp_display, config, all_cards, opp_cards, &mut rng)
+            simulate_game(deck_name, opp_display, catalog, all_cards, opp_cards, &mut rng)
         {
             // All cards are already in their correct zones in state.objects.
             // Hand cards were moved to Hand zone by sim_draw during opening hand deal.
@@ -2782,8 +2773,9 @@ fn card_has_implementation(def: &CardDef) -> bool {
     match &def.kind {
         CardKind::Creature(_) | CardKind::Artifact(_)
         | CardKind::Planeswalker(_) | CardKind::Enchantment => true,
-        CardKind::Instant(_) | CardKind::Sorcery(_) => {
-            matches!(def.name.as_str(),
+        CardKind::Instant(s) | CardKind::Sorcery(s) => {
+            s.spell_factory.is_some()
+            || matches!(def.name.as_str(),
                 "Brainstorm" | "Ponder" | "Consider" | "Preordain"
                 | "Dark Ritual"
                 | "Doomsday"
@@ -2800,15 +2792,13 @@ fn card_has_implementation(def: &CardDef) -> bool {
 /// Print a warning for mainboard cards that lack a simulation implementation.
 ///
 /// Two categories:
-///   ✗ not in pilegen.toml — excluded from simulation entirely (silently dropped)
+///   ✗ not in catalog — excluded from simulation entirely (silently dropped)
 ///   ~ in catalog but no actionable effects — drawn but never played/cast
 fn warn_unimplemented_cards(
     cards: &[(String, i32, String)],
     deck_label: &str,
-    config: &PilegenConfig,
+    catalog: &HashMap<String, CardDef>,
 ) {
-    let catalog: std::collections::HashMap<&str, &CardDef> =
-        config.cards.iter().map(|c| (c.name.as_str(), c)).collect();
 
     let mut missing: Vec<(&str, i32)> = Vec::new();
     let mut no_effects: Vec<(&str, i32)> = Vec::new();
@@ -2826,7 +2816,7 @@ fn warn_unimplemented_cards(
 
     println!("\n⚠  {} — unimplemented cards:", deck_label);
     for (name, qty) in &missing {
-        println!("   ✗ {}×{} — not in pilegen.toml (excluded from simulation)", qty, name);
+        println!("   ✗ {}×{} — not in catalog (excluded from simulation)", qty, name);
     }
     for (name, qty) in &no_effects {
         println!("   ~ {}×{} — no simulation effects (drawn but never cast)", qty, name);
