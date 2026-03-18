@@ -14,7 +14,8 @@ impl Who {
 
 /// A composable game effect. Wraps a closure that mutates SimState.
 /// Built from primitives (eff_draw, eff_destroy_target, etc.) and chained with `.then()`.
-pub(crate) struct Effect(pub(crate) Arc<dyn Fn(&mut SimState, u8, &[ObjId], &mut dyn rand::RngCore) + Send + Sync>);
+/// Effects that need randomness access `state.rng` directly inside their closure.
+pub(crate) struct Effect(pub(crate) Arc<dyn Fn(&mut SimState, u8, &[ObjId]) + Send + Sync>);
 
 impl Clone for Effect {
     fn clone(&self) -> Self { Effect(Arc::clone(&self.0)) }
@@ -26,18 +27,17 @@ impl Effect {
         state: &mut SimState,
         t: u8,
         targets: &[ObjId],
-        rng: &mut dyn rand::RngCore,
     ) {
-        (self.0)(state, t, targets, rng);
+        (self.0)(state, t, targets);
     }
 
     /// Chain two effects: `self` runs first, then `next`.
     pub(crate) fn then(self, next: Effect) -> Effect {
         let a = self.0;
         let b = next.0;
-        Effect(Arc::new(move |state, t, targets: &[ObjId], rng| {
-            a(state, t, targets, rng);
-            b(state, t, targets, rng);
+        Effect(Arc::new(move |state, t, targets: &[ObjId]| {
+            a(state, t, targets);
+            b(state, t, targets);
         }))
     }
 }
@@ -47,9 +47,9 @@ impl Effect {
 /// Draw `n` cards for `who`.
 pub(crate) fn eff_draw(who: impl Into<String>, n: usize) -> Effect {
     let who = who.into();
-    Effect(Arc::new(move |state, t, _targets, rng| {
+    Effect(Arc::new(move |state, t, _targets| {
         for _ in 0..n {
-            sim_draw(state, &who, t, false, rng);
+            sim_draw(state, &who, t, false);
         }
     }))
 }
@@ -58,10 +58,10 @@ pub(crate) fn eff_draw(who: impl Into<String>, n: usize) -> Effect {
 /// Moves `n` hand cards back to Library zone (unknown — just sets zone).
 pub(crate) fn eff_put_back(who: impl Into<String>, n: usize) -> Effect {
     let who = who.into();
-    Effect(Arc::new(move |state, t, _targets, rng| {
+    Effect(Arc::new(move |state, t, _targets| {
         let ids: Vec<ObjId> = state.hand_of(&who).map(|c| c.id).take(n).collect();
         for id in ids {
-            change_zone(id, ZoneId::Library, state, t, &who, rng);
+            change_zone(id, ZoneId::Library, state, t, &who);
         }
     }))
 }
@@ -69,7 +69,7 @@ pub(crate) fn eff_put_back(who: impl Into<String>, n: usize) -> Effect {
 /// `who` loses `n` life, with a log line.
 pub(crate) fn eff_life_loss(who: impl Into<String>, n: i32) -> Effect {
     let who = who.into();
-    Effect(Arc::new(move |state, t, _targets, _rng| {
+    Effect(Arc::new(move |state, t, _targets| {
         state.lose_life(&who, n);
         let life = state.life_of(&who);
         state.log(t, &who, format!("→ lose {} life (now {})", n, life));
@@ -80,7 +80,7 @@ pub(crate) fn eff_life_loss(who: impl Into<String>, n: i32) -> Effect {
 pub(crate) fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effect {
     let who = who.into();
     let spec = spec.into();
-    Effect(Arc::new(move |state, t, _targets, _rng| {
+    Effect(Arc::new(move |state, t, _targets| {
         let mc = parse_mana_cost(&spec);
         let pool = &mut state.player_mut(&who).pool;
         pool.w += mc.w; pool.u += mc.u; pool.b += mc.b;
@@ -93,9 +93,9 @@ pub(crate) fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effec
 /// Destroy the permanent in `targets[0]`. `caster` used for logging.
 pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, rng| {
+    Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
-            change_zone(id, ZoneId::Graveyard, state, t, &caster, rng);
+            change_zone(id, ZoneId::Graveyard, state, t, &caster);
         }
     }))
 }
@@ -103,9 +103,9 @@ pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
 /// Exile the permanent in `targets[0]`.
 pub(crate) fn eff_exile_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, rng| {
+    Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
-            change_zone(id, ZoneId::Exile, state, t, &caster, rng);
+            change_zone(id, ZoneId::Exile, state, t, &caster);
         }
     }))
 }
@@ -113,16 +113,16 @@ pub(crate) fn eff_exile_target(caster: impl Into<String>) -> Effect {
 /// Bounce the permanent in `targets[0]` to its controller's hand.
 pub(crate) fn eff_bounce_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, rng| {
+    Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
-            change_zone(id, ZoneId::Hand, state, t, &caster, rng);
+            change_zone(id, ZoneId::Hand, state, t, &caster);
         }
     }))
 }
 
 /// Set `state.success = true` (Doomsday resolved).
 pub(crate) fn eff_doomsday() -> Effect {
-    Effect(Arc::new(|state, _t, _targets, _rng| {
+    Effect(Arc::new(|state, _t, _targets| {
         state.success = true;
     }))
 }
@@ -133,7 +133,7 @@ pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filt
     let caster = caster.into();
     let filter = filter.into();
     let discard_pred = zone_pred_from_str(&filter);
-    Effect(Arc::new(move |state, t, _targets, rng| {
+    Effect(Arc::new(move |state, t, _targets| {
         use rand::Rng;
         let target_who = target.resolve(&caster).to_string();
         for _ in 0..n {
@@ -142,8 +142,8 @@ pub(crate) fn eff_discard(caster: impl Into<String>, target: Who, n: usize, filt
                 .map(|c| c.id)
                 .collect();
             if candidates.is_empty() { break; }
-            let id = candidates[rng.gen_range(0..candidates.len())];
-            change_zone(id, ZoneId::Graveyard, state, t, &caster, rng);
+            let id = candidates[state.rng.gen_range(0..candidates.len())];
+            change_zone(id, ZoneId::Graveyard, state, t, &caster);
         }
     }))
 }
@@ -155,7 +155,7 @@ pub(crate) fn eff_enter_permanent(
 ) -> Effect {
     let owner = owner.into();
     let card_name = card_name.into();
-    Effect(Arc::new(move |state, t, _targets, rng| {
+    Effect(Arc::new(move |state, t, _targets| {
         let new_id = state.alloc_id();
         // Pre-register and immediately activate instances before the event fires,
         // so ETB replacement checks (e.g. Murktide self-ETB) can intercept the event.
@@ -186,7 +186,7 @@ pub(crate) fn eff_enter_permanent(
                 to: ZoneId::Battlefield,
                 controller: owner.clone(),
             },
-            state, t, &owner, rng,
+            state, t, &owner,
         );
         state.log(t, &owner, format!("{} enters play", card_name));
     }))
@@ -196,7 +196,7 @@ pub(crate) fn eff_enter_permanent(
 /// puts it in the owner's graveyard. If the target is no longer on the stack, fizzles.
 pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
-    Effect(Arc::new(move |state, t, targets, _rng| {
+    Effect(Arc::new(move |state, t, targets| {
         let Some(&target_id) = targets.first() else { return; };
         let pos = state.stack.iter().position(|&id| id == target_id);
         if let Some(pos) = pos {
@@ -219,9 +219,9 @@ pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
 /// Target selection happens in the strategy layer via `choose_spell_target`.
 pub(crate) fn eff_reanimate(actor: impl Into<String>) -> Effect {
     let actor = actor.into();
-    Effect(Arc::new(move |state, t, targets, rng| {
+    Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
-            change_zone(id, ZoneId::Battlefield, state, t, &actor, rng);
+            change_zone(id, ZoneId::Battlefield, state, t, &actor);
         }
     }))
 }
@@ -234,7 +234,7 @@ pub(crate) fn eff_fetch_search(
     dest: ZoneId,
 ) -> Effect {
     let who = who.into();
-    Effect(Arc::new(move |state, t, _targets, rng| {
+    Effect(Arc::new(move |state, t, _targets| {
         use rand::Rng;
         // Library cards have no materialized state; fall back to catalog for the predicate check.
         let candidates: Vec<ObjId> = state.library_of(&who)
@@ -246,10 +246,10 @@ pub(crate) fn eff_fetch_search(
             .map(|c| c.id)
             .collect();
         if !candidates.is_empty() {
-            let chosen_id = candidates[rng.gen_range(0..candidates.len())];
+            let chosen_id = candidates[state.rng.gen_range(0..candidates.len())];
             let name = state.objects.get(&chosen_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
             state.log(t, &who, format!("search → {}", name));
-            change_zone(chosen_id, dest, state, t, &who, rng);
+            change_zone(chosen_id, dest, state, t, &who);
         }
     }))
 }

@@ -480,7 +480,7 @@ pub(super) fn replacement_enters_tapped() -> ReplacementDef {
         check: etb_self_check,
         make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
             let ctl = controller.to_string();
-            Effect(std::sync::Arc::new(move |state, t, targets, rng| {
+            Effect(std::sync::Arc::new(move |state, t, targets| {
                 let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
                 fire_event(
@@ -488,7 +488,7 @@ pub(super) fn replacement_enters_tapped() -> ReplacementDef {
                         id, actor: ctl.clone(), from,
                         to: ZoneId::Battlefield, controller: ctl.clone(),
                     },
-                    state, t, &ctl, rng,
+                    state, t, &ctl,
                 );
                 if let Some(bf) = state.permanent_bf_mut(id) {
                     bf.tapped = true;
@@ -504,7 +504,7 @@ pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef 
         check: etb_self_check,
         make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
             let ctl = controller.to_string();
-            Effect(std::sync::Arc::new(move |state, t, targets, rng| {
+            Effect(std::sync::Arc::new(move |state, t, targets| {
                 let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
                 fire_event(
@@ -512,7 +512,7 @@ pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef 
                         id, actor: ctl.clone(), from,
                         to: ZoneId::Battlefield, controller: ctl.clone(),
                     },
-                    state, t, &ctl, rng,
+                    state, t, &ctl,
                 );
                 if let Some(bf) = state.permanent_bf_mut(id) {
                     bf.loyalty = base_loyalty;
@@ -560,7 +560,7 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static
         source_name: "Orcish Bowmasters".into(),
         controller: ctl.clone(),
         target_spec: target_spec_from_str(Some("any_target")),
-        effect: Effect(std::sync::Arc::new(move |state, t, targets, _rng| {
+        effect: Effect(std::sync::Arc::new(move |state, t, targets| {
             // Apply 1 damage to the chosen target, then amass.
             // ObjIds are globally unique: try player first, then permanent.
             if let Some(&id) = targets.first() {
@@ -635,7 +635,7 @@ pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &s
                 source_name: "Murktide Regent".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     if let Some(bf) = state.permanent_bf_mut(source_id) {
                         bf.counters += 1;
                         state.log(t, &ctl, "Murktide: inst/sorc exiled → +1/+1 counter");
@@ -657,7 +657,7 @@ pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     if state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
                         do_create_clue(&ctl, state, t);
                     }
@@ -673,7 +673,7 @@ pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     // Guard: only flip if still on front face (active_face == 0).
                     if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
                     do_flip_tamiyo(source_id, &ctl, state, t);
@@ -735,7 +735,7 @@ pub(super) fn tamiyo_plus_two_check(
                 source_name: "Tamiyo, Seasoned Scholar".into(),
                 controller: ctl.clone(),
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
+                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
                     if state.permanent_bf(attacker_id).is_some() {
                         state.continuous_instances.push(ContinuousInstance {
@@ -760,7 +760,7 @@ pub(super) fn tamiyo_plus_two_check(
 
 pub(super) fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
     let who = who.to_string();
-    Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
         let source_name = state.permanent_name(source_id).unwrap_or_default();
         // Register a floating trigger watcher that fires for each opposing attacker.
         // Expires at the start of our next turn (StartOfControllerNextTurn).
@@ -785,7 +785,7 @@ pub(super) fn build_ability_effect(
         return factory(who, source_id);
     }
     // No factory — no-op (e.g. a loyalty ability that only adjusts loyalty counters).
-    Effect(std::sync::Arc::new(|_state, _t, _targets, _rng| {}))
+    Effect(std::sync::Arc::new(|_state, _t, _targets| {}))
 }
 
 /// Build a `(TargetSpec, Effect)` for a spell at cast time.

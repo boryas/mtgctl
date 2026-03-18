@@ -550,7 +550,7 @@ fn murktide_regent() -> CardDef {
             check: murktide_etb_check,
             make_effect: Arc::new(|source_id, controller: &str| {
                 let ctl = controller.to_string();
-                Effect(Arc::new(move |state, t, targets, rng| {
+                Effect(Arc::new(move |state, t, targets| {
                     let Some(&id) = targets.first() else { return; };
                     let exile_count = state.exile_of(&ctl)
                         .filter(|c| state.def_of(c.id)
@@ -567,7 +567,7 @@ fn murktide_regent() -> CardDef {
                             to: ZoneId::Battlefield,
                             controller: ctl.clone(),
                         },
-                        state, t, &ctl, rng,
+                        state, t, &ctl,
                     );
                 }))
             }),
@@ -622,9 +622,9 @@ fn leyline_of_the_void() -> CardDef {
         check: leyline_check,
         make_effect: Arc::new(|_source_id, controller: &str| {
             let ctl = controller.to_string();
-            Effect(Arc::new(move |state, t, targets, rng| {
+            Effect(Arc::new(move |state, t, targets| {
                 if let Some(&id) = targets.first() {
-                    change_zone(id, ZoneId::Exile, state, t, &ctl, rng);
+                    change_zone(id, ZoneId::Exile, state, t, &ctl);
                 }
             }))
         }),

@@ -1,7 +1,7 @@
 use clap::Args;
 use dialoguer::Confirm;
 use diesel::prelude::*;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use skim::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -712,6 +712,10 @@ pub(crate) struct SimState {
     /// All runtime card-definition reads go through `state.def_of(id)` (live objects)
     /// or `state.catalog` (bootstrap / non-battlefield lookups).
     pub(super) catalog: HashMap<String, CardDef>,
+    /// RNG source for all in-simulation randomness (random discard, fetch, etc.).
+    /// Effects access this directly via `state.rng`. Strategy functions receive their
+    /// own rng parameter so their randomness remains independently injectable for tests.
+    pub(super) rng: Box<dyn rand::RngCore + Send>,
 }
 
 impl SimState {
@@ -748,6 +752,7 @@ impl SimState {
             repl_depth: 0,
             continuous_instances: Vec::new(),
             catalog: HashMap::new(),
+            rng: Box::new(rand::rngs::StdRng::from_entropy()),
         };
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();
@@ -1346,7 +1351,6 @@ fn sim_play_land(
     t: u8,
     who: &str,
     card_id: ObjId,
-    rng: &mut impl Rng,
 ) {
     if !state.player(who).land_drop_available { return; }
     let land_name = match state.objects.get(&card_id) {
@@ -1354,7 +1358,7 @@ fn sim_play_land(
         _ => return,
     };
     state.log(t, who, format!("Play {} [hand: {}]", land_name, state.hand_size(who)));
-    change_zone(card_id, ZoneId::Battlefield, state, t, who, rng);
+    change_zone(card_id, ZoneId::Battlefield, state, t, who);
 }
 
 
@@ -1400,7 +1404,6 @@ pub(super) fn fire_event(
     state: &mut SimState,
     t: u8,
     actor: &str,
-    rng: &mut dyn rand::RngCore,
 ) {
     state.repl_depth += 1;
     if state.repl_depth == 1 {
@@ -1423,7 +1426,7 @@ pub(super) fn fire_event(
 
     if let Some((repl_id, targets, effect)) = repl_match {
         state.repl_applied.insert(repl_id);
-        effect.call(state, t, &targets, rng);
+        effect.call(state, t, &targets);
         state.repl_depth -= 1;
         return; // original effect suppressed
     }
@@ -1531,7 +1534,6 @@ pub(super) fn change_zone(
     state: &mut SimState,
     t: u8,
     actor: &str,
-    rng: &mut dyn rand::RngCore,
 ) {
     let (catalog_key, controller, from) = {
         let card = match state.objects.get(&id) {
@@ -1551,7 +1553,7 @@ pub(super) fn change_zone(
     }
     fire_event(
         GameEvent::ZoneChange { id, actor: actor.to_string(), from, to, controller },
-        state, t, actor, rng,
+        state, t, actor,
     );
 }
 
@@ -1559,11 +1561,11 @@ pub(super) fn change_zone(
 
 /// Draw one card for `who` through the event pipeline. Increments draws_this_turn, fires a Draw
 /// event (which handles the state mutation, logging, and trigger dispatch).
-fn sim_draw(state: &mut SimState, who: &str, t: u8, is_natural: bool, rng: &mut dyn rand::RngCore) {
+fn sim_draw(state: &mut SimState, who: &str, t: u8, is_natural: bool) {
     state.player_mut(who).draws_this_turn += 1;
     let draw_index = state.player(who).draws_this_turn;
     let ev = GameEvent::Draw { controller: who.to_string(), draw_index, is_natural };
-    fire_event(ev, state, t, who, rng);
+    fire_event(ev, state, t, who);
 }
 
 /// Pay the activation cost of an ability: mana, life, tap, and/or sacrifice.
@@ -1714,7 +1716,6 @@ fn apply_alt_cost_components(
     t: u8,
     who: &str,
     source_name: &str,
-    rng: &mut impl Rng,
 ) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     if cost.exile_blue_from_hand {
@@ -1727,7 +1728,7 @@ fn apply_alt_cost_components(
             })
             .map(|c| (c.id, c.catalog_key.clone()))
             .collect();
-        let idx = rng.gen_range(0..pitch_ids.len());
+        let idx = state.rng.gen_range(0..pitch_ids.len());
         let (pitch_id, pitch_name) = pitch_ids[idx].clone();
         state.set_card_zone(pitch_id, CardZone::Exile { on_adventure: false });
         parts.push(format!("exile {}", pitch_name));
@@ -1779,7 +1780,6 @@ fn cast_spell(
     face: SpellFace,
     preferred_cost: Option<&AlternateCost>,
     chosen_targets: &[ObjId],
-    rng: &mut impl Rng,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
     // Prefer the post-CE materialized def (current in normal game flow where recompute
@@ -1860,7 +1860,7 @@ fn cast_spell(
 
     // Pay cost and build a log label.
     let cast_label = if let Some(ref cost) = alt_cost {
-        let parts = apply_alt_cost_components(cost, state, t, who, &name, rng);
+        let parts = apply_alt_cost_components(cost, state, t, who, &name);
         parts.join(", ")
     } else {
         let mana_log = state.pay_mana(who, &cost, t);
@@ -1871,7 +1871,7 @@ fn cast_spell(
     // Exile delve cards from graveyard (cost payment).
     let to_exile_names: Vec<String> = to_exile_ids.iter().map(|(_, n)| n.clone()).collect();
     for (exile_id, _) in &to_exile_ids {
-        change_zone(*exile_id, ZoneId::Exile, state, t, who, rng);
+        change_zone(*exile_id, ZoneId::Exile, state, t, who);
     }
 
     let delve_label = if to_exile_names.is_empty() {
@@ -1916,7 +1916,6 @@ pub(super) fn creature_has_keyword(id: ObjId, kw: &str, state: &SimState) -> boo
 fn check_state_based_actions(
     state: &mut SimState,
     t: u8,
-    rng: &mut dyn rand::RngCore,
 ) {
     // Ensure materialized state is current before reading it for SBA checks.
     // (It may be stale if state was mutated outside fire_event, e.g. directly in tests.)
@@ -1959,7 +1958,7 @@ fn check_state_based_actions(
                 })
                 .collect();
             for id in dying {
-                change_zone(id, ZoneId::Graveyard, state, t, who, rng);
+                change_zone(id, ZoneId::Graveyard, state, t, who);
                 any = true;
             }
         }
@@ -1974,7 +1973,7 @@ fn check_state_based_actions(
                 })
                 .collect();
             for id in dying {
-                change_zone(id, ZoneId::Graveyard, state, t, who, rng);
+                change_zone(id, ZoneId::Graveyard, state, t, who);
                 any = true;
             }
         }
@@ -2000,7 +1999,7 @@ fn check_state_based_actions(
                 }
             }
             for id in extras {
-                change_zone(id, ZoneId::Graveyard, state, t, who, rng);
+                change_zone(id, ZoneId::Graveyard, state, t, who);
                 any = true;
             }
         }
@@ -2086,7 +2085,6 @@ fn resolve_top_of_stack(
     state: &mut SimState,
     t: u8,
     _ap: &str,
-    rng: &mut impl Rng,
 ) {
     let id = state.stack.pop().unwrap();
     if state.objects.contains_key(&id) {
@@ -2107,8 +2105,7 @@ fn resolve_top_of_stack(
 
         if is_adventure {
             if let Some(ref eff) = spell.effect {
-                let rng_dyn: &mut dyn rand::RngCore = rng;
-                eff.call(state, t, &spell.chosen_targets, rng_dyn);
+                eff.call(state, t, &spell.chosen_targets);
             }
             let back_name = state.catalog.get(name.as_str())
                 .and_then(|d| d.back.as_ref())
@@ -2130,10 +2127,9 @@ fn resolve_top_of_stack(
                     card_obj.spell = None;
                 }
                 state.log(t, &owner_str, format!("{} resolves", name));
-                change_zone(id, ZoneId::Graveyard, state, t, &owner_str, rng);
+                change_zone(id, ZoneId::Graveyard, state, t, &owner_str);
             }
-            let rng_dyn: &mut dyn rand::RngCore = rng;
-            eff.call(state, t, &spell.chosen_targets, rng_dyn);
+            eff.call(state, t, &spell.chosen_targets);
             if is_perm {
                 if let Some(card_obj) = state.objects.get_mut(&id) {
                     card_obj.spell = None;
@@ -2144,11 +2140,10 @@ fn resolve_top_of_stack(
                 card_obj.spell = None;
             }
             state.log(t, &owner_str, format!("{} resolves", name));
-            change_zone(id, ZoneId::Graveyard, state, t, &owner_str, rng);
+            change_zone(id, ZoneId::Graveyard, state, t, &owner_str);
         }
     } else if let Some(ability) = state.abilities.remove(&id) {
-        let rng_dyn: &mut dyn rand::RngCore = rng;
-        ability.effect.call(state, t, &ability.chosen_targets, rng_dyn);
+        ability.effect.call(state, t, &ability.chosen_targets);
     }
 }
 
@@ -2167,7 +2162,7 @@ fn handle_priority_round(
     loop {
         let queued = std::mem::take(&mut state.pending_triggers);
         push_triggers(queued, state);
-        check_state_based_actions(state, t, rng);
+        check_state_based_actions(state, t);
 
         let who = priority_holder.clone();
         let action = decide_action(
@@ -2177,7 +2172,7 @@ fn handle_priority_round(
 
         match action {
             PriorityAction::LandDrop(card_id) => {
-                sim_play_land(state, t, &who, card_id, rng);
+                sim_play_land(state, t, &who, card_id);
                 state.player_mut(&who).land_drop_available = false;
                 last_passer = None;
             }
@@ -2195,7 +2190,7 @@ fn handle_priority_round(
                         .find(|p| p.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked))
                         .and_then(|p| p.bf.as_ref().and_then(|bf| bf.attack_target));
                     let who_str = who.clone();
-                    let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
+                    let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets| {
                         let ninja_name = state.objects.get(&source_id)
                             .map(|c| c.catalog_key.clone())
                             .unwrap_or_default();
@@ -2234,7 +2229,7 @@ fn handle_priority_round(
                     id: ab_id,
                     source_name: source_name_for_stack,
                     owner: ab_owner,
-                    effect: ability_effect.unwrap_or_else(|| Effect(std::sync::Arc::new(|_, _, _, _| {}))),
+                    effect: ability_effect.unwrap_or_else(|| Effect(std::sync::Arc::new(|_, _, _| {}))),
                     chosen_targets: ability_targets,
                 };
                 state.abilities.insert(ab_id, ab);
@@ -2261,7 +2256,7 @@ fn handle_priority_round(
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     last_passer = Some(who.clone());
                     priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                } else if let Some(cid) = cast_spell(state, t, &who, card_id, face, preferred_cost.as_ref(), chosen_targets, rng) {
+                } else if let Some(cid) = cast_spell(state, t, &who, card_id, face, preferred_cost.as_ref(), chosen_targets) {
                     if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
                     state.player_mut(&who).spells_cast_this_turn += 1;
                     state.stack.push(cid);
@@ -2283,7 +2278,7 @@ fn handle_priority_round(
                     if state.stack.is_empty() {
                         break;
                     } else {
-                        resolve_top_of_stack(state, t, ap, rng);
+                        resolve_top_of_stack(state, t, ap);
                         priority_holder = ap.to_string();
                         last_passer = None;
                         last_action = PriorityAction::Pass;
@@ -2344,7 +2339,7 @@ fn do_step(
             if skip {
                 state.log(t, ap, "No draw (on the play)");
             } else {
-                sim_draw(state, ap, t, true, rng);
+                sim_draw(state, ap, t, true);
             }
         }
         StepKind::Cleanup => {
@@ -2387,12 +2382,12 @@ fn do_step(
                 fire_event(GameEvent::CreatureAttacked {
                     attacker_id: atk_id,
                     attacker_controller: ap.to_string(),
-                }, state, t, ap, rng);
+                }, state, t, ap);
             }
             fire_event(GameEvent::EnteredStep {
                 step: StepKind::DeclareAttackers,
                 active_player: ap.to_string(),
-            }, state, t, ap, rng);
+            }, state, t, ap);
         }
         StepKind::DeclareBlockers => {
             let nap = opp_of(ap);
@@ -2504,7 +2499,7 @@ fn do_step(
             step: step.kind,
             active_player: ap.to_string(),
         };
-        fire_event(step_ev, state, t, ap, rng);
+        fire_event(step_ev, state, t, ap);
     }
 
     if step.prio {
@@ -2535,7 +2530,7 @@ fn do_phase(
     if phase.is_main_phase() {
         state.current_phase = Some(TurnPosition::Phase(phase.kind));
         let phase_ev = GameEvent::EnteredPhase { phase: phase.kind };
-        fire_event(phase_ev, state, t, ap, rng);
+        fire_event(phase_ev, state, t, ap);
         handle_priority_round(state, t, ap, dd_turn, rng);
         // Mana pool drains at the end of the main phase.
         state.us.pool.drain();
@@ -2622,10 +2617,10 @@ fn simulate_game(
 
     // Deal opening hands: move `7 - mulligans` cards from Library to Hand.
     for _ in 0..(7u8.saturating_sub(our_mulligans)) {
-        sim_draw(&mut state, "us", 0, false, rng);
+        sim_draw(&mut state, "us", 0, false);
     }
     for _ in 0..(7u8.saturating_sub(opp_mulligans)) {
-        sim_draw(&mut state, "opp", 0, false, rng);
+        sim_draw(&mut state, "opp", 0, false);
     }
 
     let us_hand = state.hand_size("us");
