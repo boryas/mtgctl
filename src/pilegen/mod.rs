@@ -2767,18 +2767,7 @@ fn card_has_implementation(def: &CardDef) -> bool {
     match &def.kind {
         CardKind::Creature(_) | CardKind::Artifact(_)
         | CardKind::Planeswalker(_) | CardKind::Enchantment => true,
-        CardKind::Instant(s) | CardKind::Sorcery(s) => {
-            s.spell_factory.is_some()
-            || matches!(def.name.as_str(),
-                "Brainstorm" | "Ponder" | "Consider" | "Preordain"
-                | "Dark Ritual"
-                | "Doomsday"
-                | "Fatal Push" | "Snuff Out"
-                | "Thoughtseize" | "Hymn to Tourach"
-                | "Unearth"
-                | "Petty Theft"
-            )
-        }
+        CardKind::Instant(s) | CardKind::Sorcery(s) => s.spell_factory.is_some(),
         CardKind::Land(_) => true,
     }
 }
