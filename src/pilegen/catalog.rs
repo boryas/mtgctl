@@ -2,12 +2,12 @@ use super::*;
 
 // ── Effect factories ──────────────────────────────────────────────────────────
 
-/// Factory for a spell effect: takes controller name, returns the resolved `Effect`.
+/// Factory for a spell effect: takes controller, returns the resolved `Effect`.
 /// `TargetSpec` is derived from `SpellData.target` via `target_spec_from_str`.
-pub(super) type SpellFactory = std::sync::Arc<dyn Fn(&str) -> Effect + Send + Sync>;
+pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId) -> Effect + Send + Sync>;
 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
-pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(&str, ObjId) -> Effect + Send + Sync>;
+pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
 
 /// One way to pay for a counterspell. Each option is tried in order; the first
 /// affordable one is taken.
@@ -269,7 +269,7 @@ pub(crate) struct ReplacementDef {
     pub(crate) check: ReplacementCheckFn,
     /// Factory: called at instance-registration time with `(source_id, controller)`.
     /// CardDef-specific data is captured inside the factory at card-load time.
-    pub(crate) make_effect: std::sync::Arc<dyn Fn(ObjId, &str) -> Effect + Send + Sync>,
+    pub(crate) make_effect: std::sync::Arc<dyn Fn(ObjId, PlayerId) -> Effect + Send + Sync>,
 }
 
 #[derive(Clone)]
@@ -304,7 +304,7 @@ pub(crate) struct CardDef {
 /// Factory that creates a `ContinuousInstance` for a specific game object.
 /// Called when the object enters the battlefield; `source_id` and `controller` are bound then.
 pub(super) type StaticAbilityDef =
-    std::sync::Arc<dyn Fn(ObjId, &str) -> ContinuousInstance + Send + Sync>;
+    std::sync::Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance + Send + Sync>;
 
 impl CardDef {
     pub(crate) fn is_land(&self) -> bool { matches!(self.kind, CardKind::Land(_)) }
@@ -478,17 +478,16 @@ impl CardDef {
 pub(super) fn replacement_enters_tapped() -> ReplacementDef {
     ReplacementDef {
         check: etb_self_check,
-        make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
-            let ctl = controller.to_string();
+        make_effect: std::sync::Arc::new(move |_source_id, controller: PlayerId| {
             Effect(std::sync::Arc::new(move |state, t, targets| {
                 let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
                 fire_event(
                     GameEvent::ZoneChange {
-                        id, actor: ctl.clone(), from,
-                        to: ZoneId::Battlefield, controller: ctl.clone(),
+                        id, actor: controller, from,
+                        to: ZoneId::Battlefield, controller,
                     },
-                    state, t, &ctl,
+                    state, t, controller,
                 );
                 if let Some(bf) = state.permanent_bf_mut(id) {
                     bf.tapped = true;
@@ -502,17 +501,16 @@ pub(super) fn replacement_enters_tapped() -> ReplacementDef {
 pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
     ReplacementDef {
         check: etb_self_check,
-        make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
-            let ctl = controller.to_string();
+        make_effect: std::sync::Arc::new(move |_source_id, controller: PlayerId| {
             Effect(std::sync::Arc::new(move |state, t, targets| {
                 let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
                 fire_event(
                     GameEvent::ZoneChange {
-                        id, actor: ctl.clone(), from,
-                        to: ZoneId::Battlefield, controller: ctl.clone(),
+                        id, actor: controller, from,
+                        to: ZoneId::Battlefield, controller,
                     },
-                    state, t, &ctl,
+                    state, t, controller,
                 );
                 if let Some(bf) = state.permanent_bf_mut(id) {
                     bf.loyalty = base_loyalty;
@@ -554,49 +552,47 @@ pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Colo
 // ── Trigger check functions (one per trigger-having card) ─────────────────────
 
 /// Build a Bowmasters trigger context. Target is "any_target" = creature | planeswalker | player.
-fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static str) -> TriggerContext {
-    let ctl = controller.to_string();
+fn bowmasters_trigger_ctx(_source_id: ObjId, controller: PlayerId, log_msg: &'static str) -> TriggerContext {
     TriggerContext {
         source_name: "Orcish Bowmasters".into(),
-        controller: ctl.clone(),
+        controller,
         target_spec: target_spec_from_str(Some("any_target")),
         effect: Effect(std::sync::Arc::new(move |state, t, targets| {
             // Apply 1 damage to the chosen target, then amass.
             // ObjIds are globally unique: try player first, then permanent.
             if let Some(&id) = targets.first() {
                 if id == state.us.id || id == state.opp.id {
-                    let player = state.who_str(id).to_string();
-                    state.player_mut(&player).life -= 1;
-                    state.log(t, &ctl, format!("Bowmasters: 1 damage to {player}"));
+                    let player = state.who_pid(id);
+                    state.player_mut(player).life -= 1;
+                    state.log(t, controller, format!("Bowmasters: 1 damage to {player}"));
                 } else {
-                    let tgt_ctl = state.permanent_controller(id).map(|s| s.to_string());
                     let name = state.permanent_name(id);
-                    if let (Some(_tgt_ctl), Some(name)) = (tgt_ctl, name) {
+                    if let Some(name) = name {
                         if let Some(bf) = state.permanent_bf_mut(id) {
                             bf.damage += 1;
                         }
-                        state.log(t, &ctl, format!("Bowmasters: 1 damage to {name}"));
+                        state.log(t, controller, format!("Bowmasters: 1 damage to {name}"));
                     }
                 }
             }
             // No target chosen (no legal targets) — do nothing.
-            do_amass_orc(&ctl, 1, state, t);
-            state.log(t, &ctl, log_msg);
+            do_amass_orc(controller, 1, state, t);
+            state.log(t, controller, log_msg);
         })),
     }
 }
 
-pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: &str, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     match event {
         // ETB: only fires for the entering Bowmasters itself.
         GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. }
-            if *id == source_id && ctlr == controller =>
+            if *id == source_id && *ctlr == controller =>
         {
             pending.push(bowmasters_trigger_ctx(source_id, controller, "Bowmasters ETB: amass Orc 1"));
         }
         // Opponent draws any card that isn't their natural draw-step draw.
         GameEvent::Draw { controller: drawer, draw_index: _, is_natural }
-            if drawer != controller && !is_natural =>
+            if *drawer != controller && !is_natural =>
         {
             pending.push(bowmasters_trigger_ctx(source_id, controller, "Bowmasters draw trigger: amass Orc 1"));
         }
@@ -606,22 +602,21 @@ pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: 
 
 /// ETB trigger for Recruiter of the Guard: search library for a creature with toughness ≤ 2,
 /// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
-pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: &str, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-        if *id == source_id && ctlr == controller {
-            let ctl = controller.to_string();
+        if *id == source_id && *ctlr == controller {
             let pred = pred_and(pred_type_eq(CardType::Creature), pred_toughness_le(2));
             pending.push(TriggerContext {
                 source_name: "Recruiter of the Guard".into(),
-                controller: ctl.clone(),
+                controller,
                 target_spec: TargetSpec::None,
-                effect: eff_fetch_search(ctl, pred, ZoneId::Hand),
+                effect: eff_fetch_search(controller, pred, ZoneId::Hand),
             });
         }
     }
 }
 
-pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &str, state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange {
         id, from: ZoneId::Graveyard, to: ZoneId::Exile,
         controller: exiler, ..
@@ -629,16 +624,15 @@ pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &s
         let is_instant_or_sorcery = state.objects.get(id)
             .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
             .map_or(false, |d| d.is_instant() || d.is_sorcery());
-        if is_instant_or_sorcery && exiler == controller {
-            let ctl = controller.to_string();
+        if is_instant_or_sorcery && *exiler == controller {
             pending.push(TriggerContext {
                 source_name: "Murktide Regent".into(),
-                controller: ctl.clone(),
+                controller,
                 target_spec: TargetSpec::None,
                 effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     if let Some(bf) = state.permanent_bf_mut(source_id) {
                         bf.counters += 1;
-                        state.log(t, &ctl, "Murktide: inst/sorc exiled → +1/+1 counter");
+                        state.log(t, controller, "Murktide: inst/sorc exiled → +1/+1 counter");
                     }
                 })),
             });
@@ -646,37 +640,35 @@ pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &s
     }
 }
 
-pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     match event {
         // EnteredStep DeclareAttackers fires after attackers are marked, so p.attacking is set.
         GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
-            if active_player == controller =>
+            if *active_player == controller =>
         {
-            let ctl = controller.to_string();
             pending.push(TriggerContext {
                 source_name: "Tamiyo, Inquisitive Student".into(),
-                controller: ctl.clone(),
+                controller,
                 target_spec: TargetSpec::None,
                 effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     if state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
-                        do_create_clue(&ctl, state, t);
+                        do_create_clue(controller, state, t);
                     }
                 })),
             });
         }
         // Controller draws their 3rd card this turn.
         GameEvent::Draw { controller: drawer, draw_index: 3, .. }
-            if drawer == controller =>
+            if *drawer == controller =>
         {
-            let ctl = controller.to_string();
             pending.push(TriggerContext {
                 source_name: "Tamiyo, Inquisitive Student".into(),
-                controller: ctl.clone(),
+                controller,
                 target_spec: TargetSpec::None,
                 effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     // Guard: only flip if still on front face (active_face == 0).
                     if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
-                    do_flip_tamiyo(source_id, &ctl, state, t);
+                    do_flip_tamiyo(source_id, controller, state, t);
                 })),
             });
         }
@@ -691,7 +683,7 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
     let mut pending: Vec<TriggerContext> = Vec::new();
     for inst in &state.trigger_instances {
         if !inst.active { continue; }
-        (inst.check)(event, inst.source_id, &inst.controller, state, &mut pending);
+        (inst.check)(event, inst.source_id, inst.controller, state, &mut pending);
     }
     pending
 }
@@ -700,11 +692,11 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
 /// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
 pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
     for ctx in triggers {
-        let all_targets = legal_targets(&ctx.target_spec, &ctx.controller, state);
+        let all_targets = legal_targets(&ctx.target_spec, ctx.controller, state);
         let chosen_targets = pick_target(&all_targets, state)
             .into_iter().collect::<Vec<_>>();
         let ab_id = state.alloc_id();
-        let ab_owner = state.player_id(&ctx.controller);
+        let ab_owner = state.player_id(ctx.controller);
         let ab = StackAbility {
             id: ab_id,
             source_name: ctx.source_name.clone(),
@@ -722,25 +714,24 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState)
 pub(super) fn tamiyo_plus_two_check(
     event: &GameEvent,
     source_id: ObjId,
-    controller: &str,
+    controller: PlayerId,
     _state: &SimState,
     pending: &mut Vec<TriggerContext>,
 ) {
     if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
-        if attacker_controller != controller {
+        if *attacker_controller != controller {
             let attacker_id = *attacker_id;
             let tamiyo_id = source_id;
-            let ctl = controller.to_string();
             pending.push(TriggerContext {
                 source_name: "Tamiyo, Seasoned Scholar".into(),
-                controller: ctl.clone(),
+                controller,
                 target_spec: TargetSpec::None,
                 effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
                     if state.permanent_bf(attacker_id).is_some() {
                         state.continuous_instances.push(ContinuousInstance {
                             source_id: tamiyo_id,
-                            controller: ctl.clone(),
+                            controller,
                             layer: ContinuousLayer::L7PowerToughness,
                             filter: std::sync::Arc::new(move |id, _| id == attacker_id),
                             modifier: std::sync::Arc::new(|def, _state| {
@@ -751,34 +742,33 @@ pub(super) fn tamiyo_plus_two_check(
                             expiry: ContinuousExpiry::EndOfTurn,
                         });
                     }
-                    state.log(t, &ctl, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
+                    state.log(t, controller, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
                 })),
             });
         }
     }
 }
 
-pub(super) fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
-    let who = who.to_string();
+pub(super) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
     Effect(std::sync::Arc::new(move |state, t, _targets| {
         let source_name = state.permanent_name(source_id).unwrap_or_default();
         // Register a floating trigger watcher that fires for each opposing attacker.
         // Expires at the start of our next turn (StartOfControllerNextTurn).
         state.trigger_instances.push(TriggerInstance {
             source_id,
-            controller: who.clone(),
+            controller: who,
             check: std::sync::Arc::new(tamiyo_plus_two_check),
             expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
             active: true,
         });
-        state.log(t, &who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
+        state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
     }))
 }
 
 /// Build an `Effect` closure for an activated ability at push time.
 pub(super) fn build_ability_effect(
     ability: &AbilityDef,
-    who: &str,
+    who: PlayerId,
     source_id: ObjId,
 ) -> Effect {
     if let Some(factory) = &ability.ability_factory {
@@ -794,7 +784,7 @@ pub(super) fn build_ability_effect(
 /// For non-spell cards (permanents): returns `eff_enter_permanent`.
 pub(super) fn build_spell_effect(
     def: &CardDef,
-    who: &str,
+    who: PlayerId,
 ) -> (TargetSpec, Effect) {
     let target_spec = def.target_spec().clone();
     if let CardKind::Instant(s) | CardKind::Sorcery(s) = &def.kind {
@@ -802,18 +792,18 @@ pub(super) fn build_spell_effect(
             return (target_spec, factory(who));
         }
     }
-    (TargetSpec::None, eff_enter_permanent(who.to_string(), def.name.clone()))
+    (TargetSpec::None, eff_enter_permanent(who, def.name.clone()))
 }
 
 
 /// Pre-register trigger and replacement instances for a card object at simulation init.
 /// Reads directly from `card_def.trigger_defs` and `card_def.replacement_defs` — no table lookup.
 /// Instances start with `active: false`; they are activated when the card enters the battlefield.
-pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, controller: &str, state: &mut SimState) {
+pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, controller: PlayerId, state: &mut SimState) {
     for check in card_def.trigger_defs.iter().cloned() {
         state.trigger_instances.push(TriggerInstance {
             source_id,
-            controller: controller.to_string(),
+            controller,
             check,
             expiry: None,
             active: false,
@@ -824,7 +814,7 @@ pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, contro
         state.replacement_instances.push(ReplacementInstance {
             id,
             source_id,
-            controller: controller.to_string(),
+            controller,
             check: repl.check,
             effect: (repl.make_effect)(source_id, controller),
             active: false,
@@ -837,7 +827,7 @@ pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, contro
 /// `def` is `None` only in test helpers that bypass the catalog — static ability CIs won't fire.
 pub(super) fn activate_instances(
     source_id: ObjId,
-    controller: &str,
+    controller: PlayerId,
     def: Option<&CardDef>,
     state: &mut SimState,
 ) {
@@ -870,7 +860,7 @@ pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
 
 // ── Leyline of the Void ───────────────────────────────────────────────────────
 
-pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &str) -> Option<Vec<ObjId>> {
+pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, .. } = event {
         Some(vec![*id])
     } else {
@@ -881,7 +871,7 @@ pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &
 // ── Shared ETB-self check ─────────────────────────────────────────────────────
 
 /// Matches any ZoneChange where this permanent is the object entering the battlefield.
-fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: &str) -> Option<Vec<ObjId>> {
+fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
         if *id == source_id {
             return Some(vec![*id]);
@@ -898,12 +888,11 @@ fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
 
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────
 
-pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> Option<Vec<ObjId>> {
+pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-        if *id == source_id && ctlr == controller {
+        if *id == source_id && *ctlr == controller {
             return Some(vec![*id]);
         }
     }
     None
 }
-

@@ -4,7 +4,7 @@ use super::*;
 
 fn pick_on_board_action(
     state: &mut SimState,
-    ap: &str,
+    ap: PlayerId,
     t: u8,
     dd_turn: u8,
     rng: &mut impl Rng,
@@ -92,8 +92,8 @@ fn pick_on_board_action(
 
     // Fateful turn override: force-include fetch lands that can search for a black source,
     // if we have no black mana. (These bypass the 75% roll.)
-    if ap == "us" && t == dd_turn && !state.has_black_mana("us") {
-        let fetch_ids: Vec<ObjId> = state.permanents_of("us")
+    if ap == PlayerId::Us && t == dd_turn && !state.has_black_mana(PlayerId::Us) {
+        let fetch_ids: Vec<ObjId> = state.permanents_of(PlayerId::Us)
             .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
             .filter(|p| state.def_of(p.id).map_or(false, |def|
                 def.abilities().iter().any(|ab| ab.sacrifice_self && ab.life_cost > 0)
@@ -106,10 +106,10 @@ fn pick_on_board_action(
                 if !candidates.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _, _) if *id == fid)) {
                     if let Some(def) = state.def_of(fid) {
                         if let Some(ab) = def.abilities().iter()
-                            .find(|ab| ability_available(ab, state, "us", true))
+                            .find(|ab| ability_available(ab, state, PlayerId::Us, true))
                             .cloned()
                         {
-                            let targets = legal_targets(&ab.target_spec, "us", state);
+                            let targets = legal_targets(&ab.target_spec, PlayerId::Us, state);
                             let chosen = pick_target(&targets, state).into_iter().collect();
                             candidates.push(PriorityAction::ActivateAbility(fid, ab, chosen));
                         }
@@ -156,7 +156,7 @@ fn worth_countering(id: ObjId, name: &str, state: &SimState) -> bool {
 /// NAP decision: if AP just acted, try to counter the top opposing spell; otherwise pass.
 fn nap_action(
     state: &SimState,
-    who: &str,
+    who: PlayerId,
     last_action: &PriorityAction,
     rng: &mut impl Rng,
 ) -> PriorityAction {
@@ -193,10 +193,10 @@ fn nap_action(
 fn ap_react(
     state: &mut SimState,
     t: u8,
-    who: &str,
+    who: PlayerId,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
-    if who != "us" || state.stack.is_empty() {
+    if who != PlayerId::Us || state.stack.is_empty() {
         return None;
     }
     let top_idx = state.stack.len() - 1;
@@ -215,17 +215,17 @@ fn ap_react(
             .and_then(|id| state.stack.iter().find(|&&s| s == id).map(|_| id))
             .is_some_and(|id| {
                 state.objects.get(&id)
-                    .map(|c| c.catalog_key == "Doomsday" && state.player_id(&c.owner) == us_id)
+                    .map(|c| c.catalog_key == "Doomsday" && state.player_id(c.owner) == us_id)
                     .unwrap_or(false)
             });
     if !dd_countered {
         return None;
     }
     Some(
-        if let Some(action) = respond_with_counter(state, top_idx, "us", rng, false) {
+        if let Some(action) = respond_with_counter(state, top_idx, PlayerId::Us, rng, false) {
             action
         } else {
-            state.log(t, "us", "⚠ Doomsday countered — could not protect");
+            state.log(t, PlayerId::Us, "⚠ Doomsday countered — could not protect");
             state.reroll = true;
             PriorityAction::Pass
         },
@@ -237,18 +237,18 @@ fn ap_react(
 fn ap_proactive(
     state: &mut SimState,
     t: u8,
-    who: &str,
+    who: PlayerId,
     dd_turn: u8,
     rng: &mut impl Rng,
 ) -> PriorityAction {
     // Land drop (sorcery speed: requires empty stack).
     if state.stack.is_empty() && state.player(who).land_drop_available {
-        let fateful = who == "us" && t == dd_turn;
+        let fateful = who == PlayerId::Us && t == dd_turn;
         // On the fateful turn, skip the land drop if Doomsday is already castable — playing
         // a land might spend our last card in hand and leave us unable to cast Doomsday.
         let dd_already_castable = fateful && !state.us.dd_cast
-            && state.potential_mana("us").can_pay(&ManaCost { b: 3, ..Default::default() })
-            && state.hand_of("us").any(|c| c.catalog_key == "Doomsday");
+            && state.potential_mana(PlayerId::Us).can_pay(&ManaCost { b: 3, ..Default::default() })
+            && state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Doomsday");
         if !dd_already_castable {
             let force = state.player(who).must_land_drop;
             let land_count = state.hand_of(who)
@@ -285,8 +285,8 @@ fn ap_proactive(
         let hand = state.hand_size(who);
         eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
             who, pool.b, pool.u, pool.total, hand);
-        if who == "us" && t == dd_turn && !state.us.dd_cast {
-            let dd_in_hand = state.hand_of("us").filter(|c| c.catalog_key == "Doomsday").count();
+        if who == PlayerId::Us && t == dd_turn && !state.us.dd_cast {
+            let dd_in_hand = state.hand_of(PlayerId::Us).filter(|c| c.catalog_key == "Doomsday").count();
             eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_hand={}, potential B={} tot={}",
                 hand, dd_in_hand, pool.b, pool.total);
         }
@@ -300,7 +300,7 @@ fn ap_proactive(
     };
 
     // Fateful turn prioritization: Doomsday > Dark Ritual > anything else.
-    let fateful = who == "us" && t == dd_turn && !state.us.dd_cast;
+    let fateful = who == PlayerId::Us && t == dd_turn && !state.us.dd_cast;
     let action = if fateful {
         let priority = ["Doomsday", "Dark Ritual"];
         priority.iter()
@@ -336,8 +336,8 @@ fn ap_proactive(
 pub(super) fn decide_action(
     state: &mut SimState,
     t: u8,
-    ap: &str,
-    who: &str,
+    ap: PlayerId,
+    who: PlayerId,
     dd_turn: u8,
     last_action: &PriorityAction,
     rng: &mut impl Rng,
@@ -377,11 +377,11 @@ pub(super) fn decide_action(
 /// opponent player, or `Some(pw_id)` to attack a planeswalker. Attackers are chosen if their
 /// toughness exceeds the total power of NAP creatures that could block them.
 pub(super) fn declare_attackers(
-    ap: &str,
+    ap: PlayerId,
     state: &SimState,
     rng: &mut impl Rng,
 ) -> Vec<(ObjId, Option<ObjId>)> {
-    let nap = opp_of(ap);
+    let nap = ap.opp();
     // Compute NAP blocker stats (ObjId, power) for flying/non-flying checks.
     let nap_blockers: Vec<(ObjId, i32)> = state.permanents_of(nap)
         .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
@@ -432,10 +432,10 @@ pub(super) fn declare_attackers(
 /// Returns `(attacker_id, blocker_id)` pairs. A creature only blocks if it's a "good block":
 /// it kills the attacker, or both creatures survive (no chump blocks).
 pub(super) fn declare_blockers(
-    ap: &str,
+    ap: PlayerId,
     state: &SimState,
 ) -> Vec<(ObjId, ObjId)> {
-    let nap = opp_of(ap);
+    let nap = ap.opp();
     let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
     let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
     for &atk_id in &state.combat_attackers {
@@ -488,7 +488,7 @@ pub(super) fn declare_blockers(
 fn ability_available(
     ability: &AbilityDef,
     state: &SimState,
-    who: &str,
+    who: PlayerId,
     source_untapped: bool,
 ) -> bool {
     if ability.tap_self && !source_untapped {
@@ -515,7 +515,7 @@ fn spell_is_affordable(
     name: &str,
     def: &CardDef,
     state: &SimState,
-    who: &str,
+    who: PlayerId,
 ) -> bool {
     let mut cost = parse_mana_cost(def.mana_cost());
     if def.delve() && cost.generic > 0 {
@@ -527,7 +527,7 @@ fn spell_is_affordable(
     def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name))
 }
 
-fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) -> bool {
+fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: PlayerId) -> bool {
     let player = state.player(who);
     if !ability.mana_cost.is_empty() {
         if !state.potential_mana(who).can_pay(&parse_mana_cost(&ability.mana_cost)) { return false; }
@@ -541,7 +541,7 @@ fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: &str) ->
 
 fn collect_hand_actions(
     state: &SimState,
-    who: &str,
+    who: PlayerId,
 ) -> Vec<PriorityAction> {
     if state.hand_size(who) <= 0 {
         return Vec::new();
@@ -596,7 +596,7 @@ fn collect_hand_actions(
 /// On the fateful turn, requires a black-producing land if no black source is in play.
 fn choose_land(
     state: &SimState,
-    who: &str,
+    who: PlayerId,
     fateful: bool,
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
@@ -647,13 +647,13 @@ fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
 fn respond_with_counter(
     state: &SimState,
     target_idx: usize,
-    responding_who: &str,
+    responding_who: PlayerId,
     rng: &mut impl Rng,
     probabilistic: bool,
 ) -> Option<PriorityAction> {
     let target_id = state.stack[target_idx];
-    let target_owner_str = state.who_str(state.stack_item_owner(target_id)).to_string();
-    let target_has_untapped_lands = state.permanents_of(&target_owner_str).any(|c| {
+    let target_owner = if state.stack_item_owner(target_id) == state.us.id { PlayerId::Us } else { PlayerId::Opp };
+    let target_has_untapped_lands = state.permanents_of(target_owner).any(|c| {
         c.bf.as_ref().map_or(false, |bf| !bf.tapped) && !state.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
     });
 
@@ -727,7 +727,7 @@ fn respond_with_counter(
 /// Returns an `ActivateAbility` action or `None` if conditions aren't met.
 pub(super) fn try_ninjutsu(
     state: &SimState,
-    who: &str,
+    who: PlayerId,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
     if state.hand_size(who) <= 0 { return None; }

@@ -45,6 +45,22 @@ impl ObjId {
 
 }
 
+/// Typed player identifier. Replaces the "us"/"opp" string convention.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum PlayerId { Us, Opp }
+
+impl PlayerId {
+    pub(crate) fn opp(self) -> PlayerId {
+        match self { PlayerId::Us => PlayerId::Opp, PlayerId::Opp => PlayerId::Us }
+    }
+}
+
+impl std::fmt::Display for PlayerId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { PlayerId::Us => write!(f, "us"), PlayerId::Opp => write!(f, "opp") }
+    }
+}
+
 /// Zone a card currently occupies.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum CardZone {
@@ -104,8 +120,8 @@ impl BattlefieldState {
 struct GameObject {
     id: ObjId,
     catalog_key: String,  // foreign key into the CardDef catalog
-    owner: String,        // "us" or "opp" — kept as String for compat with existing player(&str) API
-    controller: String,
+    owner: PlayerId,
+    controller: PlayerId,
     zone: CardZone,
     is_token: bool,
     bf: Option<BattlefieldState>,      // Some only when zone == Battlefield
@@ -115,10 +131,9 @@ struct GameObject {
 }
 
 impl GameObject {
-    fn new(id: ObjId, catalog_key: impl Into<String>, owner: impl Into<String>) -> Self {
-        let owner = owner.into();
+    fn new(id: ObjId, catalog_key: impl Into<String>, owner: PlayerId) -> Self {
         GameObject {
-            id, catalog_key: catalog_key.into(), controller: owner.clone(), owner,
+            id, catalog_key: catalog_key.into(), controller: owner, owner,
             zone: CardZone::Library, is_token: false, bf: None, spell: None,
             materialized: None,
         }
@@ -160,15 +175,15 @@ pub(super) enum GameEvent {
     /// Does NOT include drawing — use `Draw` for that.
     ZoneChange {
         id: ObjId,
-        actor: String,
+        actor: PlayerId,
         from: ZoneId,
         to: ZoneId,
-        controller: String,
+        controller: PlayerId,
     },
     /// A player draws a card. `draw_index` is which draw this is this turn (1-based).
     /// `is_natural` is true only for the draw-step draw.
     Draw {
-        controller: String,
+        controller: PlayerId,
         draw_index: u8,
         is_natural: bool,
     },
@@ -176,7 +191,7 @@ pub(super) enum GameEvent {
     /// Only fires for named steps that have a priority round (not Untap or Cleanup).
     EnteredStep {
         step: StepKind,
-        active_player: String,
+        active_player: PlayerId,
     },
     /// Fired at the start of a phase-level priority window (main phases, which have no named steps).
     EnteredPhase {
@@ -185,7 +200,7 @@ pub(super) enum GameEvent {
     /// A creature was declared as an attacker.
     CreatureAttacked {
         attacker_id: ObjId,
-        attacker_controller: String,
+        attacker_controller: PlayerId,
     },
     // Future variants: DamageDealt, SpellCast, SpellResolved, AbilityActivated,
     //                  CounterChanged, LifeChanged, TokenCreated.
@@ -198,7 +213,7 @@ pub(crate) struct TriggerContext {
     /// Display name of the source — used for stack item naming and logging.
     pub(crate) source_name: String,
     /// Player who controls that permanent.
-    pub(crate) controller: String,
+    pub(crate) controller: PlayerId,
     /// Legal targets this trigger may choose from. Resolved when pushed to the stack.
     pub(crate) target_spec: TargetSpec,
     /// The effect to apply when this trigger resolves. Receives the chosen targets.
@@ -210,19 +225,19 @@ pub(crate) struct TriggerContext {
 /// Signature for a per-card trigger check function.
 /// Inspects the event and game state; if a trigger fires, appends a `TriggerContext` to `pending`.
 pub(super) type TriggerCheckFn =
-    std::sync::Arc<dyn Fn(&GameEvent, ObjId, &str, &SimState, &mut Vec<TriggerContext>) + Send + Sync>;
+    std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState, &mut Vec<TriggerContext>) + Send + Sync>;
 
 /// Signature for a per-card replacement check function.
 /// Returns Some(targets) if this replacement applies to the event; None otherwise.
 /// `source_id` is passed so self-ETB checks work without string dispatch.
-pub(super) type ReplacementCheckFn = fn(&GameEvent, ObjId, &str) -> Option<Vec<ObjId>>;
+pub(super) type ReplacementCheckFn = fn(&GameEvent, ObjId, PlayerId) -> Option<Vec<ObjId>>;
 
 /// One trigger registration per card object in the simulation.
 /// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
 /// Dynamically-created triggers (e.g. Tamiyo +2 watcher) start with `active: true`.
 pub(super) struct TriggerInstance {
     pub(super) source_id: ObjId,
-    pub(super) controller: String,
+    pub(super) controller: PlayerId,
     pub(super) check: TriggerCheckFn,
     /// None for permanent (card-based) triggers; Some for floating triggers created by abilities.
     pub(super) expiry: Option<ContinuousExpiry>,
@@ -235,7 +250,7 @@ pub(super) struct TriggerInstance {
 pub(super) struct ReplacementInstance {
     pub(super) id: ObjId,
     pub(super) source_id: ObjId,
-    pub(super) controller: String,
+    pub(super) controller: PlayerId,
     pub(super) check: ReplacementCheckFn,
     pub(super) effect: Effect,
     pub(super) active: bool,
@@ -274,7 +289,7 @@ pub(super) type ContinuousModFn =
 /// Predicate that decides whether a continuous effect applies to a given object.
 /// Receives (target_id, target_controller).
 pub(super) type ContinuousFilterFn =
-    std::sync::Arc<dyn Fn(ObjId, &str) -> bool + Send + Sync>;
+    std::sync::Arc<dyn Fn(ObjId, PlayerId) -> bool + Send + Sync>;
 
 /// When a `ContinuousInstance` expires and should be removed.
 #[derive(Clone, PartialEq, Debug)]
@@ -295,7 +310,7 @@ pub(super) struct ContinuousInstance {
     /// Object that generated this effect (for expiry tracking and logging).
     pub(super) source_id: ObjId,
     /// Controller of the source at the time the effect was created.
-    pub(super) controller: String,
+    pub(super) controller: PlayerId,
     /// Which layer this modifier applies in (determines application order).
     pub(super) layer: ContinuousLayer,
     /// Determines which game objects this CE affects.
@@ -361,10 +376,10 @@ pub(super) fn recompute(state: &mut SimState) {
         }
 
         // Step 2: collect applicable CI indices (not references) and sort by layer.
-        let controller = state.objects.get(&id).unwrap().controller.clone();
+        let controller = state.objects.get(&id).unwrap().controller;
         let mut applicable: Vec<(usize, ContinuousLayer)> = state.continuous_instances.iter()
             .enumerate()
-            .filter(|(_, ci)| (ci.filter)(id, &controller))
+            .filter(|(_, ci)| (ci.filter)(id, controller))
             .map(|(i, ci)| (i, ci.layer))
             .collect();
         applicable.sort_by_key(|&(_, l)| l);
@@ -764,7 +779,7 @@ impl SimState {
         ObjId(self.next_id)
     }
 
-    fn permanents_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a GameObject> {
+    fn permanents_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.controller == who && c.zone == CardZone::Battlefield)
     }
 
@@ -780,32 +795,32 @@ impl SimState {
             .and_then(|c| c.bf.as_mut())
     }
 
-    fn hand_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a GameObject> {
+    fn hand_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, CardZone::Hand { .. }))
     }
 
-    fn graveyard_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a GameObject> {
+    fn graveyard_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && c.zone == CardZone::Graveyard)
     }
 
-    fn exile_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a GameObject> {
+    fn exile_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, CardZone::Exile { .. }))
     }
 
     /// Cards owned by `who` that are currently in exile with adventure status.
-    fn on_adventure_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a GameObject> {
+    fn on_adventure_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && c.zone == (CardZone::Exile { on_adventure: true }))
     }
 
-    fn library_of<'a>(&'a self, who: &'a str) -> impl Iterator<Item = &'a GameObject> {
+    fn library_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
         self.objects.values().filter(move |c| c.owner == who && c.zone == CardZone::Library)
     }
 
-    fn hand_size(&self, who: &str) -> i32 {
+    fn hand_size(&self, who: PlayerId) -> i32 {
         self.hand_of(who).count() as i32
     }
 
-    fn library_size(&self, who: &str) -> usize {
+    fn library_size(&self, who: PlayerId) -> usize {
         self.library_of(who).count()
     }
 
@@ -826,29 +841,34 @@ impl SimState {
         self.reroll || self.success
     }
 
-    fn player(&self, who: &str) -> &PlayerState {
-        if who == "us" { &self.us } else { &self.opp }
+    fn player(&self, who: PlayerId) -> &PlayerState {
+        match who { PlayerId::Us => &self.us, PlayerId::Opp => &self.opp }
     }
 
-    fn player_mut(&mut self, who: &str) -> &mut PlayerState {
-        if who == "us" { &mut self.us } else { &mut self.opp }
+    fn player_mut(&mut self, who: PlayerId) -> &mut PlayerState {
+        match who { PlayerId::Us => &mut self.us, PlayerId::Opp => &mut self.opp }
     }
 
-    /// Resolve a player name string to its stable ObjId.
-    fn player_id(&self, who: &str) -> ObjId {
-        if who == "us" { self.us.id } else { self.opp.id }
+    /// Resolve a PlayerId to its stable ObjId.
+    fn player_id(&self, who: PlayerId) -> ObjId {
+        match who { PlayerId::Us => self.us.id, PlayerId::Opp => self.opp.id }
     }
 
-    /// Resolve a player ObjId back to the "us"/"opp" name string.
-    fn who_str(&self, id: ObjId) -> &str {
+    /// Resolve a player ObjId back to a PlayerId.
+    fn who_pid(&self, id: ObjId) -> PlayerId {
+        if id == self.us.id { PlayerId::Us } else { PlayerId::Opp }
+    }
+
+    /// Resolve a player ObjId back to the display string ("us"/"opp"). For logging only.
+    fn who_str(&self, id: ObjId) -> &'static str {
         if id == self.us.id { "us" } else { "opp" }
     }
 
-    /// Return the controller name ("us"/"opp") of the permanent with the given id.
-    fn permanent_controller(&self, id: ObjId) -> Option<&str> {
+    /// Return the controller of the permanent with the given id.
+    fn permanent_controller(&self, id: ObjId) -> Option<PlayerId> {
         self.objects.get(&id)
             .filter(|c| c.zone == CardZone::Battlefield)
-            .map(|c| c.controller.as_str())
+            .map(|c| c.controller)
     }
 
     /// Return the name of the permanent with the given id.
@@ -859,7 +879,7 @@ impl SimState {
     }
 
     /// Mana accessible right now for `who`: pool + what untapped permanents can still produce.
-    fn potential_mana(&self, who: &str) -> ManaPool {
+    fn potential_mana(&self, who: PlayerId) -> ManaPool {
         let mut p = self.player(who).pool.clone();
         for card in self.permanents_of(who) {
             if let Some(bf) = &card.bf {
@@ -872,7 +892,7 @@ impl SimState {
 
     /// Tap/sac permanents to produce mana for `who` for the given cost.
     /// Returns a log of activations.
-    fn produce_mana(&mut self, who: &str, cost: &ManaCost, _t: u8) -> Vec<String> {
+    fn produce_mana(&mut self, who: PlayerId, cost: &ManaCost, _t: u8) -> Vec<String> {
         let mut log: Vec<String> = Vec::new();
         let color_specs: [(i32, char, fn(&mut ManaPool)); 6] = [
             (cost.b, 'B', |p| p.b += 1),
@@ -969,33 +989,32 @@ impl SimState {
     }
 
     /// Produce mana and immediately spend it.
-    fn pay_mana(&mut self, who: &str, cost: &ManaCost, t: u8) -> Vec<String> {
+    fn pay_mana(&mut self, who: PlayerId, cost: &ManaCost, t: u8) -> Vec<String> {
         let log = self.produce_mana(who, cost, t);
         self.player_mut(who).pool.spend(cost);
         log
     }
 
     /// True if `who` can currently produce at least one black mana.
-    fn has_black_mana(&self, who: &str) -> bool {
+    fn has_black_mana(&self, who: PlayerId) -> bool {
         self.potential_mana(who).b > 0
     }
 
-    fn life_of(&self, who: &str) -> i32 {
+    fn life_of(&self, who: PlayerId) -> i32 {
         self.player(who).life
     }
 
-    fn lose_life(&mut self, who: &str, n: i32) {
+    fn lose_life(&mut self, who: PlayerId, n: i32) {
         self.player_mut(who).life -= n;
     }
 
-    fn log(&mut self, t: u8, who: &str, msg: impl Into<String>) {
-        let is_player = who == "us" || who == "opp";
+    fn log(&mut self, t: u8, who: PlayerId, msg: impl Into<String>) {
         let phase_str = match self.current_phase {
             Some(TurnPosition::Step(s))  => format!("{:?}", s),
             Some(TurnPosition::Phase(p)) => format!("{:?}", p),
             None                         => String::new(),
         };
-        let ctx = if is_player && self.current_ap != ObjId::UNSET {
+        let ctx = if self.current_ap != ObjId::UNSET {
             format!("|{}/{}", self.who_str(self.current_ap), phase_str)
         } else {
             String::new()
@@ -1004,7 +1023,7 @@ impl SimState {
     }
 
     /// Log each mana activation returned by pay_mana/produce_mana.
-    fn log_mana_activations(&mut self, t: u8, who: &str, activations: Vec<String>) {
+    fn log_mana_activations(&mut self, t: u8, who: PlayerId, activations: Vec<String>) {
         for entry in activations {
             self.log(t, who, format!("→ {}", entry));
         }
@@ -1012,7 +1031,7 @@ impl SimState {
 
     pub(crate) fn stack_item_owner(&self, id: ObjId) -> ObjId {
         if let Some(card) = self.objects.get(&id) {
-            return self.player_id(&card.owner);
+            return self.player_id(card.owner);
         }
         if let Some(ab) = self.abilities.get(&id) {
             return ab.owner;
@@ -1057,7 +1076,7 @@ fn sec(label: &str) -> String {
 
 impl SimState {
     /// Write hand/graveyard/exile zones for `who` to the formatter — one line per zone.
-    fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: &str) -> std::fmt::Result {
+    fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: PlayerId) -> std::fmt::Result {
         let mut visible: Vec<&str> = self.hand_of(who)
             .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
             .map(|c| c.catalog_key.as_str())
@@ -1110,7 +1129,7 @@ impl SimState {
     }
 
     /// Write permanents for `who` — lands on one line, non-lands on another.
-    fn fmt_permanents(&self, f: &mut std::fmt::Formatter<'_>, who: &str) -> std::fmt::Result {
+    fn fmt_permanents(&self, f: &mut std::fmt::Formatter<'_>, who: PlayerId) -> std::fmt::Result {
         let fmt_perm = |card: &&GameObject| -> Option<String> {
             let bf = card.bf.as_ref()?;
             let mut tags: Vec<String> = Vec::new();
@@ -1179,16 +1198,16 @@ impl std::fmt::Display for SimState {
         writeln!(f, "{}", sec("MY BOARD"))?;
         writeln!(f)?;
         writeln!(f, "  Life       : {} -> {}", self.us.life, self.us.life / 2)?;
-        self.fmt_permanents(f, "us")?;
-        self.fmt_player_zones(f, "us")?;
+        self.fmt_permanents(f, PlayerId::Us)?;
+        self.fmt_player_zones(f, PlayerId::Us)?;
         writeln!(f)?;
 
         let opp_label = format!("OPPONENT: {}", self.opp.deck_name);
         writeln!(f, "{}", sec(&opp_label))?;
         writeln!(f)?;
         writeln!(f, "  Life       : {}", self.opp.life)?;
-        self.fmt_permanents(f, "opp")?;
-        self.fmt_player_zones(f, "opp")?;
+        self.fmt_permanents(f, PlayerId::Opp)?;
+        self.fmt_player_zones(f, PlayerId::Opp)?;
 
         Ok(())
     }
@@ -1349,7 +1368,7 @@ fn select_deck(prompt: &str, flow_type_filter: Option<&str>) -> Option<(String, 
 fn sim_play_land(
     state: &mut SimState,
     t: u8,
-    who: &str,
+    who: PlayerId,
     card_id: ObjId,
 ) {
     if !state.player(who).land_drop_available { return; }
@@ -1363,7 +1382,7 @@ fn sim_play_land(
 
 
 /// Discard down to 7 at end of turn.
-fn sim_discard_to_limit(state: &mut SimState, t: u8, who: &str) {
+fn sim_discard_to_limit(state: &mut SimState, t: u8, who: PlayerId) {
     let hand = state.hand_size(who);
     if hand > 7 {
         let n = hand - 7;
@@ -1403,7 +1422,7 @@ pub(super) fn fire_event(
     event: GameEvent,
     state: &mut SimState,
     t: u8,
-    actor: &str,
+    actor: PlayerId,
 ) {
     state.repl_depth += 1;
     if state.repl_depth == 1 {
@@ -1416,7 +1435,7 @@ pub(super) fn fire_event(
         for inst in &state.replacement_instances {
             if !inst.active { continue; }
             if state.repl_applied.contains(&inst.id) { continue; }
-            if let Some(targets) = (inst.check)(&event, inst.source_id, &inst.controller) {
+            if let Some(targets) = (inst.check)(&event, inst.source_id, inst.controller) {
                 found = Some((inst.id, targets, inst.effect.clone()));
                 break;
             }
@@ -1483,8 +1502,8 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
 
         }
         GameEvent::Draw { controller, .. } => {
-            let controller = controller.clone();
-            let top_id = state.library_of(&controller).next().map(|c| c.id);
+            let controller = *controller;
+            let top_id = state.library_of(controller).next().map(|c| c.id);
             if let Some(card_id) = top_id {
                 state.set_card_zone(card_id, CardZone::Hand { known: false });
             }
@@ -1494,7 +1513,7 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
     }
 }
 
-fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: &str) {
+fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: PlayerId) {
     match event {
         GameEvent::ZoneChange { id, from, to, controller, .. } => {
             let card = state.objects.get(id).map(|o| o.catalog_key.as_str()).unwrap_or("?");
@@ -1514,6 +1533,7 @@ fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: &str) {
             }
         }
         GameEvent::Draw { controller, draw_index, is_natural } => {
+            let controller = *controller;
             let hand = state.hand_size(controller);
             if *is_natural {
                 state.log(t, controller, format!("Draw [hand: {}]", hand));
@@ -1533,14 +1553,14 @@ pub(super) fn change_zone(
     to: ZoneId,
     state: &mut SimState,
     t: u8,
-    actor: &str,
+    actor: PlayerId,
 ) {
     let (catalog_key, controller, from) = {
         let card = match state.objects.get(&id) {
             Some(c) => c,
             None => return,
         };
-        (card.catalog_key.clone(), card.controller.clone(), card_zone_to_id(&card.zone))
+        (card.catalog_key.clone(), card.controller, card_zone_to_id(&card.zone))
     };
     // Activate/deactivate instances BEFORE firing the event so replacement checks see the right state.
     if from == ZoneId::Battlefield { deactivate_instances(id, state); }
@@ -1549,10 +1569,10 @@ pub(super) fn change_zone(
         // and replacement instances. The ObjId exists but materialized isn't updated until
         // after this event resolves — bootstrapping from state.catalog is required here.
         let def = state.catalog.get(catalog_key.as_str()).cloned();
-        activate_instances(id, &controller, def.as_ref(), state);
+        activate_instances(id, controller, def.as_ref(), state);
     }
     fire_event(
-        GameEvent::ZoneChange { id, actor: actor.to_string(), from, to, controller },
+        GameEvent::ZoneChange { id, actor, from, to, controller },
         state, t, actor,
     );
 }
@@ -1561,10 +1581,10 @@ pub(super) fn change_zone(
 
 /// Draw one card for `who` through the event pipeline. Increments draws_this_turn, fires a Draw
 /// event (which handles the state mutation, logging, and trigger dispatch).
-fn sim_draw(state: &mut SimState, who: &str, t: u8, is_natural: bool) {
+fn sim_draw(state: &mut SimState, who: PlayerId, t: u8, is_natural: bool) {
     state.player_mut(who).draws_this_turn += 1;
     let draw_index = state.player(who).draws_this_turn;
-    let ev = GameEvent::Draw { controller: who.to_string(), draw_index, is_natural };
+    let ev = GameEvent::Draw { controller: who, draw_index, is_natural };
     fire_event(ev, state, t, who);
 }
 
@@ -1573,7 +1593,7 @@ fn sim_draw(state: &mut SimState, who: &str, t: u8, is_natural: bool) {
 fn pay_activation_cost(
     state: &mut SimState,
     t: u8,
-    who: &str,
+    who: PlayerId,
     source_id: ObjId,
     ability: &AbilityDef,
 ) {
@@ -1677,7 +1697,7 @@ fn pay_activation_cost(
 fn can_pay_alternate_cost(
     cost: &AlternateCost,
     state: &SimState,
-    who: &str,
+    who: PlayerId,
     source_name: &str,
 ) -> bool {
     if state.hand_size(who) < cost.hand_min {
@@ -1714,7 +1734,7 @@ fn apply_alt_cost_components(
     cost: &AlternateCost,
     state: &mut SimState,
     t: u8,
-    who: &str,
+    who: PlayerId,
     source_name: &str,
 ) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
@@ -1775,7 +1795,7 @@ fn apply_alt_cost_components(
 fn cast_spell(
     state: &mut SimState,
     t: u8,
-    who: &str,
+    who: PlayerId,
     card_id: ObjId,
     face: SpellFace,
     preferred_cost: Option<&AlternateCost>,
@@ -1925,10 +1945,10 @@ fn check_state_based_actions(
         let mut any = false;
 
         // SBA: player with life ≤ 0 loses the game (rule 704.5a).
-        for who in ["us", "opp"] {
+        for who in [PlayerId::Us, PlayerId::Opp] {
             if state.life_of(who) <= 0 {
                 state.log(t, who, format!("→ loses the game (life: {})", state.life_of(who)));
-                if who == "us" { state.reroll = true; }
+                if who == PlayerId::Us { state.reroll = true; }
                 return; // game over — no further SBA processing
             }
         }
@@ -1945,7 +1965,7 @@ fn check_state_based_actions(
 
         // SBA: creature with toughness ≤ 0 goes to graveyard (rule 704.5f).
         // SBA: creature with lethal damage goes to graveyard (rule 704.5g).
-        for who in ["us", "opp"] {
+        for who in [PlayerId::Us, PlayerId::Opp] {
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
@@ -1964,7 +1984,7 @@ fn check_state_based_actions(
         }
 
         // SBA: planeswalker with loyalty ≤ 0 goes to graveyard (rule 704.5i).
-        for who in ["us", "opp"] {
+        for who in [PlayerId::Us, PlayerId::Opp] {
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
                     let bf = card.bf.as_ref()?;
@@ -1980,7 +2000,7 @@ fn check_state_based_actions(
 
         // SBA: legend rule — if a player controls two or more legendary permanents with the
         // same name, that player chooses one to keep; the rest go to graveyard (rule 704.5j).
-        for who in ["us", "opp"] {
+        for who in [PlayerId::Us, PlayerId::Opp] {
             // Collect (name, id) for all legendary permanents controlled by `who`.
             let mut seen: HashMap<String, ObjId> = HashMap::new();
             let mut extras: Vec<ObjId> = Vec::new();
@@ -2008,11 +2028,7 @@ fn check_state_based_actions(
     }
 }
 
-fn opp_of(who: &str) -> &'static str {
-    if who == "us" { "opp" } else { "us" }
-}
-
-fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
+fn do_amass_orc(controller: PlayerId, n: i32, state: &mut SimState, t: u8) {
     let army_id: Option<ObjId> = state.permanents_of(controller)
         .find(|c| c.catalog_key == "Orc Army")
         .map(|c| c.id);
@@ -2027,8 +2043,8 @@ fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
         state.objects.insert(new_id, GameObject {
             id: new_id,
             catalog_key: "Orc Army".to_string(),
-            owner: controller.to_string(),
-            controller: controller.to_string(),
+            owner: controller,
+            controller,
             zone: CardZone::Battlefield,
             is_token: true,
             spell: None,
@@ -2042,13 +2058,13 @@ fn do_amass_orc(controller: &str, n: i32, state: &mut SimState, t: u8) {
     }
 }
 
-fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
+fn do_create_clue(controller: PlayerId, state: &mut SimState, t: u8) {
     let new_id = state.alloc_id();
     state.objects.insert(new_id, GameObject {
         id: new_id,
         catalog_key: "Clue Token".to_string(),
-        owner: controller.to_string(),
-        controller: controller.to_string(),
+        owner: controller,
+        controller,
         zone: CardZone::Battlefield,
         is_token: true,
         spell: None,
@@ -2058,7 +2074,7 @@ fn do_create_clue(controller: &str, state: &mut SimState, t: u8) {
     state.log(t, controller, "Clue Token created");
 }
 
-fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u8) {
+fn do_flip_tamiyo(source_id: ObjId, controller: PlayerId, state: &mut SimState, t: u8) {
     // Read the back-face starting loyalty from the front-face materialized def.
     // The front face is still current in materialized at the moment the trigger resolves
     // (active_face == 0). `back` carries the printed PW data for the flipped face.
@@ -2084,7 +2100,7 @@ fn do_flip_tamiyo(source_id: ObjId, controller: &str, state: &mut SimState, t: u
 fn resolve_top_of_stack(
     state: &mut SimState,
     t: u8,
-    _ap: &str,
+    _ap: PlayerId,
 ) {
     let id = state.stack.pop().unwrap();
     if state.objects.contains_key(&id) {
@@ -2094,7 +2110,7 @@ fn resolve_top_of_stack(
             chosen_targets: vec![],
             is_back_face: false,
         });
-        let owner_str = state.objects[&id].owner.clone();
+        let owner = state.objects[&id].owner;
         let name = state.objects[&id].catalog_key.clone();
 
         // Back face of a split card whose back has subtype "adventure" → exile to on_adventure.
@@ -2116,7 +2132,7 @@ fn resolve_top_of_stack(
                 card_obj.zone = CardZone::Exile { on_adventure: true };
                 card_obj.spell = None;
             }
-            state.log(t, &owner_str, format!("{} resolves → {} on adventure in exile", back_name, name));
+            state.log(t, owner, format!("{} resolves → {} on adventure in exile", back_name, name));
         } else if let Some(ref eff) = spell.effect {
             let is_perm = state.def_of(id)
                 .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
@@ -2126,8 +2142,8 @@ fn resolve_top_of_stack(
                 if let Some(card_obj) = state.objects.get_mut(&id) {
                     card_obj.spell = None;
                 }
-                state.log(t, &owner_str, format!("{} resolves", name));
-                change_zone(id, ZoneId::Graveyard, state, t, &owner_str);
+                state.log(t, owner, format!("{} resolves", name));
+                change_zone(id, ZoneId::Graveyard, state, t, owner);
             }
             eff.call(state, t, &spell.chosen_targets);
             if is_perm {
@@ -2139,8 +2155,8 @@ fn resolve_top_of_stack(
             if let Some(card_obj) = state.objects.get_mut(&id) {
                 card_obj.spell = None;
             }
-            state.log(t, &owner_str, format!("{} resolves", name));
-            change_zone(id, ZoneId::Graveyard, state, t, &owner_str);
+            state.log(t, owner, format!("{} resolves", name));
+            change_zone(id, ZoneId::Graveyard, state, t, owner);
         }
     } else if let Some(ability) = state.abilities.remove(&id) {
         ability.effect.call(state, t, &ability.chosen_targets);
@@ -2150,13 +2166,13 @@ fn resolve_top_of_stack(
 fn handle_priority_round(
     state: &mut SimState,
     t: u8,
-    ap: &str,
+    ap: PlayerId,
     dd_turn: u8,
     rng: &mut impl Rng,
 ) {
-    let nap = if ap == "us" { "opp" } else { "us" };
-    let mut priority_holder = ap.to_string();
-    let mut last_passer: Option<String> = None;
+    let nap = ap.opp();
+    let mut priority_holder = ap;
+    let mut last_passer: Option<PlayerId> = None;
     let mut last_action: PriorityAction = PriorityAction::Pass;
 
     loop {
@@ -2164,32 +2180,31 @@ fn handle_priority_round(
         push_triggers(queued, state);
         check_state_based_actions(state, t);
 
-        let who = priority_holder.clone();
+        let who = priority_holder;
         let action = decide_action(
-            state, t, ap, &who, dd_turn, &last_action, rng,
+            state, t, ap, who, dd_turn, &last_action, rng,
         );
         last_action = action.clone();
 
         match action {
             PriorityAction::LandDrop(card_id) => {
-                sim_play_land(state, t, &who, card_id);
-                state.player_mut(&who).land_drop_available = false;
+                sim_play_land(state, t, who, card_id);
+                state.player_mut(who).land_drop_available = false;
                 last_passer = None;
             }
             PriorityAction::ActivateAbility(source_id, ref ability, ref chosen_targets) => {
                 if ability.loyalty_cost.is_some() && !state.stack.is_empty() {
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    last_passer = Some(who);
+                    priority_holder = if who == ap { nap } else { ap };
                     continue;
                 }
                 let source_name_for_stack = state.permanent_name(source_id)
                     .or_else(|| state.objects.get(&source_id).map(|c| c.catalog_key.clone()))
                     .unwrap_or_default();
                 let (ability_effect, ability_targets): (Option<Effect>, Vec<ObjId>) = if ability.ninjutsu {
-                    let attack_target = state.permanents_of(&who)
+                    let attack_target = state.permanents_of(who)
                         .find(|p| p.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked))
                         .and_then(|p| p.bf.as_ref().and_then(|bf| bf.attack_target));
-                    let who_str = who.clone();
                     let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets| {
                         let ninja_name = state.objects.get(&source_id)
                             .map(|c| c.catalog_key.clone())
@@ -2199,8 +2214,8 @@ fn handle_priority_round(
                         state.objects.insert(new_id, GameObject {
                             id: new_id,
                             catalog_key: ninja_name.clone(),
-                            owner: who_str.clone(),
-                            controller: who_str.clone(),
+                            owner: who,
+                            controller: who,
                             zone: CardZone::Battlefield,
                             is_token: false,
                             spell: None,
@@ -2215,16 +2230,16 @@ fn handle_priority_round(
                             materialized: None,
                         });
                         state.combat_attackers.push(new_id);
-                        state.log(t, &who_str, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
+                        state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
                     }));
                     (Some(ninja_effect), vec![])
                 } else {
-                    let eff = build_ability_effect(ability, &who, source_id);
+                    let eff = build_ability_effect(ability, who, source_id);
                     (Some(eff), chosen_targets.clone())
                 };
-                pay_activation_cost(state, t, &who, source_id, ability);
+                pay_activation_cost(state, t, who, source_id, ability);
                 let ab_id = state.alloc_id();
-                let ab_owner = state.player_id(&who);
+                let ab_owner = state.player_id(who);
                 let ab = StackAbility {
                     id: ab_id,
                     source_name: source_name_for_stack,
@@ -2235,7 +2250,7 @@ fn handle_priority_round(
                 state.abilities.insert(ab_id, ab);
                 state.stack.push(ab_id);
                 let next = if who == ap { nap } else { ap };
-                priority_holder = next.to_string();
+                priority_holder = next;
                 last_passer = None;
             }
             PriorityAction::CastSpell { card_id, face, ref preferred_cost, ref chosen_targets } => {
@@ -2254,38 +2269,38 @@ fn handle_priority_round(
                 if !is_instant && !state.stack.is_empty() {
                     eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack, treating as Pass", name);
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                } else if let Some(cid) = cast_spell(state, t, &who, card_id, face, preferred_cost.as_ref(), chosen_targets) {
-                    if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
-                    state.player_mut(&who).spells_cast_this_turn += 1;
+                    last_passer = Some(who);
+                    priority_holder = if who == ap { nap } else { ap };
+                } else if let Some(cid) = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(), chosen_targets) {
+                    if name == "Doomsday" && who == PlayerId::Us { state.us.dd_cast = true; }
+                    state.player_mut(who).spells_cast_this_turn += 1;
                     state.stack.push(cid);
                     let next = if who == ap { nap } else { ap };
-                    priority_holder = next.to_string();
+                    priority_holder = next;
                     last_passer = None;
                 } else {
-                    let pool = &state.player(&who).pool;
+                    let pool = &state.player(who).pool;
                     eprintln!("[priority] BUG: cast_spell failed for {} by {} (pool B={} U={} tot={}, hand={})",
-                        name, who, pool.b, pool.u, pool.total, state.hand_size(&who));
+                        name, who, pool.b, pool.u, pool.total, state.hand_size(who));
                     debug_assert!(false, "BUG: cast_spell failed — decision function returned unaffordable/unavailable spell");
-                    last_passer = Some(who.clone());
-                    priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
+                    last_passer = Some(who);
+                    priority_holder = if who == ap { nap } else { ap };
                 }
             }
             PriorityAction::Pass => {
                 let other = if who == ap { nap } else { ap };
-                if last_passer.as_deref() == Some(other) {
+                if last_passer == Some(other) {
                     if state.stack.is_empty() {
                         break;
                     } else {
                         resolve_top_of_stack(state, t, ap);
-                        priority_holder = ap.to_string();
+                        priority_holder = ap;
                         last_passer = None;
                         last_action = PriorityAction::Pass;
                     }
                 } else {
-                    last_passer = Some(who.clone());
-                    priority_holder = other.to_string();
+                    last_passer = Some(who);
+                    priority_holder = other;
                 }
             }
         }
@@ -2300,7 +2315,7 @@ fn handle_priority_round(
 fn do_step(
     state: &mut SimState,
     t: u8,
-    ap: &str,
+    ap: PlayerId,
     step: &Step,
     dd_turn: u8,
     on_play: bool,
@@ -2334,7 +2349,7 @@ fn do_step(
             });
         }
         StepKind::Draw => {
-            let this_player_on_play = if ap == "us" { on_play } else { !on_play };
+            let this_player_on_play = if ap == PlayerId::Us { on_play } else { !on_play };
             let skip = this_player_on_play && t == 1;
             if skip {
                 state.log(t, ap, "No draw (on the play)");
@@ -2381,16 +2396,16 @@ fn do_step(
             for atk_id in attackers {
                 fire_event(GameEvent::CreatureAttacked {
                     attacker_id: atk_id,
-                    attacker_controller: ap.to_string(),
+                    attacker_controller: ap,
                 }, state, t, ap);
             }
             fire_event(GameEvent::EnteredStep {
                 step: StepKind::DeclareAttackers,
-                active_player: ap.to_string(),
+                active_player: ap,
             }, state, t, ap);
         }
         StepKind::DeclareBlockers => {
-            let nap = opp_of(ap);
+            let nap = ap.opp();
             // Strategy decides which blockers to assign.
             let blocks = declare_blockers(ap, state);
             for &(atk_id, blk_id) in &blocks {
@@ -2412,7 +2427,7 @@ fn do_step(
         }
         StepKind::CombatDamage => {
             if !state.combat_attackers.is_empty() {
-                let nap = if ap == "us" { "opp" } else { "us" };
+                let nap = ap.opp();
                 let attackers   = state.combat_attackers.clone();
                 let block_pairs = state.combat_blocks.clone();
                 let blocked_atk_ids: std::collections::HashSet<ObjId> = block_pairs.iter()
@@ -2497,7 +2512,7 @@ fn do_step(
     if step.prio && step.kind != StepKind::DeclareAttackers {
         let step_ev = GameEvent::EnteredStep {
             step: step.kind,
-            active_player: ap.to_string(),
+            active_player: ap,
         };
         fire_event(step_ev, state, t, ap);
     }
@@ -2515,7 +2530,7 @@ fn do_step(
 fn do_phase(
     state: &mut SimState,
     t: u8,
-    ap: &str,
+    ap: PlayerId,
     phase: &Phase,
     dd_turn: u8,
     on_play: bool,
@@ -2543,7 +2558,7 @@ fn do_phase(
 fn do_turn(
     state: &mut SimState,
     t: u8,
-    ap: &str,
+    ap: PlayerId,
     dd_turn: u8,
     on_play: bool,
     rng: &mut impl Rng,
@@ -2595,10 +2610,10 @@ fn simulate_game(
         if state.catalog.get(name.as_str()).is_none() { continue; }
         for _ in 0..*qty {
             let id = state.alloc_id();
-            state.objects.insert(id, GameObject::new(id, name.clone(), "us"));
+            state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Us));
             if let Some(def) = state.catalog.get(name.as_str()) {
                 let def = def.clone();
-                preregister_instances(&def, id, "us", &mut state);
+                preregister_instances(&def, id, PlayerId::Us, &mut state);
             }
         }
     }
@@ -2607,27 +2622,27 @@ fn simulate_game(
         if state.catalog.get(name.as_str()).is_none() { continue; }
         for _ in 0..*qty {
             let id = state.alloc_id();
-            state.objects.insert(id, GameObject::new(id, name.clone(), "opp"));
+            state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Opp));
             if let Some(def) = state.catalog.get(name.as_str()) {
                 let def = def.clone();
-                preregister_instances(&def, id, "opp", &mut state);
+                preregister_instances(&def, id, PlayerId::Opp, &mut state);
             }
         }
     }
 
     // Deal opening hands: move `7 - mulligans` cards from Library to Hand.
     for _ in 0..(7u8.saturating_sub(our_mulligans)) {
-        sim_draw(&mut state, "us", 0, false);
+        sim_draw(&mut state, PlayerId::Us, 0, false);
     }
     for _ in 0..(7u8.saturating_sub(opp_mulligans)) {
-        sim_draw(&mut state, "opp", 0, false);
+        sim_draw(&mut state, PlayerId::Opp, 0, false);
     }
 
-    let us_hand = state.hand_size("us");
-    let opp_hand = state.hand_size("opp");
+    let us_hand = state.hand_size(PlayerId::Us);
+    let opp_hand = state.hand_size(PlayerId::Opp);
     state.log(
         0,
-        "—",
+        PlayerId::Us,
         format!(
             "Turn {} — {} ({}) | us: {} cards (-{} mulligans), opp: {} cards (-{} mulligans)",
             turn,
@@ -2644,15 +2659,15 @@ fn simulate_game(
 
     for t in 1..=turn {
         if !on_play {
-            do_turn(&mut state, t, "opp", turn, on_play, rng);
+            do_turn(&mut state, t, PlayerId::Opp, turn, on_play, rng);
             if state.done() { break; }
         }
         {
-            do_turn(&mut state, t, "us", turn, on_play, rng);
+            do_turn(&mut state, t, PlayerId::Us, turn, on_play, rng);
             if state.done() { break; }
         }
         if on_play && t < turn {
-            do_turn(&mut state, t, "opp", turn, on_play, rng);
+            do_turn(&mut state, t, PlayerId::Opp, turn, on_play, rng);
             if state.done() { break; }
         }
     }

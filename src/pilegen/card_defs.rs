@@ -548,11 +548,10 @@ fn murktide_regent() -> CardDef {
         vec![Arc::new(murktide_check)],
         vec![ReplacementDef {
             check: murktide_etb_check,
-            make_effect: Arc::new(|source_id, controller: &str| {
-                let ctl = controller.to_string();
+            make_effect: Arc::new(|source_id, controller: PlayerId| {
                 Effect(Arc::new(move |state, t, targets| {
                     let Some(&id) = targets.first() else { return; };
-                    let exile_count = state.exile_of(&ctl)
+                    let exile_count = state.exile_of(controller)
                         .filter(|c| state.def_of(c.id)
                             .map_or(false, |d| d.is_instant() || d.is_sorcery()))
                         .count() as i32;
@@ -562,12 +561,12 @@ fn murktide_regent() -> CardDef {
                     fire_event(
                         GameEvent::ZoneChange {
                             id,
-                            actor: ctl.clone(),
+                            actor: controller,
                             from: ZoneId::Stack,
                             to: ZoneId::Battlefield,
-                            controller: ctl.clone(),
+                            controller,
                         },
-                        state, t, &ctl,
+                        state, t, controller,
                     );
                 }))
             }),
@@ -620,11 +619,10 @@ fn tamiyo_inquisitive_student() -> CardDef {
 fn leyline_of_the_void() -> CardDef {
     let replacement = ReplacementDef {
         check: leyline_check,
-        make_effect: Arc::new(|_source_id, controller: &str| {
-            let ctl = controller.to_string();
+        make_effect: Arc::new(|_source_id, controller: PlayerId| {
             Effect(Arc::new(move |state, t, targets| {
                 if let Some(&id) = targets.first() {
-                    change_zone(id, ZoneId::Exile, state, t, &ctl);
+                    change_zone(id, ZoneId::Exile, state, t, controller);
                 }
             }))
         }),

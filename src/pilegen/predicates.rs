@@ -207,7 +207,7 @@ pub(crate) fn pick_target(targets: &[ObjId], state: &SimState) -> Option<ObjId> 
 
 /// Enumerate all legal targets for `spec` given the current game state.
 /// No heuristic — returns every valid option. Caller picks.
-pub(crate) fn legal_targets(spec: &TargetSpec, controller: &str, state: &SimState) -> Vec<ObjId> {
+pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, state: &SimState) -> Vec<ObjId> {
     match spec {
         TargetSpec::None => vec![],
         TargetSpec::Player(who) => vec![state.player_id(who.resolve(controller))],
@@ -251,7 +251,7 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: &str, state: &SimStat
 pub(crate) fn has_valid_target(
     spec: &TargetSpec,
     state: &SimState,
-    actor: &str,
+    actor: PlayerId,
 ) -> bool {
     has_valid_target_spec(spec, state, actor)
 }
@@ -259,7 +259,7 @@ pub(crate) fn has_valid_target(
 fn has_valid_target_spec(
     spec: &TargetSpec,
     state: &SimState,
-    actor: &str,
+    actor: PlayerId,
 ) -> bool {
     match spec {
         TargetSpec::None => false,
@@ -285,7 +285,7 @@ fn has_valid_target_spec(
 /// Iterate over ObjIds in the given zone controlled (or owned) by `who`.
 fn objects_in_zone<'a>(
     zone: &ZoneId,
-    who: &'a str,
+    who: PlayerId,
     state: &'a SimState,
 ) -> impl Iterator<Item = ObjId> + 'a {
     let zone_card = match zone {
@@ -296,7 +296,6 @@ fn objects_in_zone<'a>(
         ZoneId::Exile       => CardZone::Exile { on_adventure: false },
         ZoneId::Hand        => CardZone::Hand { known: false },
     };
-    let who = who.to_string();
     state.objects.values()
         .filter(move |o| {
             let zone_match = match &o.zone {
