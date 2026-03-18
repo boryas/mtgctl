@@ -204,7 +204,7 @@ pub(crate) struct SpellData {
     pub(crate) exileable: bool,
     /// Declarative target specification. `TargetSpec::None` means no target required.
     pub(crate) target_spec: TargetSpec,
-    pub(crate) requires: Vec<String>,
+
     pub(crate) alternate_costs: Vec<AlternateCost>,
     pub(crate) delve: bool,
     /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
@@ -219,7 +219,7 @@ impl Default for SpellData {
             mana_cost: String::new(),
             exileable: false,
             target_spec: TargetSpec::None,
-            requires: Vec::new(),
+
             alternate_costs: Vec::new(),
             delve: false,
             subtypes: Vec::new(),
@@ -347,13 +347,6 @@ impl CardDef {
         match &self.kind {
             CardKind::Instant(s) | CardKind::Sorcery(s) => &s.target_spec,
             _ => &TargetSpec::None,
-        }
-    }
-
-    pub(crate) fn requires(&self) -> &[String] {
-        match &self.kind {
-            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.requires,
-            _ => &[],
         }
     }
 

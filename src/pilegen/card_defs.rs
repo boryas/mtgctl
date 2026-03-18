@@ -377,7 +377,6 @@ fn ponder() -> CardDef {
 fn thoughtseize() -> CardDef {
     simple("Thoughtseize", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
-        requires: vec!["opp_hand_nonempty".to_string()],
         spell_factory: Some(Arc::new(|who| {
             eff_discard(who, Who::Opp, 1, "nonland")
                 .then(eff_life_loss(who, 2))
@@ -390,7 +389,6 @@ fn thoughtseize() -> CardDef {
 fn unearth() -> CardDef {
     simple("Unearth", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
-        requires: vec!["us_gy_has_creature".to_string()],
         target_spec: target_spec_from_str(Some("self:gy:creature")),
         spell_factory: Some(Arc::new(|who| eff_reanimate(who))),
         ..Default::default()
@@ -401,7 +399,6 @@ fn unearth() -> CardDef {
 fn hymn_to_tourach() -> CardDef {
     simple("Hymn to Tourach", CardKind::Sorcery(SpellData {
         mana_cost: "BB".to_string(),
-        requires: vec!["opp_hand_nonempty".to_string()],
         spell_factory: Some(Arc::new(|who| eff_discard(who, Who::Opp, 2, ""))),
         ..Default::default()
     }), parse_colors("BB", false, false), None)

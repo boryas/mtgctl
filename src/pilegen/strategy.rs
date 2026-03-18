@@ -549,8 +549,6 @@ fn collect_hand_actions(
     if state.hand_size(who) <= 0 {
         return Vec::new();
     }
-    let opp_who = if who == "us" { "opp" } else { "us" };
-
     let hand_cards: Vec<(ObjId, String)> = state.hand_of(who)
         .map(|c| (c.id, c.catalog_key.clone()))
         .collect();
@@ -564,13 +562,6 @@ fn collect_hand_actions(
         if !card_has_implementation(def) { continue; }
         if def.legendary() && state.permanents_of(who).any(|c| c.catalog_key == name.as_str()) { continue; }
         if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who) { continue; }
-        let ok = def.requires().iter().all(|req| match req.as_str() {
-            "opp_hand_nonempty" => state.hand_size(opp_who) > 0,
-            "us_gy_has_creature" => state.graveyard_of(who)
-                .any(|c| state.def_of(c.id).map(|d| d.is_creature()).unwrap_or(false)),
-            _ => true,
-        });
-        if !ok { continue; }
         if !spell_is_affordable(name, def, state, who) { continue; }
         if seen_names.insert(name.clone()) {
             let targets = legal_targets(def.target_spec(), who, state);
