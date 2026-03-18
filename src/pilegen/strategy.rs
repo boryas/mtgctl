@@ -1,6 +1,7 @@
 use rand::Rng;
 use super::*;
 
+
 fn pick_on_board_action(
     state: &mut SimState,
     ap: &str,
@@ -25,7 +26,10 @@ fn pick_on_board_action(
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
-                    candidates.push(PriorityAction::ActivateAbility(land_id, ab));
+                    let spec = target_spec_from_str(ab.target.as_deref());
+                    let targets = legal_targets(&spec, ap, state);
+                    let chosen = pick_target(&targets, state).into_iter().collect();
+                    candidates.push(PriorityAction::ActivateAbility(land_id, ab, chosen));
                 }
             }
         }
@@ -49,7 +53,10 @@ fn pick_on_board_action(
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
-                    candidates.push(PriorityAction::ActivateAbility(perm_id, ab));
+                    let spec = target_spec_from_str(ab.target.as_deref());
+                    let targets = legal_targets(&spec, ap, state);
+                    let chosen = pick_target(&targets, state).into_iter().collect();
+                    candidates.push(PriorityAction::ActivateAbility(perm_id, ab, chosen));
                 }
             }
         }
@@ -77,7 +84,10 @@ fn pick_on_board_action(
                     .next()
                     .cloned()
                 {
-                    candidates.push(PriorityAction::ActivateAbility(pw_id, ab));
+                    let spec = target_spec_from_str(ab.target.as_deref());
+                    let targets = legal_targets(&spec, ap, state);
+                    let chosen = pick_target(&targets, state).into_iter().collect();
+                    candidates.push(PriorityAction::ActivateAbility(pw_id, ab, chosen));
                 }
             }
         }
@@ -99,13 +109,16 @@ fn pick_on_board_action(
         if !fetch_ids.is_empty() {
             for &fid in &fetch_ids {
                 // Force-include if not already a candidate (bypasses the 75% roll).
-                if !candidates.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _) if *id == fid)) {
+                if !candidates.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _, _) if *id == fid)) {
                     if let Some(def) = state.def_of(fid) {
                         if let Some(ab) = def.abilities().iter()
                             .find(|ab| ability_available(ab, state, "us", true))
                             .cloned()
                         {
-                            candidates.push(PriorityAction::ActivateAbility(fid, ab));
+                            let spec = target_spec_from_str(ab.target.as_deref());
+                            let targets = legal_targets(&spec, "us", state);
+                            let chosen = pick_target(&targets, state).into_iter().collect();
+                            candidates.push(PriorityAction::ActivateAbility(fid, ab, chosen));
                         }
                     }
                 }
@@ -123,7 +136,10 @@ fn pick_on_board_action(
             let cost = parse_mana_cost(def.mana_cost());
             if !state.potential_mana(ap).can_pay(&cost) { continue; }
             if rng.gen_bool(0.75) {
-                candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None });
+                let spec = target_spec_from_str(def.target());
+                let targets = legal_targets(&spec, ap, state);
+                let chosen = pick_target(&targets, state).into_iter().collect();
+                candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen });
             }
         }
     }
@@ -564,13 +580,19 @@ fn collect_hand_actions(
         if !ok { continue; }
         if !spell_is_affordable(name, def, state, who) { continue; }
         if seen_names.insert(name.clone()) {
-            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None });
+            let spec = target_spec_from_str(def.target());
+            let targets = legal_targets(&spec, who, state);
+            let chosen = pick_target(&targets, state).into_iter().collect();
+            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen });
         }
 
         // In-hand abilities (cycling, channel, etc.)
         for ab in def.abilities().iter().filter(|ab| ab.zone == "hand") {
             if hand_ability_affordable(ab, state, who) {
-                actions.push(PriorityAction::ActivateAbility(*card_id, ab.clone()));
+                let spec = target_spec_from_str(ab.target.as_deref());
+                let targets = legal_targets(&spec, who, state);
+                let chosen = pick_target(&targets, state).into_iter().collect();
+                actions.push(PriorityAction::ActivateAbility(*card_id, ab.clone(), chosen));
             }
         }
 
@@ -583,7 +605,10 @@ fn collect_hand_actions(
             if let Some(tgt) = face.target() {
                 if !has_valid_target(tgt, state, who) { continue; }
             }
-            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None });
+            let spec = target_spec_from_str(face.target());
+            let adv_targets = legal_targets(&spec, who, state);
+            let adv_chosen = pick_target(&adv_targets, state).into_iter().collect();
+            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None, chosen_targets: adv_chosen });
         }
     }
 
@@ -707,6 +732,7 @@ fn respond_with_counter(
                     card_id: *cs_id,
                     face: SpellFace::Main,
                     preferred_cost: Some(cost.clone()),
+                    chosen_targets: vec![Target::Object(target_id)],
                 });
             }
         }
@@ -741,5 +767,5 @@ pub(super) fn try_ninjutsu(
     let ninja_def = state.def_of(*ninja_id)?;
     let ninjutsu_cost = parse_mana_cost(&ninja_def.ninjutsu()?.mana_cost);
     if !state.potential_mana(who).can_pay(&ninjutsu_cost) { return None; }
-    Some(PriorityAction::ActivateAbility(*ninja_id, ninja_def.ninjutsu()?.as_ability_def()))
+    Some(PriorityAction::ActivateAbility(*ninja_id, ninja_def.ninjutsu()?.as_ability_def(), vec![]))
 }

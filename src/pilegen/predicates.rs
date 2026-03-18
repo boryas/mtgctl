@@ -1,4 +1,3 @@
-use rand::Rng;
 use super::*;
 
 // ── CardPredicate ─────────────────────────────────────────────────────────────
@@ -178,101 +177,76 @@ pub(crate) fn target_spec_from_str(target: Option<&str>) -> TargetSpec {
     TargetSpec::None
 }
 
-/// Choose a target for a trigger according to its spec and current game state.
-/// Returns None if the spec is None or no legal targets exist.
-pub(crate) fn choose_trigger_target(
-    spec: &TargetSpec,
-    controller: &str,
-    state: &SimState,
-) -> Option<Target> {
-    let opp = opp_of(controller);
+/// Pick one target from a list of legal targets using the standard heuristic:
+/// prefer a killable creature (tgh - damage <= 1), then planeswalker or player over
+/// non-killable creatures, then fall back to the first available target.
+pub(crate) fn pick_target(targets: &[Target], state: &SimState) -> Option<Target> {
+    if targets.is_empty() { return None; }
+    // Prefer a killable creature
+    if let Some(&Target::Object(id)) = targets.iter().find(|t| {
+        let Target::Object(id) = t else { return false; };
+        let is_creature = state.def_of(*id)
+            .or_else(|| state.objects.get(id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+            .map(|d| d.is_creature()).unwrap_or(false);
+        if !is_creature { return false; }
+        let tgh = state.def_of(*id)
+            .or_else(|| state.objects.get(id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+            .and_then(|d| d.as_creature()).map(|c| c.toughness()).unwrap_or(1);
+        let dmg = state.permanent_bf(*id).map(|bf| bf.damage).unwrap_or(0);
+        tgh > 0 && tgh - dmg <= 1
+    }) {
+        return Some(Target::Object(id));
+    }
+    // Skip non-killable creatures — prefer planeswalker or player over them
+    if let Some(t) = targets.iter().find(|t| {
+        !matches!(t, Target::Object(id) if
+            state.def_of(*id)
+                .or_else(|| state.objects.get(id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+                .map(|d| d.is_creature()).unwrap_or(false))
+    }) {
+        return Some(t.clone());
+    }
+    // Fallback: first target
+    Some(targets[0].clone())
+}
+
+/// Enumerate all legal targets for `spec` given the current game state.
+/// No heuristic — returns every valid option. Caller picks.
+pub(crate) fn legal_targets(spec: &TargetSpec, controller: &str, state: &SimState) -> Vec<Target> {
     match spec {
-        TargetSpec::None => None,
-        TargetSpec::Player(who) => Some(Target::Player(state.player_id(who.resolve(controller)))),
+        TargetSpec::None => vec![],
+        TargetSpec::Player(who) => vec![Target::Player(state.player_id(who.resolve(controller)))],
         TargetSpec::ObjectInZone { controller: who, zone, filter } => {
             let target_who = who.resolve(controller);
             objects_in_zone(zone, target_who, state)
-                .find(|&id| {
-                    // Stack: only opposing, counterable spells
+                .filter(|&id| {
                     if *zone == ZoneId::Stack {
                         let actor_id = state.player_id(controller);
                         if state.stack_item_owner(id) == actor_id
                             || !state.stack_item_is_counterable(id) { return false; }
                     }
-                    state.def_of(id).map(|d| filter(d)).unwrap_or(false)
+                    state.def_of(id)
+                        .or_else(|| state.objects.get(&id)
+                            .and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+                        .map(|d| filter(d))
+                        .unwrap_or(false)
                 })
                 .map(Target::Object)
+                .collect()
         }
         TargetSpec::Union(specs) => {
-            // Strategy: prefer a killable opponent creature (1-damage kill).
-            // Non-killable creatures are lower priority than planeswalker or player.
-            if let Some(id) = state.permanents_of(opp)
-                .filter(|p| {
-                    if !state.def_of(p.id).map(|d| d.is_creature()).unwrap_or(false) { return false; }
-                    let bf = p.bf.as_ref().unwrap();
-                    let tgh = state.def_of(p.id)
-                        .and_then(|d| d.as_creature())
-                        .map(|c| c.toughness())
-                        .unwrap_or(1);
-                    // Spec-check: at least one sub-spec must accept this creature.
-                    if !specs.iter().any(|sub| {
-                        if let TargetSpec::ObjectInZone { zone: ZoneId::Battlefield, filter, .. } = sub {
-                            state.def_of(p.id).map(|d| filter(d)).unwrap_or(false)
-                        } else { false }
-                    }) { return false; }
-                    tgh - bf.damage <= 1 && tgh > 0
-                })
-                .map(|p| p.id)
-                .next()
-            {
-                return Some(Target::Object(id));
-            }
-            // No killable creature: try non-creature sub-specs (planeswalker, player).
+            // Collect all legal targets from all sub-specs, deduplicating by value.
+            let mut seen = std::collections::HashSet::new();
+            let mut result = Vec::new();
             for sub in specs {
-                // Skip creature-matching battlefield specs (already handled above).
-                if let TargetSpec::ObjectInZone { zone: ZoneId::Battlefield, filter, .. } = sub {
-                    // If any opponent creature satisfies this filter, skip (creature sub-spec).
-                    if state.permanents_of(opp).any(|p| {
-                        state.def_of(p.id).map(|d| d.is_creature() && filter(d)).unwrap_or(false)
-                    }) { continue; }
-                }
-                if let Some(t) = choose_trigger_target(sub, controller, state) {
-                    return Some(t);
+                for t in legal_targets(sub, controller, state) {
+                    if seen.insert(format!("{t:?}")) {
+                        result.push(t);
+                    }
                 }
             }
-            None
+            result
         }
-    }
-}
-
-/// Choose a target for a spell. Zone targets are selected randomly (strategy-layer RNG);
-/// all other specs delegate to `choose_trigger_target` (deterministic).
-pub(crate) fn choose_spell_target(
-    spec: &TargetSpec,
-    caster: &str,
-    state: &SimState,
-    rng: &mut impl Rng,
-) -> Option<Target> {
-    match spec {
-        TargetSpec::ObjectInZone { controller: who, zone: ZoneId::Graveyard, filter } => {
-            let target_who = who.resolve(caster).to_string();
-            let candidates: Vec<ObjId> = state.graveyard_of(&target_who)
-                .filter(|c| state.def_of(c.id).map(|d| filter(d)).unwrap_or(false))
-                .map(|c| c.id)
-                .collect();
-            if candidates.is_empty() { return None; }
-            Some(Target::Object(candidates[rng.gen_range(0..candidates.len())]))
-        }
-        TargetSpec::ObjectInZone { controller: who, zone: ZoneId::Battlefield, filter } => {
-            let target_who = who.resolve(caster).to_string();
-            let candidates: Vec<ObjId> = state.permanents_of(&target_who)
-                .filter(|p| state.def_of(p.id).map(|d| filter(d)).unwrap_or(false))
-                .map(|p| p.id)
-                .collect();
-            if candidates.is_empty() { return None; }
-            Some(Target::Object(candidates[rng.gen_range(0..candidates.len())]))
-        }
-        other => choose_trigger_target(other, caster, state),
     }
 }
 
@@ -311,28 +285,6 @@ fn has_valid_target_spec(
     }
 }
 
-/// Pick a random valid permanent target for `target_str` (e.g. "opp:creature_mv_lt4").
-/// Returns the stable `ObjId` of the chosen permanent, or `None` if no valid target exists.
-pub(crate) fn choose_permanent_target(
-    target_str: &str,
-    actor: &str,
-    state: &SimState,
-    rng: &mut impl Rng,
-) -> Option<ObjId> {
-    let (who_rel, type_str) = target_str.split_once(':')?;
-    let target_who = resolve_who(who_rel, actor).to_string();
-    let pred = permanent_pred_from_str(type_str);
-    let mut candidates: Vec<ObjId> = state.permanents_of(&target_who)
-        .filter(|p| state.def_of(p.id)
-            .or_else(|| state.catalog.get(p.catalog_key.as_str()))
-            .map(|d| pred(d))
-            .unwrap_or(false))
-        .map(|p| p.id)
-        .collect();
-    if candidates.is_empty() { return None; }
-    let idx = rng.gen_range(0..candidates.len());
-    Some(candidates.remove(idx))
-}
 
 /// Build a `CardPredicate` from a library search filter token.
 ///
@@ -418,15 +370,3 @@ fn objects_in_zone<'a>(
         .map(|o| o.id)
 }
 
-/// Resolve `"<who>"` relative to the acting player.
-pub(crate) fn resolve_who<'a>(who_rel: &str, actor: &'a str) -> &'a str {
-    if who_rel == "opp" {
-        if actor == "us" {
-            "opp"
-        } else {
-            "us"
-        }
-    } else {
-        actor
-    }
-}

@@ -498,7 +498,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, "us", dark_ritual_id, SpellFace::Main, None, &mut seeded_rng());
+        let card_id = cast_spell(&mut state, 1, "us", dark_ritual_id, SpellFace::Main, None, &[], &mut seeded_rng());
 
         assert!(card_id.is_some(), "spell should be cast");
         let card_id = card_id.unwrap();
@@ -518,7 +518,7 @@
 
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let item = cast_spell(&mut state, 1, "us", doomsday_id, SpellFace::Main, None, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", doomsday_id, SpellFace::Main, None, &[], &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast with no mana");
     }
@@ -538,7 +538,7 @@
         let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
-        let item = cast_spell(&mut state, 1, "us", fow_id, SpellFace::Main, Some(alt_cost), &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", fow_id, SpellFace::Main, Some(alt_cost), &[], &mut seeded_rng());
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
@@ -725,9 +725,9 @@
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let targets: Vec<Target> = choose_permanent_target("opp:nonbasic_land", "us", &state, &mut seeded_rng())
-            .map(|id| vec![Target::Object(id)])
-            .unwrap_or_default();
+        let targets: Vec<Target> = legal_targets(
+            &target_spec_from_str(Some("opp:nonbasic_land")), "us", &state
+        );
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
         eff.call(&mut state, 1, &targets, &mut seeded_rng());
 
@@ -743,9 +743,9 @@
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let targets: Vec<Target> = choose_permanent_target("opp:nonbasic_land", "us", &state, &mut seeded_rng())
-            .map(|id| vec![Target::Object(id)])
-            .unwrap_or_default();
+        let targets: Vec<Target> = legal_targets(
+            &target_spec_from_str(Some("opp:nonbasic_land")), "us", &state
+        );
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
         eff.call(&mut state, 1, &targets, &mut seeded_rng());
 
@@ -771,7 +771,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, "us", tc_id, SpellFace::Main, None, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", tc_id, SpellFace::Main, None, &[], &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.graveyard_of("us").count(), 0, "all 7 graveyard cards exiled");
@@ -793,7 +793,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &[], &mut seeded_rng());
 
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.graveyard_of("us").count(), 0, "both graveyard cards exiled");
@@ -823,7 +823,7 @@
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &mut seeded_rng()).unwrap();
+        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &[], &mut seeded_rng()).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -861,7 +861,7 @@
         let catalog = vec![murktide_def.clone(), ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &mut seeded_rng()).unwrap();
+        let card_id = cast_spell(&mut state, 1, "us", murktide_id, SpellFace::Main, None, &[], &mut seeded_rng()).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -917,7 +917,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &mut seeded_rng());
+        let item = cast_spell(&mut state, 1, "us", dead_drop_id, SpellFace::Main, None, &[], &mut seeded_rng());
 
         assert!(item.is_none(), "can't cast — 1 generic still unpaid");
         assert_eq!(state.graveyard_of("us").count(), 2, "graveyard unchanged on failed cast");
@@ -932,9 +932,9 @@
         let ability = AbilityDef { target: Some("opp:creature".to_string()), effect: "exile".to_string(), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let targets: Vec<Target> = choose_permanent_target("opp:creature", "us", &state, &mut seeded_rng())
-            .map(|id| vec![Target::Object(id)])
-            .unwrap_or_default();
+        let targets: Vec<Target> = legal_targets(
+            &target_spec_from_str(Some("opp:creature")), "us", &state
+        );
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
         eff.call(&mut state, 1, &targets, &mut seeded_rng());
 
@@ -1367,8 +1367,8 @@
         // Rebuild materialized so choose_trigger_target sees current P/T.
         recompute(state);
         let ctx = bowmasters_etb_ctx(controller);
-        let targets: Vec<Target> = choose_trigger_target(&ctx.target_spec, controller, state)
-            .into_iter().collect();
+        let all_targets = legal_targets(&ctx.target_spec, controller, state);
+        let targets: Vec<Target> = pick_target(&all_targets, state).into_iter().collect();
         ctx.effect.call(state, 1, &targets, &mut rand::thread_rng());
     }
 
@@ -1795,7 +1795,7 @@
             let mut rng = StdRng::seed_from_u64(seed);
             let action = decide_action(&mut state, 1, "us", "us", 99, &PriorityAction::Pass, &mut rng);
             assert!(
-                !matches!(action, PriorityAction::ActivateAbility(id, _) if id == delta_id),
+                !matches!(action, PriorityAction::ActivateAbility(id, _, _) if id == delta_id),
                 "seed {}: offered ability for sacrificed permanent — effect would fire without a stack item",
                 seed
             );

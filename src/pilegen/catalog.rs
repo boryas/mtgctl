@@ -708,8 +708,9 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
 /// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
 pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
     for ctx in triggers {
-        let chosen_targets = choose_trigger_target(&ctx.target_spec, &ctx.controller, state)
-            .into_iter().collect();
+        let all_targets = legal_targets(&ctx.target_spec, &ctx.controller, state);
+        let chosen_targets = pick_target(&all_targets, state)
+            .into_iter().collect::<Vec<_>>();
         let ab_id = state.alloc_id();
         let ab_owner = state.player_id(&ctx.controller);
         let ab = StackAbility {

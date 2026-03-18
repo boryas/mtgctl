@@ -439,13 +439,15 @@ enum SpellFace { Main, Back }
 enum PriorityAction {
     /// Land drop: AP only, does NOT pass priority. Carries the chosen land name.
     LandDrop(ObjId),
-    /// Activate a permanent ability. Carries source ObjId + ability def. Uses the stack, passes priority after.
-    ActivateAbility(ObjId, AbilityDef),
+    /// Activate a permanent ability. Carries source ObjId + ability def + pre-chosen targets.
+    /// Uses the stack, passes priority after.
+    ActivateAbility(ObjId, AbilityDef, Vec<Target>),
     /// Intent to cast a spell. No resources are spent until `handle_priority_round` accepts and
     /// commits this action. The framework validates legality (sorcery-speed, etc.) there.
     /// `face` selects main vs adventure face/cost; card zone identifies the source zone.
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
-    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost> },
+    /// `chosen_targets` — targets picked by strategy at action-construction time.
+    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<Target> },
     /// Pass priority.
     Pass,
 }
@@ -1796,6 +1798,7 @@ fn cast_spell(
     card_id: ObjId,
     face: SpellFace,
     preferred_cost: Option<&AlternateCost>,
+    chosen_targets: &[Target],
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
@@ -1816,9 +1819,8 @@ fn cast_spell(
         let cost = parse_mana_cost(adv.mana_cost());
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
-        let (adv_spec, adv_eff) = build_spell_effect(&adv, who);
-        let adv_targets = choose_spell_target(&adv_spec, who, state, rng)
-            .into_iter().collect::<Vec<_>>();
+        let (_adv_spec, adv_eff) = build_spell_effect(&adv, who);
+        let adv_targets = chosen_targets.to_vec();
         state.log(t, who, format!("Cast {} ({}, {}) [hand: {}]", adv.name, adv.mana_cost(), name, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
             card.zone = CardZone::Stack;
@@ -1899,9 +1901,8 @@ fn cast_spell(
     };
     state.log(t, who, format!("Cast {} ({}{}) [hand: {}]", name, cast_label, delve_label, state.hand_size(who)));
 
-    let (spell_target_spec, spell_eff) = build_spell_effect(&def, who);
-    let spell_chosen_targets = choose_spell_target(&spell_target_spec, who, state, rng)
-        .into_iter().collect::<Vec<_>>();
+    let (_spell_target_spec, spell_eff) = build_spell_effect(&def, who);
+    let spell_chosen_targets = chosen_targets.to_vec();
 
     if let Some(card) = state.objects.get_mut(&card_id) {
         card.spell = Some(SpellState {
@@ -2200,7 +2201,7 @@ fn handle_priority_round(
                 state.player_mut(&who).land_drop_available = false;
                 last_passer = None;
             }
-            PriorityAction::ActivateAbility(source_id, ref ability) => {
+            PriorityAction::ActivateAbility(source_id, ref ability, ref chosen_targets) => {
                 if ability.loyalty_cost.is_some() && !state.stack.is_empty() {
                     last_passer = Some(who.clone());
                     priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
@@ -2244,14 +2245,7 @@ fn handle_priority_round(
                     (Some(ninja_effect), vec![])
                 } else {
                     let eff = build_ability_effect(ability, &who, source_id);
-                    let targets = if ability.target.is_some() {
-                        choose_permanent_target(ability.target.as_deref().unwrap_or(""), &who, state, rng)
-                            .map(|id| vec![Target::Object(id)])
-                            .unwrap_or_default()
-                    } else {
-                        vec![]
-                    };
-                    (Some(eff), targets)
+                    (Some(eff), chosen_targets.clone())
                 };
                 pay_activation_cost(state, t, &who, source_id, ability);
                 let ab_id = state.alloc_id();
@@ -2269,7 +2263,7 @@ fn handle_priority_round(
                 priority_holder = next.to_string();
                 last_passer = None;
             }
-            PriorityAction::CastSpell { card_id, face, ref preferred_cost } => {
+            PriorityAction::CastSpell { card_id, face, ref preferred_cost, ref chosen_targets } => {
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
                 // Sorcery-speed check: for the main face read the materialized def; for the back
                 // face read the back def's kind (the back face might be instant even if the front
@@ -2287,7 +2281,7 @@ fn handle_priority_round(
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     last_passer = Some(who.clone());
                     priority_holder = if who == ap { nap.to_string() } else { ap.to_string() };
-                } else if let Some(cid) = cast_spell(state, t, &who, card_id, face, preferred_cost.as_ref(), rng) {
+                } else if let Some(cid) = cast_spell(state, t, &who, card_id, face, preferred_cost.as_ref(), chosen_targets, rng) {
                     if name == "Doomsday" && who == "us" { state.us.dd_cast = true; }
                     state.player_mut(&who).spells_cast_this_turn += 1;
                     state.stack.push(cid);
