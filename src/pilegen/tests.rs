@@ -1318,8 +1318,6 @@
         let ev = GameEvent::ZoneChange {
             id: bowmasters_id,
             actor: "test".to_string(),
-            card: "Orcish Bowmasters".to_string(),
-            card_type: "creature".to_string(),
             from: ZoneId::Stack,
             to: ZoneId::Battlefield,
             controller: "opp".to_string(),
@@ -1335,8 +1333,6 @@
         let ev = GameEvent::ZoneChange {
             id: ObjId::UNSET,
             actor: "test".to_string(),
-            card: "Orcish Bowmasters".to_string(),
-            card_type: "creature".to_string(),
             from: ZoneId::Stack,
             to: ZoneId::Battlefield,
             controller: "opp".to_string(),
@@ -1347,17 +1343,16 @@
 
     /// Fire a Bowmasters ETB trigger for `controller` and return the TriggerContext.
     fn bowmasters_etb_ctx(controller: &str) -> TriggerContext {
+        let state = make_state();
         let ev = GameEvent::ZoneChange {
             id: ObjId::UNSET,
             actor: "test".to_string(),
-            card: "Orcish Bowmasters".into(),
-            card_type: "creature".into(),
             from: ZoneId::Hand,
             to: ZoneId::Battlefield,
             controller: controller.to_string(),
         };
         let mut pending = Vec::new();
-        bowmasters_check(&ev, ObjId::UNSET, controller, &mut pending);
+        bowmasters_check(&ev, ObjId::UNSET, controller, &state, &mut pending);
         pending.remove(0)
     }
 
@@ -1462,12 +1457,13 @@
     fn test_murktide_counter_on_instant_exile() {
         let mut state = make_state();
         add_perm(&mut state, "us", "Murktide Regent", BattlefieldState { counters: 0, ..BattlefieldState::new() });
+        // Add the card being exiled so murktide_check can look up its type.
+        let consider_id = add_default_perm(&mut state, "us", "Consider");
+        state.objects.get_mut(&consider_id).unwrap().zone = CardZone::Exile { on_adventure: false };
 
         let ev = GameEvent::ZoneChange {
-            id: ObjId::UNSET,
+            id: consider_id,
             actor: "test".to_string(),
-            card: "Counterspell".to_string(),
-            card_type: "instant".to_string(),
             from: ZoneId::Graveyard,
             to: ZoneId::Exile,
             controller: "us".to_string(),
@@ -1486,12 +1482,12 @@
     fn test_murktide_no_counter_on_land_exile() {
         let mut state = make_state();
         add_default_perm(&mut state, "us", "Murktide Regent");
+        let island_id = add_default_perm(&mut state, "us", "Island");
+        state.objects.get_mut(&island_id).unwrap().zone = CardZone::Exile { on_adventure: false };
 
         let ev = GameEvent::ZoneChange {
-            id: ObjId::UNSET,
+            id: island_id,
             actor: "test".to_string(),
-            card: "Island".to_string(),
-            card_type: "land".to_string(),
             from: ZoneId::Graveyard,
             to: ZoneId::Exile,
             controller: "us".to_string(),
@@ -1666,7 +1662,7 @@
             state.trigger_instances.push(TriggerInstance {
                 source_id: ObjId::UNSET,
                 controller: "us".to_string(),
-                check: std::sync::Arc::new(move |e, _source_id, _ctl, pending| {
+                check: std::sync::Arc::new(move |e, _source_id, _ctl, _state, pending| {
                     if let GameEvent::EnteredStep { step, .. } = e {
                         if *step == step_kind {
                             pending.push(TriggerContext {
@@ -1698,7 +1694,7 @@
             state.trigger_instances.push(TriggerInstance {
                 source_id: ObjId::UNSET,
                 controller: "us".to_string(),
-                check: std::sync::Arc::new(move |e, _source_id, _ctl, pending| {
+                check: std::sync::Arc::new(move |e, _source_id, _ctl, _state, pending| {
                     if let GameEvent::EnteredPhase { phase, .. } = e {
                         if *phase == phase_kind {
                             pending.push(TriggerContext {

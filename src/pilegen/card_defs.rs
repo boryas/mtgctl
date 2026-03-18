@@ -136,7 +136,7 @@ fn undercity_sewers() -> CardDef {
         }),
         vec![], None, vec![], CardLayout::Normal, None,
         vec![],
-        vec![replacement_enters_tapped(CardType::Land)],
+        vec![replacement_enters_tapped()],
         vec![],
     )
 }
@@ -548,7 +548,7 @@ fn murktide_regent() -> CardDef {
         vec![Arc::new(murktide_check)],
         vec![ReplacementDef {
             check: murktide_etb_check,
-            make_effect: Arc::new(|_source_id, controller: &str| {
+            make_effect: Arc::new(|source_id, controller: &str| {
                 let ctl = controller.to_string();
                 Effect(Arc::new(move |state, t, targets, rng| {
                     let Some(&id) = targets.first() else { return; };
@@ -563,8 +563,6 @@ fn murktide_regent() -> CardDef {
                         GameEvent::ZoneChange {
                             id,
                             actor: ctl.clone(),
-                            card: "Murktide Regent".to_string(),
-                            card_type: "creature".to_string(),
                             from: ZoneId::Stack,
                             to: ZoneId::Battlefield,
                             controller: ctl.clone(),

@@ -161,8 +161,6 @@ pub(super) enum GameEvent {
     ZoneChange {
         id: ObjId,
         actor: String,
-        card: String,
-        card_type: String,
         from: ZoneId,
         to: ZoneId,
         controller: String,
@@ -210,9 +208,9 @@ pub(crate) struct TriggerContext {
 // ── Triggers and replacement effects ─────────────────────────────────────────
 
 /// Signature for a per-card trigger check function.
-/// Inspects the event, and if a trigger fires, appends a `TriggerContext` to `pending`.
+/// Inspects the event and game state; if a trigger fires, appends a `TriggerContext` to `pending`.
 pub(super) type TriggerCheckFn =
-    std::sync::Arc<dyn Fn(&GameEvent, ObjId, &str, &mut Vec<TriggerContext>) + Send + Sync>;
+    std::sync::Arc<dyn Fn(&GameEvent, ObjId, &str, &SimState, &mut Vec<TriggerContext>) + Send + Sync>;
 
 /// Signature for a per-card replacement check function.
 /// Returns Some(targets) if this replacement applies to the event; None otherwise.
@@ -1393,13 +1391,6 @@ pub(super) fn card_zone_to_id(zone: &CardZone) -> ZoneId {
     }
 }
 
-pub(super) fn card_type_str(d: &CardDef) -> &'static str {
-    if d.is_creature()      { "creature" }
-    else if d.is_instant()  { "instant" }
-    else if d.is_sorcery()  { "sorcery" }
-    else if d.is_land()     { "land" }
-    else                    { "permanent" }
-}
 
 /// The central elemental event pipeline: check_replacement → do_effect → check_triggers.
 /// Every elemental game operation (zone change, draw, step/phase entry, etc.) passes through here.
@@ -1502,7 +1493,8 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
 
 fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: &str) {
     match event {
-        GameEvent::ZoneChange { from, to, card, controller, .. } => {
+        GameEvent::ZoneChange { id, from, to, controller, .. } => {
+            let card = state.objects.get(id).map(|o| o.catalog_key.as_str()).unwrap_or("?");
             match (from, to) {
                 // Stack→Graveyard is silent here: resolution logs "{name} resolves" before calling
                 // change_zone, and eff_counter_target logs "→ {name} countered" before setting zone
@@ -1541,16 +1533,12 @@ pub(super) fn change_zone(
     actor: &str,
     rng: &mut dyn rand::RngCore,
 ) {
-    let (name, controller, from, card_type) = {
+    let (catalog_key, controller, from) = {
         let card = match state.objects.get(&id) {
             Some(c) => c,
             None => return,
         };
-        let from = card_zone_to_id(&card.zone);
-        let ct = state.def_of(id)
-            .map(|d| card_type_str(d))
-            .unwrap_or("permanent");
-        (card.catalog_key.clone(), card.controller.clone(), from, ct)
+        (card.catalog_key.clone(), card.controller.clone(), card_zone_to_id(&card.zone))
     };
     // Activate/deactivate instances BEFORE firing the event so replacement checks see the right state.
     if from == ZoneId::Battlefield { deactivate_instances(id, state); }
@@ -1558,19 +1546,11 @@ pub(super) fn change_zone(
         // catalog: activate_instances needs the static ability list to register triggered
         // and replacement instances. The ObjId exists but materialized isn't updated until
         // after this event resolves — bootstrapping from state.catalog is required here.
-        let def = state.catalog.get(name.as_str()).cloned();
+        let def = state.catalog.get(catalog_key.as_str()).cloned();
         activate_instances(id, &controller, def.as_ref(), state);
     }
     fire_event(
-        GameEvent::ZoneChange {
-            id,
-            actor: actor.to_string(),
-            card: name,
-            card_type: card_type.to_string(),
-            from,
-            to,
-            controller,
-        },
+        GameEvent::ZoneChange { id, actor: actor.to_string(), from, to, controller },
         state, t, actor, rng,
     );
 }

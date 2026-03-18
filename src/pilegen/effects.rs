@@ -182,8 +182,6 @@ pub(crate) fn eff_enter_permanent(
             GameEvent::ZoneChange {
                 id: new_id,
                 actor: owner.clone(),
-                card: card_name.clone(),
-                card_type: "creature".to_string(),
                 from: ZoneId::Stack,
                 to: ZoneId::Battlefield,
                 controller: owner.clone(),

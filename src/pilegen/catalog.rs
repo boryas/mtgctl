@@ -440,18 +440,6 @@ pub(crate) fn card_type_of(kind: &CardKind) -> CardType {
     }
 }
 
-/// Return the lowercase card type string used in `GameEvent::ZoneChange.card_type`.
-fn card_type_event_str(ct: CardType) -> &'static str {
-    match ct {
-        CardType::Land        => "land",
-        CardType::Creature    => "creature",
-        CardType::Artifact    => "artifact",
-        CardType::Instant     => "instant",
-        CardType::Sorcery     => "sorcery",
-        CardType::Planeswalker => "planeswalker",
-        CardType::Enchantment => "enchantment",
-    }
-}
 
 impl CardDef {
     /// Construct a `CardDef` from its parts. Used by `cards.rs` to define cards in Rust.
@@ -487,23 +475,17 @@ impl CardDef {
 
 /// Build a `ReplacementDef` for permanents that enter the battlefield tapped.
 /// The replacement re-fires the `ZoneChange` event and sets `bf.tapped = true`.
-pub(super) fn replacement_enters_tapped(card_type: CardType) -> ReplacementDef {
-    let ct = card_type_event_str(card_type).to_string();
+pub(super) fn replacement_enters_tapped() -> ReplacementDef {
     ReplacementDef {
         check: etb_self_check,
         make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
             let ctl = controller.to_string();
-            let ct = ct.clone();
             Effect(std::sync::Arc::new(move |state, t, targets, rng| {
                 let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
-                let card_name = state.objects.get(&id)
-                    .map(|c| c.catalog_key.clone())
-                    .unwrap_or_default();
                 fire_event(
                     GameEvent::ZoneChange {
-                        id, actor: ctl.clone(), card: card_name,
-                        card_type: ct.clone(), from,
+                        id, actor: ctl.clone(), from,
                         to: ZoneId::Battlefield, controller: ctl.clone(),
                     },
                     state, t, &ctl, rng,
@@ -518,22 +500,16 @@ pub(super) fn replacement_enters_tapped(card_type: CardType) -> ReplacementDef {
 
 /// Build a `ReplacementDef` that sets a planeswalker's loyalty on ETB.
 pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
-    let ct = card_type_event_str(CardType::Planeswalker).to_string();
     ReplacementDef {
         check: etb_self_check,
         make_effect: std::sync::Arc::new(move |_source_id, controller: &str| {
             let ctl = controller.to_string();
-            let ct = ct.clone();
             Effect(std::sync::Arc::new(move |state, t, targets, rng| {
                 let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
-                let card_name = state.objects.get(&id)
-                    .map(|c| c.catalog_key.clone())
-                    .unwrap_or_default();
                 fire_event(
                     GameEvent::ZoneChange {
-                        id, actor: ctl.clone(), card: card_name,
-                        card_type: ct.clone(), from,
+                        id, actor: ctl.clone(), from,
                         to: ZoneId::Battlefield, controller: ctl.clone(),
                     },
                     state, t, &ctl, rng,
@@ -610,7 +586,7 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static
     }
 }
 
-pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
+pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: &str, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     match event {
         // ETB: only fires for the entering Bowmasters itself.
         GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. }
@@ -630,7 +606,7 @@ pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: 
 
 /// ETB trigger for Recruiter of the Guard: search library for a creature with toughness ≤ 2,
 /// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
-pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
+pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: &str, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && ctlr == controller {
             let ctl = controller.to_string();
@@ -645,12 +621,15 @@ pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: &
     }
 }
 
-pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
+pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &str, state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange {
-        from: ZoneId::Graveyard, to: ZoneId::Exile,
-        card_type, controller: exiler, ..
+        id, from: ZoneId::Graveyard, to: ZoneId::Exile,
+        controller: exiler, ..
     } = event {
-        if (card_type == "instant" || card_type == "sorcery") && exiler == controller {
+        let is_instant_or_sorcery = state.objects.get(id)
+            .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
+            .map_or(false, |d| d.is_instant() || d.is_sorcery());
+        if is_instant_or_sorcery && exiler == controller {
             let ctl = controller.to_string();
             pending.push(TriggerContext {
                 source_name: "Murktide Regent".into(),
@@ -667,7 +646,7 @@ pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: &s
     }
 }
 
-pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
+pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: &str, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     match event {
         // EnteredStep DeclareAttackers fires after attackers are marked, so p.attacking is set.
         GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
@@ -712,7 +691,7 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
     let mut pending: Vec<TriggerContext> = Vec::new();
     for inst in &state.trigger_instances {
         if !inst.active { continue; }
-        (inst.check)(event, inst.source_id, &inst.controller, &mut pending);
+        (inst.check)(event, inst.source_id, &inst.controller, state, &mut pending);
     }
     pending
 }
@@ -744,6 +723,7 @@ pub(super) fn tamiyo_plus_two_check(
     event: &GameEvent,
     source_id: ObjId,
     controller: &str,
+    _state: &SimState,
     pending: &mut Vec<TriggerContext>,
 ) {
     if let GameEvent::CreatureAttacked { attacker_id, attacker_controller, .. } = event {
