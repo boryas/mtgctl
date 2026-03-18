@@ -1,6 +1,129 @@
 use rand::Rng;
+use rand::rngs::SmallRng;
 use super::*;
 
+// ── Strategy trait ────────────────────────────────────────────────────────────
+
+pub(super) trait Strategy {
+    fn player_id(&self) -> PlayerId;
+
+    /// Called when this player holds priority.
+    /// `ap` is the active player (whose turn it is).
+    /// Takes `&mut SimState` because some decisions clear engine flags as a side-effect (known impurity).
+    fn priority_action(
+        &mut self,
+        state: &mut SimState,
+        ap: PlayerId,
+        last_action: &PriorityAction,
+    ) -> PriorityAction;
+
+    fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)>;
+    fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)>;
+    fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool;
+}
+
+// ── DoomsdayStrategy ─────────────────────────────────────────────────────────
+
+pub(super) struct DoomsdayStrategy {
+    player_id: PlayerId,
+    rng: SmallRng,
+    dd_turn: u8,
+    pub(super) reroll: bool,
+}
+
+impl DoomsdayStrategy {
+    pub(super) fn new(dd_turn: u8) -> Self {
+        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), dd_turn, reroll: false }
+    }
+}
+
+impl Strategy for DoomsdayStrategy {
+    fn player_id(&self) -> PlayerId { self.player_id }
+
+    fn priority_action(&mut self, state: &mut SimState, ap: PlayerId, last_action: &PriorityAction) -> PriorityAction {
+        let who = self.player_id;
+        let t = state.current_turn;
+        if who != ap {
+            if state.stack.is_empty() { return PriorityAction::Pass; }
+            return nap_action(state, who, last_action, &mut self.rng);
+        }
+        let in_ninjutsu_step = matches!(state.current_phase,
+            Some(TurnPosition::Step(StepKind::DeclareBlockers))
+            | Some(TurnPosition::Step(StepKind::CombatDamage))
+            | Some(TurnPosition::Step(StepKind::EndCombat)));
+        if in_ninjutsu_step {
+            if let Some(action) = try_ninjutsu(state, who, &mut self.rng) { return action; }
+            return PriorityAction::Pass;
+        }
+        let in_main_phase = matches!(state.current_phase,
+            Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
+            | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
+        if !in_main_phase { return PriorityAction::Pass; }
+        if let Some(action) = ap_react(state, t, who, &mut self.rng) { return action; }
+        ap_proactive(state, t, who, self.dd_turn, &mut self.rng)
+    }
+
+    fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)> {
+        pick_attackers(self.player_id, state, &mut self.rng)
+    }
+
+    fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)> {
+        pick_blockers(self.player_id, state)
+    }
+
+    fn take_mulligan(&mut self, _state: &SimState, _mulligans_taken: u32) -> bool { false }
+}
+
+// ── GenericOppStrategy ────────────────────────────────────────────────────────
+
+pub(super) struct GenericOppStrategy {
+    player_id: PlayerId,
+    rng: SmallRng,
+}
+
+impl GenericOppStrategy {
+    pub(super) fn new() -> Self {
+        Self { player_id: PlayerId::Opp, rng: SmallRng::from_entropy() }
+    }
+}
+
+impl Strategy for GenericOppStrategy {
+    fn player_id(&self) -> PlayerId { self.player_id }
+
+    fn priority_action(&mut self, state: &mut SimState, ap: PlayerId, last_action: &PriorityAction) -> PriorityAction {
+        let who = self.player_id;
+        let t = state.current_turn;
+        if who != ap {
+            if state.stack.is_empty() { return PriorityAction::Pass; }
+            return nap_action(state, who, last_action, &mut self.rng);
+        }
+        let in_ninjutsu_step = matches!(state.current_phase,
+            Some(TurnPosition::Step(StepKind::DeclareBlockers))
+            | Some(TurnPosition::Step(StepKind::CombatDamage))
+            | Some(TurnPosition::Step(StepKind::EndCombat)));
+        if in_ninjutsu_step {
+            if let Some(action) = try_ninjutsu(state, who, &mut self.rng) { return action; }
+            return PriorityAction::Pass;
+        }
+        let in_main_phase = matches!(state.current_phase,
+            Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
+            | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
+        if !in_main_phase { return PriorityAction::Pass; }
+        ap_proactive(state, t, who, 0, &mut self.rng)
+    }
+
+    fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)> {
+        pick_attackers(self.player_id, state, &mut self.rng)
+    }
+
+    fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)> {
+        pick_blockers(self.player_id, state)
+    }
+
+    fn take_mulligan(&mut self, _state: &SimState, _mulligans_taken: u32) -> bool { false }
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
 
 fn pick_on_board_action(
     state: &mut SimState,
@@ -330,53 +453,10 @@ fn ap_proactive(
     action
 }
 
-/// Decide what action the player `who` takes when they hold priority.
-/// `ap` is the active player (whose turn it is). Phase context is read from
-/// `state.current_phase` (set by `do_turn`/`do_step`/`do_phase` before each priority window).
-pub(super) fn decide_action(
-    state: &mut SimState,
-    t: u8,
-    ap: PlayerId,
-    who: PlayerId,
-    dd_turn: u8,
-    last_action: &PriorityAction,
-    rng: &mut impl Rng,
-) -> PriorityAction {
-    if who != ap {
-        if state.stack.is_empty() { return PriorityAction::Pass; }
-        return nap_action(state, who, last_action, rng);
-    }
-    // Ninjutsu: AP can activate during DeclareBlockers / CombatDamage / EndCombat.
-    let in_ninjutsu_step = matches!(state.current_phase,
-        Some(TurnPosition::Step(StepKind::DeclareBlockers))
-        | Some(TurnPosition::Step(StepKind::CombatDamage))
-        | Some(TurnPosition::Step(StepKind::EndCombat)));
-    if in_ninjutsu_step {
-        if let Some(action) = try_ninjutsu(state, who, rng) {
-            return action;
-        }
-        return PriorityAction::Pass;
-    }
-    let in_main_phase = matches!(state.current_phase,
-        Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
-        | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
-    if !in_main_phase {
-        return PriorityAction::Pass;
-    }
-    if let Some(action) = ap_react(state, t, who, rng) {
-        return action;
-    }
-    ap_proactive(state, t, who, dd_turn, rng)
-}
 
 // ── Combat strategy ───────────────────────────────────────────────────────────
 
-/// Decide which creatures attack and what each one targets.
-///
-/// Returns `(attacker_id, attack_target)` pairs. `attack_target` is `None` to attack the
-/// opponent player, or `Some(pw_id)` to attack a planeswalker. Attackers are chosen if their
-/// toughness exceeds the total power of NAP creatures that could block them.
-pub(super) fn declare_attackers(
+fn pick_attackers(
     ap: PlayerId,
     state: &SimState,
     rng: &mut impl Rng,
@@ -427,15 +507,12 @@ pub(super) fn declare_attackers(
         .collect()
 }
 
-/// Decide which NAP creatures block which attackers.
-///
-/// Returns `(attacker_id, blocker_id)` pairs. A creature only blocks if it's a "good block":
-/// it kills the attacker, or both creatures survive (no chump blocks).
-pub(super) fn declare_blockers(
-    ap: PlayerId,
+/// `blocker_player` is the player declaring blockers (the NAP / defending player).
+fn pick_blockers(
+    blocker_player: PlayerId,
     state: &SimState,
 ) -> Vec<(ObjId, ObjId)> {
-    let nap = ap.opp();
+    let nap = blocker_player;
     let mut used_blockers: std::collections::HashSet<ObjId> = Default::default();
     let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
     for &atk_id in &state.combat_attackers {

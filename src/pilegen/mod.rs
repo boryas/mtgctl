@@ -21,7 +21,7 @@ mod predicates;
 pub(crate) use predicates::*;
 
 mod strategy;
-use strategy::{decide_action, declare_attackers, declare_blockers};
+use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy};
 #[cfg(test)] use strategy::try_ninjutsu;
 
 #[cfg(test)]
@@ -681,6 +681,8 @@ impl PlayerState {
 
 pub(crate) struct SimState {
     turn: u8,
+    /// The turn number currently being simulated. Set at the start of each do_turn call.
+    pub(super) current_turn: u8,
     on_play: bool,
     us: PlayerState,
     opp: PlayerState,
@@ -745,6 +747,7 @@ impl SimState {
     fn new(us: PlayerState, opp: PlayerState) -> Self {
         let mut s = SimState {
             turn: 0,
+            current_turn: 0,
             on_play: true,
             us,
             opp,
@@ -2167,8 +2170,7 @@ fn handle_priority_round(
     state: &mut SimState,
     t: u8,
     ap: PlayerId,
-    dd_turn: u8,
-    rng: &mut impl Rng,
+    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     let nap = ap.opp();
     let mut priority_holder = ap;
@@ -2181,9 +2183,8 @@ fn handle_priority_round(
         check_state_based_actions(state, t);
 
         let who = priority_holder;
-        let action = decide_action(
-            state, t, ap, who, dd_turn, &last_action, rng,
-        );
+        let action = strategies.get_mut(&who).unwrap()
+            .priority_action(state, ap, &last_action);
         last_action = action.clone();
 
         match action {
@@ -2317,9 +2318,8 @@ fn do_step(
     t: u8,
     ap: PlayerId,
     step: &Step,
-    dd_turn: u8,
     on_play: bool,
-    rng: &mut impl Rng,
+    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     // Ensure materialized state is current at the start of every step.
     // Strategy calls (declare_attackers, declare_blockers) and combat damage run against
@@ -2371,7 +2371,7 @@ fn do_step(
         }
         StepKind::DeclareAttackers => {
             // Strategy decides who attacks and what each attacker targets.
-            let decisions = declare_attackers(ap, state, rng);
+            let decisions = strategies.get_mut(&ap).unwrap().declare_attackers(state);
             // Apply: mark each attacker on the battlefield.
             for &(atk_id, target) in &decisions {
                 if let Some(bf) = state.permanent_bf_mut(atk_id) {
@@ -2407,7 +2407,7 @@ fn do_step(
         StepKind::DeclareBlockers => {
             let nap = ap.opp();
             // Strategy decides which blockers to assign.
-            let blocks = declare_blockers(ap, state);
+            let blocks = strategies.get_mut(&ap.opp()).unwrap().declare_blockers(state);
             for &(atk_id, blk_id) in &blocks {
                 let atk_name = state.objects.get(&atk_id).map(|p| p.catalog_key.as_str()).unwrap_or("");
                 let blk_name = state.objects.get(&blk_id).map(|p| p.catalog_key.clone()).unwrap_or_default();
@@ -2518,7 +2518,7 @@ fn do_step(
     }
 
     if step.prio {
-        handle_priority_round(state, t, ap, dd_turn, rng);
+        handle_priority_round(state, t, ap, strategies);
     }
     // Mana pool drains at the end of every step.
     state.us.pool.drain();
@@ -2532,12 +2532,11 @@ fn do_phase(
     t: u8,
     ap: PlayerId,
     phase: &Phase,
-    dd_turn: u8,
     on_play: bool,
-    rng: &mut impl Rng,
+    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     for step in &phase.steps {
-        do_step(state, t, ap, step, dd_turn, on_play, rng);
+        do_step(state, t, ap, step, on_play, strategies);
         if state.done() {
             return;
         }
@@ -2546,7 +2545,7 @@ fn do_phase(
         state.current_phase = Some(TurnPosition::Phase(phase.kind));
         let phase_ev = GameEvent::EnteredPhase { phase: phase.kind };
         fire_event(phase_ev, state, t, ap);
-        handle_priority_round(state, t, ap, dd_turn, rng);
+        handle_priority_round(state, t, ap, strategies);
         // Mana pool drains at the end of the main phase.
         state.us.pool.drain();
         state.opp.pool.drain();
@@ -2559,24 +2558,24 @@ fn do_turn(
     state: &mut SimState,
     t: u8,
     ap: PlayerId,
-    dd_turn: u8,
     on_play: bool,
-    rng: &mut impl Rng,
+    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
+    state.current_turn = t;
     state.current_ap = state.player_id(ap);
-    do_phase(state, t, ap, &beginning_phase(), dd_turn, on_play, rng);
+    do_phase(state, t, ap, &beginning_phase(), on_play, strategies);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &main_phase(), dd_turn, on_play, rng);
+    do_phase(state, t, ap, &main_phase(), on_play, strategies);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &combat_phase(), dd_turn, on_play, rng);
+    do_phase(state, t, ap, &combat_phase(), on_play, strategies);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &post_combat_main_phase(), dd_turn, on_play, rng);
+    do_phase(state, t, ap, &post_combat_main_phase(), on_play, strategies);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &end_phase(), dd_turn, on_play, rng);
+    do_phase(state, t, ap, &end_phase(), on_play, strategies);
 }
 
 
@@ -2657,17 +2656,22 @@ fn simulate_game(
 
     // ── Turn loop ────────────────────────────────────────────────────────────
 
+    let mut strategies: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::from([
+        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(turn)) as Box<dyn Strategy>),
+        (PlayerId::Opp, Box::new(GenericOppStrategy::new())   as Box<dyn Strategy>),
+    ]);
+
     for t in 1..=turn {
         if !on_play {
-            do_turn(&mut state, t, PlayerId::Opp, turn, on_play, rng);
+            do_turn(&mut state, t, PlayerId::Opp, on_play, &mut strategies);
             if state.done() { break; }
         }
         {
-            do_turn(&mut state, t, PlayerId::Us, turn, on_play, rng);
+            do_turn(&mut state, t, PlayerId::Us, on_play, &mut strategies);
             if state.done() { break; }
         }
         if on_play && t < turn {
-            do_turn(&mut state, t, PlayerId::Opp, turn, on_play, rng);
+            do_turn(&mut state, t, PlayerId::Opp, on_play, &mut strategies);
             if state.done() { break; }
         }
     }
