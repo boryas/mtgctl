@@ -33,13 +33,7 @@ pub(crate) struct AlternateCost {
 ///
 /// Preconditions are derived automatically: ability is available iff
 /// the cost can be paid and a valid target exists (if one is required).
-///
-/// target syntax: "<who>:<type>"
-///   who  ∈ { opp, us }
-///   type ∈ { nonbasic_land, land, creature, planeswalker, artifact, any }
-///
-/// effect ∈ { destroy, bounce, exile, fetch_land }
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct AbilityDef {
     // ── Cost ──────────────────────────────────────────────────────────────────
     /// Mana cost to activate (empty = no mana required).
@@ -52,9 +46,9 @@ pub(crate) struct AbilityDef {
     pub(crate) life_cost: i32,
 
     // ── Target (optional) ─────────────────────────────────────────────────────
-    /// If set, a valid target must exist for the ability to be available,
+    /// If not `TargetSpec::None`, a valid target must exist for the ability to be available,
     /// and the effect is applied to a randomly chosen valid target.
-    pub(crate) target: Option<String>,
+    pub(crate) target_spec: TargetSpec,
 
     // ── Zone ──────────────────────────────────────────────────────────────────
     /// Zone the card must be in for this ability. Default "" / "play" = in play.
@@ -76,6 +70,25 @@ pub(crate) struct AbilityDef {
     /// (positive = gain loyalty, negative = spend loyalty, 0 = 0-loyalty ability).
     /// Loyalty abilities are sorcery-speed and can only be activated once per turn per planeswalker.
     pub(crate) loyalty_cost: Option<i32>,
+}
+
+impl Default for AbilityDef {
+    fn default() -> Self {
+        AbilityDef {
+            mana_cost: String::new(),
+            tap_self: false,
+            sacrifice_self: false,
+            life_cost: 0,
+            target_spec: TargetSpec::None,
+            zone: String::new(),
+            discard_self: false,
+            sacrifice_land: false,
+            effect: String::new(),
+            ability_factory: None,
+            ninjutsu: false,
+            loyalty_cost: None,
+        }
+    }
 }
 
 // ── Mana ability types ────────────────────────────────────────────────────────
@@ -184,20 +197,35 @@ impl NinjutsuAbility {
 }
 
 /// Spell data shared by Instant and Sorcery variants.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct SpellData {
     pub(crate) mana_cost: String,
     #[allow(dead_code)]
     pub(crate) exileable: bool,
-    pub(crate) target: Option<String>,
+    /// Declarative target specification. `TargetSpec::None` means no target required.
+    pub(crate) target_spec: TargetSpec,
     pub(crate) requires: Vec<String>,
     pub(crate) alternate_costs: Vec<AlternateCost>,
     pub(crate) delve: bool,
     /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
     pub(crate) subtypes: Vec<String>,
     /// Pre-built effect factory for Rust-defined spells.
-    /// `TargetSpec` is derived from `target` via `target_spec_from_str`.
     pub(crate) spell_factory: Option<SpellFactory>,
+}
+
+impl Default for SpellData {
+    fn default() -> Self {
+        SpellData {
+            mana_cost: String::new(),
+            exileable: false,
+            target_spec: TargetSpec::None,
+            requires: Vec::new(),
+            alternate_costs: Vec::new(),
+            delve: false,
+            subtypes: Vec::new(),
+            spell_factory: None,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -315,10 +343,10 @@ impl CardDef {
         }
     }
 
-    pub(crate) fn target(&self) -> Option<&str> {
+    pub(crate) fn target_spec(&self) -> &TargetSpec {
         match &self.kind {
-            CardKind::Instant(s) | CardKind::Sorcery(s) => s.target.as_deref(),
-            _ => None,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.target_spec,
+            _ => &TargetSpec::None,
         }
     }
 
@@ -865,7 +893,7 @@ pub(super) fn build_spell_effect(
     def: &CardDef,
     who: &str,
 ) -> (TargetSpec, Effect) {
-    let target_spec = target_spec_from_str(def.target());
+    let target_spec = def.target_spec().clone();
     if let CardKind::Instant(s) | CardKind::Sorcery(s) = &def.kind {
         if let Some(factory) = &s.spell_factory {
             return (target_spec, factory(who));

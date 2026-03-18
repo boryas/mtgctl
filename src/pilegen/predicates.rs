@@ -98,6 +98,11 @@ pub(crate) enum TargetSpec {
     Union(Vec<TargetSpec>),
 }
 
+impl TargetSpec {
+    /// Returns true if this spec requires no target (i.e. `TargetSpec::None`).
+    pub(crate) fn is_none(&self) -> bool { matches!(self, TargetSpec::None) }
+}
+
 /// Build a `CardPredicate` from a permanent filter string (e.g. `"creature"`, `"nonbasic_land"`).
 fn permanent_pred_from_str(filter: &str) -> CardPredicate {
     match filter {
@@ -250,15 +255,16 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: &str, state: &SimStat
     }
 }
 
-/// Return true if at least one valid target exists for `target_str`.
-/// For `"stack:<filter>"` targets, checks the current stack for opposing non-ability spells.
+/// Return true if at least one valid target exists for `spec`.
+/// For stack targets, checks the current stack for opposing non-ability spells.
 /// For permanent/zone targets, checks the battlefield or zone.
+/// Returns false for `TargetSpec::None` (no target required = always valid; caller should check `is_none()` first).
 pub(crate) fn has_valid_target(
-    target_str: &str,
+    spec: &TargetSpec,
     state: &SimState,
     actor: &str,
 ) -> bool {
-    has_valid_target_spec(&target_spec_from_str(Some(target_str)), state, actor)
+    has_valid_target_spec(spec, state, actor)
 }
 
 fn has_valid_target_spec(

@@ -721,7 +721,7 @@
     fn test_effect_destroy_ability_removes_nonbasic_land() {
         let mut state = make_state();
         make_land(&mut state, "opp", "Bayou", false);
-        let ability = AbilityDef { target: Some("opp:nonbasic_land".to_string()), effect: "destroy".to_string(), ..Default::default() };
+        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), effect: "destroy".to_string(), ..Default::default() };
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -739,7 +739,7 @@
     fn test_effect_destroy_ability_ignores_basic_land() {
         let mut state = make_state();
         make_land(&mut state, "opp", "Forest", false);
-        let ability = AbilityDef { target: Some("opp:nonbasic_land".to_string()), effect: "destroy".to_string(), ..Default::default() };
+        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), effect: "destroy".to_string(), ..Default::default() };
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -929,7 +929,7 @@
         let mut state = make_state();
         add_default_perm(&mut state, "opp", "Troll");
         let troll_def = creature("Troll", 2, 2);
-        let ability = AbilityDef { target: Some("opp:creature".to_string()), effect: "exile".to_string(), ..Default::default() };
+        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:creature")), effect: "exile".to_string(), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<Target> = legal_targets(

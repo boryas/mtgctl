@@ -2763,7 +2763,7 @@ fn weighted_choice<T: Clone>(options: &[(T, u32)], rng: &mut impl Rng) -> T {
 fn card_has_implementation(def: &CardDef) -> bool {
     if def.is_land() { return true; }
     if !def.abilities().is_empty() { return true; }
-    if def.target().is_some() { return true; }
+    if !def.target_spec().is_none() { return true; }
     match &def.kind {
         CardKind::Creature(_) | CardKind::Artifact(_)
         | CardKind::Planeswalker(_) | CardKind::Enchantment => true,

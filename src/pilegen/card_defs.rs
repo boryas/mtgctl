@@ -147,7 +147,7 @@ fn wasteland() -> CardDef {
         abilities: vec![AbilityDef {
             tap_self: true,
             sacrifice_self: true,
-            target: Some("opp:nonbasic_land".to_string()),
+            target_spec: target_spec_from_str(Some("opp:nonbasic_land")),
             ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))),
             ..Default::default()
         }],
@@ -294,7 +294,7 @@ fn daze() -> CardDef {
         mana_cost: "U".to_string(),
         exileable: true,
         // blue=true so it can be pitched to Force of Will
-        target: Some("stack:any".to_string()),
+        target_spec: target_spec_from_str(Some("stack:any")),
         alternate_costs: vec![
             AlternateCost { bounce_island: true, hand_min: 1, ..Default::default() },
             AlternateCost { mana_cost: "1U".to_string(), hand_min: 1, prob: Some(0.2), ..Default::default() },
@@ -309,7 +309,7 @@ fn daze() -> CardDef {
 fn force_of_will() -> CardDef {
     simple("Force of Will", CardKind::Instant(SpellData {
         mana_cost: "3UU".to_string(),
-        target: Some("stack:any".to_string()),
+        target_spec: target_spec_from_str(Some("stack:any")),
         alternate_costs: vec![
             AlternateCost { exile_blue_from_hand: true, life_cost: 1, hand_min: 2, ..Default::default() },
             AlternateCost { mana_cost: "3UU".to_string(), hand_min: 1, ..Default::default() },
@@ -332,7 +332,7 @@ fn dark_ritual() -> CardDef {
 fn fatal_push() -> CardDef {
     simple("Fatal Push", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
-        target: Some("opp:creature_mv_lt4".to_string()),
+        target_spec: target_spec_from_str(Some("opp:creature_mv_lt4")),
         spell_factory: Some(Arc::new(|who| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
@@ -342,7 +342,7 @@ fn fatal_push() -> CardDef {
 fn snuff_out() -> CardDef {
     simple("Snuff Out", CardKind::Instant(SpellData {
         mana_cost: "3BB".to_string(),
-        target: Some("opp:creature_nonblack".to_string()),
+        target_spec: target_spec_from_str(Some("opp:creature_nonblack")),
         alternate_costs: vec![
             AlternateCost { life_cost: 4, ..Default::default() },
         ],
@@ -391,7 +391,7 @@ fn unearth() -> CardDef {
     simple("Unearth", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
         requires: vec!["us_gy_has_creature".to_string()],
-        target: Some("self:gy:creature".to_string()),
+        target_spec: target_spec_from_str(Some("self:gy:creature")),
         spell_factory: Some(Arc::new(|who| eff_reanimate(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
@@ -652,7 +652,7 @@ fn brazen_borrower() -> CardDef {
         "Petty Theft",
         CardKind::Instant(SpellData {
             mana_cost: "1U".to_string(),
-            target: Some("opp:permanent_nonland".to_string()),
+            target_spec: target_spec_from_str(Some("opp:permanent_nonland")),
             subtypes: vec!["adventure".to_string()],
             spell_factory: Some(Arc::new(|who| eff_bounce_target(who))),
             ..Default::default()

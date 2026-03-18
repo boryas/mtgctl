@@ -26,8 +26,7 @@ fn pick_on_board_action(
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
-                    let spec = target_spec_from_str(ab.target.as_deref());
-                    let targets = legal_targets(&spec, ap, state);
+                    let targets = legal_targets(&ab.target_spec, ap, state);
                     let chosen = pick_target(&targets, state).into_iter().collect();
                     candidates.push(PriorityAction::ActivateAbility(land_id, ab, chosen));
                 }
@@ -53,8 +52,7 @@ fn pick_on_board_action(
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
-                    let spec = target_spec_from_str(ab.target.as_deref());
-                    let targets = legal_targets(&spec, ap, state);
+                    let targets = legal_targets(&ab.target_spec, ap, state);
                     let chosen = pick_target(&targets, state).into_iter().collect();
                     candidates.push(PriorityAction::ActivateAbility(perm_id, ab, chosen));
                 }
@@ -84,8 +82,7 @@ fn pick_on_board_action(
                     .next()
                     .cloned()
                 {
-                    let spec = target_spec_from_str(ab.target.as_deref());
-                    let targets = legal_targets(&spec, ap, state);
+                    let targets = legal_targets(&ab.target_spec, ap, state);
                     let chosen = pick_target(&targets, state).into_iter().collect();
                     candidates.push(PriorityAction::ActivateAbility(pw_id, ab, chosen));
                 }
@@ -115,8 +112,7 @@ fn pick_on_board_action(
                             .find(|ab| ability_available(ab, state, "us", true))
                             .cloned()
                         {
-                            let spec = target_spec_from_str(ab.target.as_deref());
-                            let targets = legal_targets(&spec, "us", state);
+                            let targets = legal_targets(&ab.target_spec, "us", state);
                             let chosen = pick_target(&targets, state).into_iter().collect();
                             candidates.push(PriorityAction::ActivateAbility(fid, ab, chosen));
                         }
@@ -136,8 +132,7 @@ fn pick_on_board_action(
             let cost = parse_mana_cost(def.mana_cost());
             if !state.potential_mana(ap).can_pay(&cost) { continue; }
             if rng.gen_bool(0.75) {
-                let spec = target_spec_from_str(def.target());
-                let targets = legal_targets(&spec, ap, state);
+                let targets = legal_targets(def.target_spec(), ap, state);
                 let chosen = pick_target(&targets, state).into_iter().collect();
                 candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen });
             }
@@ -508,8 +503,8 @@ fn ability_available(
             return false;
         }
     }
-    if let Some(tgt) = &ability.target {
-        if !has_valid_target(tgt, state, who) {
+    if !ability.target_spec.is_none() {
+        if !has_valid_target(&ability.target_spec, state, who) {
             return false;
         }
     }
@@ -568,9 +563,7 @@ fn collect_hand_actions(
         if def.is_land() { continue; }
         if !card_has_implementation(def) { continue; }
         if def.legendary() && state.permanents_of(who).any(|c| c.catalog_key == name.as_str()) { continue; }
-        if let Some(tgt) = def.target() {
-            if !has_valid_target(tgt, state, who) { continue; }
-        }
+        if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who) { continue; }
         let ok = def.requires().iter().all(|req| match req.as_str() {
             "opp_hand_nonempty" => state.hand_size(opp_who) > 0,
             "us_gy_has_creature" => state.graveyard_of(who)
@@ -580,8 +573,7 @@ fn collect_hand_actions(
         if !ok { continue; }
         if !spell_is_affordable(name, def, state, who) { continue; }
         if seen_names.insert(name.clone()) {
-            let spec = target_spec_from_str(def.target());
-            let targets = legal_targets(&spec, who, state);
+            let targets = legal_targets(def.target_spec(), who, state);
             let chosen = pick_target(&targets, state).into_iter().collect();
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen });
         }
@@ -589,8 +581,7 @@ fn collect_hand_actions(
         // In-hand abilities (cycling, channel, etc.)
         for ab in def.abilities().iter().filter(|ab| ab.zone == "hand") {
             if hand_ability_affordable(ab, state, who) {
-                let spec = target_spec_from_str(ab.target.as_deref());
-                let targets = legal_targets(&spec, who, state);
+                let targets = legal_targets(&ab.target_spec, who, state);
                 let chosen = pick_target(&targets, state).into_iter().collect();
                 actions.push(PriorityAction::ActivateAbility(*card_id, ab.clone(), chosen));
             }
@@ -602,11 +593,8 @@ fn collect_hand_actions(
                 let cost = parse_mana_cost(face.mana_cost());
                 if !state.potential_mana(who).can_pay(&cost) { continue; }
             }
-            if let Some(tgt) = face.target() {
-                if !has_valid_target(tgt, state, who) { continue; }
-            }
-            let spec = target_spec_from_str(face.target());
-            let adv_targets = legal_targets(&spec, who, state);
+            if !face.target_spec().is_none() && !has_valid_target(face.target_spec(), state, who) { continue; }
+            let adv_targets = legal_targets(face.target_spec(), who, state);
             let adv_chosen = pick_target(&adv_targets, state).into_iter().collect();
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None, chosen_targets: adv_chosen });
         }
@@ -686,8 +674,11 @@ fn respond_with_counter(
     let counterspells: Vec<(ObjId, String)> = state.hand_of(responding_who)
         .filter_map(|c| {
             let def = state.def_of(c.id)?;
-            let filter_str = def.target().and_then(|t| t.strip_prefix("stack:"))?;
-            let stack_pred = stack_pred_from_str(filter_str);
+            let stack_pred = if let TargetSpec::ObjectInZone { zone: ZoneId::Stack, ref filter, .. } = def.target_spec() {
+                filter.clone()
+            } else {
+                return None;
+            };
             if !state.def_of(target_id).map(|d| stack_pred(d)).unwrap_or(true) { return None; }
             if def.alternate_costs().is_empty() { return None; }
             if c.catalog_key == "Daze" && target_has_untapped_lands { return None; }
