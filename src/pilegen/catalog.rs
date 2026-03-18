@@ -505,8 +505,7 @@ pub(super) fn replacement_enters_tapped(card_type: CardType) -> ReplacementDef {
             let ctl = controller.to_string();
             let ct = ct.clone();
             Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-                let Some(Target::Object(id)) = targets.first() else { return; };
-                let id = *id;
+                let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
                 let card_name = state.objects.get(&id)
                     .map(|c| c.catalog_key.clone())
@@ -536,8 +535,7 @@ pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef 
             let ctl = controller.to_string();
             let ct = ct.clone();
             Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-                let Some(Target::Object(id)) = targets.first() else { return; };
-                let id = *id;
+                let Some(&id) = targets.first() else { return; };
                 let from = current_zone_id(id, state);
                 let card_name = state.objects.get(&id)
                     .map(|c| c.catalog_key.clone())
@@ -598,14 +596,13 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static
         target_spec: target_spec_from_str(Some("any_target")),
         effect: Effect(std::sync::Arc::new(move |state, t, targets, _rng| {
             // Apply 1 damage to the chosen target, then amass.
-            match targets.first() {
-                Some(Target::Player(id)) => {
-                    let player = state.who_str(*id).to_string();
+            // ObjIds are globally unique: try player first, then permanent.
+            if let Some(&id) = targets.first() {
+                if id == state.us.id || id == state.opp.id {
+                    let player = state.who_str(id).to_string();
                     state.player_mut(&player).life -= 1;
                     state.log(t, &ctl, format!("Bowmasters: 1 damage to {player}"));
-                }
-                Some(Target::Object(id)) => {
-                    let id = *id;
+                } else {
                     let tgt_ctl = state.permanent_controller(id).map(|s| s.to_string());
                     let name = state.permanent_name(id);
                     if let (Some(_tgt_ctl), Some(name)) = (tgt_ctl, name) {
@@ -615,10 +612,8 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static
                         state.log(t, &ctl, format!("Bowmasters: 1 damage to {name}"));
                     }
                 }
-                _ => {
-                    // No target chosen (no legal targets) — do nothing.
-                }
             }
+            // No target chosen (no legal targets) — do nothing.
             do_amass_orc(&ctl, 1, state, t);
             state.log(t, &ctl, log_msg);
         })),
@@ -875,8 +870,8 @@ pub(super) fn build_ability_effect(
         };
         let who_c = who.clone();
         return Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-            if let Some(Target::Object(id)) = targets.first() {
-                change_zone(*id, to, state, t, &who_c, rng);
+            if let Some(&id) = targets.first() {
+                change_zone(id, to, state, t, &who_c, rng);
             }
         }));
     }
@@ -967,9 +962,9 @@ pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
 
 // ── Leyline of the Void ───────────────────────────────────────────────────────
 
-pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &str) -> Option<Vec<Target>> {
+pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &str) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, .. } = event {
-        Some(vec![Target::Object(*id)])
+        Some(vec![*id])
     } else {
         None
     }
@@ -978,10 +973,10 @@ pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: &
 // ── Shared ETB-self check ─────────────────────────────────────────────────────
 
 /// Matches any ZoneChange where this permanent is the object entering the battlefield.
-fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: &str) -> Option<Vec<Target>> {
+fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: &str) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
         if *id == source_id {
-            return Some(vec![Target::Object(*id)]);
+            return Some(vec![*id]);
         }
     }
     None
@@ -995,10 +990,10 @@ fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
 
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────
 
-pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> Option<Vec<Target>> {
+pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: &str) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && ctlr == controller {
-            return Some(vec![Target::Object(*id)]);
+            return Some(vec![*id]);
         }
     }
     None

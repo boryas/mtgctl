@@ -214,8 +214,8 @@ fn ap_react(
     let dd_countered = top_is_counterable
         && top_owner != us_id
         && top_chosen.first()
-            .and_then(|t| if let Target::Object(id) = t { Some(id) } else { None })
-            .and_then(|id| state.stack.iter().find(|&&s| s == *id).map(|_| *id))
+            .copied()
+            .and_then(|id| state.stack.iter().find(|&&s| s == id).map(|_| id))
             .is_some_and(|id| {
                 state.objects.get(&id)
                     .map(|c| c.catalog_key == "Doomsday" && state.player_id(&c.owner) == us_id)
@@ -723,7 +723,7 @@ fn respond_with_counter(
                     card_id: *cs_id,
                     face: SpellFace::Main,
                     preferred_cost: Some(cost.clone()),
-                    chosen_targets: vec![Target::Object(target_id)],
+                    chosen_targets: vec![target_id],
                 });
             }
         }

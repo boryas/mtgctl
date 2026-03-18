@@ -61,7 +61,7 @@ pub(super) enum CardZone {
 #[derive(Clone)]
 struct SpellState {
     effect: Option<Effect>,
-    chosen_targets: Vec<Target>,
+    chosen_targets: Vec<ObjId>,
     /// True when the back face of a split card was cast (e.g. an adventure instant).
     is_back_face: bool,
 }
@@ -135,7 +135,7 @@ pub(crate) struct StackAbility {
     pub(crate) source_name: String,
     pub(crate) owner: ObjId,         // player id
     pub(crate) effect: Effect,
-    pub(crate) chosen_targets: Vec<Target>,
+    pub(crate) chosen_targets: Vec<ObjId>,
 }
 
 // ── Trigger system ────────────────────────────────────────────────────────────
@@ -217,7 +217,7 @@ pub(super) type TriggerCheckFn =
 /// Signature for a per-card replacement check function.
 /// Returns Some(targets) if this replacement applies to the event; None otherwise.
 /// `source_id` is passed so self-ETB checks work without string dispatch.
-pub(super) type ReplacementCheckFn = fn(&GameEvent, ObjId, &str) -> Option<Vec<Target>>;
+pub(super) type ReplacementCheckFn = fn(&GameEvent, ObjId, &str) -> Option<Vec<ObjId>>;
 
 /// One trigger registration per card object in the simulation.
 /// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
@@ -441,13 +441,13 @@ enum PriorityAction {
     LandDrop(ObjId),
     /// Activate a permanent ability. Carries source ObjId + ability def + pre-chosen targets.
     /// Uses the stack, passes priority after.
-    ActivateAbility(ObjId, AbilityDef, Vec<Target>),
+    ActivateAbility(ObjId, AbilityDef, Vec<ObjId>),
     /// Intent to cast a spell. No resources are spent until `handle_priority_round` accepts and
     /// commits this action. The framework validates legality (sorcery-speed, etc.) there.
     /// `face` selects main vs adventure face/cost; card zone identifies the source zone.
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
     /// `chosen_targets` — targets picked by strategy at action-construction time.
-    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<Target> },
+    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<ObjId> },
     /// Pass priority.
     Pass,
 }
@@ -1798,7 +1798,7 @@ fn cast_spell(
     card_id: ObjId,
     face: SpellFace,
     preferred_cost: Option<&AlternateCost>,
-    chosen_targets: &[Target],
+    chosen_targets: &[ObjId],
     rng: &mut impl Rng,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
@@ -2210,7 +2210,7 @@ fn handle_priority_round(
                 let source_name_for_stack = state.permanent_name(source_id)
                     .or_else(|| state.objects.get(&source_id).map(|c| c.catalog_key.clone()))
                     .unwrap_or_default();
-                let (ability_effect, ability_targets): (Option<Effect>, Vec<Target>) = if ability.ninjutsu {
+                let (ability_effect, ability_targets): (Option<Effect>, Vec<ObjId>) = if ability.ninjutsu {
                     let attack_target = state.permanents_of(&who)
                         .find(|p| p.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked))
                         .and_then(|p| p.bf.as_ref().and_then(|bf| bf.attack_target));

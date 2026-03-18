@@ -14,7 +14,7 @@ impl Who {
 
 /// A composable game effect. Wraps a closure that mutates SimState.
 /// Built from primitives (eff_draw, eff_destroy_target, etc.) and chained with `.then()`.
-pub(crate) struct Effect(pub(crate) Arc<dyn Fn(&mut SimState, u8, &[Target], &mut dyn rand::RngCore) + Send + Sync>);
+pub(crate) struct Effect(pub(crate) Arc<dyn Fn(&mut SimState, u8, &[ObjId], &mut dyn rand::RngCore) + Send + Sync>);
 
 impl Clone for Effect {
     fn clone(&self) -> Self { Effect(Arc::clone(&self.0)) }
@@ -25,7 +25,7 @@ impl Effect {
         &self,
         state: &mut SimState,
         t: u8,
-        targets: &[Target],
+        targets: &[ObjId],
         rng: &mut dyn rand::RngCore,
     ) {
         (self.0)(state, t, targets, rng);
@@ -35,7 +35,7 @@ impl Effect {
     pub(crate) fn then(self, next: Effect) -> Effect {
         let a = self.0;
         let b = next.0;
-        Effect(Arc::new(move |state, t, targets, rng| {
+        Effect(Arc::new(move |state, t, targets: &[ObjId], rng| {
             a(state, t, targets, rng);
             b(state, t, targets, rng);
         }))
@@ -94,8 +94,8 @@ pub(crate) fn eff_mana(who: impl Into<String>, spec: impl Into<String>) -> Effec
 pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
     Effect(Arc::new(move |state, t, targets, rng| {
-        if let Some(Target::Object(id)) = targets.first() {
-            change_zone(*id, ZoneId::Graveyard, state, t, &caster, rng);
+        if let Some(&id) = targets.first() {
+            change_zone(id, ZoneId::Graveyard, state, t, &caster, rng);
         }
     }))
 }
@@ -104,8 +104,8 @@ pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
 pub(crate) fn eff_bounce_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
     Effect(Arc::new(move |state, t, targets, rng| {
-        if let Some(Target::Object(id)) = targets.first() {
-            change_zone(*id, ZoneId::Hand, state, t, &caster, rng);
+        if let Some(&id) = targets.first() {
+            change_zone(id, ZoneId::Hand, state, t, &caster, rng);
         }
     }))
 }
@@ -189,8 +189,7 @@ pub(crate) fn eff_enter_permanent(
 pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();
     Effect(Arc::new(move |state, t, targets, _rng| {
-        let Some(Target::Object(target_id)) = targets.first() else { return; };
-        let target_id = *target_id;
+        let Some(&target_id) = targets.first() else { return; };
         let pos = state.stack.iter().position(|&id| id == target_id);
         if let Some(pos) = pos {
             state.stack.remove(pos);
@@ -213,8 +212,8 @@ pub(crate) fn eff_counter_target(caster: impl Into<String>) -> Effect {
 pub(crate) fn eff_reanimate(actor: impl Into<String>) -> Effect {
     let actor = actor.into();
     Effect(Arc::new(move |state, t, targets, rng| {
-        if let Some(Target::Object(id)) = targets.first() {
-            change_zone(*id, ZoneId::Battlefield, state, t, &actor, rng);
+        if let Some(&id) = targets.first() {
+            change_zone(id, ZoneId::Battlefield, state, t, &actor, rng);
         }
     }))
 }

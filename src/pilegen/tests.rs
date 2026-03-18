@@ -690,7 +690,7 @@
     fn test_effect_destroy_spell_removes_opp_land() {
         let mut state = make_state();
         let id = make_land(&mut state, "opp", "Bayou", false);
-        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &mut seeded_rng());
+        eff_destroy_target("us").call(&mut state, 1, &[id], &mut seeded_rng());
 
         assert!(state.permanents_of("opp").count() == 0, "Bayou should be destroyed");
         assert!(state.graveyard_of("opp").any(|c| c.catalog_key == "Bayou"));
@@ -700,7 +700,7 @@
     fn test_effect_destroy_spell_removes_opp_creature() {
         let mut state = make_state();
         let id = add_default_perm(&mut state, "opp", "Troll");
-        eff_destroy_target("us").call(&mut state, 1, &[Target::Object(id)], &mut seeded_rng());
+        eff_destroy_target("us").call(&mut state, 1, &[id], &mut seeded_rng());
 
         assert!(state.permanents_of("opp").count() == 0, "Troll should be destroyed");
         assert!(state.graveyard_of("opp").any(|c| c.catalog_key == "Troll"));
@@ -725,7 +725,7 @@
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let targets: Vec<Target> = legal_targets(
+        let targets: Vec<ObjId> = legal_targets(
             &target_spec_from_str(Some("opp:nonbasic_land")), "us", &state
         );
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
@@ -743,7 +743,7 @@
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let targets: Vec<Target> = legal_targets(
+        let targets: Vec<ObjId> = legal_targets(
             &target_spec_from_str(Some("opp:nonbasic_land")), "us", &state
         );
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
@@ -932,7 +932,7 @@
         let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:creature")), effect: "exile".to_string(), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let targets: Vec<Target> = legal_targets(
+        let targets: Vec<ObjId> = legal_targets(
             &target_spec_from_str(Some("opp:creature")), "us", &state
         );
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
@@ -1177,7 +1177,7 @@
 
         // Run the Effect directly (as the new adventure resolution path does).
         let eff = eff_bounce_target("us");
-        eff.call(&mut state, 1, &[Target::Object(bowmasters_id)], &mut seeded_rng());
+        eff.call(&mut state, 1, &[bowmasters_id], &mut seeded_rng());
         // Then exile the card to on_adventure.
         let borrower_id = state.alloc_id();
         let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", "us");
@@ -1368,7 +1368,7 @@
         recompute(state);
         let ctx = bowmasters_etb_ctx(controller);
         let all_targets = legal_targets(&ctx.target_spec, controller, state);
-        let targets: Vec<Target> = pick_target(&all_targets, state).into_iter().collect();
+        let targets: Vec<ObjId> = pick_target(&all_targets, state).into_iter().collect();
         ctx.effect.call(state, 1, &targets, &mut rand::thread_rng());
     }
 

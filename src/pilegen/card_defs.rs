@@ -554,8 +554,7 @@ fn murktide_regent() -> CardDef {
             make_effect: Arc::new(|_source_id, controller: &str| {
                 let ctl = controller.to_string();
                 Effect(Arc::new(move |state, t, targets, rng| {
-                    let Some(Target::Object(id)) = targets.first() else { return; };
-                    let id = *id;
+                    let Some(&id) = targets.first() else { return; };
                     let exile_count = state.exile_of(&ctl)
                         .filter(|c| state.def_of(c.id)
                             .map_or(false, |d| d.is_instant() || d.is_sorcery()))
@@ -629,8 +628,8 @@ fn leyline_of_the_void() -> CardDef {
         make_effect: Arc::new(|_source_id, controller: &str| {
             let ctl = controller.to_string();
             Effect(Arc::new(move |state, t, targets, rng| {
-                if let Some(Target::Object(id)) = targets.first() {
-                    change_zone(*id, ZoneId::Exile, state, t, &ctl, rng);
+                if let Some(&id) = targets.first() {
+                    change_zone(id, ZoneId::Exile, state, t, &ctl, rng);
                 }
             }))
         }),

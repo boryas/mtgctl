@@ -76,14 +76,6 @@ pub(crate) fn pred_not(p: CardPredicate) -> CardPredicate {
     std::sync::Arc::new(move |d| !p(d))
 }
 
-/// A concrete, resolved reference to a game object that can be targeted.
-/// `id` fields default to `ObjId::UNSET` for now; they'll be filled in as objects get IDs.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Target {
-    Player(ObjId),
-    Object(ObjId),
-}
-
 /// Declarative description of what targets a spell or ability may choose from.
 /// Used both to enumerate legal choices and to re-validate at resolution.
 #[derive(Clone)]
@@ -185,42 +177,40 @@ pub(crate) fn target_spec_from_str(target: Option<&str>) -> TargetSpec {
 /// Pick one target from a list of legal targets using the standard heuristic:
 /// prefer a killable creature (tgh - damage <= 1), then planeswalker or player over
 /// non-killable creatures, then fall back to the first available target.
-pub(crate) fn pick_target(targets: &[Target], state: &SimState) -> Option<Target> {
+pub(crate) fn pick_target(targets: &[ObjId], state: &SimState) -> Option<ObjId> {
     if targets.is_empty() { return None; }
     // Prefer a killable creature
-    if let Some(&Target::Object(id)) = targets.iter().find(|t| {
-        let Target::Object(id) = t else { return false; };
-        let is_creature = state.def_of(*id)
-            .or_else(|| state.objects.get(id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+    if let Some(&id) = targets.iter().find(|&&id| {
+        let is_creature = state.def_of(id)
+            .or_else(|| state.objects.get(&id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
             .map(|d| d.is_creature()).unwrap_or(false);
         if !is_creature { return false; }
-        let tgh = state.def_of(*id)
-            .or_else(|| state.objects.get(id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+        let tgh = state.def_of(id)
+            .or_else(|| state.objects.get(&id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
             .and_then(|d| d.as_creature()).map(|c| c.toughness()).unwrap_or(1);
-        let dmg = state.permanent_bf(*id).map(|bf| bf.damage).unwrap_or(0);
+        let dmg = state.permanent_bf(id).map(|bf| bf.damage).unwrap_or(0);
         tgh > 0 && tgh - dmg <= 1
     }) {
-        return Some(Target::Object(id));
+        return Some(id);
     }
     // Skip non-killable creatures — prefer planeswalker or player over them
-    if let Some(t) = targets.iter().find(|t| {
-        !matches!(t, Target::Object(id) if
-            state.def_of(*id)
-                .or_else(|| state.objects.get(id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
-                .map(|d| d.is_creature()).unwrap_or(false))
+    if let Some(&id) = targets.iter().find(|&&id| {
+        !state.def_of(id)
+            .or_else(|| state.objects.get(&id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+            .map(|d| d.is_creature()).unwrap_or(false)
     }) {
-        return Some(t.clone());
+        return Some(id);
     }
     // Fallback: first target
-    Some(targets[0].clone())
+    Some(targets[0])
 }
 
 /// Enumerate all legal targets for `spec` given the current game state.
 /// No heuristic — returns every valid option. Caller picks.
-pub(crate) fn legal_targets(spec: &TargetSpec, controller: &str, state: &SimState) -> Vec<Target> {
+pub(crate) fn legal_targets(spec: &TargetSpec, controller: &str, state: &SimState) -> Vec<ObjId> {
     match spec {
         TargetSpec::None => vec![],
-        TargetSpec::Player(who) => vec![Target::Player(state.player_id(who.resolve(controller)))],
+        TargetSpec::Player(who) => vec![state.player_id(who.resolve(controller))],
         TargetSpec::ObjectInZone { controller: who, zone, filter } => {
             let target_who = who.resolve(controller);
             objects_in_zone(zone, target_who, state)
@@ -236,17 +226,16 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: &str, state: &SimStat
                         .map(|d| filter(d))
                         .unwrap_or(false)
                 })
-                .map(Target::Object)
                 .collect()
         }
         TargetSpec::Union(specs) => {
-            // Collect all legal targets from all sub-specs, deduplicating by value.
+            // Collect all legal targets from all sub-specs, deduplicating by id.
             let mut seen = std::collections::HashSet::new();
             let mut result = Vec::new();
             for sub in specs {
-                for t in legal_targets(sub, controller, state) {
-                    if seen.insert(format!("{t:?}")) {
-                        result.push(t);
+                for id in legal_targets(sub, controller, state) {
+                    if seen.insert(id) {
+                        result.push(id);
                     }
                 }
             }
