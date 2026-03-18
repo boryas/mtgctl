@@ -281,63 +281,6 @@ fn has_valid_target_spec(
 }
 
 
-/// Build a `CardPredicate` from a library search filter token.
-///
-/// Token syntax (all parsed at load time — no runtime string dispatch):
-/// - `"land"` → type == Land
-/// - `"land-island"` / `"land-swamp"` etc. → type == Land AND has that basic land subtype
-/// - `"land-island|swamp"` → type == Land AND (island OR swamp)
-/// - `"sorcery"` → type == Sorcery
-/// - `"instant"` → type == Instant
-/// - `"creature"` → type == Creature
-/// - `"creature-green"` → type == Creature AND color contains Green
-/// - `"artifact"` → type == Artifact
-/// - `"artifact-cost01"` → type == Artifact AND no colored pips AND mana value ≤ 1
-pub(crate) fn search_filter_pred(filter: &str) -> CardPredicate {
-    // Simple type tokens
-    match filter {
-        "land"            => return pred_type_eq(CardType::Land),
-        "sorcery"         => return pred_type_eq(CardType::Sorcery),
-        "instant"         => return pred_type_eq(CardType::Instant),
-        "creature"        => return pred_type_eq(CardType::Creature),
-        "artifact"        => return pred_type_eq(CardType::Artifact),
-        "artifact-cost01" => return pred_and(
-            pred_type_eq(CardType::Artifact),
-            pred_and(pred_no_colored_pips(), pred_mana_value_le(1)),
-        ),
-        _ => {}
-    }
-    // "land-<subtype>" and "land-<subtype>|<subtype>" patterns
-    if let Some(types_str) = filter.strip_prefix("land-") {
-        let subtypes: Vec<&str> = types_str.split('|').collect();
-        let mut pred: CardPredicate = pred_none();
-        for subtype in subtypes {
-            let p = match subtype {
-                "island"   => pred_land_subtype("island"),
-                "swamp"    => pred_land_subtype("swamp"),
-                "plains"   => pred_land_subtype("plains"),
-                "mountain" => pred_land_subtype("mountain"),
-                "forest"   => pred_land_subtype("forest"),
-                _          => pred_none(),
-            };
-            pred = pred_or(pred, p);
-        }
-        return pred_and(pred_type_eq(CardType::Land), pred);
-    }
-    // "creature-<color>" patterns
-    if let Some(color_str) = filter.strip_prefix("creature-") {
-        let color_pred = match color_str {
-            "white" => pred_has_color(Color::White),
-            "blue"  => pred_has_color(Color::Blue),
-            "black" => pred_has_color(Color::Black),
-            "red"   => pred_has_color(Color::Red),
-            "green" => pred_has_color(Color::Green),
-            _       => pred_none(),
-        };
-        return pred_and(pred_type_eq(CardType::Creature), color_pred);
-    }
-    pred_none()
-}
 
 /// Iterate over ObjIds in the given zone controlled (or owned) by `who`.
 fn objects_in_zone<'a>(

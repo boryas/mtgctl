@@ -2156,7 +2156,7 @@
         let dd_id  = add_library_card(&mut state, "us", "Doomsday");
         let fow_id = add_library_card(&mut state, "us", "Force of Will");
 
-        let eff = eff_fetch_search("us", search_filter_pred("sorcery"), ZoneId::Library);
+        let eff = eff_fetch_search("us", pred_type_eq(CardType::Sorcery), ZoneId::Library);
         eff.call(&mut state, 1, &[], &mut seeded_rng());
 
         // Both stay in library: Doomsday was "put on top" (Library ≡ top until ordering tracked),
@@ -2213,7 +2213,7 @@
         let lotus_id = add_library_card(&mut state, "us", "Lotus Petal");
         let fow_id   = add_library_card(&mut state, "us", "Force of Will");
 
-        let pred = search_filter_pred("artifact-cost01");
+        let pred = pred_and(pred_type_eq(CardType::Artifact), pred_and(pred_no_colored_pips(), pred_mana_value_le(1)));
         let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[], &mut seeded_rng());
 
@@ -2229,7 +2229,7 @@
         state.catalog.insert(white_art_def.name.clone(), white_art_def);
         add_library_card(&mut state, "us", "White Artifact");
 
-        let pred = search_filter_pred("artifact-cost01");
+        let pred = pred_and(pred_type_eq(CardType::Artifact), pred_and(pred_no_colored_pips(), pred_mana_value_le(1)));
         let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[], &mut seeded_rng());
 
@@ -2245,7 +2245,7 @@
         state.catalog.insert(sol_ring_def.name.clone(), sol_ring_def);
         add_library_card(&mut state, "us", "Sol Ring");
 
-        let pred = search_filter_pred("artifact-cost01");
+        let pred = pred_and(pred_type_eq(CardType::Artifact), pred_and(pred_no_colored_pips(), pred_mana_value_le(1)));
         let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[], &mut seeded_rng());
 
@@ -2264,7 +2264,7 @@
         let green_id = add_library_card(&mut state, "us", "Elvish Reclaimer");
         let red_id   = add_library_card(&mut state, "us", "Ragavan, Nimble Pilferer");
 
-        let pred = search_filter_pred("creature-green");
+        let pred = pred_and(pred_type_eq(CardType::Creature), pred_has_color(Color::Green));
         let eff  = eff_fetch_search("us", pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[], &mut seeded_rng());
 
