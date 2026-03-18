@@ -623,8 +623,8 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: &str, log_msg: &'static
 pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
     match event {
         // ETB: only fires for the entering Bowmasters itself.
-        GameEvent::ZoneChange { card, to: ZoneId::Battlefield, controller: ctlr, .. }
-            if card == "Orcish Bowmasters" && ctlr == controller =>
+        GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. }
+            if *id == source_id && ctlr == controller =>
         {
             pending.push(bowmasters_trigger_ctx(source_id, controller, "Bowmasters ETB: amass Orc 1"));
         }
@@ -640,9 +640,9 @@ pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: 
 
 /// ETB trigger for Recruiter of the Guard: search library for a creature with toughness ≤ 2,
 /// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
-pub(super) fn recruiter_check(event: &GameEvent, _source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
-    if let GameEvent::ZoneChange { card, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-        if card == "Recruiter of the Guard" && ctlr == controller {
+pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: &str, pending: &mut Vec<TriggerContext>) {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+        if *id == source_id && ctlr == controller {
             let ctl = controller.to_string();
             let pred = pred_and(pred_type_eq(CardType::Creature), pred_toughness_le(2));
             pending.push(TriggerContext {

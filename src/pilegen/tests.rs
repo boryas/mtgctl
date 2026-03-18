@@ -1314,10 +1314,10 @@
     #[test]
     fn test_fire_triggers_returns_context_for_bowmasters_etb() {
         let mut state = make_state();
-        add_default_perm(&mut state, "opp", "Orcish Bowmasters");
+        let bowmasters_id = add_default_perm(&mut state, "opp", "Orcish Bowmasters");
 
         let ev = GameEvent::ZoneChange {
-            id: ObjId::UNSET,
+            id: bowmasters_id,
             actor: "test".to_string(),
             card: "Orcish Bowmasters".to_string(),
             card_type: "creature".to_string(),
