@@ -96,10 +96,7 @@ fn pick_on_board_action(
         let fetch_ids: Vec<ObjId> = state.permanents_of("us")
             .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
             .filter(|p| state.def_of(p.id).map_or(false, |def|
-                def.abilities().iter().any(|ab|
-                    ab.effect.starts_with("search:land-swamp")
-                        || ab.effect.starts_with("search:land-island|swamp")
-                )
+                def.abilities().iter().any(|ab| ab.sacrifice_self && ab.life_cost > 0)
             ))
             .map(|p| p.id)
             .collect();

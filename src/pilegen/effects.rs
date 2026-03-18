@@ -100,6 +100,16 @@ pub(crate) fn eff_destroy_target(caster: impl Into<String>) -> Effect {
     }))
 }
 
+/// Exile the permanent in `targets[0]`.
+pub(crate) fn eff_exile_target(caster: impl Into<String>) -> Effect {
+    let caster = caster.into();
+    Effect(Arc::new(move |state, t, targets, rng| {
+        if let Some(&id) = targets.first() {
+            change_zone(id, ZoneId::Exile, state, t, &caster, rng);
+        }
+    }))
+}
+
 /// Bounce the permanent in `targets[0]` to its controller's hand.
 pub(crate) fn eff_bounce_target(caster: impl Into<String>) -> Effect {
     let caster = caster.into();

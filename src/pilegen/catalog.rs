@@ -60,8 +60,6 @@ pub(crate) struct AbilityDef {
     pub(crate) sacrifice_land: bool,
 
     // ── Effect ────────────────────────────────────────────────────────────────
-    pub(crate) effect: String,
-    /// Pre-built effect factory for Rust-defined abilities. Supersedes `effect` when `Some`.
     pub(crate) ability_factory: Option<AbilityFactory>,
     /// If true, this is a ninjutsu activation: cost includes returning an unblocked attacker to
     /// hand, and the effect puts the ninja into play tapped and attacking.
@@ -83,7 +81,6 @@ impl Default for AbilityDef {
             zone: String::new(),
             discard_self: false,
             sacrifice_land: false,
-            effect: String::new(),
             ability_factory: None,
             ninjutsu: false,
             loyalty_cost: None,
@@ -781,10 +778,6 @@ pub(super) fn tamiyo_plus_two_check(
     }
 }
 
-/// A named effect builder: given `(who, source_id)`, produces an `Effect` closure.
-/// Used by `NAMED_ABILITY_EFFECTS` to register card-specific ability effects by name.
-type NamedEffectBuilder = fn(&str, ObjId) -> Effect;
-
 pub(super) fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
     let who = who.to_string();
     Effect(std::sync::Arc::new(move |state, t, _targets, _rng| {
@@ -802,74 +795,16 @@ pub(super) fn build_tamiyo_plus_two(who: &str, source_id: ObjId) -> Effect {
     }))
 }
 
-/// Registry of named ability effects. Each entry maps an effect tag to a builder
-/// function. New card-specific effects are added here rather than as inline branches.
-static NAMED_ABILITY_EFFECTS: &[(&str, NamedEffectBuilder)] = &[
-    ("tamiyo_plus_two", build_tamiyo_plus_two),
-];
-
-/// Map the destination token from a `"search:filter:dest"` effect string to a `ZoneId`.
-/// Called at load time only — no string lookup at simulation time.
-fn search_dest_from_str(dest: &str) -> ZoneId {
-    match dest {
-        "play"    => ZoneId::Battlefield,
-        "hand"    => ZoneId::Hand,
-        "library" => ZoneId::Library,
-        _         => ZoneId::Battlefield,
-    }
-}
-
 /// Build an `Effect` closure for an activated ability at push time.
-///
-/// For Rust-defined abilities: uses `ability_factory` from `AbilityDef`.
-/// Fallback: string dispatch on `ability.effect` for hand-constructed `AbilityDef`s in tests.
 pub(super) fn build_ability_effect(
     ability: &AbilityDef,
     who: &str,
     source_id: ObjId,
 ) -> Effect {
-    // Rust-defined abilities: use the pre-built factory.
     if let Some(factory) = &ability.ability_factory {
         return factory(who, source_id);
     }
-
-    let who = who.to_string();
-
-    if let Some(rest) = ability.effect.strip_prefix("draw:") {
-        let n: usize = rest.parse().unwrap_or(1);
-        return eff_draw(who, n);
-    }
-
-    if ability.effect.starts_with("search:") {
-        let mut parts = ability.effect.splitn(3, ':');
-        parts.next(); // "search"
-        let filter = parts.next().unwrap_or("land");
-        let dest = search_dest_from_str(parts.next().unwrap_or("play"));
-        return eff_fetch_search(who, search_filter_pred(filter), dest);
-    }
-
-    for &(tag, builder) in NAMED_ABILITY_EFFECTS {
-        if ability.effect == tag {
-            return builder(&who, source_id);
-        }
-    }
-
-    // Targeted effect (destroy/bounce/exile): target was chosen at push time, stored in chosen_targets.
-    if !ability.effect.is_empty() {
-        let to = match ability.effect.as_str() {
-            "exile"  => ZoneId::Exile,
-            "bounce" => ZoneId::Hand,
-            _        => ZoneId::Graveyard,  // "destroy" and anything else
-        };
-        let who_c = who.clone();
-        return Effect(std::sync::Arc::new(move |state, t, targets, rng| {
-            if let Some(&id) = targets.first() {
-                change_zone(id, to, state, t, &who_c, rng);
-            }
-        }));
-    }
-
-    // No-op (ability with no effect string — e.g. loyalty ability that just adjusts loyalty).
+    // No factory — no-op (e.g. a loyalty ability that only adjusts loyalty counters).
     Effect(std::sync::Arc::new(|_state, _t, _targets, _rng| {}))
 }
 

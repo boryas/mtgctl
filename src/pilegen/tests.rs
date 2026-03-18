@@ -654,7 +654,7 @@
         let mut state = make_state();
         state.us.pool.b = 2;
         state.us.pool.total = 2;
-        let ability = AbilityDef { mana_cost: "B".to_string(), effect: "cantrip".to_string(), ..Default::default() };
+        let ability = AbilityDef { mana_cost: "B".to_string(), ..Default::default() };
         pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
@@ -665,7 +665,7 @@
     fn test_pay_activation_cost_life() {
         let mut state = make_state();
         let initial = state.us.life;
-        let ability = AbilityDef { life_cost: 2, effect: "cantrip".to_string(), ..Default::default() };
+        let ability = AbilityDef { life_cost: 2, ..Default::default() };
         pay_activation_cost(&mut state, 1, "us", ObjId::UNSET, &ability);
 
         assert_eq!(state.us.life, initial - 2);
@@ -675,7 +675,7 @@
     fn test_pay_activation_cost_sacrifice_self() {
         let mut state = make_state();
         let petal_id = add_default_perm(&mut state, "us", "Lotus Petal");
-        let ability = AbilityDef { sacrifice_self: true, effect: "mana:B".to_string(), ..Default::default() };
+        let ability = AbilityDef { sacrifice_self: true, ..Default::default() };
         pay_activation_cost(&mut state, 1, "us", petal_id, &ability);
 
         assert!(state.permanents_of("us").count() == 0, "Lotus Petal should be sacrificed");
@@ -721,7 +721,7 @@
     fn test_effect_destroy_ability_removes_nonbasic_land() {
         let mut state = make_state();
         make_land(&mut state, "opp", "Bayou", false);
-        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), effect: "destroy".to_string(), ..Default::default() };
+        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -739,7 +739,7 @@
     fn test_effect_destroy_ability_ignores_basic_land() {
         let mut state = make_state();
         make_land(&mut state, "opp", "Forest", false);
-        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), effect: "destroy".to_string(), ..Default::default() };
+        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -929,7 +929,7 @@
         let mut state = make_state();
         add_default_perm(&mut state, "opp", "Troll");
         let troll_def = creature("Troll", 2, 2);
-        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:creature")), effect: "exile".to_string(), ..Default::default() };
+        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:creature")), ability_factory: Some(Arc::new(|who, _| eff_exile_target(who))), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
@@ -1119,11 +1119,10 @@
 
     #[test]
     fn test_cycling_draw_effect() {
-        // build_ability_effect with draw:1 draws one card.
         let mut state = make_state();
         add_library_card(&mut state, "us", "Island");
         let initial = state.hand_size("us");
-        let ability = AbilityDef { effect: "draw:1".to_string(), ..Default::default() };
+        let ability = AbilityDef { ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
         let eff = build_ability_effect(&ability, "us", ObjId::UNSET);
         eff.call(&mut state, 1, &[], &mut seeded_rng());
         assert_eq!(state.hand_size("us"), initial + 1, "cycling draws one card");
@@ -1135,7 +1134,7 @@
         // and sends it to the graveyard.
         let mut state = make_state();
         let wraith_def = catalog_card("Street Wraith");
-        let ability = AbilityDef { zone: "hand".to_string(), discard_self: true, life_cost: 2, effect: "draw:1".to_string(), ..Default::default() };
+        let ability = AbilityDef { zone: "hand".to_string(), discard_self: true, life_cost: 2, ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
         let catalog = vec![wraith_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         // Add Street Wraith to hand and a library card to draw
@@ -2273,10 +2272,11 @@
         assert_eq!(state.objects[&red_id].zone,   CardZone::Library,     "non-green creature should stay");
     }
 
-    /// Fetchland regression: island-or-swamp search still works via build_ability_effect.
+    /// Fetchland regression: island-or-swamp search finds the correct land.
     #[test]
-    fn test_fetchland_search_via_build_ability_effect() {
-        let delta_ability = AbilityDef { sacrifice_self: true, life_cost: 1, effect: "search:land-island|swamp:play".to_string(), ..Default::default() };
+    fn test_fetchland_search_via_ability_factory() {
+        let pred = pred_and(pred_type_eq(CardType::Land), pred_or(pred_land_subtype("island"), pred_land_subtype("swamp")));
+        let delta_ability = AbilityDef { sacrifice_self: true, life_cost: 1, ability_factory: Some(Arc::new(move |who, _| eff_fetch_search(who, pred.clone(), ZoneId::Battlefield))), ..Default::default() };
         let island_def = catalog_card("Underground Sea");
         let forest_def = CardDef::new("Forest", CardKind::Land(LandData {
             land_types: LandTypes { forest: true, ..Default::default() },
