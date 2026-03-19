@@ -461,7 +461,6 @@ fn thassas_oracle() -> CardDef {
 fn street_wraith() -> CardDef {
     let mut data = CreatureData::new("3BB", 3, 4);
     data.abilities = vec![AbilityDef {
-        zone: "hand".to_string(),
         discard_self: true,
         life_cost: 2,
         ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))),

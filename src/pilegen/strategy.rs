@@ -674,7 +674,7 @@ fn collect_hand_actions(
         }
 
         // In-hand abilities (cycling, channel, etc.)
-        for ab in def.abilities().iter().filter(|ab| ab.zone == "hand") {
+        for ab in def.abilities().iter().filter(|ab| ab.discard_self) {
             if hand_ability_affordable(ab, state, who) {
                 let targets = legal_targets(&ab.target_spec, who, state);
                 let chosen = pick_target(&targets, state).into_iter().collect();

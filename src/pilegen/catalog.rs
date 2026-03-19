@@ -50,11 +50,7 @@ pub(crate) struct AbilityDef {
     /// and the effect is applied to a randomly chosen valid target.
     pub(crate) target_spec: TargetSpec,
 
-    // ── Zone ──────────────────────────────────────────────────────────────────
-    /// Zone the card must be in for this ability. Default "" / "play" = in play.
-    /// Use "hand" for cycling/channel abilities.
-    pub(crate) zone: String,
-    /// Discard this card as part of the cost (zone="hand" abilities).
+    /// Discard this card as part of the cost (cycling/channel abilities; implies card must be in hand).
     pub(crate) discard_self: bool,
     /// Sacrifice a land you control as part of the cost (e.g. Edge of Autumn cycling).
     pub(crate) sacrifice_land: bool,
@@ -78,7 +74,6 @@ impl Default for AbilityDef {
             sacrifice_self: false,
             life_cost: 0,
             target_spec: TargetSpec::None,
-            zone: String::new(),
             discard_self: false,
             sacrifice_land: false,
             ability_factory: None,
@@ -185,7 +180,6 @@ impl CreatureData {
 impl NinjutsuAbility {
     pub(crate) fn as_ability_def(&self) -> AbilityDef {
         AbilityDef {
-            zone: "hand".to_string(),
             mana_cost: self.mana_cost.clone(),
             ninjutsu: true,
             ..Default::default()

@@ -1618,7 +1618,7 @@ fn pay_activation_cost(
     }
 
     // Pay sacrifice cost (in-play permanent).
-    if ability.sacrifice_self && ability.zone != "hand" {
+    if ability.sacrifice_self && !ability.discard_self {
         state.set_card_zone(source_id, CardZone::Graveyard);
     }
 

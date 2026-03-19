@@ -1141,7 +1141,7 @@
         // and sends it to the graveyard.
         let mut state = make_state();
         let wraith_def = catalog_card("Street Wraith");
-        let ability = AbilityDef { zone: "hand".to_string(), discard_self: true, life_cost: 2, ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
+        let ability = AbilityDef { discard_self: true, life_cost: 2, ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
         let catalog = vec![wraith_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         // Add Street Wraith to hand and a library card to draw
