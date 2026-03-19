@@ -658,7 +658,7 @@ struct PlayerState {
 }
 
 impl PlayerState {
-    fn new(deck: &str, _mulligans: u8) -> Self {
+    fn new(deck: &str) -> Self {
         PlayerState {
             id: ObjId::UNSET,
             life: 20,
@@ -2583,11 +2583,8 @@ fn simulate_game(
 ) -> Option<SimState> {
     let turn = gen_turn(rng);
     let on_play = rng.gen_bool(0.5);
-    let our_mulligans = gen_mulligans(rng);
-    let opp_mulligans = gen_mulligans(rng);
-
-    let us = PlayerState::new(deck_name, our_mulligans);
-    let opp = PlayerState::new(opponent, opp_mulligans);
+    let us = PlayerState::new(deck_name);
+    let opp = PlayerState::new(opponent);
     let mut state = SimState::new(us, opp);
     state.catalog = catalog.clone();
     state.on_play = on_play;
@@ -2621,12 +2618,32 @@ fn simulate_game(
         }
     }
 
-    // Deal opening hands: move `7 - mulligans` cards from Library to Hand.
-    for _ in 0..(7u8.saturating_sub(our_mulligans)) {
-        sim_draw(&mut state, PlayerId::Us, 0, false);
-    }
-    for _ in 0..(7u8.saturating_sub(opp_mulligans)) {
-        sim_draw(&mut state, PlayerId::Opp, 0, false);
+    // ── Strategies and opening hands ─────────────────────────────────────────
+
+    let mut strategies: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::from([
+        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(turn)) as Box<dyn Strategy>),
+        (PlayerId::Opp, Box::new(GenericOppStrategy::new())   as Box<dyn Strategy>),
+    ]);
+
+    // Deal opening hands with mulligan decisions.
+    // The library is a HashMap so iteration order is already effectively random;
+    // moving cards back and redrawing is sufficient — no explicit shuffle needed.
+    let mut mulligans = [0u32; 2];
+    for (i, who) in [PlayerId::Us, PlayerId::Opp].into_iter().enumerate() {
+        for _ in 0..7 { sim_draw(&mut state, who, 0, false); }
+        loop {
+            let taken = mulligans[i];
+            if !strategies.get_mut(&who).unwrap().take_mulligan(&state, taken) { break; }
+            mulligans[i] += 1;
+            // Return hand to library.
+            let hand_ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
+            for id in hand_ids { state.objects.get_mut(&id).unwrap().zone = CardZone::Library; }
+            state.player_mut(who).draws_this_turn = 0;
+            // Draw new hand.
+            let new_size = 7u32.saturating_sub(mulligans[i]) as usize;
+            for _ in 0..new_size { sim_draw(&mut state, who, 0, false); }
+        }
+        state.player_mut(who).draws_this_turn = 0;
     }
 
     let us_hand = state.hand_size(PlayerId::Us);
@@ -2640,18 +2657,13 @@ fn simulate_game(
             opponent,
             if on_play { "play" } else { "draw" },
             us_hand,
-            our_mulligans,
+            mulligans[0],
             opp_hand,
-            opp_mulligans
+            mulligans[1],
         ),
     );
 
     // ── Turn loop ────────────────────────────────────────────────────────────
-
-    let mut strategies: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::from([
-        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(turn)) as Box<dyn Strategy>),
-        (PlayerId::Opp, Box::new(GenericOppStrategy::new())   as Box<dyn Strategy>),
-    ]);
 
     for t in 1..=turn {
         if !on_play {
@@ -2722,9 +2734,6 @@ fn gen_turn(rng: &mut impl Rng) -> u8 {
     )
 }
 
-fn gen_mulligans(rng: &mut impl Rng) -> u8 {
-    weighted_choice(&[(0u8, 55), (1, 35), (2, 10)], rng)
-}
 
 fn weighted_choice<T: Clone>(options: &[(T, u32)], rng: &mut impl Rng) -> T {
     let total: u32 = options.iter().map(|(_, w)| w).sum();

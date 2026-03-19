@@ -80,7 +80,15 @@ impl Strategy for DoomsdayStrategy {
         pick_blockers(self.player_id, state)
     }
 
-    fn take_mulligan(&mut self, _state: &SimState, _mulligans_taken: u32) -> bool { false }
+    fn take_mulligan(&mut self, _state: &SimState, mulligans_taken: u32) -> bool {
+        let prob = match mulligans_taken {
+            0 => 0.10,
+            1 => 0.10,
+            2 => 0.05,
+            _ => 0.0,
+        };
+        self.rng.gen_bool(prob)
+    }
 }
 
 // ── GenericOppStrategy ────────────────────────────────────────────────────────
@@ -130,7 +138,15 @@ impl Strategy for GenericOppStrategy {
         pick_blockers(self.player_id, state)
     }
 
-    fn take_mulligan(&mut self, _state: &SimState, _mulligans_taken: u32) -> bool { false }
+    fn take_mulligan(&mut self, _state: &SimState, mulligans_taken: u32) -> bool {
+        let prob = match mulligans_taken {
+            0 => 0.10,
+            1 => 0.10,
+            2 => 0.05,
+            _ => 0.0,
+        };
+        self.rng.gen_bool(prob)
+    }
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

@@ -5,8 +5,8 @@
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     fn make_state() -> SimState {
-        let us = PlayerState::new("us_deck", 0);
-        let opp = PlayerState::new("opp_deck", 0);
+        let us = PlayerState::new("us_deck");
+        let opp = PlayerState::new("opp_deck");
         let mut s = SimState::new(us, opp);
         s.rng = Box::new(rand::rngs::StdRng::seed_from_u64(42));
         s
