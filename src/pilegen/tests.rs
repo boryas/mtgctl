@@ -214,7 +214,7 @@
         assert!(!state.permanent_bf(land_id).unwrap().tapped, "land should be untapped");
         assert!(!state.permanent_bf(ragavan_id).unwrap().tapped, "permanent should be untapped");
         assert!(!state.permanent_bf(ragavan_id).unwrap().entered_this_turn, "summoning sickness should clear");
-        assert!(state.us.land_drop_available, "land drop should reset");
+        assert_eq!(state.us.lands_played_this_turn, 0, "land drop count should reset");
         assert_eq!(state.us.spells_cast_this_turn, 0);
     }
 
@@ -1848,19 +1848,19 @@
     }
 
     #[test]
-    fn test_sba_life_zero_sets_reroll() {
+    fn test_sba_life_zero_ends_game() {
         let mut state = make_state();
         state.us.life = 0;
         check_state_based_actions(&mut state, 1);
-        assert!(state.reroll, "us at 0 life → reroll");
+        assert_eq!(state.winner, Some(PlayerId::Opp), "us at 0 life → opp wins");
     }
 
     #[test]
-    fn test_sba_life_negative_sets_reroll() {
+    fn test_sba_life_negative_ends_game() {
         let mut state = make_state();
         state.us.life = -3;
         check_state_based_actions(&mut state, 1);
-        assert!(state.reroll);
+        assert_eq!(state.winner, Some(PlayerId::Opp));
     }
 
     #[test]

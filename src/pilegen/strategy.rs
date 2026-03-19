@@ -28,12 +28,15 @@ pub(super) struct DoomsdayStrategy {
     player_id: PlayerId,
     rng: SmallRng,
     dd_turn: u8,
-    pub(super) reroll: bool,
+    /// Set when a black-producing land must be played next main phase (no fetch available on fateful turn).
+    must_land_drop: bool,
+    /// Set as soon as we choose to cast Doomsday (intent; may not have resolved yet).
+    dd_cast: bool,
 }
 
 impl DoomsdayStrategy {
     pub(super) fn new(dd_turn: u8) -> Self {
-        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), dd_turn, reroll: false }
+        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), dd_turn, must_land_drop: false, dd_cast: false }
     }
 }
 
@@ -60,7 +63,13 @@ impl Strategy for DoomsdayStrategy {
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
         if !in_main_phase { return PriorityAction::Pass; }
         if let Some(action) = ap_react(state, t, who, &mut self.rng) { return action; }
-        ap_proactive(state, t, who, self.dd_turn, &mut self.rng)
+        let action = ap_proactive(state, t, who, self.dd_turn, self.dd_cast, &mut self.must_land_drop, &mut self.rng);
+        if let PriorityAction::CastSpell { card_id, .. } = &action {
+            if state.objects.get(card_id).map(|c| c.catalog_key == "Doomsday").unwrap_or(false) {
+                self.dd_cast = true;
+            }
+        }
+        action
     }
 
     fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)> {
@@ -109,7 +118,8 @@ impl Strategy for GenericOppStrategy {
             Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
         if !in_main_phase { return PriorityAction::Pass; }
-        ap_proactive(state, t, who, 0, &mut self.rng)
+        let mut _md = false;
+        ap_proactive(state, t, who, 0, false, &mut _md, &mut self.rng)
     }
 
     fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)> {
@@ -130,6 +140,7 @@ fn pick_on_board_action(
     ap: PlayerId,
     t: u8,
     dd_turn: u8,
+    must_land_drop: &mut bool,
     rng: &mut impl Rng,
 ) -> Option<PriorityAction> {
     let mut candidates: Vec<PriorityAction> = Vec::new();
@@ -240,8 +251,8 @@ fn pick_on_board_action(
                 }
             }
         } else {
-            // No fetch available — ensure the land drop fires.
-            state.us.must_land_drop = true;
+            // No fetch available — ensure a black-producing land is played next main phase.
+            *must_land_drop = true;
         }
     }
 
@@ -349,7 +360,6 @@ fn ap_react(
             action
         } else {
             state.log(t, PlayerId::Us, "⚠ Doomsday countered — could not protect");
-            state.reroll = true;
             PriorityAction::Pass
         },
     )
@@ -357,23 +367,27 @@ fn ap_react(
 
 /// AP proactive decision: land drop, abilities, Doomsday setup, and general spells.
 /// Only called when the AP is in the main phase.
+/// `must_land_drop` is strategy-owned state: set when a black-producing land is urgently needed;
+/// cleared once the land is played or the window passes.
 fn ap_proactive(
     state: &mut SimState,
     t: u8,
     who: PlayerId,
     dd_turn: u8,
+    dd_cast: bool,
+    must_land_drop: &mut bool,
     rng: &mut impl Rng,
 ) -> PriorityAction {
-    // Land drop (sorcery speed: requires empty stack).
-    if state.stack.is_empty() && state.player(who).land_drop_available {
+    // Land drop (sorcery speed: requires empty stack, AP, one per turn).
+    if state.stack.is_empty() && state.player(who).lands_played_this_turn == 0 {
         let fateful = who == PlayerId::Us && t == dd_turn;
         // On the fateful turn, skip the land drop if Doomsday is already castable — playing
         // a land might spend our last card in hand and leave us unable to cast Doomsday.
-        let dd_already_castable = fateful && !state.us.dd_cast
+        let dd_already_castable = fateful && !dd_cast
             && state.potential_mana(PlayerId::Us).can_pay(&ManaCost { b: 3, ..Default::default() })
             && state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Doomsday");
         if !dd_already_castable {
-            let force = state.player(who).must_land_drop;
+            let force = *must_land_drop;
             let land_count = state.hand_of(who)
                 .filter(|c| state.def_of(c.id).map_or(false, |d| d.is_land()))
                 .count();
@@ -382,18 +396,18 @@ fn ap_proactive(
                 let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
                 if rng.gen::<f64>() < prob {
                     if let Some(id) = choose_land(state, who, fateful, rng) {
-                        state.player_mut(who).must_land_drop = false;
+                        *must_land_drop = false;
                         return PriorityAction::LandDrop(id);
                     }
                 }
             }
-            state.player_mut(who).must_land_drop = false;
-            state.player_mut(who).land_drop_available = false;
+            *must_land_drop = false;
+            // No land_drop_available to clear — engine enforces via lands_played_this_turn.
         }
     }
 
     // On-board actions: computed fresh from current state.
-    if let Some(action) = pick_on_board_action(state, who, t, dd_turn, rng) {
+    if let Some(action) = pick_on_board_action(state, who, t, dd_turn, must_land_drop, rng) {
         return action;
     }
 
@@ -408,7 +422,7 @@ fn ap_proactive(
         let hand = state.hand_size(who);
         eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
             who, pool.b, pool.u, pool.total, hand);
-        if who == PlayerId::Us && t == dd_turn && !state.us.dd_cast {
+        if who == PlayerId::Us && t == dd_turn && !dd_cast {
             let dd_in_hand = state.hand_of(PlayerId::Us).filter(|c| c.catalog_key == "Doomsday").count();
             eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_hand={}, potential B={} tot={}",
                 hand, dd_in_hand, pool.b, pool.total);
@@ -423,7 +437,7 @@ fn ap_proactive(
     };
 
     // Fateful turn prioritization: Doomsday > Dark Ritual > anything else.
-    let fateful = who == PlayerId::Us && t == dd_turn && !state.us.dd_cast;
+    let fateful = who == PlayerId::Us && t == dd_turn && !dd_cast;
     let action = if fateful {
         let priority = ["Doomsday", "Dark Ritual"];
         priority.iter()

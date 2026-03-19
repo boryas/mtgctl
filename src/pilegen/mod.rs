@@ -647,13 +647,8 @@ struct PlayerState {
     id: ObjId,
     deck_name: String,
     life: i32,
-    /// Reset to true each Untap step; false once a land has been played or the 85% roll failed.
-    land_drop_available: bool,
-    /// Set at the start of the fateful main phase when black mana is unavailable; ensures a
-    /// black-producing land is played this turn (bypasses the probability roll).
-    must_land_drop: bool,
-    /// True once Doomsday has been cast this game (prevents double-cast).
-    dd_cast: bool,
+    /// Number of lands played this turn; reset to 0 each Untap step. Engine enforces the one-per-turn rule.
+    lands_played_this_turn: u8,
     /// Number of non-land spells cast this turn; reset each Untap. Used for multi-spell probability.
     spells_cast_this_turn: u8,
     /// Mana produced but not yet spent; drains at end of each step/phase.
@@ -668,9 +663,7 @@ impl PlayerState {
             id: ObjId::UNSET,
             life: 20,
             deck_name: deck.to_string(),
-            land_drop_available: false, // set true by Untap step
-            must_land_drop: false,
-            dd_cast: false,
+            lands_played_this_turn: 0,
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
             draws_this_turn: 0,
@@ -687,8 +680,8 @@ pub(crate) struct SimState {
     us: PlayerState,
     opp: PlayerState,
     log: Vec<String>,
-    /// Set when Doomsday was countered and we couldn't protect it — scenario must be re-rolled.
-    reroll: bool,
+    /// Set when the game ends by normal rules (a player's life reaches 0, etc.). Holds the winner.
+    winner: Option<PlayerId>,
     /// Set when Doomsday resolved — simulation ends successfully.
     success: bool,
     /// Active player this phase/step (for log context).
@@ -752,7 +745,7 @@ impl SimState {
             us,
             opp,
             log: Vec::new(),
-            reroll: false,
+            winner: None,
             success: false,
             current_ap: ObjId::UNSET,
             current_phase: None,
@@ -839,9 +832,9 @@ impl SimState {
 
 
 
-    /// True when the simulation should stop (either success or reroll).
+    /// True when the simulation should stop (game ended or objective reached).
     fn done(&self) -> bool {
-        self.reroll || self.success
+        self.winner.is_some() || self.success
     }
 
     fn player(&self, who: PlayerId) -> &PlayerState {
@@ -1374,7 +1367,7 @@ fn sim_play_land(
     who: PlayerId,
     card_id: ObjId,
 ) {
-    if !state.player(who).land_drop_available { return; }
+    if state.player(who).lands_played_this_turn >= 1 { return; }
     let land_name = match state.objects.get(&card_id) {
         Some(c) if matches!(c.zone, CardZone::Hand { .. }) => c.catalog_key.clone(),
         _ => return,
@@ -1951,7 +1944,7 @@ fn check_state_based_actions(
         for who in [PlayerId::Us, PlayerId::Opp] {
             if state.life_of(who) <= 0 {
                 state.log(t, who, format!("→ loses the game (life: {})", state.life_of(who)));
-                if who == PlayerId::Us { state.reroll = true; }
+                state.winner = Some(who.opp());
                 return; // game over — no further SBA processing
             }
         }
@@ -2190,7 +2183,7 @@ fn handle_priority_round(
         match action {
             PriorityAction::LandDrop(card_id) => {
                 sim_play_land(state, t, who, card_id);
-                state.player_mut(who).land_drop_available = false;
+                state.player_mut(who).lands_played_this_turn += 1;
                 last_passer = None;
             }
             PriorityAction::ActivateAbility(source_id, ref ability, ref chosen_targets) => {
@@ -2273,7 +2266,6 @@ fn handle_priority_round(
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
                 } else if let Some(cid) = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(), chosen_targets) {
-                    if name == "Doomsday" && who == PlayerId::Us { state.us.dd_cast = true; }
                     state.player_mut(who).spells_cast_this_turn += 1;
                     state.stack.push(cid);
                     let next = if who == ap { nap } else { ap };
@@ -2337,7 +2329,7 @@ fn do_step(
                     bf.pw_activated_this_turn = false;
                 }
             }
-            state.player_mut(ap).land_drop_available = true;
+            state.player_mut(ap).lands_played_this_turn = 0;
             state.player_mut(ap).spells_cast_this_turn = 0;
             state.player_mut(ap).draws_this_turn = 0;
             // Expire "until your next turn" trigger and continuous instances for the active player.
