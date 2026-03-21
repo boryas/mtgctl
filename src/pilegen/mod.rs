@@ -2788,12 +2788,17 @@ fn warn_unimplemented_cards(
     deck_label: &str,
     catalog: &HashMap<String, CardDef>,
 ) {
-
-    let mut missing: Vec<(&str, i32)> = Vec::new();
-    let mut no_effects: Vec<(&str, i32)> = Vec::new();
+    let mut missing_main:  Vec<(&str, i32)> = Vec::new();
+    let mut no_effects_main: Vec<(&str, i32)> = Vec::new();
+    let mut missing_side:  Vec<(&str, i32)> = Vec::new();
+    let mut no_effects_side: Vec<(&str, i32)> = Vec::new();
 
     for (name, qty, board) in cards {
-        if board != "main" { continue; }
+        let (missing, no_effects) = if board == "main" {
+            (&mut missing_main, &mut no_effects_main)
+        } else {
+            (&mut missing_side, &mut no_effects_side)
+        };
         match catalog.get(name.as_str()) {
             None => missing.push((name, *qty)),
             Some(def) if !card_has_implementation(def) => no_effects.push((name, *qty)),
@@ -2801,14 +2806,24 @@ fn warn_unimplemented_cards(
         }
     }
 
-    if missing.is_empty() && no_effects.is_empty() { return; }
+    if missing_main.is_empty() && no_effects_main.is_empty()
+        && missing_side.is_empty() && no_effects_side.is_empty() { return; }
 
     println!("\n⚠  {} — unimplemented cards:", deck_label);
-    for (name, qty) in &missing {
+    for (name, qty) in &missing_main {
         println!("   ✗ {}×{} — not in catalog (excluded from simulation)", qty, name);
     }
-    for (name, qty) in &no_effects {
+    for (name, qty) in &no_effects_main {
         println!("   ~ {}×{} — no simulation effects (drawn but never cast)", qty, name);
+    }
+    if !missing_side.is_empty() || !no_effects_side.is_empty() {
+        println!("   sideboard:");
+        for (name, qty) in &missing_side {
+            println!("   ✗ {}×{} — not in catalog", qty, name);
+        }
+        for (name, qty) in &no_effects_side {
+            println!("   ~ {}×{} — no simulation effects", qty, name);
+        }
     }
 }
 
