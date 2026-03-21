@@ -548,7 +548,7 @@ fn murktide_regent() -> CardDef {
         vec![Arc::new(murktide_check)],
         vec![ReplacementDef {
             check: murktide_etb_check,
-            make_effect: Arc::new(|source_id, controller: PlayerId| {
+            make_effect: Arc::new(|_source_id, controller: PlayerId| {
                 Effect(Arc::new(move |state, t, targets| {
                     let Some(&id) = targets.first() else { return; };
                     // Count instants/sorceries exiled specifically as delve payment (CR 702.66b).

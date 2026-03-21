@@ -98,21 +98,25 @@ pub(crate) fn cost_pred_from_card(p: CardPredicate) -> CostPredicate {
 }
 
 /// Logical AND of two cost predicates.
+#[allow(dead_code)]
 pub(crate) fn cost_pred_and(a: CostPredicate, b: CostPredicate) -> CostPredicate {
     std::sync::Arc::new(move |id, state| a(id, state) && b(id, state))
 }
 
 /// Logical OR of two cost predicates.
+#[allow(dead_code)]
 pub(crate) fn cost_pred_or(a: CostPredicate, b: CostPredicate) -> CostPredicate {
     std::sync::Arc::new(move |id, state| a(id, state) || b(id, state))
 }
 
 /// Logical NOT of a cost predicate.
+#[allow(dead_code)]
 pub(crate) fn cost_pred_not(p: CostPredicate) -> CostPredicate {
     std::sync::Arc::new(move |id, state| !p(id, state))
 }
 
 /// True iff the object is a land.
+#[allow(dead_code)]
 pub(crate) fn cost_pred_land() -> CostPredicate {
     cost_pred_from_card(pred_type_eq(CardType::Land))
 }

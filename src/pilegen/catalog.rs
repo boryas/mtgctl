@@ -92,6 +92,7 @@ pub(crate) enum SourceZone {
 /// A single component of an activation or spell cost.
 /// Costs are a `Vec<CostComponent>`; all must be payable and are paid together.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub(crate) enum CostComponent {
     Mana(ManaCost),
     TapSelf,

@@ -5,8 +5,6 @@ use super::*;
 // ── Strategy trait ────────────────────────────────────────────────────────────
 
 pub(super) trait Strategy {
-    fn player_id(&self) -> PlayerId;
-
     /// Called when this player holds priority.
     /// `ap` is the active player (whose turn it is).
     /// Takes `&mut SimState` because some decisions clear engine flags as a side-effect (known impurity).
@@ -41,8 +39,6 @@ impl DoomsdayStrategy {
 }
 
 impl Strategy for DoomsdayStrategy {
-    fn player_id(&self) -> PlayerId { self.player_id }
-
     fn priority_action(&mut self, state: &mut SimState, ap: PlayerId, last_action: &PriorityAction) -> PriorityAction {
         let who = self.player_id;
         let t = state.current_turn;
@@ -105,8 +101,6 @@ impl GenericOppStrategy {
 }
 
 impl Strategy for GenericOppStrategy {
-    fn player_id(&self) -> PlayerId { self.player_id }
-
     fn priority_action(&mut self, state: &mut SimState, ap: PlayerId, last_action: &PriorityAction) -> PriorityAction {
         let who = self.player_id;
         let t = state.current_turn;

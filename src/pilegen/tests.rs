@@ -1091,7 +1091,7 @@
         let catalog = vec![def.clone(), island_def];
 
         // Loop over seeds until ninjutsu fires (35% per attempt → statistically guaranteed within 50).
-        for seed in 0u64..50 {
+        for _seed in 0u64..50 {
             let mut state = make_state();
             for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
             state.current_phase = Some(TurnPosition::Step(StepKind::DeclareBlockers));
@@ -1226,7 +1226,7 @@
 
         // At 75% per attempt, try up to 20 seeds; at least one must result in Borrower entering play.
         let mut entered = false;
-        for seed in 0u64..20 {
+        for _seed in 0u64..20 {
             let mut state = make_fresh_state();
             handle_priority_round(&mut state, 1, PlayerId::Us, &mut make_strategies());
             if state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Brazen Borrower") {

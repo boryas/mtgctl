@@ -165,6 +165,7 @@ pub(crate) struct StackAbility {
     pub(crate) effect: Effect,
     pub(crate) chosen_targets: Vec<ObjId>,
     /// Objects moved during cost payment (for effects that depend on what was paid).
+    #[allow(dead_code)]
     pub(crate) costs_paid_ctx: CostsPaidCtx,
 }
 
@@ -833,13 +834,6 @@ impl SimState {
     /// Resolve a player ObjId back to the display string ("us"/"opp"). For logging only.
     fn who_str(&self, id: ObjId) -> &'static str {
         if id == self.us.id { "us" } else { "opp" }
-    }
-
-    /// Return the controller of the permanent with the given id.
-    fn permanent_controller(&self, id: ObjId) -> Option<PlayerId> {
-        self.objects.get(&id)
-            .filter(|c| c.zone == CardZone::Battlefield)
-            .map(|c| c.controller)
     }
 
     /// Return the name of the permanent with the given id.

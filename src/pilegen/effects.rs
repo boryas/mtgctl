@@ -96,6 +96,7 @@ pub(crate) fn eff_destroy_target(caster: PlayerId) -> Effect {
 }
 
 /// Exile the permanent in `targets[0]`.
+#[allow(dead_code)]
 pub(crate) fn eff_exile_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
