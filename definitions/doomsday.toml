@@ -87,7 +87,11 @@ pile_disruption = [
     "Mindbreak Trap",
     "Daze",
     "Goblin Bombardment",
-    "Ajani, Nacatl Pariah"]
+    "Ajani, Nacatl Pariah",
+    "Eldrazi Linebreaker",
+    "Phelia, Exuberant Shepherd",
+    "Veil of Summer",
+    "Noxious Revival"]
 
 [subtypes.Turbo]
 game_plans = ["combo", "cantrips", "control", "creatures"]

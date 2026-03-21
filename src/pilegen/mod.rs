@@ -72,6 +72,17 @@ pub(super) enum CardZone {
     Exile { on_adventure: bool },
 }
 
+/// Context recording which objects moved during cost payment.
+/// Carried on stack items so that resolution effects can inspect what was paid.
+#[derive(Clone, Default)]
+pub(crate) struct CostsPaidCtx {
+    /// ObjIds of all objects moved as cost (exiled, discarded, sacrificed, returned).
+    pub(crate) objects_moved: Vec<ObjId>,
+    /// For each `ReturnFromBattlefield` payment, the `attack_target` the returned
+    /// permanent had at the time it left the battlefield (in payment order).
+    pub(crate) returned_attack_targets: Vec<Option<ObjId>>,
+}
+
 /// Spell-on-stack state for a card while it's on the stack.
 /// Populated at cast time; cleared when the spell resolves or is countered.
 #[derive(Clone)]
@@ -80,6 +91,8 @@ struct SpellState {
     chosen_targets: Vec<ObjId>,
     /// True when the back face of a split card was cast (e.g. an adventure instant).
     is_back_face: bool,
+    /// Objects moved during cost payment (for effects that depend on what was paid).
+    costs_paid_ctx: CostsPaidCtx,
 }
 
 /// In-play state for any permanent (land, creature, artifact, planeswalker, enchantment, token).
@@ -151,6 +164,8 @@ pub(crate) struct StackAbility {
     pub(crate) owner: ObjId,         // player id
     pub(crate) effect: Effect,
     pub(crate) chosen_targets: Vec<ObjId>,
+    /// Objects moved during cost payment (for effects that depend on what was paid).
+    pub(crate) costs_paid_ctx: CostsPaidCtx,
 }
 
 // ── Trigger system ────────────────────────────────────────────────────────────
@@ -509,57 +524,6 @@ fn end_phase() -> Phase {
     }
 }
 
-// ── Mana cost ─────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Default, Debug)]
-struct ManaCost {
-    w: i32,
-    u: i32,
-    b: i32,
-    r: i32,
-    g: i32,
-    c: i32,       // colorless pips {C}
-    generic: i32, // any-color pips {1}, {2}, ...
-}
-
-impl ManaCost {
-    fn total_specific(&self) -> i32 { self.w + self.u + self.b + self.r + self.g + self.c }
-    fn mana_value(&self) -> i32 { self.total_specific() + self.generic }
-}
-
-/// Parse a mana cost string into a ManaCost.
-/// Leading digits → generic; W/U/B/R/G/C → specific color pips.
-/// Empty string = no castable mana cost (alt-cost-only or uncostable cards like Daze/FoW).
-/// "0" = genuinely free (Lotus Petal, LED).
-fn parse_mana_cost(cost: &str) -> ManaCost {
-    let mut mc = ManaCost::default();
-    let mut chars = cost.trim().chars().peekable();
-    let mut num = String::new();
-    while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
-        num.push(chars.next().unwrap());
-    }
-    if !num.is_empty() {
-        mc.generic = num.parse().unwrap_or(0);
-    }
-    for c in chars {
-        match c {
-            'W' => mc.w += 1,
-            'U' => mc.u += 1,
-            'B' => mc.b += 1,
-            'R' => mc.r += 1,
-            'G' => mc.g += 1,
-            'C' => mc.c += 1,
-            _ => mc.generic += 1,
-        }
-    }
-    mc
-}
-
-/// Total mana value (CMC) of a cost string.
-fn mana_value(cost: &str) -> i32 {
-    parse_mana_cost(cost).mana_value()
-}
-
 // ── Mana pool ─────────────────────────────────────────────────────────────────
 
 /// Mana tracking: all 5 colors + colorless tracked separately; total covers all available mana.
@@ -616,28 +580,35 @@ impl ManaPool {
 /// A source (land or permanent) contributes at most 1 to `total` because a single
 /// tap or sacrifice produces one mana. The per-color fields reflect which colors
 /// that source *can* produce (union across all available abilities).
+fn ma_requires_tap(ma: &ManaAbility) -> bool {
+    ma.costs.iter().any(|c| matches!(c, CostComponent::TapSelf))
+}
+
+fn ma_requires_sac(ma: &ManaAbility) -> bool {
+    ma.costs.iter().any(|c| matches!(c, CostComponent::SacSelf))
+}
+
 fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
     let avail: Vec<_> = abilities.iter()
-        .filter(|ma| !ma.tap_self || !tapped)
+        .filter(|ma| !ma_requires_tap(ma) || !tapped)
         .collect();
     if avail.is_empty() { return; }
     p.total += 1;
-    let mut produced = [false; 6]; // W U B R G C
+    // Track which colors this source *can* produce (union across available abilities).
+    let mut produced = [false; 5]; // W U B R G
     for ma in &avail {
-        for ch in ma.produces.chars() {
-            match ch {
-                'W' => produced[0] = true,
-                'U' => produced[1] = true,
-                'B' => produced[2] = true,
-                'R' => produced[3] = true,
-                'G' => produced[4] = true,
-                'C' => produced[5] = true,
-                _ => {}
+        for color in &ma.produces {
+            match color {
+                Color::White => produced[0] = true,
+                Color::Blue  => produced[1] = true,
+                Color::Black => produced[2] = true,
+                Color::Red   => produced[3] = true,
+                Color::Green => produced[4] = true,
             }
         }
     }
-    let [w, u, b, r, g, c] = produced.map(|x| x as i32);
-    p.w += w; p.u += u; p.b += b; p.r += r; p.g += g; p.c += c;
+    let [w, u, b, r, g] = produced.map(|x| x as i32);
+    p.w += w; p.u += u; p.b += b; p.r += r; p.g += g;
 }
 
 // ── Simulation types ──────────────────────────────────────────────────────────
@@ -694,6 +665,9 @@ pub(crate) struct SimState {
     combat_blocks: Vec<(ObjId, ObjId)>,
     /// Triggered abilities waiting to be pushed onto the stack at the next priority window.
     pending_triggers: Vec<TriggerContext>,
+    /// Costs paid to cast the spell currently resolving (set by `resolve_top_of_stack`,
+    /// cleared after resolution). Read by ETB replacement effects that need cast context.
+    pub(crate) resolving_costs_ctx: CostsPaidCtx,
     /// Spell/ability stack. Items are resolved last-in-first-out. Populated by
     /// handle_priority_round; empty between priority rounds.
     pub(crate) stack: Vec<ObjId>,
@@ -752,6 +726,7 @@ impl SimState {
             combat_attackers: Vec::new(),
             combat_blocks: Vec::new(),
             pending_triggers: Vec::new(),
+            resolving_costs_ctx: CostsPaidCtx::default(),
             stack: Vec::new(),
             abilities: HashMap::new(),
             objects: HashMap::new(),
@@ -890,16 +865,15 @@ impl SimState {
     /// Returns a log of activations.
     fn produce_mana(&mut self, who: PlayerId, cost: &ManaCost, _t: u8) -> Vec<String> {
         let mut log: Vec<String> = Vec::new();
-        let color_specs: [(i32, char, fn(&mut ManaPool)); 6] = [
-            (cost.b, 'B', |p| p.b += 1),
-            (cost.u, 'U', |p| p.u += 1),
-            (cost.w, 'W', |p| p.w += 1),
-            (cost.r, 'R', |p| p.r += 1),
-            (cost.g, 'G', |p| p.g += 1),
-            (cost.c, 'C', |p| p.c += 1),
+        let color_specs: [(i32, Color, fn(&mut ManaPool)); 5] = [
+            (cost.b, Color::Black, |p| p.b += 1),
+            (cost.u, Color::Blue,  |p| p.u += 1),
+            (cost.w, Color::White, |p| p.w += 1),
+            (cost.r, Color::Red,   |p| p.r += 1),
+            (cost.g, Color::Green, |p| p.g += 1),
         ];
 
-        for (need, color_char, add_color) in color_specs {
+        for (need, color, add_color) in color_specs {
             let mut remaining = need;
             while remaining > 0 {
                 // Find a battlefield permanent controlled by `who` with the right ability.
@@ -908,27 +882,28 @@ impl SimState {
                         c.controller == who && c.zone == CardZone::Battlefield &&
                         c.bf.as_ref().map_or(false, |bf| {
                             self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[])
-                                .iter().any(|ma| (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char))
+                                .iter().any(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color))
                         })
                     })
                     .map(|(id, c)| {
                         let bf = c.bf.as_ref().unwrap();
                         let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
                             .iter()
-                            .find(|ma| (!ma.tap_self || !bf.tapped) && ma.produces.contains(color_char))
-                            .map(|ma| ma.sacrifice_self)
+                            .find(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color))
+                            .map(|ma| ma_requires_sac(ma))
                             .unwrap_or(false);
                         (*id, c.catalog_key.clone(), sac)
                     });
                 if let Some((id, name, sac)) = found {
+                    let color_ch = match color { Color::White=>'W', Color::Blue=>'U', Color::Black=>'B', Color::Red=>'R', Color::Green=>'G' };
                     if sac {
-                        log.push(format!("sac {} → {}", name, color_char));
+                        log.push(format!("sac {} → {}", name, color_ch));
                         if let Some(card) = self.objects.get_mut(&id) {
                             card.zone = CardZone::Graveyard;
                             card.bf = None;
                         }
                     } else {
-                        log.push(format!("tap {} → {}", name, color_char));
+                        log.push(format!("tap {} → {}", name, color_ch));
                         if let Some(bf) = self.permanent_bf_mut(id) {
                             bf.tapped = true;
                         }
@@ -950,15 +925,15 @@ impl SimState {
                     c.controller == who && c.zone == CardZone::Battlefield &&
                     c.bf.as_ref().map_or(false, |bf| {
                         let mas = self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[]);
-                        !mas.is_empty() && mas.iter().any(|ma| !ma.tap_self || !bf.tapped)
+                        !mas.is_empty() && mas.iter().any(|ma| !ma_requires_tap(ma) || !bf.tapped)
                     })
                 })
                 .map(|(id, c)| {
                     let bf = c.bf.as_ref().unwrap();
                     let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
                         .iter()
-                        .find(|ma| !ma.tap_self || !bf.tapped)
-                        .map(|ma| ma.sacrifice_self)
+                        .find(|ma| !ma_requires_tap(ma) || !bf.tapped)
+                        .map(|ma| ma_requires_sac(ma))
                         .unwrap_or(false);
                     (*id, c.catalog_key.clone(), sac)
                 });
@@ -1584,195 +1559,205 @@ fn sim_draw(state: &mut SimState, who: PlayerId, t: u8, is_natural: bool) {
     fire_event(ev, state, t, who);
 }
 
-/// Pay the activation cost of an ability: mana, life, tap, and/or sacrifice.
-/// Effects are NOT applied here — they happen when the ability resolves off the stack.
-fn pay_activation_cost(
+// ── Unified cost check / pay ──────────────────────────────────────────────────
+
+/// Returns true iff every component of `costs` can be paid by `who`.
+/// `source_id` is used to resolve `SacSelf` and `DiscardSelf`.
+fn can_pay_costs(
+    costs: &[CostComponent],
+    state: &SimState,
+    who: PlayerId,
+    source_id: ObjId,
+    source_untapped: bool,
+) -> bool {
+    for cost in costs {
+        let ok = match cost {
+            CostComponent::Mana(mc) => state.potential_mana(who).can_pay(mc),
+            CostComponent::TapSelf => source_untapped,
+            CostComponent::SacSelf => state.permanent_bf(source_id).is_some(),
+            CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
+            CostComponent::Life(n) => state.player(who).life > *n,
+            CostComponent::SacPermanent(pred) => {
+                state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
+            }
+            CostComponent::DiscardCard(pred) | CostComponent::ExileFromHand(pred) => {
+                state.hand_of(who).any(|c| c.id != source_id && pred(c.id, state))
+            }
+            CostComponent::ReturnFromBattlefield(pred) => {
+                state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
+            }
+            CostComponent::TapPermanent(pred) => {
+                state.permanents_of(who).any(|c| {
+                    c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state)
+                })
+            }
+            CostComponent::LoyaltyAdjust(n) => {
+                state.permanent_bf(source_id).map_or(false, |bf| {
+                    !bf.pw_activated_this_turn && (*n >= 0 || bf.loyalty + n > 0)
+                })
+            }
+        };
+        if !ok { return false; }
+    }
+    true
+}
+
+/// Executes every component of `costs`, mutating state.
+/// Caller must have checked `can_pay_costs` first.
+/// For `SacPermanent` and `ReturnFromBattlefield`, prefers permanents without mana
+/// abilities to preserve mana sources where possible.
+/// Returns a `CostsPaidCtx` recording which objects moved during payment.
+fn pay_costs(
+    costs: &[CostComponent],
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    source_id: ObjId,
+) -> CostsPaidCtx {
+    let mut ctx = CostsPaidCtx::default();
+    for cost in costs {
+        match cost {
+            CostComponent::Mana(mc) => {
+                let mana_log = state.pay_mana(who, mc, t);
+                state.log_mana_activations(t, who, mana_log);
+            }
+            CostComponent::TapSelf => {
+                if let Some(bf) = state.permanent_bf_mut(source_id) {
+                    bf.tapped = true;
+                }
+            }
+            CostComponent::SacSelf => {
+                state.set_card_zone(source_id, CardZone::Graveyard);
+            }
+            CostComponent::DiscardSelf => {
+                state.set_card_zone(source_id, CardZone::Graveyard);
+            }
+            CostComponent::Life(n) => {
+                state.lose_life(who, *n);
+            }
+            CostComponent::SacPermanent(pred) => {
+                // Prefer permanents without mana abilities; fall back to any match.
+                let target = state.permanents_of(who)
+                    .filter(|c| c.bf.is_some() && pred(c.id, state))
+                    .min_by_key(|c| {
+                        let has_mana = state.def_of(c.id)
+                            .map_or(false, |d| !d.mana_abilities().is_empty());
+                        has_mana as u8
+                    })
+                    .map(|c| c.id);
+                if let Some(id) = target {
+                    state.set_card_zone(id, CardZone::Graveyard);
+                    ctx.objects_moved.push(id);
+                }
+            }
+            CostComponent::DiscardCard(pred) => {
+                let target = state.hand_of(who)
+                    .find(|c| c.id != source_id && pred(c.id, state))
+                    .map(|c| c.id);
+                if let Some(id) = target {
+                    state.set_card_zone(id, CardZone::Graveyard);
+                    ctx.objects_moved.push(id);
+                }
+            }
+            CostComponent::ExileFromHand(pred) => {
+                let target = state.hand_of(who)
+                    .find(|c| c.id != source_id && pred(c.id, state))
+                    .map(|c| c.id);
+                if let Some(id) = target {
+                    state.set_card_zone(id, CardZone::Exile { on_adventure: false });
+                    ctx.objects_moved.push(id);
+                }
+            }
+            CostComponent::ReturnFromBattlefield(pred) => {
+                let target = state.permanents_of(who)
+                    .find(|c| c.bf.is_some() && pred(c.id, state))
+                    .map(|c| (c.id, c.catalog_key.clone(), c.bf.as_ref().and_then(|bf| bf.attack_target)));
+                if let Some((id, name, attack_target)) = target {
+                    if let Some(card) = state.objects.get_mut(&id) {
+                        card.zone = CardZone::Hand { known: false };
+                        card.bf = None;
+                    }
+                    state.combat_attackers.retain(|&a| a != id);
+                    state.combat_blocks.retain(|(a, _)| *a != id);
+                    state.log(t, who, format!("→ return {} to hand (cost)", name));
+                    ctx.objects_moved.push(id);
+                    ctx.returned_attack_targets.push(attack_target);
+                }
+            }
+            CostComponent::TapPermanent(pred) => {
+                let target = state.permanents_of(who)
+                    .find(|c| c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state))
+                    .map(|c| c.id);
+                if let Some(id) = target {
+                    if let Some(bf) = state.permanent_bf_mut(id) {
+                        bf.tapped = true;
+                    }
+                }
+            }
+            CostComponent::LoyaltyAdjust(n) => {
+                if let Some(bf) = state.permanent_bf_mut(source_id) {
+                    bf.loyalty += n;
+                    bf.pw_activated_this_turn = true;
+                }
+            }
+        }
+    }
+    ctx
+}
+
+/// Log the ability activation and pay its costs via the unified `pay_costs` function.
+/// Returns a `CostsPaidCtx` with the objects moved during payment.
+/// For ninjutsu abilities the ninja is also moved to Stack zone.
+fn pay_ability_cost(
     state: &mut SimState,
     t: u8,
     who: PlayerId,
     source_id: ObjId,
     ability: &AbilityDef,
-) {
+    is_ninjutsu: bool,
+) -> CostsPaidCtx {
     let source_name = state.permanent_name(source_id)
         .or_else(|| state.hand_of(who).find(|c| c.id == source_id).map(|c| c.catalog_key.clone()))
         .unwrap_or_default();
     state.log(t, who, format!("Activate {} ability", source_name));
 
-    // Pay mana cost.
-    if !ability.mana_cost.is_empty() {
-        let cost = parse_mana_cost(&ability.mana_cost);
-        let mana_log = state.pay_mana(who, &cost, t);
-        state.log_mana_activations(t, who, mana_log);
-    }
-
-    // Pay life cost.
-    if ability.life_cost > 0 {
-        state.lose_life(who, ability.life_cost);
-    }
-
-    // Pay tap cost.
-    if ability.tap_self && !ability.sacrifice_self {
-        if let Some(bf) = state.permanent_bf_mut(source_id) {
-            bf.tapped = true;
+    // Ninjutsu: move the ninja card from hand to Stack zone before paying costs.
+    // The ReturnFromBattlefield cost in pay_costs handles returning the attacker.
+    if is_ninjutsu {
+        if let Some(card) = state.objects.get_mut(&source_id) {
+            card.zone = CardZone::Stack;
         }
     }
 
-    // Pay sacrifice cost (in-play permanent).
-    if ability.sacrifice_self && !ability.discard_self {
-        state.set_card_zone(source_id, CardZone::Graveyard);
-    }
+    let ctx = pay_costs(&ability.costs, state, t, who, source_id);
 
-    // Discard cost (zone="hand"): move from hand to graveyard.
-    if ability.discard_self {
-        // Find the hand card by name.
-        let hand_card_id = state.hand_of(who)
-            .find(|c| c.catalog_key == source_name)
-            .map(|c| c.id);
-        if let Some(hid) = hand_card_id {
-            state.set_card_zone(hid, CardZone::Graveyard);
-        }
-    }
-
-    // Ninjutsu cost: move ninja from hand to stack zone, and return an unblocked attacker to hand.
-    if ability.ninjutsu {
-        // Find the ninja in hand by name and move it to a neutral zone (it will enter BF via effect).
-        let ninja_hand_id = state.hand_of(who)
-            .find(|c| c.catalog_key == source_name)
-            .map(|c| c.id);
-        if let Some(nid) = ninja_hand_id {
-            // Keep it in cards but mark as Stack (it "enters via ninjutsu" when the ability resolves).
-            if let Some(card) = state.objects.get_mut(&nid) {
-                card.zone = CardZone::Stack;
-            }
-        }
-        let unblocked_attacker = state.permanents_of(who)
-            .find(|c| c.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked))
-            .map(|c| (c.id, c.catalog_key.clone(), c.bf.as_ref().and_then(|bf| bf.attack_target)));
-        if let Some((atk_id, atk_name, _atk_target)) = unblocked_attacker {
-            if let Some(card) = state.objects.get_mut(&atk_id) {
-                card.zone = CardZone::Hand { known: false };
-                card.bf = None;
-            }
-            state.combat_attackers.retain(|&a| a != atk_id);
-            state.combat_blocks.retain(|(a, _)| *a != atk_id);
-            state.log(t, who, format!("→ return {} to hand (ninjutsu)", atk_name));
-        }
-    }
-
-    // Sacrifice-a-land cost (e.g. Edge of Autumn cycling).
-    if ability.sacrifice_land {
-        // Prefer permanents with no mana abilities to preserve mana sources.
-        let land_to_sac = state.permanents_of(who)
-            .find(|c| c.bf.is_some() && state.def_of(c.id).map(|d| d.mana_abilities().is_empty()).unwrap_or(true))
-            .or_else(|| state.permanents_of(who).next())
-            .map(|c| c.id);
-        if let Some(sac_id) = land_to_sac {
-            state.set_card_zone(sac_id, CardZone::Graveyard);
-        }
-    }
-
-    // Loyalty ability: adjust planeswalker loyalty and mark activated this turn.
-    if let Some(loyalty_delta) = ability.loyalty_cost {
-        let new_loyalty = if let Some(bf) = state.permanent_bf_mut(source_id) {
-            bf.loyalty += loyalty_delta;
-            bf.pw_activated_this_turn = true;
-            Some(bf.loyalty)
-        } else {
-            None
-        };
-        if let Some(new_loyalty) = new_loyalty {
+    // Log loyalty adjustment.
+    if let Some(n) = ability.loyalty_delta() {
+        if let Some(new_loyalty) = state.permanent_bf(source_id).map(|bf| bf.loyalty) {
             state.log(t, who, format!("→ {} loyalty {} → {}", source_name,
-                if loyalty_delta >= 0 { format!("+{}", loyalty_delta) } else { loyalty_delta.to_string() },
+                if n >= 0 { format!("+{}", n) } else { n.to_string() },
                 new_loyalty));
         }
     }
+
+    ctx
 }
 
-/// Check whether `cost` can be paid by `who` given current state.
-/// `source_name` is the counterspell card name (excluded from blue pitch candidates).
-fn can_pay_alternate_cost(
-    cost: &AlternateCost,
-    state: &SimState,
-    who: PlayerId,
-    source_name: &str,
-) -> bool {
-    if state.hand_size(who) < cost.hand_min {
-        return false;
-    }
-    if !cost.mana_cost.is_empty() {
-        let cost_mc = parse_mana_cost(&cost.mana_cost);
-        if !state.potential_mana(who).can_pay(&cost_mc) {
-            return false;
-        }
-    }
-    if cost.exile_blue_from_hand {
-        let has_pitch = state.hand_of(who)
-            .any(|c| c.catalog_key != source_name && {
-                let is_blue_non_land = |d: &CardDef| !d.is_land() && d.is_blue();
-                state.def_of(c.id).map(is_blue_non_land)
-                    .unwrap_or_else(|| state.catalog.get(c.catalog_key.as_str()).map_or(false, |d| is_blue_non_land(d)))
-            });
-        if !has_pitch {
-            return false;
-        }
-    }
-    if cost.bounce_island {
-        if !state.permanents_of(who).any(|c| c.bf.is_some() && state.def_of(c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false)) {
-            return false;
-        }
-    }
-    true
-}
-
-/// Pay the component parts of `cost` (life, mana, exile, bounce). Returns description parts.
-/// Does NOT handle the spell card itself leaving hand — that is the caller's responsibility.
-fn apply_alt_cost_components(
-    cost: &AlternateCost,
-    state: &mut SimState,
-    t: u8,
-    who: PlayerId,
-    source_name: &str,
-) -> Vec<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if cost.exile_blue_from_hand {
-        // Collect pitch candidates from hand.
-        let pitch_ids: Vec<(ObjId, String)> = state.hand_of(who)
-            .filter(|c| c.catalog_key != source_name && {
-                let is_blue_non_land = |d: &CardDef| !d.is_land() && d.is_blue();
-                state.def_of(c.id).map(is_blue_non_land)
-                    .unwrap_or_else(|| state.catalog.get(c.catalog_key.as_str()).map_or(false, |d| is_blue_non_land(d)))
-            })
-            .map(|c| (c.id, c.catalog_key.clone()))
-            .collect();
-        let idx = state.rng.gen_range(0..pitch_ids.len());
-        let (pitch_id, pitch_name) = pitch_ids[idx].clone();
-        state.set_card_zone(pitch_id, CardZone::Exile { on_adventure: false });
-        parts.push(format!("exile {}", pitch_name));
-    }
-    if cost.bounce_island {
-        let bounce = state.permanents_of(who)
-            .find(|c| c.bf.is_some() && state.def_of(c.id).map(|d| d.mana_abilities().iter().any(|ma| ma.produces.contains('U'))).unwrap_or(false))
-            .map(|c| (c.id, c.catalog_key.clone()))
-            .unwrap();
-        let (bounce_id, land_name) = bounce;
-        if let Some(card) = state.objects.get_mut(&bounce_id) {
-            card.zone = CardZone::Hand { known: false };
-            card.bf = None;
-        }
-        parts.push(format!("bounce {}", land_name));
-    }
-    if !cost.mana_cost.is_empty() {
-        let cost_mc = parse_mana_cost(&cost.mana_cost);
-        let mana_log = state.pay_mana(who, &cost_mc, t);
-        state.log_mana_activations(t, who, mana_log);
-        parts.push(cost.mana_cost.clone());
-    }
-
-    if cost.life_cost > 0 {
-        state.lose_life(who, cost.life_cost);
-        parts.push(format!("-{} life", cost.life_cost));
-    }
-    parts
+/// Build a human-readable description of a cost list for log messages.
+fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
+    costs.iter().map(|c| match c {
+        CostComponent::Mana(mc) => mc.display(),
+        CostComponent::TapSelf => "tap".to_string(),
+        CostComponent::SacSelf => "sac self".to_string(),
+        CostComponent::DiscardSelf => "discard self".to_string(),
+        CostComponent::Life(n) => format!("-{} life", n),
+        CostComponent::SacPermanent(_) => "sac permanent".to_string(),
+        CostComponent::DiscardCard(_) => "discard card".to_string(),
+        CostComponent::ExileFromHand(_) => "exile blue".to_string(),
+        CostComponent::ReturnFromBattlefield(_) => "bounce land".to_string(),
+        CostComponent::TapPermanent(_) => "tap permanent".to_string(),
+        CostComponent::LoyaltyAdjust(n) => format!("loyalty {}", n),
+    }).collect()
 }
 
 /// Cast a spell: pay its cost, choose any permanent target, remove from library, log,
@@ -1824,6 +1809,7 @@ fn cast_spell(
                 effect: Some(adv_eff),
                 chosen_targets: adv_targets,
                 is_back_face: true,
+                costs_paid_ctx: CostsPaidCtx::default(),
             });
         }
         return Some(card_id);
@@ -1857,7 +1843,7 @@ fn cast_spell(
     } else if !mana_is_usable {
         def.alternate_costs()
             .iter()
-            .find(|c| can_pay_alternate_cost(c, state, who, &name))
+            .find(|c| state.hand_size(who) >= c.hand_min && can_pay_costs(&c.costs, state, who, card_id, false))
             .cloned()
     } else if has_alt_costs {
         None
@@ -1868,6 +1854,9 @@ fn cast_spell(
     if alt_cost.is_none() && !mana_is_usable {
         return None;
     }
+    if !can_pay_costs(&def.additional_costs, state, who, card_id, false) {
+        return None;
+    }
 
     // Move to Stack zone.
     if let Some(card) = state.objects.get_mut(&card_id) {
@@ -1875,19 +1864,27 @@ fn cast_spell(
     }
 
     // Pay cost and build a log label.
-    let cast_label = if let Some(ref cost) = alt_cost {
-        let parts = apply_alt_cost_components(cost, state, t, who, &name);
-        parts.join(", ")
+    let (cast_label, mut costs_ctx) = if let Some(ref cost) = alt_cost {
+        let ctx = pay_costs(&cost.costs, state, t, who, card_id);
+        (describe_costs(&cost.costs).join(", "), ctx)
     } else {
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
-        def.mana_cost().to_string()
+        (def.mana_cost().to_string(), CostsPaidCtx::default())
     };
 
-    // Exile delve cards from graveyard (cost payment).
+    // Pay additional costs (CR 118.9d: apply regardless of which cost path was taken).
+    if !def.additional_costs.is_empty() {
+        let add_ctx = pay_costs(&def.additional_costs, state, t, who, card_id);
+        costs_ctx.objects_moved.extend(add_ctx.objects_moved);
+        costs_ctx.returned_attack_targets.extend(add_ctx.returned_attack_targets);
+    }
+
+    // Exile delve cards from graveyard (cost payment); record in costs_ctx.
     let to_exile_names: Vec<String> = to_exile_ids.iter().map(|(_, n)| n.clone()).collect();
     for (exile_id, _) in &to_exile_ids {
         change_zone(*exile_id, ZoneId::Exile, state, t, who);
+        costs_ctx.objects_moved.push(*exile_id);
     }
 
     let delve_label = if to_exile_names.is_empty() {
@@ -1905,6 +1902,7 @@ fn cast_spell(
             effect: Some(spell_eff),
             chosen_targets: spell_chosen_targets,
             is_back_face: false,
+            costs_paid_ctx: costs_ctx,
         });
     }
 
@@ -2024,21 +2022,22 @@ fn check_state_based_actions(
     }
 }
 
-fn do_amass_orc(controller: PlayerId, n: i32, state: &mut SimState, t: u8) {
+pub(super) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mut SimState, t: u8) {
     let army_id: Option<ObjId> = state.permanents_of(controller)
-        .find(|c| c.catalog_key == "Orc Army")
+        .find(|c| c.catalog_key == token_key)
         .map(|c| c.id);
     if let Some(army_id) = army_id {
         if let Some(bf) = state.permanent_bf_mut(army_id) {
             bf.counters += n;
         }
         let c = state.permanent_bf(army_id).map_or(0, |bf| bf.counters);
-        state.log(t, controller, format!("Orc Army grows to {c}/{c}"));
+        state.log(t, controller, format!("{token_key} grows to {c}/{c}"));
     } else {
+        let def = state.catalog.get(token_key).cloned();
         let new_id = state.alloc_id();
         state.objects.insert(new_id, GameObject {
             id: new_id,
-            catalog_key: "Orc Army".to_string(),
+            catalog_key: token_key.to_string(),
             owner: controller,
             controller,
             zone: CardZone::Battlefield,
@@ -2050,15 +2049,20 @@ fn do_amass_orc(controller: PlayerId, n: i32, state: &mut SimState, t: u8) {
             }),
             materialized: None,
         });
-        state.log(t, controller, format!("Orc Army token created {n}/{n}"));
+        if let Some(def) = &def {
+            preregister_instances(def, new_id, controller, state);
+            activate_instances(new_id, controller, Some(def), state);
+        }
+        state.log(t, controller, format!("{token_key} token created {n}/{n}"));
     }
 }
 
-fn do_create_clue(controller: PlayerId, state: &mut SimState, t: u8) {
+pub(super) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut SimState, t: u8) {
+    let def = state.catalog.get(token_key).cloned();
     let new_id = state.alloc_id();
     state.objects.insert(new_id, GameObject {
         id: new_id,
-        catalog_key: "Clue Token".to_string(),
+        catalog_key: token_key.to_string(),
         owner: controller,
         controller,
         zone: CardZone::Battlefield,
@@ -2067,7 +2071,11 @@ fn do_create_clue(controller: PlayerId, state: &mut SimState, t: u8) {
         bf: Some(BattlefieldState::new()),
         materialized: None,
     });
-    state.log(t, controller, "Clue Token created");
+    if let Some(def) = &def {
+        preregister_instances(def, new_id, controller, state);
+        activate_instances(new_id, controller, Some(def), state);
+    }
+    state.log(t, controller, format!("{token_key} created"));
 }
 
 fn do_flip_tamiyo(source_id: ObjId, controller: PlayerId, state: &mut SimState, t: u8) {
@@ -2105,6 +2113,7 @@ fn resolve_top_of_stack(
             effect: None,
             chosen_targets: vec![],
             is_back_face: false,
+            costs_paid_ctx: CostsPaidCtx::default(),
         });
         let owner = state.objects[&id].owner;
         let name = state.objects[&id].catalog_key.clone();
@@ -2140,12 +2149,16 @@ fn resolve_top_of_stack(
                 }
                 state.log(t, owner, format!("{} resolves", name));
                 change_zone(id, ZoneId::Graveyard, state, t, owner);
+            } else {
+                // Stash costs-paid ctx so ETB replacement effects (e.g. Murktide) can read it.
+                state.resolving_costs_ctx = spell.costs_paid_ctx.clone();
             }
             eff.call(state, t, &spell.chosen_targets);
             if is_perm {
                 if let Some(card_obj) = state.objects.get_mut(&id) {
                     card_obj.spell = None;
                 }
+                state.resolving_costs_ctx = CostsPaidCtx::default();
             }
         } else {
             if let Some(card_obj) = state.objects.get_mut(&id) {
@@ -2187,7 +2200,7 @@ fn handle_priority_round(
                 last_passer = None;
             }
             PriorityAction::ActivateAbility(source_id, ref ability, ref chosen_targets) => {
-                if ability.loyalty_cost.is_some() && !state.stack.is_empty() {
+                if ability.is_loyalty_ability() && !state.stack.is_empty() {
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
                     continue;
@@ -2195,10 +2208,14 @@ fn handle_priority_round(
                 let source_name_for_stack = state.permanent_name(source_id)
                     .or_else(|| state.objects.get(&source_id).map(|c| c.catalog_key.clone()))
                     .unwrap_or_default();
-                let (ability_effect, ability_targets): (Option<Effect>, Vec<ObjId>) = if ability.ninjutsu {
-                    let attack_target = state.permanents_of(who)
-                        .find(|p| p.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked))
-                        .and_then(|p| p.bf.as_ref().and_then(|bf| bf.attack_target));
+                // Detect ninjutsu via the source card's def rather than a flag on AbilityDef.
+                let is_ninjutsu = state.objects.get(&source_id)
+                    .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
+                    .map_or(false, |d| d.ninjutsu().is_some());
+                // Pay costs first; ctx carries the returned attacker's attack_target for ninjutsu.
+                let ctx = pay_ability_cost(state, t, who, source_id, ability, is_ninjutsu);
+                let (ability_effect, ability_targets): (Option<Effect>, Vec<ObjId>) = if is_ninjutsu {
+                    let attack_target = ctx.returned_attack_targets.first().copied().flatten();
                     let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets| {
                         let ninja_name = state.objects.get(&source_id)
                             .map(|c| c.catalog_key.clone())
@@ -2231,7 +2248,6 @@ fn handle_priority_round(
                     let eff = build_ability_effect(ability, who, source_id);
                     (Some(eff), chosen_targets.clone())
                 };
-                pay_activation_cost(state, t, who, source_id, ability);
                 let ab_id = state.alloc_id();
                 let ab_owner = state.player_id(who);
                 let ab = StackAbility {
@@ -2240,6 +2256,7 @@ fn handle_priority_round(
                     owner: ab_owner,
                     effect: ability_effect.unwrap_or_else(|| Effect(std::sync::Arc::new(|_, _, _| {}))),
                     chosen_targets: ability_targets,
+                    costs_paid_ctx: ctx,
                 };
                 state.abilities.insert(ab_id, ab);
                 state.stack.push(ab_id);

@@ -664,8 +664,8 @@
         let mut state = make_state();
         state.us.pool.b = 2;
         state.us.pool.total = 2;
-        let ability = AbilityDef { mana_cost: "B".to_string(), ..Default::default() };
-        pay_activation_cost(&mut state, 1, PlayerId::Us, ObjId::UNSET, &ability);
+        let ability = AbilityDef { costs: vec![CostComponent::Mana(parse_mana_cost("B"))], ..Default::default() };
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
         assert_eq!(state.us.pool.total, 1);
@@ -675,8 +675,8 @@
     fn test_pay_activation_cost_life() {
         let mut state = make_state();
         let initial = state.us.life;
-        let ability = AbilityDef { life_cost: 2, ..Default::default() };
-        pay_activation_cost(&mut state, 1, PlayerId::Us, ObjId::UNSET, &ability);
+        let ability = AbilityDef { costs: vec![CostComponent::Life(2)], ..Default::default() };
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET);
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -685,8 +685,8 @@
     fn test_pay_activation_cost_sacrifice_self() {
         let mut state = make_state();
         let petal_id = add_default_perm(&mut state, PlayerId::Us, "Lotus Petal");
-        let ability = AbilityDef { sacrifice_self: true, ..Default::default() };
-        pay_activation_cost(&mut state, 1, PlayerId::Us, petal_id, &ability);
+        let ability = AbilityDef { costs: vec![CostComponent::SacSelf], ..Default::default() };
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, petal_id);
 
         assert!(state.permanents_of(PlayerId::Us).count() == 0, "Lotus Petal should be sacrificed");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Lotus Petal"));
@@ -838,8 +838,10 @@
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
 
-        // Resolve via Effect path — replacement effect counts exiled instants/sorceries.
+        // Simulate what resolve_top_of_stack does: stash costs_paid_ctx before calling the effect.
+        state.resolving_costs_ctx = spell.costs_paid_ctx.clone();
         effect.as_ref().unwrap().call(&mut state, 1, &chosen_targets);
+        state.resolving_costs_ctx = CostsPaidCtx::default();
 
         let murktide_bf = state.permanents_of(PlayerId::Us).find(|p| p.catalog_key == "Murktide Regent")
             .and_then(|p| p.bf.as_ref()).expect("Murktide on battlefield");
@@ -1141,7 +1143,7 @@
         // and sends it to the graveyard.
         let mut state = make_state();
         let wraith_def = catalog_card("Street Wraith");
-        let ability = AbilityDef { discard_self: true, life_cost: 2, ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
+        let ability = AbilityDef { source_zone: SourceZone::Hand, costs: vec![CostComponent::DiscardSelf, CostComponent::Life(2)], ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
         let catalog = vec![wraith_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         // Add Street Wraith to hand and a library card to draw
@@ -1149,7 +1151,7 @@
         add_library_card(&mut state, PlayerId::Us, "Island");
         let initial_hand = state.hand_size(PlayerId::Us);
 
-        pay_activation_cost(&mut state, 1, PlayerId::Us, wraith_id, &ability);
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, wraith_id);
 
         assert!(!state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Street Wraith"), "Street Wraith removed from hand");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Street Wraith"), "in graveyard");
@@ -1201,7 +1203,7 @@
         // (75% roll). Run with multiple seeds to confirm it fires and the creature enters play.
         let borrower_def = catalog_card("Brazen Borrower");
         let island2_def = CardDef::new("Island2", CardKind::Land(LandData {
-            mana_abilities: vec![ManaAbility { tap_self: true, produces: "U".to_string(), ..Default::default() }],
+            mana_abilities: vec![ManaAbility { costs: vec![CostComponent::TapSelf], produces: produces_colors("U") }],
             ..Default::default()
         }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
         let catalog = vec![borrower_def.clone(), catalog_card("Island"), island2_def.clone(), catalog_card("Swamp")];
@@ -1759,6 +1761,7 @@
                 effect: Some(eff_draw(PlayerId::Us, 3).then(eff_put_back(PlayerId::Us, 2))),
                 chosen_targets: vec![],
                 is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
             materialized: None,
@@ -2275,7 +2278,7 @@
     #[test]
     fn test_fetchland_search_via_ability_factory() {
         let pred = pred_and(pred_type_eq(CardType::Land), pred_or(pred_land_subtype("island"), pred_land_subtype("swamp")));
-        let delta_ability = AbilityDef { sacrifice_self: true, life_cost: 1, ability_factory: Some(Arc::new(move |who, _| eff_fetch_search(who, pred.clone(), ZoneId::Battlefield))), ..Default::default() };
+        let delta_ability = AbilityDef { costs: vec![CostComponent::SacSelf, CostComponent::Life(1)], ability_factory: Some(Arc::new(move |who, _| eff_fetch_search(who, pred.clone(), ZoneId::Battlefield))), ..Default::default() };
         let island_def = catalog_card("Underground Sea");
         let forest_def = CardDef::new("Forest", CardKind::Land(LandData {
             land_types: LandTypes { forest: true, ..Default::default() },
@@ -2292,4 +2295,201 @@
 
         assert_eq!(state.objects[&sea_id].zone,    CardZone::Battlefield, "Underground Sea should enter play");
         assert_eq!(state.objects[&forest_id].zone, CardZone::Library,     "Forest should remain in library");
+    }
+
+    // ── Section 20: CostsPaidCtx / objects_moved ─────────────────────────────
+
+    /// FoW pitch records the pitched card id in costs_paid_ctx.objects_moved.
+    #[test]
+    fn test_fow_pitch_objects_moved_contains_pitch_card() {
+        let mut state = make_state();
+        let fow_def = catalog_card("Force of Will");
+        let brainstorm_def = catalog_card("Brainstorm");
+        for c in &[fow_def.clone(), brainstorm_def] {
+            state.catalog.insert(c.name.clone(), c.clone());
+        }
+        let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        let bs_id  = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        let alt_cost = &fow_def.alternate_costs()[0];
+
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[]).unwrap();
+        let ctx = &state.objects[&card_id].spell.as_ref().unwrap().costs_paid_ctx;
+
+        assert_eq!(ctx.objects_moved, vec![bs_id], "pitched Brainstorm id recorded in objects_moved");
+    }
+
+    /// FoW can't pitch itself — needs a second blue card in hand.
+    #[test]
+    fn test_fow_cannot_pitch_itself() {
+        let mut state = make_state();
+        let fow_def = catalog_card("Force of Will");
+        state.catalog.insert(fow_def.name.clone(), fow_def.clone());
+        let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        // No other cards — pitch cost requires another blue non-land card; also no mana for 3UU.
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[]);
+        assert!(result.is_none(), "FoW can't be cast with only itself in hand and no mana");
+    }
+
+    /// FoW normal cost (3UU mana) works when pool is sufficient.
+    #[test]
+    fn test_fow_normal_mana_cost() {
+        let mut state = make_state();
+        let fow_def = catalog_card("Force of Will");
+        state.catalog.insert(fow_def.name.clone(), fow_def.clone());
+        let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        state.us.pool.u     = 2;
+        state.us.pool.total = 5; // 3 generic + 2 blue
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[]);
+        assert!(result.is_some(), "FoW should cast for 3UU when pool is full");
+        assert_eq!(state.us.pool.total, 0, "all mana spent");
+    }
+
+    // ── Section 21: Snuff Out ────────────────────────────────────────────────
+
+    /// Snuff Out can be cast for 4 life with no mana at all.
+    #[test]
+    fn test_snuff_out_life_alternate_cost() {
+        let mut state = make_state();
+        let def = catalog_card("Snuff Out");
+        state.catalog.insert(def.name.clone(), def.clone());
+        let troll_def = creature("Troll", 2, 2);
+        state.catalog.insert(troll_def.name.clone(), troll_def);
+        add_default_perm(&mut state, PlayerId::Opp, "Troll");
+        let snuff_id = add_hand_card(&mut state, PlayerId::Us, "Snuff Out");
+        let initial_life = state.us.life;
+        let alt = &def.alternate_costs()[0];
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), &[]);
+        assert!(result.is_some(), "Snuff Out should cast for 4 life");
+        assert_eq!(state.us.life, initial_life - 4, "paid 4 life");
+        let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
+        assert!(ctx.objects_moved.is_empty(), "no objects moved for life payment");
+    }
+
+    /// Snuff Out alternate cost requires life > 4 (can't pay if at exactly 4 or below).
+    #[test]
+    fn test_snuff_out_cant_pay_life_when_low() {
+        let mut state = make_state();
+        let def = catalog_card("Snuff Out");
+        state.catalog.insert(def.name.clone(), def.clone());
+        let snuff_id = add_hand_card(&mut state, PlayerId::Us, "Snuff Out");
+        state.us.life = 4; // exactly 4 — can't pay (would reach 0)
+        let alt = &def.alternate_costs()[0];
+        let ok = can_pay_costs(&alt.costs, &state, PlayerId::Us, snuff_id, false);
+        assert!(!ok, "can't pay 4 life when at 4 life (would reach 0)");
+    }
+
+    // ── Section 22: Street Wraith cycling ───────────────────────────────────
+
+    /// can_pay_costs returns false for DiscardSelf when the card is not in hand.
+    #[test]
+    fn test_street_wraith_discard_self_not_in_hand() {
+        let mut state = make_state();
+        let wraith_def = catalog_card("Street Wraith");
+        state.catalog.insert(wraith_def.name.clone(), wraith_def);
+        // Place the wraith in the graveyard instead of hand.
+        let wraith_id = add_graveyard_card(&mut state, PlayerId::Us, "Street Wraith");
+        let costs = vec![CostComponent::DiscardSelf, CostComponent::Life(2)];
+        let ok = can_pay_costs(&costs, &state, PlayerId::Us, wraith_id, false);
+        assert!(!ok, "can't cycle from graveyard — DiscardSelf requires card in hand");
+    }
+
+    /// After paying DiscardSelf + Life(2), the wraith is in the graveyard and 2 life is gone.
+    /// DiscardSelf moves the source itself so it is not in objects_moved (only "other" objects are).
+    #[test]
+    fn test_street_wraith_discard_self_pays_correctly() {
+        let mut state = make_state();
+        let wraith_def = catalog_card("Street Wraith");
+        state.catalog.insert(wraith_def.name.clone(), wraith_def);
+        state.us.life = 20;
+        let wraith_id = add_hand_card(&mut state, PlayerId::Us, "Street Wraith");
+        let costs = vec![CostComponent::DiscardSelf, CostComponent::Life(2)];
+        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, wraith_id);
+        // DiscardSelf moves the source itself — not tracked in objects_moved (only "other" objects are).
+        assert!(ctx.objects_moved.is_empty(), "DiscardSelf does not appear in objects_moved");
+        assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == wraith_id), "wraith in graveyard");
+        assert_eq!(state.us.life, 18, "2 life paid");
+    }
+
+    // ── Section 23: Daze bounce cost ────────────────────────────────────────
+
+    /// Daze's alternate cost bounces a blue-producing land; the bounced id is recorded.
+    #[test]
+    fn test_daze_bounce_alt_cost_records_returned_island() {
+        let mut state = make_state();
+        let daze_def = catalog_card("Daze");
+        state.catalog.insert(daze_def.name.clone(), daze_def.clone());
+        // Island on the battlefield (blue-producing).
+        let island_id = island_land(&mut state, PlayerId::Us);
+        let daze_id = add_hand_card(&mut state, PlayerId::Us, "Daze");
+        let alt = &daze_def.alternate_costs()[0]; // ReturnFromBattlefield(cost_pred_blue_producing())
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), &[]);
+        assert!(result.is_some(), "Daze should cast by bouncing the Island");
+        let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
+        assert_eq!(ctx.objects_moved, vec![island_id], "bounced Island id in objects_moved");
+        assert!(state.hand_of(PlayerId::Us).any(|c| c.id == island_id), "Island returned to hand");
+    }
+
+    // ── Section 24: Ninjutsu costs_paid_ctx ─────────────────────────────────
+
+    /// pay_costs for ReturnFromBattlefield captures the attacker's attack_target.
+    #[test]
+    fn test_ninjutsu_return_cost_records_attack_target() {
+        let mut state = make_state();
+        let opp_id = state.opp.id;
+        // Set up an attacking Ragavan with attack_target set to Opp.
+        let ragavan_id = add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
+            attacking: true,
+            unblocked: true,
+            attack_target: Some(opp_id),
+            ..BattlefieldState::new()
+        });
+        // The cost we test is just ReturnFromBattlefield + mana, applied directly.
+        let pred = cost_pred_unblocked_attacker();
+        let costs = vec![CostComponent::ReturnFromBattlefield(pred), CostComponent::Mana(parse_mana_cost("1U"))];
+        state.us.pool.u     = 1;
+        state.us.pool.total = 2;
+
+        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, ObjId::UNSET);
+
+        assert_eq!(ctx.objects_moved, vec![ragavan_id], "returned attacker id in objects_moved");
+        assert_eq!(ctx.returned_attack_targets, vec![Some(opp_id)], "opp player id captured as attack target");
+        // Ragavan should now be in hand.
+        assert!(state.hand_of(PlayerId::Us).any(|c| c.id == ragavan_id), "Ragavan moved to hand");
+    }
+
+    // ── Section 25: Additional costs ────────────────────────────────────────
+
+    /// A spell with additional_costs requires those costs to be payable.
+    #[test]
+    fn test_additional_cost_blocks_cast_when_unpayable() {
+        let mut state = make_state();
+        // Build a cheap spell ({B}) with an additional Life(3) cost.
+        let mut def = catalog_card("Dark Ritual");
+        def.additional_costs = vec![CostComponent::Life(3)];
+        state.catalog.insert(def.name.clone(), def.clone());
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        state.us.pool.b = 1; state.us.pool.total = 1;
+        state.us.life = 3; // can't pay Life(3) — would reach 0
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        assert!(result.is_none(), "additional Life(3) cost blocks cast at 3 life");
+    }
+
+    /// A spell with a payable additional_cost is cast and the cost is paid.
+    #[test]
+    fn test_additional_cost_paid_on_cast() {
+        let mut state = make_state();
+        let mut def = catalog_card("Dark Ritual");
+        def.additional_costs = vec![CostComponent::Life(3)];
+        state.catalog.insert(def.name.clone(), def.clone());
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        state.us.pool.b = 1; state.us.pool.total = 1;
+        let initial_life = state.us.life; // 20
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        assert!(result.is_some(), "Dark Ritual + Life(3) additional cost is payable at 20 life");
+        assert_eq!(state.us.life, initial_life - 3, "additional Life(3) was paid");
     }

@@ -76,6 +76,68 @@ pub(crate) fn pred_not(p: CardPredicate) -> CardPredicate {
     std::sync::Arc::new(move |d| !p(d))
 }
 
+// ── CostPredicate ─────────────────────────────────────────────────────────────
+
+/// A state-aware predicate for cost payment: takes the candidate object id and
+/// current state; can inspect both the card def and battlefield state.
+pub(crate) type CostPredicate = std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>;
+
+/// Lift a `CardPredicate` into a `CostPredicate`.
+/// Falls back to catalog lookup for non-battlefield objects (hand, graveyard, etc.)
+/// where the materialized view is not populated.
+pub(crate) fn cost_pred_from_card(p: CardPredicate) -> CostPredicate {
+    std::sync::Arc::new(move |id, state| {
+        if let Some(d) = state.def_of(id) {
+            p(d)
+        } else if let Some(obj) = state.objects.get(&id) {
+            state.catalog.get(obj.catalog_key.as_str()).map_or(false, |d| p(d))
+        } else {
+            false
+        }
+    })
+}
+
+/// Logical AND of two cost predicates.
+pub(crate) fn cost_pred_and(a: CostPredicate, b: CostPredicate) -> CostPredicate {
+    std::sync::Arc::new(move |id, state| a(id, state) && b(id, state))
+}
+
+/// Logical OR of two cost predicates.
+pub(crate) fn cost_pred_or(a: CostPredicate, b: CostPredicate) -> CostPredicate {
+    std::sync::Arc::new(move |id, state| a(id, state) || b(id, state))
+}
+
+/// Logical NOT of a cost predicate.
+pub(crate) fn cost_pred_not(p: CostPredicate) -> CostPredicate {
+    std::sync::Arc::new(move |id, state| !p(id, state))
+}
+
+/// True iff the object is a land.
+pub(crate) fn cost_pred_land() -> CostPredicate {
+    cost_pred_from_card(pred_type_eq(CardType::Land))
+}
+
+/// True iff the object is blue and not a land.
+pub(crate) fn cost_pred_blue_nonland() -> CostPredicate {
+    cost_pred_from_card(pred_and(pred_has_color(Color::Blue), pred_not(pred_type_eq(CardType::Land))))
+}
+
+/// True iff the object is a permanent on the battlefield that is attacking and unblocked.
+pub(crate) fn cost_pred_unblocked_attacker() -> CostPredicate {
+    std::sync::Arc::new(|id, state| {
+        state.permanent_bf(id).map_or(false, |bf| bf.attacking && bf.unblocked)
+    })
+}
+
+/// True iff the object is a land with a mana ability that produces blue mana.
+pub(crate) fn cost_pred_blue_producing() -> CostPredicate {
+    std::sync::Arc::new(|id, state| {
+        state.def_of(id).map_or(false, |d| {
+            d.mana_abilities().iter().any(|ma| ma.produces.contains(&Color::Blue))
+        })
+    })
+}
+
 /// Declarative description of what targets a spell or ability may choose from.
 /// Used both to enumerate legal choices and to re-validate at resolution.
 #[derive(Clone)]

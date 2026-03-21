@@ -1,6 +1,110 @@
 use super::*;
 
+// ── Mana cost ─────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Default, Debug)]
+pub(crate) struct ManaCost {
+    pub(crate) w: i32,
+    pub(crate) u: i32,
+    pub(crate) b: i32,
+    pub(crate) r: i32,
+    pub(crate) g: i32,
+    pub(crate) c: i32,       // colorless pips {C}
+    pub(crate) generic: i32, // any-color pips {1}, {2}, ...
+}
+
+impl ManaCost {
+    pub(crate) fn total_specific(&self) -> i32 { self.w + self.u + self.b + self.r + self.g + self.c }
+    pub(crate) fn mana_value(&self) -> i32 { self.total_specific() + self.generic }
+
+    /// Reconstruct a compact display string (e.g. `ManaCost{generic:1,u:1}` → `"1U"`).
+    pub(crate) fn display(&self) -> String {
+        let mut s = String::new();
+        if self.generic > 0 { s.push_str(&self.generic.to_string()); }
+        for _ in 0..self.w { s.push('W'); }
+        for _ in 0..self.u { s.push('U'); }
+        for _ in 0..self.b { s.push('B'); }
+        for _ in 0..self.r { s.push('R'); }
+        for _ in 0..self.g { s.push('G'); }
+        for _ in 0..self.c { s.push('C'); }
+        s
+    }
+}
+
+/// Parse a mana cost string into a ManaCost.
+/// Leading digits → generic; W/U/B/R/G/C → specific color pips.
+/// Empty string = no castable mana cost (alt-cost-only or uncostable cards like Daze/FoW).
+/// "0" = genuinely free (Lotus Petal, LED).
+pub(crate) fn parse_mana_cost(cost: &str) -> ManaCost {
+    let mut mc = ManaCost::default();
+    let mut chars = cost.trim().chars().peekable();
+    let mut num = String::new();
+    while chars.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        num.push(chars.next().unwrap());
+    }
+    if !num.is_empty() {
+        mc.generic = num.parse().unwrap_or(0);
+    }
+    for c in chars {
+        match c {
+            'W' => mc.w += 1,
+            'U' => mc.u += 1,
+            'B' => mc.b += 1,
+            'R' => mc.r += 1,
+            'G' => mc.g += 1,
+            'C' => mc.c += 1,
+            _ => mc.generic += 1,
+        }
+    }
+    mc
+}
+
+/// Convert a mana-production string (e.g. "U", "WUBRG") to a Vec<Color>.
+/// Each character maps to the corresponding Color; unknown chars are ignored.
+pub(crate) fn produces_colors(s: &str) -> Vec<Color> {
+    s.chars().filter_map(|c| match c {
+        'W' => Some(Color::White),
+        'U' => Some(Color::Blue),
+        'B' => Some(Color::Black),
+        'R' => Some(Color::Red),
+        'G' => Some(Color::Green),
+        _ => None,
+    }).collect()
+}
+
+/// Total mana value (CMC) of a cost string.
+pub(crate) fn mana_value(cost: &str) -> i32 {
+    parse_mana_cost(cost).mana_value()
+}
+
 // ── Effect factories ──────────────────────────────────────────────────────────
+
+// ── Cost types ────────────────────────────────────────────────────────────────
+
+/// Where the source object must be located for an ability to be activated.
+#[derive(Clone, Default)]
+pub(crate) enum SourceZone {
+    #[default]
+    Battlefield,
+    Hand,
+}
+
+/// A single component of an activation or spell cost.
+/// Costs are a `Vec<CostComponent>`; all must be payable and are paid together.
+#[derive(Clone)]
+pub(crate) enum CostComponent {
+    Mana(ManaCost),
+    TapSelf,
+    SacSelf,                              // sacrifice the source from battlefield
+    DiscardSelf,                          // discard the source from hand
+    Life(i32),
+    SacPermanent(CostPredicate),          // sacrifice another permanent from battlefield
+    DiscardCard(CostPredicate),           // discard another card from hand
+    ExileFromHand(CostPredicate),         // exile another card from hand (pitch costs)
+    ReturnFromBattlefield(CostPredicate), // return another permanent from battlefield to hand
+    TapPermanent(CostPredicate),          // tap another permanent (Kappa Cannoneer et al.)
+    LoyaltyAdjust(i32),                   // +/- loyalty; also marks pw_activated_this_turn
+}
 
 /// Factory for a spell effect: takes controller, returns the resolved `Effect`.
 /// `TargetSpec` is derived from `SpellData.target` via `target_spec_from_str`.
@@ -9,89 +113,79 @@ pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId) -> Effect + Send 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
 pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
 
-/// One way to pay for a counterspell. Each option is tried in order; the first
-/// affordable one is taken.
+/// One way to pay for a spell instead of (or in addition to) its mana cost.
+/// Options are tried in order; the first affordable one is taken.
 ///
-/// Components (all optional, combined additively):
-///   mana_cost           — standard mana (e.g. "3UU" for FoW hard cost)
-///   exile_blue_from_hand — exile another blue card from hand as pitch cost
-///   life_cost           — life paid alongside (e.g. 1 for FoW alternate)
-///   bounce_island       — return any blue-producing land from play to hand
-///   hand_min            — minimum hand size required (inclusive of this spell)
-///   prob                — probability this option is even attempted (default 1.0)
+/// `hand_min` and `prob` are strategy metadata, not rules costs.
+/// Per CR 118.9d, additional costs apply on top when an AlternateCost is chosen;
+/// that is enforced at the cast-spell call site.
 #[derive(Clone, Default)]
 pub(crate) struct AlternateCost {
-    pub(crate) mana_cost: String,
-    pub(crate) exile_blue_from_hand: bool,
-    pub(crate) life_cost: i32,
-    pub(crate) bounce_island: bool,
+    pub(crate) costs: Vec<CostComponent>,
     pub(crate) hand_min: i32,
     pub(crate) prob: Option<f64>,
 }
 
-/// An activated ability a permanent can use during its controller's turn.
+/// An activated ability a permanent or hand card can use.
 ///
 /// Preconditions are derived automatically: ability is available iff
-/// the cost can be paid and a valid target exists (if one is required).
+/// every cost component can be paid and a valid target exists (if required).
 #[derive(Clone)]
 pub(crate) struct AbilityDef {
-    // ── Cost ──────────────────────────────────────────────────────────────────
-    /// Mana cost to activate (empty = no mana required).
-    pub(crate) mana_cost: String,
-    /// Whether the source is tapped as part of the cost.
-    pub(crate) tap_self: bool,
-    /// Whether the source is sacrificed as part of the cost.
-    pub(crate) sacrifice_self: bool,
-    /// Life paid as part of the cost (e.g. 1 for fetchlands).
-    pub(crate) life_cost: i32,
+    /// Where the source must be located for this ability to be activatable.
+    /// Default: Battlefield. Set to Hand for cycling, channel, ninjutsu, etc.
+    pub(crate) source_zone: SourceZone,
+    /// All costs to activate this ability, paid simultaneously.
+    pub(crate) costs: Vec<CostComponent>,
 
     // ── Target (optional) ─────────────────────────────────────────────────────
-    /// If not `TargetSpec::None`, a valid target must exist for the ability to be available,
-    /// and the effect is applied to a randomly chosen valid target.
+    /// If not `TargetSpec::None`, a valid target must exist for the ability to be available.
     pub(crate) target_spec: TargetSpec,
-
-    /// Discard this card as part of the cost (cycling/channel abilities; implies card must be in hand).
-    pub(crate) discard_self: bool,
-    /// Sacrifice a land you control as part of the cost (e.g. Edge of Autumn cycling).
-    pub(crate) sacrifice_land: bool,
 
     // ── Effect ────────────────────────────────────────────────────────────────
     pub(crate) ability_factory: Option<AbilityFactory>,
-    /// If true, this is a ninjutsu activation: cost includes returning an unblocked attacker to
-    /// hand, and the effect puts the ninja into play tapped and attacking.
-    pub(crate) ninjutsu: bool,
-    /// If Some, this is a loyalty ability with the given loyalty adjustment
-    /// (positive = gain loyalty, negative = spend loyalty, 0 = 0-loyalty ability).
-    /// Loyalty abilities are sorcery-speed and can only be activated once per turn per planeswalker.
-    pub(crate) loyalty_cost: Option<i32>,
 }
 
 impl Default for AbilityDef {
     fn default() -> Self {
         AbilityDef {
-            mana_cost: String::new(),
-            tap_self: false,
-            sacrifice_self: false,
-            life_cost: 0,
+            source_zone: SourceZone::Battlefield,
+            costs: Vec::new(),
             target_spec: TargetSpec::None,
-            discard_self: false,
-            sacrifice_land: false,
             ability_factory: None,
-            ninjutsu: false,
-            loyalty_cost: None,
         }
+    }
+}
+
+impl AbilityDef {
+    /// True if this is a loyalty ability (costs contain a `LoyaltyAdjust`).
+    pub(crate) fn is_loyalty_ability(&self) -> bool {
+        self.costs.iter().any(|c| matches!(c, CostComponent::LoyaltyAdjust(_)))
+    }
+
+    /// Returns the loyalty delta if this is a loyalty ability.
+    pub(crate) fn loyalty_delta(&self) -> Option<i32> {
+        self.costs.iter().find_map(|c| {
+            if let CostComponent::LoyaltyAdjust(n) = c { Some(*n) } else { None }
+        })
+    }
+
+    /// True if this looks like a fetch land activation (SacSelf + Life cost > 0).
+    pub(crate) fn is_fetch_ability(&self) -> bool {
+        self.costs.iter().any(|c| matches!(c, CostComponent::SacSelf))
+            && self.costs.iter().any(|c| matches!(c, CostComponent::Life(n) if *n > 0))
     }
 }
 
 // ── Mana ability types ────────────────────────────────────────────────────────
 
-/// How a permanent produces mana. `produces` is a string of color chars (e.g. "B", "U", "BU").
-/// Empty produces → contributes to generic total only (e.g. Cavern of Souls).
+/// How a permanent produces mana.
+/// `costs` — what must be paid to activate (typically TapSelf or SacSelf).
+/// `produces` — colors produced; empty vec → contributes to generic total only.
 #[derive(Clone, Default)]
 pub(crate) struct ManaAbility {
-    pub(crate) tap_self: bool,
-    pub(crate) sacrifice_self: bool,
-    pub(crate) produces: String,
+    pub(crate) costs: Vec<CostComponent>,
+    pub(crate) produces: Vec<Color>,
 }
 
 /// The five basic land subtypes.
@@ -180,8 +274,11 @@ impl CreatureData {
 impl NinjutsuAbility {
     pub(crate) fn as_ability_def(&self) -> AbilityDef {
         AbilityDef {
-            mana_cost: self.mana_cost.clone(),
-            ninjutsu: true,
+            source_zone: SourceZone::Hand,
+            costs: vec![
+                CostComponent::Mana(parse_mana_cost(&self.mana_cost)),
+                CostComponent::ReturnFromBattlefield(cost_pred_unblocked_attacker()),
+            ],
             ..Default::default()
         }
     }
@@ -293,6 +390,9 @@ pub(crate) struct CardDef {
     /// Static ability factories. Called at ETB to register a `ContinuousInstance` for this
     /// object. The CI has `expiry: WhileSourceOnBattlefield` and is removed on LTB.
     pub(super) static_ability_defs: Vec<StaticAbilityDef>,
+    /// Costs that must always be paid in addition to the chosen base/alternative cost.
+    /// Per CR 118.9d these apply regardless of which cost path is taken.
+    pub(crate) additional_costs: Vec<CostComponent>,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -463,6 +563,7 @@ impl CardDef {
             trigger_defs,
             replacement_defs,
             static_ability_defs,
+            additional_costs: vec![],
         }
     }
 }
@@ -570,7 +671,7 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: PlayerId, log_msg: &'st
                 }
             }
             // No target chosen (no legal targets) — do nothing.
-            do_amass_orc(controller, 1, state, t);
+            do_amass("Orc Army", controller, 1, state, t);
             state.log(t, controller, log_msg);
         })),
     }
@@ -646,7 +747,7 @@ pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: Play
                 target_spec: TargetSpec::None,
                 effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     if state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
-                        do_create_clue(controller, state, t);
+                        do_create_token("Clue Token", controller, state, t);
                     }
                 })),
             });
@@ -697,6 +798,7 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState)
             owner: ab_owner,
             effect: ctx.effect.clone(),
             chosen_targets,
+            costs_paid_ctx: CostsPaidCtx::default(),
         };
         state.abilities.insert(ab_id, ab);
         state.stack.push(ab_id);

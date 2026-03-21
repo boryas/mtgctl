@@ -166,13 +166,13 @@ fn pick_on_board_action(
         .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
         .filter(|p| state.def_of(p.id)
             .map_or(false, |def| def.is_land() && def.abilities().iter()
-                .any(|ab| ability_available(ab, state, ap, true))))
+                .any(|ab| ability_available(ab, state, ap, p.id, true))))
         .map(|p| p.id)
         .collect();
     for land_id in land_ids {
         if let Some(def) = state.def_of(land_id) {
             if let Some(ab) = def.abilities().iter()
-                .find(|ab| ability_available(ab, state, ap, true))
+                .find(|ab| ability_available(ab, state, ap, land_id, true))
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
@@ -191,14 +191,14 @@ fn pick_on_board_action(
             let tapped = p.bf.as_ref().map_or(false, |bf| bf.tapped);
             state.def_of(p.id)
                 .map_or(false, |def| !def.is_land() && def.abilities().iter()
-                    .any(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped)))
+                    .any(|ab| !ab.is_loyalty_ability() && ability_available(ab, state, ap, p.id, !tapped)))
         })
         .map(|p| (p.id, p.bf.as_ref().map_or(false, |bf| bf.tapped)))
         .collect();
     for (perm_id, tapped) in perm_ids {
         if let Some(def) = state.def_of(perm_id) {
             if let Some(ab) = def.abilities().iter()
-                .find(|ab| ab.loyalty_cost.is_none() && ability_available(ab, state, ap, !tapped))
+                .find(|ab| !ab.is_loyalty_ability() && ability_available(ab, state, ap, perm_id, !tapped))
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
@@ -226,8 +226,8 @@ fn pick_on_board_action(
             if let Some(def) = state.def_of(pw_id) {
                 if let Some(ab) = def.abilities().iter()
                     .filter(|ab| {
-                        let Some(cost) = ab.loyalty_cost else { return false; };
-                        !(cost < 0 && loyalty < -cost)
+                        let Some(n) = ab.loyalty_delta() else { return false; };
+                        !(n < 0 && loyalty < -n)
                     })
                     .next()
                     .cloned()
@@ -246,7 +246,7 @@ fn pick_on_board_action(
         let fetch_ids: Vec<ObjId> = state.permanents_of(PlayerId::Us)
             .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
             .filter(|p| state.def_of(p.id).map_or(false, |def|
-                def.abilities().iter().any(|ab| ab.sacrifice_self && ab.life_cost > 0)
+                def.abilities().iter().any(|ab| ab.is_fetch_ability())
             ))
             .map(|p| p.id)
             .collect();
@@ -256,7 +256,7 @@ fn pick_on_board_action(
                 if !candidates.iter().any(|a| matches!(a, PriorityAction::ActivateAbility(id, _, _) if *id == fid)) {
                     if let Some(def) = state.def_of(fid) {
                         if let Some(ab) = def.abilities().iter()
-                            .find(|ab| ability_available(ab, state, PlayerId::Us, true))
+                            .find(|ab| ability_available(ab, state, PlayerId::Us, fid, true))
                             .cloned()
                         {
                             let targets = legal_targets(&ab.target_spec, PlayerId::Us, state);
@@ -591,35 +591,23 @@ fn pick_blockers(
 // ── Hand and board action enumeration ─────────────────────────────────────────
 
 /// Check whether an ability can be activated (cost payable + valid target exists).
-/// `source_untapped` must be true when the source is an untapped land/permanent.
+/// `source_untapped` must be true when the source is an untapped permanent.
 fn ability_available(
     ability: &AbilityDef,
     state: &SimState,
     who: PlayerId,
+    source_id: ObjId,
     source_untapped: bool,
 ) -> bool {
-    if ability.tap_self && !source_untapped {
-        return false;
-    }
-    if !ability.mana_cost.is_empty() {
-        let cost = parse_mana_cost(&ability.mana_cost);
-        if !state.potential_mana(who).can_pay(&cost) {
-            return false;
-        }
-    }
-    if !ability.target_spec.is_none() {
-        if !has_valid_target(&ability.target_spec, state, who) {
-            return false;
-        }
-    }
-    true
+    can_pay_costs(&ability.costs, state, who, source_id, source_untapped)
+        && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who))
 }
 
 /// True if the player can currently afford to cast `name` via any available cost.
 ///
 /// Tries the standard mana cost first; falls back to alternate costs (e.g. delve, pitch).
 fn spell_is_affordable(
-    name: &str,
+    card_id: ObjId,
     def: &CardDef,
     state: &SimState,
     who: PlayerId,
@@ -630,20 +618,18 @@ fn spell_is_affordable(
         cost.generic = (cost.generic - gy_len).max(0);
     }
     let mana_is_usable = !def.mana_cost().is_empty() && state.potential_mana(who).can_pay(&cost);
-    if mana_is_usable { return true; }
-    def.alternate_costs().iter().any(|c| can_pay_alternate_cost(c, state, who, name))
+    let base_payable = if mana_is_usable {
+        true
+    } else {
+        def.alternate_costs().iter().any(|c| {
+            state.hand_size(who) >= c.hand_min && can_pay_costs(&c.costs, state, who, card_id, false)
+        })
+    };
+    base_payable && can_pay_costs(&def.additional_costs, state, who, card_id, false)
 }
 
-fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: PlayerId) -> bool {
-    let player = state.player(who);
-    if !ability.mana_cost.is_empty() {
-        if !state.potential_mana(who).can_pay(&parse_mana_cost(&ability.mana_cost)) { return false; }
-    }
-    if ability.life_cost > 0 && player.life <= ability.life_cost { return false; }
-    if ability.sacrifice_land && !state.permanents_of(who).any(|c| {
-        c.bf.is_some() && !state.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
-    }) { return false; }
-    true
+fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: PlayerId, source_id: ObjId) -> bool {
+    ability_available(ability, state, who, source_id, true)
 }
 
 fn collect_hand_actions(
@@ -666,7 +652,7 @@ fn collect_hand_actions(
         if !card_has_implementation(def) { continue; }
         if def.legendary() && state.permanents_of(who).any(|c| c.catalog_key == name.as_str()) { continue; }
         if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who) { continue; }
-        if !spell_is_affordable(name, def, state, who) { continue; }
+        if !spell_is_affordable(*card_id, def, state, who) { continue; }
         if seen_names.insert(name.clone()) {
             let targets = legal_targets(def.target_spec(), who, state);
             let chosen = pick_target(&targets, state).into_iter().collect();
@@ -674,8 +660,8 @@ fn collect_hand_actions(
         }
 
         // In-hand abilities (cycling, channel, etc.)
-        for ab in def.abilities().iter().filter(|ab| ab.discard_self) {
-            if hand_ability_affordable(ab, state, who) {
+        for ab in def.abilities().iter().filter(|ab| matches!(ab.source_zone, SourceZone::Hand)) {
+            if hand_ability_affordable(ab, state, who, *card_id) {
                 let targets = legal_targets(&ab.target_spec, who, state);
                 let chosen = pick_target(&targets, state).into_iter().collect();
                 actions.push(PriorityAction::ActivateAbility(*card_id, ab.clone(), chosen));
@@ -715,7 +701,7 @@ fn choose_land(
         .filter_map(|c| {
             let def = state.def_of(c.id)?;
             let land = def.as_land()?;
-            if need_black && !land.mana_abilities.iter().any(|ma| ma.produces.contains('B')) { return None; }
+            if need_black && !land.mana_abilities.iter().any(|ma| ma.produces.contains(&Color::Black)) { return None; }
             Some(c.id)
         })
         .collect();
@@ -805,7 +791,8 @@ fn respond_with_counter(
 
         let costs = def.alternate_costs().to_vec();
         for cost in &costs {
-            if probabilistic && cost.exile_blue_from_hand {
+            let has_exile_blue = cost.costs.iter().any(|c| matches!(c, CostComponent::ExileFromHand(_)));
+            if probabilistic && has_exile_blue {
                 let n_blue = state.hand_of(responding_who)
                     .filter(|c| c.id != *cs_id
                         && state.def_of(c.id).map_or(false, |d| !d.is_land() && d.is_blue()))
@@ -813,7 +800,8 @@ fn respond_with_counter(
                 let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
                 if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
             }
-            if can_pay_alternate_cost(cost, state, responding_who, cs_name) {
+            if state.hand_size(responding_who) >= cost.hand_min
+                && can_pay_costs(&cost.costs, state, responding_who, *cs_id, false) {
                 return Some(PriorityAction::CastSpell {
                     card_id: *cs_id,
                     face: SpellFace::Main,

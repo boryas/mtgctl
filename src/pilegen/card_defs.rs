@@ -59,6 +59,9 @@ fn all_cards() -> Vec<CardDef> {
         brazen_borrower(),
         // Opponent archetypes / hate cards
         leyline_of_the_void(),
+        // Tokens
+        orc_army_token(),
+        clue_token(),
     ]
 }
 
@@ -73,15 +76,14 @@ fn simple(name: &str, kind: CardKind, colors: Vec<Color>, play_weight: Option<u3
 }
 
 /// `ManaAbility` that taps self and produces the given mana string (e.g. `"U"`, `"B"`).
-fn tap_produces(produces: impl Into<String>) -> ManaAbility {
-    ManaAbility { tap_self: true, produces: produces.into(), ..Default::default() }
+fn tap_produces(s: &str) -> ManaAbility {
+    ManaAbility { costs: vec![CostComponent::TapSelf], produces: produces_colors(s) }
 }
 
 /// `AbilityDef` for a fetch land: sacrifice self, pay 1 life, search → Battlefield.
 fn fetch_ability(pred: CardPredicate) -> AbilityDef {
     AbilityDef {
-        sacrifice_self: true,
-        life_cost: 1,
+        costs: vec![CostComponent::SacSelf, CostComponent::Life(1)],
         ability_factory: Some(Arc::new(move |who, _| {
             eff_fetch_search(who, pred.clone(), ZoneId::Battlefield)
         })),
@@ -145,8 +147,7 @@ fn undercity_sewers() -> CardDef {
 fn wasteland() -> CardDef {
     simple("Wasteland", CardKind::Land(LandData {
         abilities: vec![AbilityDef {
-            tap_self: true,
-            sacrifice_self: true,
+            costs: vec![CostComponent::TapSelf, CostComponent::SacSelf],
             target_spec: target_spec_from_str(Some("opp:nonbasic_land")),
             ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))),
             ..Default::default()
@@ -218,7 +219,7 @@ fn bloodstained_mire() -> CardDef {
 /// Produces generic mana only (no colored pips). CR 106.
 fn cavern_of_souls() -> CardDef {
     simple("Cavern of Souls", CardKind::Land(LandData {
-        mana_abilities: vec![ManaAbility { tap_self: true, produces: String::new(), ..Default::default() }],
+        mana_abilities: vec![ManaAbility { costs: vec![CostComponent::TapSelf], produces: vec![] }],
         ..Default::default()
     }), vec![], Some(50))
 }
@@ -229,7 +230,7 @@ fn cavern_of_souls() -> CardDef {
 fn lotus_petal() -> CardDef {
     simple("Lotus Petal", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
-        mana_abilities: vec![ManaAbility { sacrifice_self: true, produces: "WUBRG".to_string(), ..Default::default() }],
+        mana_abilities: vec![ManaAbility { costs: vec![CostComponent::SacSelf], produces: produces_colors("WUBRG") }],
         ..Default::default()
     }), vec![], Some(25))
 }
@@ -253,7 +254,7 @@ fn ursas_saga() -> CardDef {
     simple("Urza's Saga", CardKind::Artifact(ArtifactData {
         mana_cost: String::new(),
         abilities: vec![AbilityDef {
-            sacrifice_self: true,
+            costs: vec![CostComponent::SacSelf],
             ability_factory: Some(Arc::new(move |who, _| {
                 eff_fetch_search(who, pred.clone(), ZoneId::Battlefield)
             })),
@@ -296,8 +297,8 @@ fn daze() -> CardDef {
         // blue=true so it can be pitched to Force of Will
         target_spec: target_spec_from_str(Some("stack:any")),
         alternate_costs: vec![
-            AlternateCost { bounce_island: true, hand_min: 1, ..Default::default() },
-            AlternateCost { mana_cost: "1U".to_string(), hand_min: 1, prob: Some(0.2), ..Default::default() },
+            AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(cost_pred_blue_producing())], hand_min: 1, ..Default::default() },
+            AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("1U"))], hand_min: 1, prob: Some(0.2), ..Default::default() },
         ],
         spell_factory: Some(Arc::new(|who| eff_counter_target(who))),
         ..Default::default()
@@ -311,8 +312,8 @@ fn force_of_will() -> CardDef {
         mana_cost: "3UU".to_string(),
         target_spec: target_spec_from_str(Some("stack:any")),
         alternate_costs: vec![
-            AlternateCost { exile_blue_from_hand: true, life_cost: 1, hand_min: 2, ..Default::default() },
-            AlternateCost { mana_cost: "3UU".to_string(), hand_min: 1, ..Default::default() },
+            AlternateCost { costs: vec![CostComponent::ExileFromHand(cost_pred_blue_nonland()), CostComponent::Life(1)], hand_min: 2, ..Default::default() },
+            AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("3UU"))], hand_min: 1, ..Default::default() },
         ],
         spell_factory: Some(Arc::new(|who| eff_counter_target(who))),
         ..Default::default()
@@ -344,7 +345,7 @@ fn snuff_out() -> CardDef {
         mana_cost: "3BB".to_string(),
         target_spec: target_spec_from_str(Some("opp:creature_nonblack")),
         alternate_costs: vec![
-            AlternateCost { life_cost: 4, ..Default::default() },
+            AlternateCost { costs: vec![CostComponent::Life(4)], ..Default::default() },
         ],
         spell_factory: Some(Arc::new(|who| eff_destroy_target(who))),
         ..Default::default()
@@ -461,8 +462,8 @@ fn thassas_oracle() -> CardDef {
 fn street_wraith() -> CardDef {
     let mut data = CreatureData::new("3BB", 3, 4);
     data.abilities = vec![AbilityDef {
-        discard_self: true,
-        life_cost: 2,
+        source_zone: SourceZone::Hand,
+        costs: vec![CostComponent::DiscardSelf, CostComponent::Life(2)],
         ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))),
         ..Default::default()
     }];
@@ -550,9 +551,15 @@ fn murktide_regent() -> CardDef {
             make_effect: Arc::new(|source_id, controller: PlayerId| {
                 Effect(Arc::new(move |state, t, targets| {
                     let Some(&id) = targets.first() else { return; };
-                    let exile_count = state.exile_of(controller)
-                        .filter(|c| state.def_of(c.id)
-                            .map_or(false, |d| d.is_instant() || d.is_sorcery()))
+                    // Count instants/sorceries exiled specifically as delve payment (CR 702.66b).
+                    // `resolving_costs_ctx` is set by resolve_top_of_stack before the effect runs.
+                    let delve_ids = state.resolving_costs_ctx.objects_moved.clone();
+                    let exile_count = delve_ids.iter()
+                        .filter(|&&id| {
+                            state.objects.get(&id)
+                                .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
+                                .map_or(false, |d| d.is_instant() || d.is_sorcery())
+                        })
                         .count() as i32;
                     if let Some(bf) = state.permanent_bf_mut(id) {
                         bf.counters = exile_count;
@@ -586,7 +593,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
             mana_cost: String::new(),
             loyalty: 2,
             abilities: vec![AbilityDef {
-                loyalty_cost: Some(2),
+                costs: vec![CostComponent::LoyaltyAdjust(2)],
                 ability_factory: Some(Arc::new(build_tamiyo_plus_two)),
                 ..Default::default()
             }],
@@ -638,6 +645,31 @@ fn leyline_of_the_void() -> CardDef {
 
 /// Front: Brazen Borrower — 3/1 flying creature for {1UU}.
 /// Back (adventure): Petty Theft — instant for {1U}, bounce a nonland permanent. CR 715.
+// ── Tokens ────────────────────────────────────────────────────────────────────
+
+/// 0/0 Orc Army creature token. Created and grown by Amass Orcs. CR 701.45.
+fn orc_army_token() -> CardDef {
+    simple("Orc Army", CardKind::Creature(CreatureData::new("", 0, 0)), vec![], None)
+}
+
+/// Colorless Clue artifact token. Activated ability: {2}, tap self, sacrifice self → draw one.
+/// CR 701.28 (Investigate).
+fn clue_token() -> CardDef {
+    simple("Clue Token", CardKind::Artifact(ArtifactData {
+        mana_cost: String::new(),
+        abilities: vec![AbilityDef {
+            costs: vec![
+                CostComponent::Mana(parse_mana_cost("2")),
+                CostComponent::TapSelf,
+                CostComponent::SacSelf,
+            ],
+            ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }), vec![], None)
+}
+
 fn brazen_borrower() -> CardDef {
     let back = simple(
         "Petty Theft",
