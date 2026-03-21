@@ -650,7 +650,7 @@
         let mut state = make_state();
         add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
         let initial_opp_hand = state.hand_size(PlayerId::Opp);
-        eff_discard(PlayerId::Us, Who::Opp, 1, "").call(&mut state, 1, &[]);
+        eff_discard(PlayerId::Us, Who::Opp, 1, pred_any()).call(&mut state, 1, &[]);
 
         assert_eq!(state.hand_size(PlayerId::Opp), initial_opp_hand - 1, "opp hand decremented");
         assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Counterspell"), "Counterspell in graveyard");
@@ -731,12 +731,12 @@
     fn test_effect_destroy_ability_removes_nonbasic_land() {
         let mut state = make_state();
         make_land(&mut state, PlayerId::Opp, "Bayou", false);
-        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &target_spec_from_str(Some("opp:nonbasic_land")), PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, PlayerId::Us, &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -749,12 +749,12 @@
     fn test_effect_destroy_ability_ignores_basic_land() {
         let mut state = make_state();
         make_land(&mut state, PlayerId::Opp, "Forest", false);
-        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:nonbasic_land")), ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &target_spec_from_str(Some("opp:nonbasic_land")), PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, PlayerId::Us, &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -939,11 +939,11 @@
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Troll");
         let troll_def = creature("Troll", 2, 2);
-        let ability = AbilityDef { target_spec: target_spec_from_str(Some("opp:creature")), ability_factory: Some(Arc::new(|who, _| eff_exile_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Creature) }, ability_factory: Some(Arc::new(|who, _| eff_exile_target(who))), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &target_spec_from_str(Some("opp:creature")), PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Creature) }, PlayerId::Us, &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);

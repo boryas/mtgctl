@@ -121,11 +121,9 @@ pub(crate) fn eff_doomsday() -> Effect {
     }))
 }
 
-/// Discard `n` random cards from `target`'s hand.
-/// `filter` is a type predicate string (e.g. `"nonland"`, `"any"`, `""` = any).
-pub(crate) fn eff_discard(caster: PlayerId, target: Who, n: usize, filter: impl Into<String>) -> Effect {
-    let filter = filter.into();
-    let discard_pred = zone_pred_from_str(&filter);
+/// Discard `n` random cards from `target`'s hand matching `filter`.
+pub(crate) fn eff_discard(caster: PlayerId, target: Who, n: usize, filter: CardPredicate) -> Effect {
+    let discard_pred = filter;
     Effect(Arc::new(move |state, t, _targets| {
         use rand::Rng;
         let target_who = target.resolve(caster);

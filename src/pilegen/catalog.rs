@@ -117,7 +117,6 @@ pub(crate) enum CostComponent {
 }
 
 /// Factory for a spell effect: takes controller, returns the resolved `Effect`.
-/// `TargetSpec` is derived from `SpellData.target` via `target_spec_from_str`.
 pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
@@ -661,7 +660,11 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: PlayerId, log_msg: &'st
     TriggerContext {
         source_name: "Orcish Bowmasters".into(),
         controller,
-        target_spec: target_spec_from_str(Some("any_target")),
+        target_spec: TargetSpec::Union(vec![
+            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Creature) },
+            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Planeswalker) },
+            TargetSpec::Player(Who::Opp),
+        ]),
         effect: Effect(std::sync::Arc::new(move |state, t, targets| {
             // Apply 1 damage to the chosen target, then amass.
             // ObjIds are globally unique: try player first, then permanent.

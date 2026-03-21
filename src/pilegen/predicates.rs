@@ -11,10 +11,6 @@ pub(crate) fn pred_any() -> CardPredicate {
     std::sync::Arc::new(|_| true)
 }
 
-/// Always returns false.
-pub(crate) fn pred_none() -> CardPredicate {
-    std::sync::Arc::new(|_| false)
-}
 
 /// True iff the card's primary type equals `t`.
 pub(crate) fn pred_type_eq(t: CardType) -> CardPredicate {
@@ -161,85 +157,6 @@ impl TargetSpec {
     pub(crate) fn is_none(&self) -> bool { matches!(self, TargetSpec::None) }
 }
 
-/// Build a `CardPredicate` from a permanent filter string (e.g. `"creature"`, `"nonbasic_land"`).
-fn permanent_pred_from_str(filter: &str) -> CardPredicate {
-    match filter {
-        "any"             => pred_any(),
-        "land"            => pred_type_eq(CardType::Land),
-        "nonbasic_land"   => pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))),
-        "creature"        => pred_type_eq(CardType::Creature),
-        "creature_or_planeswalker" => pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
-        "planeswalker"    => pred_type_eq(CardType::Planeswalker),
-        "artifact"        => pred_type_eq(CardType::Artifact),
-        "nonland"         => pred_not(pred_type_eq(CardType::Land)),
-        "permanent_nonland" => pred_not(pred_type_eq(CardType::Land)),
-        "creature_mv_lt4" => pred_and(pred_type_eq(CardType::Creature), pred_mana_value_le(3)),
-        "creature_nonblack" => pred_and(pred_type_eq(CardType::Creature), pred_not(pred_has_color(Color::Black))),
-        _                 => pred_none(),
-    }
-}
-
-/// Build a `CardPredicate` from a stack entry filter string (e.g. `"any"`, `"instant_or_sorcery"`).
-pub(crate) fn stack_pred_from_str(filter: &str) -> CardPredicate {
-    match filter {
-        "any"                => pred_any(),
-        "noncreature"        => pred_not(pred_type_eq(CardType::Creature)),
-        "nonland"            => pred_not(pred_type_eq(CardType::Land)),
-        "instant_or_sorcery" => pred_or(pred_type_eq(CardType::Instant), pred_type_eq(CardType::Sorcery)),
-        _                    => pred_none(),
-    }
-}
-
-/// Build a `CardPredicate` for graveyard/hand zone filter strings.
-pub(crate) fn zone_pred_from_str(filter: &str) -> CardPredicate {
-    match filter {
-        "" | "any" => pred_any(),
-        other      => permanent_pred_from_str(other),
-    }
-}
-
-/// Parse a TOML target string into a `TargetSpec`.
-pub(crate) fn target_spec_from_str(target: Option<&str>) -> TargetSpec {
-    let Some(s) = target else { return TargetSpec::None; };
-    if let Some(filter) = s.strip_prefix("stack:") {
-        return TargetSpec::ObjectInZone {
-            controller: Who::Opp,
-            zone: ZoneId::Stack,
-            filter: stack_pred_from_str(filter),
-        };
-    }
-    if let Some(rest) = s.strip_prefix("self:gy:") {
-        return TargetSpec::ObjectInZone {
-            controller: Who::Actor,
-            zone: ZoneId::Graveyard,
-            filter: zone_pred_from_str(rest),
-        };
-    }
-    if let Some(filter) = s.strip_prefix("opp:") {
-        return TargetSpec::ObjectInZone {
-            controller: Who::Opp,
-            zone: ZoneId::Battlefield,
-            filter: permanent_pred_from_str(filter),
-        };
-    }
-    if s == "any_target" {
-        // "Any target" = creature permanent | planeswalker permanent | player.
-        return TargetSpec::Union(vec![
-            TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Battlefield,
-                filter: pred_type_eq(CardType::Creature),
-            },
-            TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Battlefield,
-                filter: pred_type_eq(CardType::Planeswalker),
-            },
-            TargetSpec::Player(Who::Opp),
-        ]);
-    }
-    TargetSpec::None
-}
 
 /// Pick one target from a list of legal targets using the standard heuristic:
 /// prefer a killable creature (tgh - damage <= 1), then planeswalker or player over

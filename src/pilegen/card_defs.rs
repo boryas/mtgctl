@@ -149,7 +149,11 @@ fn wasteland() -> CardDef {
     simple("Wasteland", CardKind::Land(LandData {
         abilities: vec![AbilityDef {
             costs: vec![CostComponent::TapSelf, CostComponent::SacSelf],
-            target_spec: target_spec_from_str(Some("opp:nonbasic_land")),
+            target_spec: TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Battlefield,
+                filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))),
+            },
             ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))),
             ..Default::default()
         }],
@@ -296,7 +300,7 @@ fn daze() -> CardDef {
         mana_cost: "U".to_string(),
         exileable: true,
         // blue=true so it can be pitched to Force of Will
-        target_spec: target_spec_from_str(Some("stack:any")),
+        target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: pred_any() },
         alternate_costs: vec![
             AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(cost_pred_blue_producing())], hand_min: 1, ..Default::default() },
             AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("1U"))], hand_min: 1, prob: Some(0.2), ..Default::default() },
@@ -311,7 +315,7 @@ fn daze() -> CardDef {
 fn force_of_will() -> CardDef {
     simple("Force of Will", CardKind::Instant(SpellData {
         mana_cost: "3UU".to_string(),
-        target_spec: target_spec_from_str(Some("stack:any")),
+        target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: pred_any() },
         alternate_costs: vec![
             AlternateCost { costs: vec![CostComponent::ExileFromHand(cost_pred_blue_nonland()), CostComponent::Life(1)], hand_min: 2, ..Default::default() },
             AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("3UU"))], hand_min: 1, ..Default::default() },
@@ -334,7 +338,11 @@ fn dark_ritual() -> CardDef {
 fn fatal_push() -> CardDef {
     simple("Fatal Push", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
-        target_spec: target_spec_from_str(Some("opp:creature_mv_lt4")),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: pred_and(pred_type_eq(CardType::Creature), pred_mana_value_le(3)),
+        },
         spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
@@ -344,7 +352,11 @@ fn fatal_push() -> CardDef {
 fn snuff_out() -> CardDef {
     simple("Snuff Out", CardKind::Instant(SpellData {
         mana_cost: "3BB".to_string(),
-        target_spec: target_spec_from_str(Some("opp:creature_nonblack")),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: pred_and(pred_type_eq(CardType::Creature), pred_not(pred_has_color(Color::Black))),
+        },
         alternate_costs: vec![
             AlternateCost { costs: vec![CostComponent::Life(4)], ..Default::default() },
         ],
@@ -358,7 +370,11 @@ fn snuff_out() -> CardDef {
 fn bitter_triumph() -> CardDef {
     let mut def = simple("Bitter Triumph", CardKind::Instant(SpellData {
         mana_cost: "1B".to_string(),
-        target_spec: target_spec_from_str(Some("opp:creature_or_planeswalker")),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
+        },
         spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("1B", false, false), None);
@@ -398,7 +414,7 @@ fn thoughtseize() -> CardDef {
     simple("Thoughtseize", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
         spell_factory: Some(Arc::new(|who, _source_id| {
-            eff_discard(who, Who::Opp, 1, "nonland")
+            eff_discard(who, Who::Opp, 1, pred_not(pred_type_eq(CardType::Land)))
                 .then(eff_life_loss(who, 2))
         })),
         ..Default::default()
@@ -409,7 +425,11 @@ fn thoughtseize() -> CardDef {
 fn unearth() -> CardDef {
     simple("Unearth", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
-        target_spec: target_spec_from_str(Some("self:gy:creature")),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Actor,
+            zone: ZoneId::Graveyard,
+            filter: pred_type_eq(CardType::Creature),
+        },
         spell_factory: Some(Arc::new(|who, _source_id| eff_reanimate(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
@@ -419,7 +439,7 @@ fn unearth() -> CardDef {
 fn hymn_to_tourach() -> CardDef {
     simple("Hymn to Tourach", CardKind::Sorcery(SpellData {
         mana_cost: "BB".to_string(),
-        spell_factory: Some(Arc::new(|who, _source_id| eff_discard(who, Who::Opp, 2, ""))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_discard(who, Who::Opp, 2, pred_any()))),
         ..Default::default()
     }), parse_colors("BB", false, false), None)
 }
@@ -694,7 +714,11 @@ fn brazen_borrower() -> CardDef {
         "Petty Theft",
         CardKind::Instant(SpellData {
             mana_cost: "1U".to_string(),
-            target_spec: target_spec_from_str(Some("opp:permanent_nonland")),
+            target_spec: TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Battlefield,
+                filter: pred_not(pred_type_eq(CardType::Land)),
+            },
             subtypes: vec!["adventure".to_string()],
             spell_factory: Some(Arc::new(|who, _source_id| eff_bounce_target(who))),
             ..Default::default()
