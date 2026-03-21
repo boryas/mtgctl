@@ -271,7 +271,7 @@ fn brainstorm() -> CardDef {
     simple("Brainstorm", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
         exileable: true,
-        spell_factory: Some(Arc::new(|who| {
+        spell_factory: Some(Arc::new(|who, _source_id| {
             eff_draw(who, 3).then(eff_put_back(who, 2))
         })),
         ..Default::default()
@@ -283,7 +283,7 @@ fn consider() -> CardDef {
     simple("Consider", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
         exileable: true,
-        spell_factory: Some(Arc::new(|who| eff_draw(who, 1))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_draw(who, 1))),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
@@ -300,7 +300,7 @@ fn daze() -> CardDef {
             AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(cost_pred_blue_producing())], hand_min: 1, ..Default::default() },
             AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("1U"))], hand_min: 1, prob: Some(0.2), ..Default::default() },
         ],
-        spell_factory: Some(Arc::new(|who| eff_counter_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_counter_target(who))),
         ..Default::default()
     }), parse_colors("U", true, false), None)
 }
@@ -315,7 +315,7 @@ fn force_of_will() -> CardDef {
             AlternateCost { costs: vec![CostComponent::ExileFromHand(cost_pred_blue_nonland()), CostComponent::Life(1)], hand_min: 2, ..Default::default() },
             AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("3UU"))], hand_min: 1, ..Default::default() },
         ],
-        spell_factory: Some(Arc::new(|who| eff_counter_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_counter_target(who))),
         ..Default::default()
     }), parse_colors("3UU", true, false), None)
 }
@@ -324,7 +324,7 @@ fn force_of_will() -> CardDef {
 fn dark_ritual() -> CardDef {
     simple("Dark Ritual", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
-        spell_factory: Some(Arc::new(|who| eff_mana(who, "BBB"))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_mana(who, "BBB"))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
 }
@@ -334,7 +334,7 @@ fn fatal_push() -> CardDef {
     simple("Fatal Push", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
         target_spec: target_spec_from_str(Some("opp:creature_mv_lt4")),
-        spell_factory: Some(Arc::new(|who| eff_destroy_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
 }
@@ -347,7 +347,7 @@ fn snuff_out() -> CardDef {
         alternate_costs: vec![
             AlternateCost { costs: vec![CostComponent::Life(4)], ..Default::default() },
         ],
-        spell_factory: Some(Arc::new(|who| eff_destroy_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("3BB", false, true), None)
 }
@@ -359,7 +359,7 @@ fn snuff_out() -> CardDef {
 fn doomsday() -> CardDef {
     simple("Doomsday", CardKind::Sorcery(SpellData {
         mana_cost: "BBB".to_string(),
-        spell_factory: Some(Arc::new(|_who| eff_doomsday())),
+        spell_factory: Some(Arc::new(|_who, _source_id| eff_doomsday())),
         ..Default::default()
     }), parse_colors("BBB", false, false), None)
 }
@@ -369,7 +369,7 @@ fn ponder() -> CardDef {
     simple("Ponder", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
         exileable: true,
-        spell_factory: Some(Arc::new(|who| eff_draw(who, 1))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_draw(who, 1))),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
@@ -378,7 +378,7 @@ fn ponder() -> CardDef {
 fn thoughtseize() -> CardDef {
     simple("Thoughtseize", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
-        spell_factory: Some(Arc::new(|who| {
+        spell_factory: Some(Arc::new(|who, _source_id| {
             eff_discard(who, Who::Opp, 1, "nonland")
                 .then(eff_life_loss(who, 2))
         })),
@@ -391,7 +391,7 @@ fn unearth() -> CardDef {
     simple("Unearth", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
         target_spec: target_spec_from_str(Some("self:gy:creature")),
-        spell_factory: Some(Arc::new(|who| eff_reanimate(who))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_reanimate(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
 }
@@ -400,7 +400,7 @@ fn unearth() -> CardDef {
 fn hymn_to_tourach() -> CardDef {
     simple("Hymn to Tourach", CardKind::Sorcery(SpellData {
         mana_cost: "BB".to_string(),
-        spell_factory: Some(Arc::new(|who| eff_discard(who, Who::Opp, 2, ""))),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_discard(who, Who::Opp, 2, ""))),
         ..Default::default()
     }), parse_colors("BB", false, false), None)
 }
@@ -423,7 +423,7 @@ fn edge_of_autumn() -> CardDef {
 fn personal_tutor() -> CardDef {
     simple("Personal Tutor", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        spell_factory: Some(Arc::new(|who| {
+        spell_factory: Some(Arc::new(|who, _source_id| {
             eff_fetch_search(who, pred_type_eq(CardType::Sorcery), ZoneId::Library)
         })),
         ..Default::default()
@@ -435,7 +435,7 @@ fn personal_tutor() -> CardDef {
 fn green_suns_zenith() -> CardDef {
     simple("Green Sun's Zenith", CardKind::Sorcery(SpellData {
         mana_cost: "1G".to_string(),
-        spell_factory: Some(Arc::new(|who| {
+        spell_factory: Some(Arc::new(|who, _source_id| {
             eff_fetch_search(
                 who,
                 pred_and(pred_type_eq(CardType::Creature), pred_has_color(Color::Green)),
@@ -677,7 +677,7 @@ fn brazen_borrower() -> CardDef {
             mana_cost: "1U".to_string(),
             target_spec: target_spec_from_str(Some("opp:permanent_nonland")),
             subtypes: vec!["adventure".to_string()],
-            spell_factory: Some(Arc::new(|who| eff_bounce_target(who))),
+            spell_factory: Some(Arc::new(|who, _source_id| eff_bounce_target(who))),
             ..Default::default()
         }),
         parse_colors("1UU", true, false),

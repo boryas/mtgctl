@@ -108,7 +108,7 @@ pub(crate) enum CostComponent {
 
 /// Factory for a spell effect: takes controller, returns the resolved `Effect`.
 /// `TargetSpec` is derived from `SpellData.target` via `target_spec_from_str`.
-pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId) -> Effect + Send + Sync>;
+pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
 pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
@@ -881,11 +881,12 @@ pub(super) fn build_ability_effect(
 pub(super) fn build_spell_effect(
     def: &CardDef,
     who: PlayerId,
+    source_id: ObjId,
 ) -> (TargetSpec, Effect) {
     let target_spec = def.target_spec().clone();
     if let CardKind::Instant(s) | CardKind::Sorcery(s) = &def.kind {
         if let Some(factory) = &s.spell_factory {
-            return (target_spec, factory(who));
+            return (target_spec, factory(who, source_id));
         }
     }
     (TargetSpec::None, eff_enter_permanent(who, def.name.clone()))

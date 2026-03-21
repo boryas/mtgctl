@@ -1800,7 +1800,7 @@ fn cast_spell(
         let cost = parse_mana_cost(adv.mana_cost());
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
-        let (_adv_spec, adv_eff) = build_spell_effect(&adv, who);
+        let (_adv_spec, adv_eff) = build_spell_effect(&adv, who, card_id);
         let adv_targets = chosen_targets.to_vec();
         state.log(t, who, format!("Cast {} ({}, {}) [hand: {}]", adv.name, adv.mana_cost(), name, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
@@ -1894,7 +1894,7 @@ fn cast_spell(
     };
     state.log(t, who, format!("Cast {} ({}{}) [hand: {}]", name, cast_label, delve_label, state.hand_size(who)));
 
-    let (_spell_target_spec, spell_eff) = build_spell_effect(&def, who);
+    let (_spell_target_spec, spell_eff) = build_spell_effect(&def, who, card_id);
     let spell_chosen_targets = chosen_targets.to_vec();
 
     if let Some(card) = state.objects.get_mut(&card_id) {
