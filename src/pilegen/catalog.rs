@@ -90,7 +90,12 @@ pub(crate) enum SourceZone {
 }
 
 /// A single component of an activation or spell cost.
-/// Costs are a `Vec<CostComponent>`; all must be payable and are paid together.
+///
+/// `CostAnd` / `CostOr` are combinators that mirror CR 118 semantics:
+/// - `CostAnd`: all sub-costs must be paid (CR 118.9 — multiple additional costs).
+/// - `CostOr`: player chooses exactly one payable branch (CR 118.9 modal costs,
+///   e.g. Bitter Triumph's "pay 3 life OR discard a card").
+///   Strategy always picks the first affordable branch.
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) enum CostComponent {
@@ -105,6 +110,10 @@ pub(crate) enum CostComponent {
     ReturnFromBattlefield(CostPredicate), // return another permanent from battlefield to hand
     TapPermanent(CostPredicate),          // tap another permanent (Kappa Cannoneer et al.)
     LoyaltyAdjust(i32),                   // +/- loyalty; also marks pw_activated_this_turn
+    /// All sub-costs must be paid (explicit AND).
+    CostAnd(Vec<CostComponent>),
+    /// Exactly one payable sub-cost branch is paid (OR — player's choice).
+    CostOr(Vec<CostComponent>),
 }
 
 /// Factory for a spell effect: takes controller, returns the resolved `Effect`.

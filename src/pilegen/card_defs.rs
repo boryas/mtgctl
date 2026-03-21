@@ -36,6 +36,7 @@ fn all_cards() -> Vec<CardDef> {
         dark_ritual(),
         fatal_push(),
         snuff_out(),
+        bitter_triumph(),
         // Spells — sorceries
         doomsday(),
         ponder(),
@@ -350,6 +351,24 @@ fn snuff_out() -> CardDef {
         spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("3BB", false, true), None)
+}
+
+/// Destroy target creature or planeswalker.
+/// Additional cost: discard a card OR pay 3 life (CR 118.9d).
+fn bitter_triumph() -> CardDef {
+    let mut def = simple("Bitter Triumph", CardKind::Instant(SpellData {
+        mana_cost: "1B".to_string(),
+        target_spec: target_spec_from_str(Some("opp:creature_or_planeswalker")),
+        spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
+        ..Default::default()
+    }), parse_colors("1B", false, false), None);
+    def.additional_costs = vec![
+        CostComponent::CostOr(vec![
+            CostComponent::DiscardCard(cost_pred_from_card(pred_any())),
+            CostComponent::Life(3),
+        ]),
+    ];
+    def
 }
 
 // ── Sorceries ─────────────────────────────────────────────────────────────────

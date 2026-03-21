@@ -2493,3 +2493,60 @@
         assert!(result.is_some(), "Dark Ritual + Life(3) additional cost is payable at 20 life");
         assert_eq!(state.us.life, initial_life - 3, "additional Life(3) was paid");
     }
+
+    // ── Section 26: Bitter Triumph (CostOr additional cost) ──────────────────
+
+    fn setup_bitter_triumph(state: &mut SimState) {
+        let bt = catalog_card("Bitter Triumph");
+        state.catalog.insert(bt.name.clone(), bt);
+        // Spare card for discard tests — needs a catalog entry so cost_pred_from_card resolves it.
+        let dr = catalog_card("Dark Ritual");
+        state.catalog.insert(dr.name.clone(), dr);
+    }
+
+    /// Bitter Triumph prefers the discard branch when a card is available in hand.
+    #[test]
+    fn test_bitter_triumph_discard_branch_preferred() {
+        let mut state = make_state();
+        setup_bitter_triumph(&mut state);
+        let extra_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Bitter Triumph");
+        state.us.pool.b = 2; state.us.pool.total = 2;
+        let initial_life = state.us.life;
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        assert!(result.is_some(), "Bitter Triumph should be castable");
+        let extra_zone = state.objects.get(&extra_id).map(|o| &o.zone);
+        assert!(
+            matches!(extra_zone, Some(CardZone::Graveyard)),
+            "discard branch of CostOr was paid (card discarded)"
+        );
+        assert_eq!(state.us.life, initial_life, "life branch was not taken when discard is available");
+    }
+
+    /// Bitter Triumph falls back to the life branch when no spare card is in hand.
+    #[test]
+    fn test_bitter_triumph_life_branch_fallback() {
+        let mut state = make_state();
+        setup_bitter_triumph(&mut state);
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Bitter Triumph");
+        state.us.pool.b = 2; state.us.pool.total = 2;
+        let initial_life = state.us.life;
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        assert!(result.is_some(), "Bitter Triumph should be castable via life branch");
+        assert_eq!(state.us.life, initial_life - 3, "3 life paid as fallback cost");
+    }
+
+    /// Bitter Triumph is uncastable when neither branch can be paid.
+    #[test]
+    fn test_bitter_triumph_unpayable_when_both_branches_blocked() {
+        let mut state = make_state();
+        setup_bitter_triumph(&mut state);
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Bitter Triumph");
+        state.us.pool.b = 2; state.us.pool.total = 2;
+        state.us.life = 3; // can't pay Life(3) — life > n is strict
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        assert!(result.is_none(), "Bitter Triumph should be blocked when life ≤ 3 and no spare card");
+    }

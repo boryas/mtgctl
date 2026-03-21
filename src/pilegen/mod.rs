@@ -1557,6 +1557,47 @@ fn sim_draw(state: &mut SimState, who: PlayerId, t: u8, is_natural: bool) {
 
 /// Returns true iff every component of `costs` can be paid by `who`.
 /// `source_id` is used to resolve `SacSelf` and `DiscardSelf`.
+fn can_pay_single_cost(
+    cost: &CostComponent,
+    state: &SimState,
+    who: PlayerId,
+    source_id: ObjId,
+    source_untapped: bool,
+) -> bool {
+    match cost {
+        CostComponent::Mana(mc) => state.potential_mana(who).can_pay(mc),
+        CostComponent::TapSelf => source_untapped,
+        CostComponent::SacSelf => state.permanent_bf(source_id).is_some(),
+        CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
+        CostComponent::Life(n) => state.player(who).life > *n,
+        CostComponent::SacPermanent(pred) => {
+            state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
+        }
+        CostComponent::DiscardCard(pred) | CostComponent::ExileFromHand(pred) => {
+            state.hand_of(who).any(|c| c.id != source_id && pred(c.id, state))
+        }
+        CostComponent::ReturnFromBattlefield(pred) => {
+            state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
+        }
+        CostComponent::TapPermanent(pred) => {
+            state.permanents_of(who).any(|c| {
+                c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state)
+            })
+        }
+        CostComponent::LoyaltyAdjust(n) => {
+            state.permanent_bf(source_id).map_or(false, |bf| {
+                !bf.pw_activated_this_turn && (*n >= 0 || bf.loyalty + n > 0)
+            })
+        }
+        CostComponent::CostAnd(parts) => {
+            can_pay_costs(parts, state, who, source_id, source_untapped)
+        }
+        CostComponent::CostOr(parts) => {
+            parts.iter().any(|branch| can_pay_single_cost(branch, state, who, source_id, source_untapped))
+        }
+    }
+}
+
 fn can_pay_costs(
     costs: &[CostComponent],
     state: &SimState,
@@ -1564,36 +1605,118 @@ fn can_pay_costs(
     source_id: ObjId,
     source_untapped: bool,
 ) -> bool {
-    for cost in costs {
-        let ok = match cost {
-            CostComponent::Mana(mc) => state.potential_mana(who).can_pay(mc),
-            CostComponent::TapSelf => source_untapped,
-            CostComponent::SacSelf => state.permanent_bf(source_id).is_some(),
-            CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
-            CostComponent::Life(n) => state.player(who).life > *n,
-            CostComponent::SacPermanent(pred) => {
-                state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
+    costs.iter().all(|cost| can_pay_single_cost(cost, state, who, source_id, source_untapped))
+}
+
+/// Executes a single cost component, mutating state.
+/// Caller must have checked `can_pay_costs` first.
+fn pay_single_cost(
+    cost: &CostComponent,
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    source_id: ObjId,
+    ctx: &mut CostsPaidCtx,
+) {
+    match cost {
+        CostComponent::Mana(mc) => {
+            let mana_log = state.pay_mana(who, mc, t);
+            state.log_mana_activations(t, who, mana_log);
+        }
+        CostComponent::TapSelf => {
+            if let Some(bf) = state.permanent_bf_mut(source_id) {
+                bf.tapped = true;
             }
-            CostComponent::DiscardCard(pred) | CostComponent::ExileFromHand(pred) => {
-                state.hand_of(who).any(|c| c.id != source_id && pred(c.id, state))
-            }
-            CostComponent::ReturnFromBattlefield(pred) => {
-                state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
-            }
-            CostComponent::TapPermanent(pred) => {
-                state.permanents_of(who).any(|c| {
-                    c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state)
+        }
+        CostComponent::SacSelf => {
+            state.set_card_zone(source_id, CardZone::Graveyard);
+        }
+        CostComponent::DiscardSelf => {
+            state.set_card_zone(source_id, CardZone::Graveyard);
+        }
+        CostComponent::Life(n) => {
+            state.lose_life(who, *n);
+        }
+        CostComponent::SacPermanent(pred) => {
+            // Prefer permanents without mana abilities; fall back to any match.
+            let target = state.permanents_of(who)
+                .filter(|c| c.bf.is_some() && pred(c.id, state))
+                .min_by_key(|c| {
+                    let has_mana = state.def_of(c.id)
+                        .map_or(false, |d| !d.mana_abilities().is_empty());
+                    has_mana as u8
                 })
+                .map(|c| c.id);
+            if let Some(id) = target {
+                state.set_card_zone(id, CardZone::Graveyard);
+                ctx.objects_moved.push(id);
             }
-            CostComponent::LoyaltyAdjust(n) => {
-                state.permanent_bf(source_id).map_or(false, |bf| {
-                    !bf.pw_activated_this_turn && (*n >= 0 || bf.loyalty + n > 0)
-                })
+        }
+        CostComponent::DiscardCard(pred) => {
+            let target = state.hand_of(who)
+                .find(|c| c.id != source_id && pred(c.id, state))
+                .map(|c| c.id);
+            if let Some(id) = target {
+                state.set_card_zone(id, CardZone::Graveyard);
+                ctx.objects_moved.push(id);
             }
-        };
-        if !ok { return false; }
+        }
+        CostComponent::ExileFromHand(pred) => {
+            let target = state.hand_of(who)
+                .find(|c| c.id != source_id && pred(c.id, state))
+                .map(|c| c.id);
+            if let Some(id) = target {
+                state.set_card_zone(id, CardZone::Exile { on_adventure: false });
+                ctx.objects_moved.push(id);
+            }
+        }
+        CostComponent::ReturnFromBattlefield(pred) => {
+            let target = state.permanents_of(who)
+                .find(|c| c.bf.is_some() && pred(c.id, state))
+                .map(|c| (c.id, c.catalog_key.clone(), c.bf.as_ref().and_then(|bf| bf.attack_target)));
+            if let Some((id, name, attack_target)) = target {
+                if let Some(card) = state.objects.get_mut(&id) {
+                    card.zone = CardZone::Hand { known: false };
+                    card.bf = None;
+                }
+                state.combat_attackers.retain(|&a| a != id);
+                state.combat_blocks.retain(|(a, _)| *a != id);
+                state.log(t, who, format!("→ return {} to hand (cost)", name));
+                ctx.objects_moved.push(id);
+                ctx.returned_attack_targets.push(attack_target);
+            }
+        }
+        CostComponent::TapPermanent(pred) => {
+            let target = state.permanents_of(who)
+                .find(|c| c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state))
+                .map(|c| c.id);
+            if let Some(id) = target {
+                if let Some(bf) = state.permanent_bf_mut(id) {
+                    bf.tapped = true;
+                }
+            }
+        }
+        CostComponent::LoyaltyAdjust(n) => {
+            if let Some(bf) = state.permanent_bf_mut(source_id) {
+                bf.loyalty += n;
+                bf.pw_activated_this_turn = true;
+            }
+        }
+        CostComponent::CostAnd(parts) => {
+            for part in parts {
+                pay_single_cost(part, state, t, who, source_id, ctx);
+            }
+        }
+        CostComponent::CostOr(parts) => {
+            // Strategy picks the first payable branch (greedy).
+            let source_untapped = state.permanent_bf(source_id).map_or(true, |bf| !bf.tapped);
+            if let Some(branch) = parts.iter().find(|branch| {
+                can_pay_single_cost(branch, state, who, source_id, source_untapped)
+            }) {
+                pay_single_cost(branch, state, t, who, source_id, ctx);
+            }
+        }
     }
-    true
 }
 
 /// Executes every component of `costs`, mutating state.
@@ -1610,91 +1733,7 @@ fn pay_costs(
 ) -> CostsPaidCtx {
     let mut ctx = CostsPaidCtx::default();
     for cost in costs {
-        match cost {
-            CostComponent::Mana(mc) => {
-                let mana_log = state.pay_mana(who, mc, t);
-                state.log_mana_activations(t, who, mana_log);
-            }
-            CostComponent::TapSelf => {
-                if let Some(bf) = state.permanent_bf_mut(source_id) {
-                    bf.tapped = true;
-                }
-            }
-            CostComponent::SacSelf => {
-                state.set_card_zone(source_id, CardZone::Graveyard);
-            }
-            CostComponent::DiscardSelf => {
-                state.set_card_zone(source_id, CardZone::Graveyard);
-            }
-            CostComponent::Life(n) => {
-                state.lose_life(who, *n);
-            }
-            CostComponent::SacPermanent(pred) => {
-                // Prefer permanents without mana abilities; fall back to any match.
-                let target = state.permanents_of(who)
-                    .filter(|c| c.bf.is_some() && pred(c.id, state))
-                    .min_by_key(|c| {
-                        let has_mana = state.def_of(c.id)
-                            .map_or(false, |d| !d.mana_abilities().is_empty());
-                        has_mana as u8
-                    })
-                    .map(|c| c.id);
-                if let Some(id) = target {
-                    state.set_card_zone(id, CardZone::Graveyard);
-                    ctx.objects_moved.push(id);
-                }
-            }
-            CostComponent::DiscardCard(pred) => {
-                let target = state.hand_of(who)
-                    .find(|c| c.id != source_id && pred(c.id, state))
-                    .map(|c| c.id);
-                if let Some(id) = target {
-                    state.set_card_zone(id, CardZone::Graveyard);
-                    ctx.objects_moved.push(id);
-                }
-            }
-            CostComponent::ExileFromHand(pred) => {
-                let target = state.hand_of(who)
-                    .find(|c| c.id != source_id && pred(c.id, state))
-                    .map(|c| c.id);
-                if let Some(id) = target {
-                    state.set_card_zone(id, CardZone::Exile { on_adventure: false });
-                    ctx.objects_moved.push(id);
-                }
-            }
-            CostComponent::ReturnFromBattlefield(pred) => {
-                let target = state.permanents_of(who)
-                    .find(|c| c.bf.is_some() && pred(c.id, state))
-                    .map(|c| (c.id, c.catalog_key.clone(), c.bf.as_ref().and_then(|bf| bf.attack_target)));
-                if let Some((id, name, attack_target)) = target {
-                    if let Some(card) = state.objects.get_mut(&id) {
-                        card.zone = CardZone::Hand { known: false };
-                        card.bf = None;
-                    }
-                    state.combat_attackers.retain(|&a| a != id);
-                    state.combat_blocks.retain(|(a, _)| *a != id);
-                    state.log(t, who, format!("→ return {} to hand (cost)", name));
-                    ctx.objects_moved.push(id);
-                    ctx.returned_attack_targets.push(attack_target);
-                }
-            }
-            CostComponent::TapPermanent(pred) => {
-                let target = state.permanents_of(who)
-                    .find(|c| c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state))
-                    .map(|c| c.id);
-                if let Some(id) = target {
-                    if let Some(bf) = state.permanent_bf_mut(id) {
-                        bf.tapped = true;
-                    }
-                }
-            }
-            CostComponent::LoyaltyAdjust(n) => {
-                if let Some(bf) = state.permanent_bf_mut(source_id) {
-                    bf.loyalty += n;
-                    bf.pw_activated_this_turn = true;
-                }
-            }
-        }
+        pay_single_cost(cost, state, t, who, source_id, &mut ctx);
     }
     ctx
 }
@@ -1751,6 +1790,13 @@ fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
         CostComponent::ReturnFromBattlefield(_) => "bounce land".to_string(),
         CostComponent::TapPermanent(_) => "tap permanent".to_string(),
         CostComponent::LoyaltyAdjust(n) => format!("loyalty {}", n),
+        CostComponent::CostAnd(parts) => describe_costs(parts).join(", "),
+        CostComponent::CostOr(parts) => {
+            let branches: Vec<String> = parts.iter()
+                .map(|b| describe_costs(std::slice::from_ref(b)).join(", "))
+                .collect();
+            format!("({})", branches.join(" OR "))
+        }
     }).collect()
 }
 

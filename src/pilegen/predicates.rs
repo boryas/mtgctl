@@ -168,6 +168,7 @@ fn permanent_pred_from_str(filter: &str) -> CardPredicate {
         "land"            => pred_type_eq(CardType::Land),
         "nonbasic_land"   => pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))),
         "creature"        => pred_type_eq(CardType::Creature),
+        "creature_or_planeswalker" => pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
         "planeswalker"    => pred_type_eq(CardType::Planeswalker),
         "artifact"        => pred_type_eq(CardType::Artifact),
         "nonland"         => pred_not(pred_type_eq(CardType::Land)),
