@@ -53,6 +53,24 @@ pub(crate) fn eff_draw(who: PlayerId, n: usize) -> Effect {
     }))
 }
 
+/// Surveil N for `who`. For each of the top N cards of their library, calls
+/// `state.surveil_choice` to decide keep-on-top or put-in-graveyard.
+/// Reveal step is a no-op (hidden information is not modeled).
+/// TODO: surveil N>1 for Kaito, Bane of Nightmares 0 ability (passes N cards as a batch).
+pub(crate) fn eff_surveil(who: PlayerId, n: usize) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        for _ in 0..n {
+            let top = state.library_of(who).next().map(|o| o.id);
+            if let Some(id) = top {
+                let f = std::sync::Arc::clone(&state.surveil_choice);
+                if f(id, state) {
+                    change_zone(id, ZoneId::Graveyard, state, t, who);
+                }
+            }
+        }
+    }))
+}
+
 /// Put `n` cards back from `who`'s hand (Brainstorm put-back).
 /// Moves `n` hand cards back to Library zone (unknown — just sets zone).
 pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {

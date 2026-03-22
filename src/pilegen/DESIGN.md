@@ -168,6 +168,13 @@ clone the Arc before passing `&*state` to avoid double-borrow.
 Default (in `SimState::new`): Blue / "Wizard" / "". Override in tests for specific choices.
 Current users: Painter's Servant ETB (Color), Cavern of Souls ETB (CreatureType), Disruptor Flute ETB (CardName).
 
+**`SimState.surveil_choice: Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>`** (`mod.rs`) —
+Strategy callback for surveil. Given the `ObjId` of the card being surveiled, returns `true`
+to put it in the graveyard, `false` to keep it on top. Effects clone the Arc before calling
+with `&*state` (same double-borrow idiom as `resolve_choice`).
+Default: `rand::thread_rng().gen_bool(0.5)` (coin flip). Override in tests for deterministic
+outcomes. Current user: `eff_surveil` in `effects.rs`.
+
 **`BattlefieldState.etb_choice: Option<ChoiceResult>`** (`mod.rs`) — uniform storage for the
 choice a permanent made as it entered. Written by ETB replacement closures that call
 `resolve_choice`; cleared automatically on LTB when `bf` is dropped. Convention: any ETB

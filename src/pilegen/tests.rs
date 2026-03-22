@@ -3497,3 +3497,106 @@
         assert_eq!(d.casting_cost_modifier, 0);
         assert!(!d.non_mana_abilities_suppressed);
     }
+
+    // ── 38. Surveil lands ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_surveil_land_etb_mills_when_choice_true() {
+        // Override surveil_choice to always mill. ETB a surveil land; top library card
+        // should end up in the graveyard. Land itself should enter tapped.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.surveil_choice = std::sync::Arc::new(|_, _| true);
+
+        // Put a known card on top of Us's library.
+        let top_id = {
+            let def = catalog_card("Brainstorm");
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Brainstorm".to_string(),
+                owner: PlayerId::Us,
+                controller: PlayerId::Us,
+                zone: CardZone::Library,
+                is_token: false,
+                bf: None, spell: None, materialized: None,
+                counters: HashMap::new(),
+            });
+            state.catalog.entry("Brainstorm".to_string()).or_insert(def);
+            id
+        };
+
+        // ETB Undercity Sewers.
+        let land_id = {
+            let def = catalog_card("Undercity Sewers");
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Undercity Sewers".to_string(),
+                owner: PlayerId::Us,
+                controller: PlayerId::Us,
+                zone: CardZone::Hand { known: false },
+                is_token: false,
+                bf: None, spell: None, materialized: None,
+                counters: HashMap::new(),
+            });
+            preregister_instances(&def, id, PlayerId::Us, &mut state);
+            state.catalog.entry("Undercity Sewers".to_string()).or_insert(def);
+            id
+        };
+        change_zone(land_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&top_id].zone, CardZone::Graveyard,
+            "top library card should be milled by surveil");
+        assert!(matches!(state.objects[&land_id].bf, Some(ref bf) if bf.tapped),
+            "surveil land should enter tapped");
+    }
+
+    #[test]
+    fn test_surveil_land_etb_keeps_when_choice_false() {
+        // Override surveil_choice to always keep. Library card stays in library.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.surveil_choice = std::sync::Arc::new(|_, _| false);
+
+        let top_id = {
+            let def = catalog_card("Brainstorm");
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Brainstorm".to_string(),
+                owner: PlayerId::Us,
+                controller: PlayerId::Us,
+                zone: CardZone::Library,
+                is_token: false,
+                bf: None, spell: None, materialized: None,
+                counters: HashMap::new(),
+            });
+            state.catalog.entry("Brainstorm".to_string()).or_insert(def);
+            id
+        };
+
+        let land_id = {
+            let def = catalog_card("Undercity Sewers");
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Undercity Sewers".to_string(),
+                owner: PlayerId::Us,
+                controller: PlayerId::Us,
+                zone: CardZone::Hand { known: false },
+                is_token: false,
+                bf: None, spell: None, materialized: None,
+                counters: HashMap::new(),
+            });
+            preregister_instances(&def, id, PlayerId::Us, &mut state);
+            state.catalog.entry("Undercity Sewers".to_string()).or_insert(def);
+            id
+        };
+        change_zone(land_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&top_id].zone, CardZone::Library,
+            "top library card should stay when surveil keeps");
+    }

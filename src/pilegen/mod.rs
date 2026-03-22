@@ -777,6 +777,12 @@ pub(crate) struct SimState {
     /// Override in tests to force specific choices.
     pub(super) resolve_choice:
         std::sync::Arc<dyn Fn(ObjId, &ChoiceRequest, &SimState) -> ChoiceResult + Send + Sync>,
+    /// Strategy callback for surveil: given the ObjId of the card being surveiled,
+    /// return `true` to put it in the graveyard, `false` to keep it on top.
+    /// Effects clone this Arc out before calling it with `&*state` (same double-borrow idiom).
+    /// Default: coin flip. Override in tests to force deterministic outcomes.
+    pub(super) surveil_choice:
+        std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>,
 }
 
 impl SimState {
@@ -822,6 +828,7 @@ impl SimState {
                 ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
                 ChoiceRequest::CardName     => ChoiceResult::CardName(String::new()),
             }),
+            surveil_choice: std::sync::Arc::new(|_, _| rand::thread_rng().gen_bool(0.5)),
         };
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();

@@ -167,10 +167,22 @@ fn snow_basic(name: &str, land_types: LandTypes, mana: &str) -> CardDef {
 }
 
 /// Dual land that always enters tapped (surveil lands, etc.).
-fn dual_tapped(name: &str, data: LandData) -> CardDef {
+/// MKM-style surveil dual: always enters tapped, triggers surveil 1 on ETB.
+fn surveil_dual(name: &'static str, land_types: LandTypes, c1: &str, c2: &str) -> CardDef {
+    let trigger = etb_self_trigger(name, TargetSpec::None, move |_, controller| {
+        eff_surveil(controller, 1)
+    });
     CardDef::new(
-        name, CardKind::Land(data), vec![], None, vec![], CardLayout::Normal, None,
-        vec![], vec![replacement_enters_tapped()], vec![],
+        name,
+        CardKind::Land(LandData {
+            land_types,
+            mana_abilities: vec![tap_produces(c1), tap_produces(c2)],
+            ..Default::default()
+        }),
+        vec![], None, vec![], CardLayout::Normal, None,
+        vec![trigger],
+        vec![replacement_enters_tapped()],
+        vec![],
     )
 }
 
@@ -333,94 +345,18 @@ fn snow_covered_wastes() -> CardDef {
 }
 
 /// Enters tapped. CR 614.1 (replacement effect): replaces the ETB event to set tapped=true.
-fn undercity_sewers() -> CardDef {
-    CardDef::new(
-        "Undercity Sewers",
-        CardKind::Land(LandData {
-            land_types: LandTypes { island: true, swamp: true, ..Default::default() },
-            mana_abilities: vec![tap_produces("U"), tap_produces("B")],
-            ..Default::default()
-        }),
-        vec![], None, vec![], CardLayout::Normal, None,
-        vec![],
-        vec![replacement_enters_tapped()],
-        vec![],
-    )
-}
+// ── MKM surveil lands (always enter tapped; surveil 1 on ETB) ─────────────────
 
-// ── MKM surveil lands (enter tapped, surveil 1 on ETB — surveil not modeled) ──
-
-fn meticulous_archive() -> CardDef {
-    dual_tapped("Meticulous Archive", LandData {
-        land_types: LandTypes { plains: true, island: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("W"), tap_produces("U")],
-        ..Default::default()
-    })
-}
-
-fn raucous_theater() -> CardDef {
-    dual_tapped("Raucous Theater", LandData {
-        land_types: LandTypes { swamp: true, mountain: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("B"), tap_produces("R")],
-        ..Default::default()
-    })
-}
-
-fn hedge_maze() -> CardDef {
-    dual_tapped("Hedge Maze", LandData {
-        land_types: LandTypes { island: true, forest: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("U"), tap_produces("G")],
-        ..Default::default()
-    })
-}
-
-fn commercial_district() -> CardDef {
-    dual_tapped("Commercial District", LandData {
-        land_types: LandTypes { forest: true, mountain: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("G"), tap_produces("R")],
-        ..Default::default()
-    })
-}
-
-fn lush_portico() -> CardDef {
-    dual_tapped("Lush Portico", LandData {
-        land_types: LandTypes { plains: true, forest: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("W"), tap_produces("G")],
-        ..Default::default()
-    })
-}
-
-fn thundering_falls() -> CardDef {
-    dual_tapped("Thundering Falls", LandData {
-        land_types: LandTypes { island: true, mountain: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("U"), tap_produces("R")],
-        ..Default::default()
-    })
-}
-
-fn underground_mortuary() -> CardDef {
-    dual_tapped("Underground Mortuary", LandData {
-        land_types: LandTypes { swamp: true, forest: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("B"), tap_produces("G")],
-        ..Default::default()
-    })
-}
-
-fn elegant_parlor() -> CardDef {
-    dual_tapped("Elegant Parlor", LandData {
-        land_types: LandTypes { mountain: true, plains: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("R"), tap_produces("W")],
-        ..Default::default()
-    })
-}
-
-fn shadowy_backstreet() -> CardDef {
-    dual_tapped("Shadowy Backstreet", LandData {
-        land_types: LandTypes { plains: true, swamp: true, ..Default::default() },
-        mana_abilities: vec![tap_produces("W"), tap_produces("B")],
-        ..Default::default()
-    })
-}
+fn undercity_sewers()     -> CardDef { surveil_dual("Undercity Sewers",     LandTypes { island: true,   swamp: true,    ..Default::default() }, "U", "B") }
+fn meticulous_archive()   -> CardDef { surveil_dual("Meticulous Archive",   LandTypes { plains: true,   island: true,   ..Default::default() }, "W", "U") }
+fn raucous_theater()      -> CardDef { surveil_dual("Raucous Theater",      LandTypes { swamp: true,    mountain: true, ..Default::default() }, "B", "R") }
+fn hedge_maze()           -> CardDef { surveil_dual("Hedge Maze",           LandTypes { mountain: true, forest: true,   ..Default::default() }, "R", "G") }
+fn commercial_district()  -> CardDef { surveil_dual("Commercial District",  LandTypes { forest: true,   plains: true,   ..Default::default() }, "G", "W") }
+fn lush_portico()         -> CardDef { surveil_dual("Lush Portico",         LandTypes { plains: true,   forest: true,   ..Default::default() }, "W", "G") }
+fn thundering_falls()     -> CardDef { surveil_dual("Thundering Falls",     LandTypes { island: true,   mountain: true, ..Default::default() }, "U", "R") }
+fn underground_mortuary() -> CardDef { surveil_dual("Underground Mortuary", LandTypes { swamp: true,    forest: true,   ..Default::default() }, "B", "G") }
+fn elegant_parlor()       -> CardDef { surveil_dual("Elegant Parlor",       LandTypes { mountain: true, plains: true,   ..Default::default() }, "R", "W") }
+fn shadowy_backstreet()   -> CardDef { surveil_dual("Shadowy Backstreet",   LandTypes { plains: true,   swamp: true,    ..Default::default() }, "W", "B") }
 
 /// {T}, Sacrifice: destroy target nonbasic land. CR 701.7.
 fn wasteland() -> CardDef {
