@@ -158,6 +158,41 @@ Atomics: `Mana`, `TapSelf`, `SacSelf`, `DiscardSelf`, `Life`, `SacPermanent`,
 `Replicate(ManaCost)` (optional, repeatable — see `cast_spell` for copy logic),
 `XLife` (variable life payment; X is strategy-chosen — see below).
 
+**`ChoiceRequest` / `ChoiceResult`** (`mod.rs`) — typed strategy choices inside effects.
+Used when an effect needs a decision that is not a target (`TargetSpec`) and not an object
+selection (`ChoiceSpec`): specifically, choices over abstract typed values.
+Variants: `ChoiceRequest::Color`, `CreatureType`, `CardName`.
+`SimState.resolve_choice: Arc<dyn Fn(ObjId, &ChoiceRequest, &SimState) -> ChoiceResult + ...>`
+Effects call it via `let f = Arc::clone(&state.resolve_choice); f(source_id, &req, state)` —
+clone the Arc before passing `&*state` to avoid double-borrow.
+Default (in `SimState::new`): Blue / "Wizard" / "". Override in tests for specific choices.
+Current users: Painter's Servant ETB (Color), Cavern of Souls ETB (CreatureType), Disruptor Flute ETB (CardName).
+
+**`BattlefieldState.etb_choice: Option<ChoiceResult>`** (`mod.rs`) — uniform storage for the
+choice a permanent made as it entered. Written by ETB replacement closures that call
+`resolve_choice`; cleared automatically on LTB when `bf` is dropped. Convention: any ETB
+replacement that calls `resolve_choice` MUST write the result here. Most cards also capture
+the value in their CE closure; `etb_choice` is the side-channel for abilities needing to
+inspect "what was named" without a captured copy.
+
+**`CardDef.casting_cost_modifier: i32`** (`catalog.rs`, default 0) — generic-mana surcharge
+applied by CE (e.g. Disruptor Flute). Added to `ManaCost.generic` during affordability checks
+in `spell_is_affordable`. Reset to 0 each `recompute` (materialized starts from catalog clone).
+
+**`CardDef.non_mana_abilities_suppressed: bool`** (`catalog.rs`, default false) — set by CE
+to suppress non-mana activated abilities (e.g. Disruptor Flute, Pithing Needle). Checked by
+`ability_available` in `strategy.rs`. Does NOT affect `ManaAbility`s — those are a separate
+type on a separate code path. Null Rod (suppress ALL activated abilities including mana) would
+need a companion `mana_abilities_suppressed` field.
+
+**`etb_self_replacement<F>(extra) -> ReplacementDef`** (`catalog.rs`) — builds an ETB
+self-replacement that handles the boilerplate (extract id, `current_zone_id`, `fire_event`) and
+calls `extra(source_id, id, controller, state, t)` after the zone-change fires.
+
+**`etb_self_trigger<F>(source_name, target_spec, make_effect) -> TriggerCheckFn`** (`catalog.rs`)
+— builds a trigger check fn that fires when this permanent enters under its controller's control
+and pushes a `TriggerContext` with the given spec and effect.
+
 **X spells and `XLife`.** Cards with "as an additional cost, pay X life" (e.g. Toxic Deluge)
 use `CardDef.additional_costs = vec![CostComponent::XLife]`. The X value flows as:
 - `Strategy::choose_x_for_spell(card_id, state) -> u32` — trait method, default 3.

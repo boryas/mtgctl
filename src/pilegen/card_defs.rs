@@ -41,6 +41,10 @@ fn all_cards() -> Vec<CardDef> {
         long_goodbye(),
         consign_to_memory(),
         surgical_extraction(),
+        red_elemental_blast(),
+        pyroblast(),
+        blue_elemental_blast(),
+        hydroblast(),
         // Spells — sorceries
         toxic_deluge(),
         doomsday(),
@@ -65,7 +69,9 @@ fn all_cards() -> Vec<CardDef> {
         tamiyo_inquisitive_student(),
         brazen_borrower(),
         // Opponent archetypes / hate cards
+        painters_servant(),
         leyline_of_the_void(),
+        disruptor_flute(),
         // Tokens
         orc_army_token(),
         clue_token(),
@@ -228,11 +234,37 @@ fn bloodstained_mire() -> CardDef {
 }
 
 /// Produces generic mana only (no colored pips). CR 106.
+/// Legendary land. ETB: choose a creature type (logged, used for future uncounterable modeling).
+/// {T}: Add {C}.
+/// {T}: Add one mana of any color (TODO: restrict to spells of the named type; mana is uncounterable).
 fn cavern_of_souls() -> CardDef {
-    simple("Cavern of Souls", CardKind::Land(LandData {
-        mana_abilities: vec![ManaAbility { costs: vec![CostComponent::TapSelf], produces: vec![] }],
-        ..Default::default()
-    }), vec![], Some(50))
+    let repl = etb_self_replacement(|source_id, id, controller, state, t| {
+        let f = Arc::clone(&state.resolve_choice);
+        let ChoiceResult::CreatureType(chosen_type) =
+            f(source_id, &ChoiceRequest::CreatureType, state) else { return };
+        if let Some(bf) = state.permanent_bf_mut(id) {
+            bf.etb_choice = Some(ChoiceResult::CreatureType(chosen_type.clone()));
+        }
+        state.log(t, controller, format!("Cavern of Souls names \"{}\"", chosen_type));
+    });
+    CardDef::new(
+        "Cavern of Souls",
+        CardKind::Land(LandData {
+            // {T}: Add {C} — colorless
+            // {T}: Add one mana of any color (type restriction and uncounterable not yet modeled)
+            mana_abilities: vec![
+                ManaAbility { costs: vec![CostComponent::TapSelf], produces: vec![] },
+                ManaAbility { costs: vec![CostComponent::TapSelf], produces: produces_colors("WUBRG") },
+            ],
+            ..Default::default()
+        }),
+        vec![],
+        Some(50),
+        vec![Supertype::Legendary], CardLayout::Normal, None,
+        vec![],
+        vec![repl],
+        vec![],
+    )
 }
 
 // ── Artifacts ─────────────────────────────────────────────────────────────────
@@ -501,6 +533,113 @@ fn surgical_extraction() -> CardDef {
         })),
         ..Default::default()
     }), parse_colors("B", false, false), None)
+}
+
+/// Build a TargetSpec for the modal color-hate instants: either a spell on the stack
+/// or a permanent on the battlefield, both filtered to the given color.
+fn color_hate_target_spec(c: Color) -> TargetSpec {
+    TargetSpec::Union(vec![
+        TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Stack,
+            filter: obj_pred_from_card(pred_has_color(c)),
+        },
+        TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: obj_pred_from_card(pred_has_color(c)),
+        },
+    ])
+}
+
+/// Build a TargetSpec for the "if it's [color]" variant: targets ANY spell on the stack
+/// or ANY permanent on the battlefield (targeting is unrestricted; the effect is conditional).
+fn any_spell_or_permanent_target() -> TargetSpec {
+    TargetSpec::Union(vec![
+        TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Stack,
+            filter: obj_pred_from_card(pred_any()),
+        },
+        TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: obj_pred_from_card(pred_any()),
+        },
+    ])
+}
+
+/// Modal effect: counter if target is on the stack, destroy if on the battlefield.
+/// Used by REB/BEB where the color restriction is on targeting (not the effect).
+fn counter_or_destroy(who: PlayerId) -> Effect {
+    Effect(Arc::new(move |state, t, targets| {
+        let Some(&id) = targets.first() else { return };
+        if state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Stack) {
+            eff_counter_target(who).call(state, t, targets);
+        } else {
+            eff_destroy_target(who).call(state, t, targets);
+        }
+    }))
+}
+
+/// Modal effect: counter/destroy only if target is the given color; otherwise fizzles.
+/// Used by Pyroblast/Hydroblast where ANY spell/permanent can be targeted but the
+/// effect only applies "if it's [color]" (CR 608.2b — legal target, effect doesn't apply).
+fn counter_or_destroy_if_color(who: PlayerId, c: Color) -> Effect {
+    Effect(Arc::new(move |state, t, targets| {
+        let Some(&id) = targets.first() else { return };
+        let is_color = state.def_of(id).map_or(false, |d| d.colors.contains(&c));
+        if !is_color { return; }
+        if state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Stack) {
+            eff_counter_target(who).call(state, t, targets);
+        } else {
+            eff_destroy_target(who).call(state, t, targets);
+        }
+    }))
+}
+
+/// Choose one — Counter target blue spell; or destroy target blue permanent. CR 701.5, 701.7.
+fn red_elemental_blast() -> CardDef {
+    simple("Red Elemental Blast", CardKind::Instant(SpellData {
+        mana_cost: "R".to_string(),
+        target_spec: color_hate_target_spec(Color::Blue),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| counter_or_destroy(who))),
+        ..Default::default()
+    }), parse_colors("R", false, false), None)
+}
+
+/// Choose one — Counter target spell if it's blue; or destroy target permanent if it's blue.
+/// Targets any opp spell/permanent; effect fizzles if the target is not blue. CR 701.5, 701.7.
+fn pyroblast() -> CardDef {
+    simple("Pyroblast", CardKind::Instant(SpellData {
+        mana_cost: "R".to_string(),
+        target_spec: any_spell_or_permanent_target(),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| counter_or_destroy_if_color(who, Color::Blue))),
+        ..Default::default()
+    }), parse_colors("R", false, false), None)
+}
+
+/// Choose one — Counter target red spell; or destroy target red permanent. CR 701.5, 701.7.
+fn blue_elemental_blast() -> CardDef {
+    simple("Blue Elemental Blast", CardKind::Instant(SpellData {
+        mana_cost: "U".to_string(),
+        exileable: true,
+        target_spec: color_hate_target_spec(Color::Red),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| counter_or_destroy(who))),
+        ..Default::default()
+    }), parse_colors("U", false, false), None)
+}
+
+/// Choose one — Counter target spell if it's red; or destroy target red permanent.
+/// Targets any opp spell/permanent; effect fizzles if the target is not red. CR 701.5, 701.7.
+fn hydroblast() -> CardDef {
+    simple("Hydroblast", CardKind::Instant(SpellData {
+        mana_cost: "U".to_string(),
+        exileable: true,
+        target_spec: any_spell_or_permanent_target(),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| counter_or_destroy_if_color(who, Color::Red))),
+        ..Default::default()
+    }), parse_colors("U", false, false), None)
 }
 
 // ── Sorceries ─────────────────────────────────────────────────────────────────
@@ -859,6 +998,45 @@ fn tamiyo_inquisitive_student() -> CardDef {
     )
 }
 
+/// Artifact Creature {2}, 1/3. ETB: choose a color; all objects everywhere gain that color.
+/// Layer 5 continuous effect, expires when Painter leaves the battlefield.
+/// CR 613.4 (color-changing effects apply at layer 5).
+fn painters_servant() -> CardDef {
+    let repl = etb_self_replacement(|source_id, id, controller, state, _t| {
+        let f = Arc::clone(&state.resolve_choice);
+        let ChoiceResult::Color(chosen) =
+            f(source_id, &ChoiceRequest::Color, state) else { return };
+        if let Some(bf) = state.permanent_bf_mut(id) {
+            bf.etb_choice = Some(ChoiceResult::Color(chosen));
+        }
+        // Register L5 CE: all objects everywhere gain chosen_color while Painter is in play.
+        state.continuous_instances.push(ContinuousInstance {
+            source_id,
+            controller,
+            layer: ContinuousLayer::L5ColorEffects,
+            filter: Arc::new(|_, _| true),
+            modifier: Arc::new(move |def, _| {
+                if !def.colors.contains(&chosen) { def.colors.push(chosen); }
+            }),
+            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+        });
+    });
+    let mut def = CardDef::new(
+        "Painter's Servant",
+        CardKind::Creature(CreatureData::new("2", 1, 3)),
+        vec![],
+        Some(40),
+        vec![], CardLayout::Normal, None,
+        vec![],
+        vec![repl],
+        vec![],
+    );
+    // Painter's Servant is an Artifact Creature; the constructor derives only one type from
+    // CardKind, so we push the second type explicitly.
+    def.types.push(CardType::Artifact);
+    def
+}
+
 /// Enchantment for {2BB}. Replacement: any card going to any graveyard goes to exile instead.
 fn leyline_of_the_void() -> CardDef {
     let replacement = ReplacementDef {
@@ -878,6 +1056,46 @@ fn leyline_of_the_void() -> CardDef {
         None,
         vec![], CardLayout::Normal, None,
         vec![], vec![replacement], vec![],
+    )
+}
+
+/// Flash, colorless artifact for {2}.
+/// As this enters, choose a card name. Spells with that name cost {3} more to cast.
+/// Activated abilities of sources with that name can't be activated unless they're mana abilities.
+fn disruptor_flute() -> CardDef {
+    CardDef::new(
+        "Disruptor Flute",
+        CardKind::Artifact(ArtifactData {
+            mana_cost: "2".to_string(),
+            ..Default::default()  // no activated abilities
+        }),
+        vec![],  // colorless
+        Some(40),
+        vec![], CardLayout::Normal, None,
+        vec![],  // no trigger_defs
+        vec![etb_self_replacement(|source_id, id, _controller, state, _t| {
+            let f = Arc::clone(&state.resolve_choice);
+            let ChoiceResult::CardName(chosen) =
+                f(source_id, &ChoiceRequest::CardName, state) else { return };
+            if let Some(bf) = state.permanent_bf_mut(id) {
+                bf.etb_choice = Some(ChoiceResult::CardName(chosen.clone()));
+            }
+            // L3TextEffects CE: cost +3 and ability suppression for matching card name.
+            let controller = state.objects.get(&id).map_or(PlayerId::Us, |o| o.controller);
+            state.continuous_instances.push(ContinuousInstance {
+                source_id, controller,
+                layer: ContinuousLayer::L3TextEffects,
+                filter: Arc::new(|_, _| true),
+                modifier: Arc::new(move |def, _| {
+                    if def.name == chosen {
+                        def.casting_cost_modifier += 3;
+                        def.non_mana_abilities_suppressed = true;
+                    }
+                }),
+                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+            });
+        })],
+        vec![],  // no static_ability_defs
     )
 }
 

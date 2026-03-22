@@ -52,3 +52,11 @@ Run `cargo test -q` — all 147+ tests must still pass.
 If the card has costs or effects not covered by existing tests, add a test in
 `src/pilegen/tests.rs` following the existing section numbering. The test should verify
 the card's most important property (effect fires, cost gate is enforced, etc.).
+
+### 7. Update todo files
+
+**`~/org/projects/mtgctl/cards-todo.org`** — if the card appears here (cards shared across
+≥2 decks), mark it DONE with a CLOSED timestamp and update the count if present.
+
+**`~/org/projects/mtgctl/<deck>.org`** — for each deck file that lists this card as TODO,
+mark it DONE with a CLOSED timestamp and increment the `#+PROGRESS:` counter at the top.

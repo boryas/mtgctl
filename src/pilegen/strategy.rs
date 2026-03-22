@@ -621,6 +621,10 @@ fn ability_available(
     source_id: ObjId,
     source_untapped: bool,
 ) -> bool {
+    // Disruptor Flute / Pithing Needle style suppression: non-mana abilities can't be activated.
+    if state.def_of(source_id).map_or(false, |d| d.non_mana_abilities_suppressed) {
+        return false;
+    }
     can_pay_costs(&ability.costs, state, who, source_id, source_untapped, 0)
         && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who))
 }
@@ -636,6 +640,8 @@ fn spell_is_affordable(
     who: PlayerId,
 ) -> bool {
     let mut cost = parse_mana_cost(def.mana_cost());
+    // CE cost surcharge (e.g. Disruptor Flute).
+    cost.generic += state.def_of(card_id).map_or(0, |d| d.casting_cost_modifier);
     if def.delve() && cost.generic > 0 {
         let gy_len = state.graveyard_of(who).count() as i32;
         cost.generic = (cost.generic - gy_len).max(0);

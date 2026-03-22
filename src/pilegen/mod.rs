@@ -134,6 +134,13 @@ struct BattlefieldState {
     attack_target: Option<ObjId>,  // None = attacking player, Some = attacking planeswalker
     /// Active face index for double-faced cards (0 = front, 1 = back). Flip sets this to 1.
     active_face: u8,
+    /// Choice made as this permanent entered the battlefield (e.g. color for Painter's Servant,
+    /// creature type for Cavern of Souls, card name for Disruptor Flute). Written by ETB
+    /// replacement closures that call `resolve_choice`; cleared automatically on LTB when
+    /// `bf` is dropped. Most cards also capture the choice value in their CE closure (the CE IS
+    /// the primary storage); `etb_choice` is the side-channel for abilities that need to inspect
+    /// "what was named" without holding a captured copy.
+    pub(super) etb_choice: Option<ChoiceResult>,
 }
 
 impl BattlefieldState {
@@ -142,7 +149,7 @@ impl BattlefieldState {
             tapped: false, damage: 0, entered_this_turn: true, counters: 0,
             power_mod: 0, toughness_mod: 0, loyalty: 0, pw_activated_this_turn: false,
             attacking: false, unblocked: false, attack_target: None,
-            active_face: 0,
+            active_face: 0, etb_choice: None,
         }
     }
 }
@@ -313,6 +320,28 @@ pub(super) struct ReplacementInstance {
 /// The five colors of Magic.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Color { White, Blue, Black, Red, Green }
+
+/// A typed choice that an effect needs to make at resolution/ETB time.
+/// Passed to `SimState.resolve_choice`; the installed closure returns a `ChoiceResult`.
+/// This covers decisions that are not targets (`TargetSpec`) and not object selections
+/// (`ChoiceSpec`) — specifically, choices over abstract typed values.
+#[derive(Clone, Debug)]
+pub(super) enum ChoiceRequest {
+    /// Choose one of the five colors (e.g. Painter's Servant ETB).
+    Color,
+    /// Choose a creature type by name (e.g. Cavern of Souls ETB).
+    CreatureType,
+    /// Choose a card name (e.g. Disruptor Flute, Pithing Needle, Meddling Mage).
+    CardName,
+}
+
+/// The value returned by `SimState.resolve_choice` for a given `ChoiceRequest`.
+#[derive(Clone, Debug)]
+pub(super) enum ChoiceResult {
+    Color(Color),
+    CreatureType(String),
+    CardName(String),
+}
 
 /// Card supertypes (Legendary, Basic, Snow, World, Ongoing).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -742,6 +771,13 @@ pub(crate) struct SimState {
     /// Effects access this directly via `state.rng`. Strategy functions receive their
     /// own rng parameter so their randomness remains independently injectable for tests.
     pub(super) rng: Box<dyn rand::RngCore + Send>,
+    /// Strategy callback for effects that need a typed, non-object choice at resolution/ETB
+    /// time (e.g. "choose a color", "name a creature type"). Effects clone this Arc out before
+    /// calling it with `&*state` to avoid a double-borrow of `state`.
+    /// Default: Blue / "Wizard" / "" — suitable for the Doomsday vs. Painter heuristic.
+    /// Override in tests to force specific choices.
+    pub(super) resolve_choice:
+        std::sync::Arc<dyn Fn(ObjId, &ChoiceRequest, &SimState) -> ChoiceResult + Send + Sync>,
 }
 
 impl SimState {
@@ -782,6 +818,11 @@ impl SimState {
             free_cast_permissions: Vec::new(),
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
+            resolve_choice: std::sync::Arc::new(|_, req, _| match req {
+                ChoiceRequest::Color        => ChoiceResult::Color(Color::Blue),
+                ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
+                ChoiceRequest::CardName     => ChoiceResult::CardName(String::new()),
+            }),
         };
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();

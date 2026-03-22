@@ -457,6 +457,19 @@ pub(crate) struct CardDef {
     /// `eff_counter_target`; the spell is still a legal target for counterspells.
     /// Modifiable by continuous effects.
     pub(crate) counterable: bool,
+    /// Generic-mana surcharge applied to this card's casting cost by a CE (e.g. Disruptor Flute).
+    /// Added to `ManaCost.generic` during affordability checks. Reset to 0 on each `recompute`
+    /// because materialized views start from a fresh catalog clone.
+    pub(crate) casting_cost_modifier: i32,
+    /// True when a CE (e.g. Disruptor Flute, Pithing Needle) suppresses this card's non-mana
+    /// activated abilities. Reset to false on each `recompute`.
+    ///
+    /// NOTE: `AbilityDef`s (non-mana) and `ManaAbility`s are separate types checked by separate
+    /// code paths, so this flag does NOT accidentally suppress mana abilities. Null Rod
+    /// (suppress ALL activated abilities including mana) would need a companion
+    /// `mana_abilities_suppressed: bool` field. Future work: a more principled
+    /// `AbilitySuppression` model when adding Null Rod / Mycosynth Lattice interactions.
+    pub(crate) non_mana_abilities_suppressed: bool,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -632,55 +645,87 @@ impl CardDef {
             static_ability_defs,
             additional_costs: vec![],
             counterable: true,
+            casting_cost_modifier: 0,
+            non_mana_abilities_suppressed: false,
         }
     }
 }
 
-/// Build a `ReplacementDef` for permanents that enter the battlefield tapped.
-/// The replacement re-fires the `ZoneChange` event and sets `bf.tapped = true`.
-pub(super) fn replacement_enters_tapped() -> ReplacementDef {
+// ── ETB replacement / trigger helpers ────────────────────────────────────────
+
+/// Build a `ReplacementDef` for self-ETB replacement effects.
+///
+/// Eliminates the repeated boilerplate (extract id, `current_zone_id`, `fire_event`) present in
+/// every ETB replacement. `extra` is called **after** the zone-change event fires, so
+/// `state.permanent_bf_mut(id)` is live by the time it runs.
+///
+/// Signature: `extra(source_id, id, controller, state, t)`
+///
+/// Cards that need pre-fire mutation (e.g. Murktide setting counters before entering) keep their
+/// replacement inline with a custom check fn.
+pub(super) fn etb_self_replacement<F>(extra: F) -> ReplacementDef
+where
+    F: Fn(ObjId, ObjId, PlayerId, &mut SimState, u8) + Send + Sync + 'static,
+{
+    let extra = std::sync::Arc::new(extra);
     ReplacementDef {
         check: std::sync::Arc::new(etb_self_check),
-        make_effect: std::sync::Arc::new(move |_source_id, controller: PlayerId| {
+        make_effect: std::sync::Arc::new(move |source_id, controller: PlayerId| {
+            let extra = std::sync::Arc::clone(&extra);
             Effect(std::sync::Arc::new(move |state, t, targets| {
-                let Some(&id) = targets.first() else { return; };
+                let Some(&id) = targets.first() else { return };
                 let from = current_zone_id(id, state);
                 fire_event(
-                    GameEvent::ZoneChange {
-                        id, actor: controller, from,
-                        to: ZoneId::Battlefield, controller,
-                    },
+                    GameEvent::ZoneChange { id, actor: controller, from, to: ZoneId::Battlefield, controller },
                     state, t, controller,
                 );
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.tapped = true;
-                }
+                extra(source_id, id, controller, state, t);
             }))
         }),
     }
 }
 
+/// Build a `TriggerCheckFn` for simple self-ETB triggers.
+///
+/// Fires when this permanent enters the battlefield under its controller's control.
+/// Pushes a `TriggerContext` with the given `source_name`, `target_spec`, and effect.
+///
+/// Cards with combined ETB+other triggers (e.g. Orcish Bowmasters) or effects that read state
+/// at trigger-push time keep their trigger inline.
+pub(super) fn etb_self_trigger<F>(
+    source_name: &'static str,
+    target_spec: TargetSpec,
+    make_effect: F,
+) -> TriggerCheckFn
+where
+    F: Fn(ObjId, PlayerId) -> Effect + Send + Sync + 'static,
+{
+    std::sync::Arc::new(move |event, source_id, controller, _state, pending| {
+        if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+            if *id == source_id && *ctlr == controller {
+                pending.push(TriggerContext {
+                    source_name: source_name.into(),
+                    controller,
+                    target_spec: target_spec.clone(),
+                    effect: make_effect(source_id, controller),
+                });
+            }
+        }
+    })
+}
+
+/// Build a `ReplacementDef` for permanents that enter the battlefield tapped.
+pub(super) fn replacement_enters_tapped() -> ReplacementDef {
+    etb_self_replacement(|_, id, _, state, _| {
+        if let Some(bf) = state.permanent_bf_mut(id) { bf.tapped = true; }
+    })
+}
+
 /// Build a `ReplacementDef` that sets a planeswalker's loyalty on ETB.
 pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
-    ReplacementDef {
-        check: std::sync::Arc::new(etb_self_check),
-        make_effect: std::sync::Arc::new(move |_source_id, controller: PlayerId| {
-            Effect(std::sync::Arc::new(move |state, t, targets| {
-                let Some(&id) = targets.first() else { return; };
-                let from = current_zone_id(id, state);
-                fire_event(
-                    GameEvent::ZoneChange {
-                        id, actor: controller, from,
-                        to: ZoneId::Battlefield, controller,
-                    },
-                    state, t, controller,
-                );
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.loyalty = base_loyalty;
-                }
-            }))
-        }),
-    }
+    etb_self_replacement(move |_, id, _, state, _| {
+        if let Some(bf) = state.permanent_bf_mut(id) { bf.loyalty = base_loyalty; }
+    })
 }
 
 // ── Card type enum ─────────────────────────────────────────────────────────────
@@ -1044,7 +1089,7 @@ pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: P
 // ── Shared ETB-self check ─────────────────────────────────────────────────────
 
 /// Matches any ZoneChange where this permanent is the object entering the battlefield.
-fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
+pub(super) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
         if *id == source_id {
             return Some(vec![*id]);
@@ -1055,7 +1100,7 @@ fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId) ->
 
 /// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
 /// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
-fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
+pub(super) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
     state.objects.get(&id).map(|c| card_zone_to_id(&c.zone)).unwrap_or(ZoneId::Hand)
 }
 
