@@ -104,20 +104,28 @@ pub(crate) enum CostComponent {
     SacSelf,                              // sacrifice the source from battlefield
     DiscardSelf,                          // discard the source from hand
     Life(i32),
-    SacPermanent(CostPredicate),          // sacrifice another permanent from battlefield
-    DiscardCard(CostPredicate),           // discard another card from hand
-    ExileFromHand(CostPredicate),         // exile another card from hand (pitch costs)
-    ReturnFromBattlefield(CostPredicate), // return another permanent from battlefield to hand
-    TapPermanent(CostPredicate),          // tap another permanent (Kappa Cannoneer et al.)
+    SacPermanent(ObjPredicate),          // sacrifice another permanent from battlefield
+    DiscardCard(ObjPredicate),           // discard another card from hand
+    ExileFromHand(ObjPredicate),         // exile another card from hand (pitch costs)
+    ReturnFromBattlefield(ObjPredicate), // return another permanent from battlefield to hand
+    TapPermanent(ObjPredicate),          // tap another permanent (Kappa Cannoneer et al.)
     LoyaltyAdjust(i32),                   // +/- loyalty; also marks pw_activated_this_turn
     /// All sub-costs must be paid (explicit AND).
     CostAnd(Vec<CostComponent>),
     /// Exactly one payable sub-cost branch is paid (OR — player's choice).
     CostOr(Vec<CostComponent>),
+    /// Optional additional cost paid 0+ times at cast time; each payment creates a
+    /// copy of the spell on the stack (CR 702.58). Tracked via `CostsPaidCtx::replicate_count`.
+    /// `can_pay` is always true (0 payments is valid). Payment logic lives in `cast_spell`.
+    Replicate(ManaCost),
+    /// Variable life payment: "as an additional cost, pay X life" where X is strategy-chosen.
+    /// `can_pay` checks `life >= chosen_x`; payment records `chosen_x` in `CostsPaidCtx`.
+    XLife,
 }
 
-/// Factory for a spell effect: takes controller, returns the resolved `Effect`.
-pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
+/// Factory for a spell effect: takes (controller, source_id, chosen_x) and returns the resolved `Effect`.
+/// `chosen_x` is the strategy-chosen X value; 0 for spells without an X cost.
+pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync>;
 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
 pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
@@ -128,15 +136,51 @@ pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effec
 /// `hand_min` and `prob` are strategy metadata, not rules costs.
 /// Per CR 118.9d, additional costs apply on top when an AlternateCost is chosen;
 /// that is enforced at the cast-spell call site.
+///
+/// `condition` — optional rules restriction on when this cost may be chosen (CR 118.9b),
+/// e.g. "If it's not your turn" on Force of Negation. `None` = always available.
 #[derive(Clone, Default)]
 pub(crate) struct AlternateCost {
     pub(crate) costs: Vec<CostComponent>,
     pub(crate) hand_min: i32,
     pub(crate) prob: Option<f64>,
+    pub(crate) condition: Option<std::sync::Arc<dyn Fn(PlayerId, &SimState) -> bool + Send + Sync>>,
 }
 
 /// An activated ability a permanent or hand card can use.
 ///
+/// Describes a choice made at ability-resolution time (CR: "choose" ≠ "target").
+/// The engine enumerates valid objects and delegates the pick to `Strategy::choose_for_effect`.
+#[derive(Clone)]
+pub(crate) struct ChoiceSpec {
+    /// Whose objects to enumerate (relative to the ability's controller).
+    pub(crate) controller: Who,
+    /// Zone the chosen object must be in.
+    pub(crate) zone: ZoneId,
+    /// Predicate the chosen object must satisfy.
+    pub(crate) filter: ObjPredicate,
+}
+
+/// Enumerate valid choices for a `ChoiceSpec` from the perspective of `controller`.
+pub(super) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: &SimState) -> Vec<ObjId> {
+    let target_who = spec.controller.resolve(controller);
+    state.objects.values()
+        .filter(|o| {
+            let zone_match = match spec.zone {
+                ZoneId::Exile => matches!(o.zone, CardZone::Exile { .. }),
+                ZoneId::Hand => matches!(o.zone, CardZone::Hand { .. }),
+                ZoneId::Battlefield => o.zone == CardZone::Battlefield,
+                ZoneId::Graveyard  => o.zone == CardZone::Graveyard,
+                ZoneId::Stack      => o.zone == CardZone::Stack,
+                ZoneId::Library    => o.zone == CardZone::Library,
+            };
+            zone_match && (o.owner == target_who || o.controller == target_who)
+        })
+        .filter(|o| (spec.filter)(o.id, state))
+        .map(|o| o.id)
+        .collect()
+}
+
 /// Preconditions are derived automatically: ability is available iff
 /// every cost component can be paid and a valid target exists (if required).
 #[derive(Clone)]
@@ -151,6 +195,12 @@ pub(crate) struct AbilityDef {
     /// If not `TargetSpec::None`, a valid target must exist for the ability to be available.
     pub(crate) target_spec: TargetSpec,
 
+    // ── Choice (optional, CR "choose" ≠ "target") ────────────────────────────
+    /// If `Some`, the engine enumerates matching objects at resolution time and
+    /// delegates the pick to `Strategy::choose_for_effect`. The chosen ObjId is
+    /// passed to the effect closure via its `targets` slice.
+    pub(crate) choice_spec: Option<ChoiceSpec>,
+
     // ── Effect ────────────────────────────────────────────────────────────────
     pub(crate) ability_factory: Option<AbilityFactory>,
 }
@@ -161,6 +211,7 @@ impl Default for AbilityDef {
             source_zone: SourceZone::Battlefield,
             costs: Vec::new(),
             target_spec: TargetSpec::None,
+            choice_spec: None,
             ability_factory: None,
         }
     }
@@ -402,6 +453,10 @@ pub(crate) struct CardDef {
     /// Costs that must always be paid in addition to the chosen base/alternative cost.
     /// Per CR 118.9d these apply regardless of which cost path is taken.
     pub(crate) additional_costs: Vec<CostComponent>,
+    /// False iff this spell can't be countered (CR 608.2b). Checked at resolution by
+    /// `eff_counter_target`; the spell is still a legal target for counterspells.
+    /// Modifiable by continuous effects.
+    pub(crate) counterable: bool,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -526,6 +581,9 @@ impl CardDef {
             _ => false,
         }
     }
+
+    /// False iff this spell can't be countered (CR 608.2b).
+    pub(crate) fn counterable(&self) -> bool { self.counterable }
 }
 
 // ── CardDef constructor + card type helpers ───────────────────────────────────
@@ -573,6 +631,7 @@ impl CardDef {
             replacement_defs,
             static_ability_defs,
             additional_costs: vec![],
+            counterable: true,
         }
     }
 }
@@ -581,7 +640,7 @@ impl CardDef {
 /// The replacement re-fires the `ZoneChange` event and sets `bf.tapped = true`.
 pub(super) fn replacement_enters_tapped() -> ReplacementDef {
     ReplacementDef {
-        check: etb_self_check,
+        check: std::sync::Arc::new(etb_self_check),
         make_effect: std::sync::Arc::new(move |_source_id, controller: PlayerId| {
             Effect(std::sync::Arc::new(move |state, t, targets| {
                 let Some(&id) = targets.first() else { return; };
@@ -604,7 +663,7 @@ pub(super) fn replacement_enters_tapped() -> ReplacementDef {
 /// Build a `ReplacementDef` that sets a planeswalker's loyalty on ETB.
 pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
     ReplacementDef {
-        check: etb_self_check,
+        check: std::sync::Arc::new(etb_self_check),
         make_effect: std::sync::Arc::new(move |_source_id, controller: PlayerId| {
             Effect(std::sync::Arc::new(move |state, t, targets| {
                 let Some(&id) = targets.first() else { return; };
@@ -661,8 +720,8 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: PlayerId, log_msg: &'st
         source_name: "Orcish Bowmasters".into(),
         controller,
         target_spec: TargetSpec::Union(vec![
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Creature) },
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Planeswalker) },
+            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) },
+            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Planeswalker)) },
             TargetSpec::Player(Who::Opp),
         ]),
         effect: Effect(std::sync::Arc::new(move |state, t, targets| {
@@ -796,7 +855,7 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
     pending
 }
 
-/// Push a vec of `TriggerContext`s onto the stack as uncounterable triggered ability items.
+/// Push a vec of `TriggerContext`s onto the stack as triggered ability items.
 /// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
 pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
     for ctx in triggers {
@@ -812,6 +871,9 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState)
             effect: ctx.effect.clone(),
             chosen_targets,
             costs_paid_ctx: CostsPaidCtx::default(),
+            is_triggered: true,
+            counterable: true,
+            choice_spec: None,
         };
         state.abilities.insert(ab_id, ab);
         state.stack.push(ab_id);
@@ -895,11 +957,12 @@ pub(super) fn build_spell_effect(
     def: &CardDef,
     who: PlayerId,
     source_id: ObjId,
+    chosen_x: u32,
 ) -> (TargetSpec, Effect) {
     let target_spec = def.target_spec().clone();
     if let CardKind::Instant(s) | CardKind::Sorcery(s) = &def.kind {
         if let Some(factory) = &s.spell_factory {
-            return (target_spec, factory(who, source_id));
+            return (target_spec, factory(who, source_id, chosen_x));
         }
     }
     (TargetSpec::None, eff_enter_permanent(who, def.name.clone()))
@@ -925,7 +988,7 @@ pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, contro
             id,
             source_id,
             controller,
-            check: repl.check,
+            check: repl.check.clone(),
             effect: (repl.make_effect)(source_id, controller),
             active: false,
         });
@@ -1001,6 +1064,19 @@ fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
 pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && *ctlr == controller {
+            return Some(vec![*id]);
+        }
+    }
+    None
+}
+
+// ── Dauthi Voidwalker replacement check ──────────────────────────────────────
+
+/// Replacement check for Dauthi Voidwalker: fires when any card controlled by
+/// the opponent (not DV's controller) would be put into the graveyard from anywhere.
+pub(super) fn dv_replacement_check(event: &GameEvent, _source_id: ObjId, controller: PlayerId) -> Option<Vec<ObjId>> {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, controller: card_controller, .. } = event {
+        if *card_controller != controller {
             return Some(vec![*id]);
         }
     }

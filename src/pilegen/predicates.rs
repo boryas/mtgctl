@@ -72,16 +72,17 @@ pub(crate) fn pred_not(p: CardPredicate) -> CardPredicate {
     std::sync::Arc::new(move |d| !p(d))
 }
 
-// ── CostPredicate ─────────────────────────────────────────────────────────────
+// ── ObjPredicate ──────────────────────────────────────────────────────────────
 
-/// A state-aware predicate for cost payment: takes the candidate object id and
+/// A state-aware predicate over a game object: takes the candidate object id and
 /// current state; can inspect both the card def and battlefield state.
-pub(crate) type CostPredicate = std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>;
+/// Used for cost payment filters, choice enumeration, and `ObjectInZone` targeting.
+pub(crate) type ObjPredicate = std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>;
 
-/// Lift a `CardPredicate` into a `CostPredicate`.
+/// Lift a `CardPredicate` into an `ObjPredicate`.
 /// Falls back to catalog lookup for non-battlefield objects (hand, graveyard, etc.)
 /// where the materialized view is not populated.
-pub(crate) fn cost_pred_from_card(p: CardPredicate) -> CostPredicate {
+pub(crate) fn obj_pred_from_card(p: CardPredicate) -> ObjPredicate {
     std::sync::Arc::new(move |id, state| {
         if let Some(d) = state.def_of(id) {
             p(d)
@@ -93,49 +94,66 @@ pub(crate) fn cost_pred_from_card(p: CardPredicate) -> CostPredicate {
     })
 }
 
-/// Logical AND of two cost predicates.
+/// True iff the object has at least one counter of the given type.
+pub(crate) fn pred_has_counter(ct: CounterType) -> ObjPredicate {
+    std::sync::Arc::new(move |id, state| {
+        state.objects.get(&id)
+            .map_or(false, |o| o.counters.get(&ct).copied().unwrap_or(0) > 0)
+    })
+}
+
+/// Logical AND of two obj predicates.
 #[allow(dead_code)]
-pub(crate) fn cost_pred_and(a: CostPredicate, b: CostPredicate) -> CostPredicate {
+pub(crate) fn cost_pred_and(a: ObjPredicate, b: ObjPredicate) -> ObjPredicate {
     std::sync::Arc::new(move |id, state| a(id, state) && b(id, state))
 }
 
-/// Logical OR of two cost predicates.
+/// Logical OR of two obj predicates.
 #[allow(dead_code)]
-pub(crate) fn cost_pred_or(a: CostPredicate, b: CostPredicate) -> CostPredicate {
+pub(crate) fn cost_pred_or(a: ObjPredicate, b: ObjPredicate) -> ObjPredicate {
     std::sync::Arc::new(move |id, state| a(id, state) || b(id, state))
 }
 
-/// Logical NOT of a cost predicate.
+/// Logical NOT of an obj predicate.
 #[allow(dead_code)]
-pub(crate) fn cost_pred_not(p: CostPredicate) -> CostPredicate {
+pub(crate) fn cost_pred_not(p: ObjPredicate) -> ObjPredicate {
     std::sync::Arc::new(move |id, state| !p(id, state))
 }
 
 /// True iff the object is a land.
 #[allow(dead_code)]
-pub(crate) fn cost_pred_land() -> CostPredicate {
-    cost_pred_from_card(pred_type_eq(CardType::Land))
+pub(crate) fn cost_pred_land() -> ObjPredicate {
+    obj_pred_from_card(pred_type_eq(CardType::Land))
 }
 
 /// True iff the object is blue and not a land.
-pub(crate) fn cost_pred_blue_nonland() -> CostPredicate {
-    cost_pred_from_card(pred_and(pred_has_color(Color::Blue), pred_not(pred_type_eq(CardType::Land))))
+pub(crate) fn cost_pred_blue_nonland() -> ObjPredicate {
+    obj_pred_from_card(pred_and(pred_has_color(Color::Blue), pred_not(pred_type_eq(CardType::Land))))
 }
 
 /// True iff the object is a permanent on the battlefield that is attacking and unblocked.
-pub(crate) fn cost_pred_unblocked_attacker() -> CostPredicate {
+pub(crate) fn cost_pred_unblocked_attacker() -> ObjPredicate {
     std::sync::Arc::new(|id, state| {
         state.permanent_bf(id).map_or(false, |bf| bf.attacking && bf.unblocked)
     })
 }
 
 /// True iff the object is a land with a mana ability that produces blue mana.
-pub(crate) fn cost_pred_blue_producing() -> CostPredicate {
+pub(crate) fn cost_pred_blue_producing() -> ObjPredicate {
     std::sync::Arc::new(|id, state| {
         state.def_of(id).map_or(false, |d| {
             d.mana_abilities().iter().any(|ma| ma.produces.contains(&Color::Blue))
         })
     })
+}
+
+/// Which kind of ability a `TargetSpec::AbilityOnStack` matches.
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) enum AbilityType {
+    Any,
+    Triggered,
+    Activated,
 }
 
 /// Declarative description of what targets a spell or ability may choose from.
@@ -147,9 +165,13 @@ pub(crate) enum TargetSpec {
     Player(Who),
     /// Any game object in `zone` controlled by `controller` matching `filter`.
     /// Covers permanents (Battlefield), spells (Stack), and cards in graveyard/library.
-    ObjectInZone { controller: Who, zone: ZoneId, filter: CardPredicate },
+    ObjectInZone { controller: Who, zone: ZoneId, filter: ObjPredicate },
     /// Any one of several sub-specs is a legal target (e.g. "any target" = creature | planeswalker | player).
     Union(Vec<TargetSpec>),
+    /// An ability on the stack (Zone=Stack, StackObjectType=Ability) controlled by `controller`,
+    /// optionally filtered by `ability_type` (Triggered / Activated / Any).
+    /// Abilities don't have a `CardDef` so they can't be reached via `ObjectInZone`.
+    AbilityOnStack { controller: Who, ability_type: AbilityType },
 }
 
 impl TargetSpec {
@@ -204,11 +226,7 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, state: &Sim
                         if state.stack_item_owner(id) == actor_id
                             || !state.stack_item_is_counterable(id) { return false; }
                     }
-                    state.def_of(id)
-                        .or_else(|| state.objects.get(&id)
-                            .and_then(|o| state.catalog.get(o.catalog_key.as_str())))
-                        .map(|d| filter(d))
-                        .unwrap_or(false)
+                    filter(id, state)
                 })
                 .collect()
         }
@@ -224,6 +242,20 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, state: &Sim
                 }
             }
             result
+        }
+        TargetSpec::AbilityOnStack { controller: who, ability_type } => {
+            let target_who = who.resolve(controller);
+            let target_who_id = state.player_id(target_who);
+            state.abilities_on_stack()
+                .filter(|(_, ab)| {
+                    ab.owner == target_who_id && match ability_type {
+                        AbilityType::Any       => true,
+                        AbilityType::Triggered => ab.is_triggered,
+                        AbilityType::Activated => !ab.is_triggered,
+                    }
+                })
+                .map(|(id, _)| id)
+                .collect()
         }
     }
 }
@@ -257,10 +289,22 @@ fn has_valid_target_spec(
                         if state.stack_item_owner(id) == actor_id
                             || !state.stack_item_is_counterable(id) { return false; }
                     }
-                    state.def_of(id).map(|d| filter(d)).unwrap_or(false)
+                    filter(id, state)
                 })
         }
         TargetSpec::Union(specs) => specs.iter().any(|s| has_valid_target_spec(s, state, actor)),
+        TargetSpec::AbilityOnStack { controller: who, ability_type } => {
+            let target_who = who.resolve(actor);
+            let target_who_id = state.player_id(target_who);
+            state.abilities_on_stack()
+                .any(|(_, ab)| {
+                    ab.owner == target_who_id && match ability_type {
+                        AbilityType::Any       => true,
+                        AbilityType::Triggered => ab.is_triggered,
+                        AbilityType::Activated => !ab.is_triggered,
+                    }
+                })
+        }
     }
 }
 

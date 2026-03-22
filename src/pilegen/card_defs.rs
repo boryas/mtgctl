@@ -32,12 +32,17 @@ fn all_cards() -> Vec<CardDef> {
         brainstorm(),
         consider(),
         daze(),
+        force_of_negation(),
         force_of_will(),
         dark_ritual(),
         fatal_push(),
         snuff_out(),
         bitter_triumph(),
+        long_goodbye(),
+        consign_to_memory(),
+        surgical_extraction(),
         // Spells — sorceries
+        toxic_deluge(),
         doomsday(),
         ponder(),
         thoughtseize(),
@@ -55,6 +60,7 @@ fn all_cards() -> Vec<CardDef> {
         recruiter_of_the_guard(),
         orcish_bowmasters(),
         murktide_regent(),
+        dauthi_voidwalker(),
         // DFCs / split
         tamiyo_inquisitive_student(),
         brazen_borrower(),
@@ -152,7 +158,7 @@ fn wasteland() -> CardDef {
             target_spec: TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))),
+                filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))),
             },
             ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))),
             ..Default::default()
@@ -276,7 +282,7 @@ fn brainstorm() -> CardDef {
     simple("Brainstorm", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
         exileable: true,
-        spell_factory: Some(Arc::new(|who, _source_id| {
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
             eff_draw(who, 3).then(eff_put_back(who, 2))
         })),
         ..Default::default()
@@ -288,7 +294,7 @@ fn consider() -> CardDef {
     simple("Consider", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
         exileable: true,
-        spell_factory: Some(Arc::new(|who, _source_id| eff_draw(who, 1))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_draw(who, 1))),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
@@ -300,14 +306,39 @@ fn daze() -> CardDef {
         mana_cost: "U".to_string(),
         exileable: true,
         // blue=true so it can be pitched to Force of Will
-        target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: pred_any() },
+        target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
         alternate_costs: vec![
             AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(cost_pred_blue_producing())], hand_min: 1, ..Default::default() },
             AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("1U"))], hand_min: 1, prob: Some(0.2), ..Default::default() },
         ],
-        spell_factory: Some(Arc::new(|who, _source_id| eff_counter_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_counter_target(who))),
         ..Default::default()
     }), parse_colors("U", true, false), None)
+}
+
+/// Counter target noncreature spell. Pitch cost (exile a blue card) only available when it's
+/// not your turn; the countered spell is exiled via a scoped replacement (CR 118.9b, 614.1a).
+fn force_of_negation() -> CardDef {
+    simple("Force of Negation", CardKind::Instant(SpellData {
+        mana_cost: "1UU".to_string(),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Stack,
+            filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Creature))),
+        },
+        alternate_costs: vec![
+            AlternateCost {
+                costs: vec![CostComponent::ExileFromHand(cost_pred_blue_nonland())],
+                hand_min: 2,
+                condition: Some(std::sync::Arc::new(|caster, state| {
+                    state.current_ap != state.player_id(caster)
+                })),
+                ..Default::default()
+            },
+        ],
+        spell_factory: Some(Arc::new(|who, source_id, _x| eff_counter_and_exile(who, source_id))),
+        ..Default::default()
+    }), parse_colors("1UU", true, false), None)
 }
 
 /// Counter target spell. Alternate costs: exile a blue card from hand + pay 1 life (pitch),
@@ -315,12 +346,12 @@ fn daze() -> CardDef {
 fn force_of_will() -> CardDef {
     simple("Force of Will", CardKind::Instant(SpellData {
         mana_cost: "3UU".to_string(),
-        target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: pred_any() },
+        target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
         alternate_costs: vec![
             AlternateCost { costs: vec![CostComponent::ExileFromHand(cost_pred_blue_nonland()), CostComponent::Life(1)], hand_min: 2, ..Default::default() },
             AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("3UU"))], hand_min: 1, ..Default::default() },
         ],
-        spell_factory: Some(Arc::new(|who, _source_id| eff_counter_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_counter_target(who))),
         ..Default::default()
     }), parse_colors("3UU", true, false), None)
 }
@@ -329,7 +360,7 @@ fn force_of_will() -> CardDef {
 fn dark_ritual() -> CardDef {
     simple("Dark Ritual", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
-        spell_factory: Some(Arc::new(|who, _source_id| eff_mana(who, "BBB"))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_mana(who, "BBB"))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
 }
@@ -341,9 +372,9 @@ fn fatal_push() -> CardDef {
         target_spec: TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: pred_and(pred_type_eq(CardType::Creature), pred_mana_value_le(3)),
+            filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Creature), pred_mana_value_le(3))),
         },
-        spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
 }
@@ -355,12 +386,12 @@ fn snuff_out() -> CardDef {
         target_spec: TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: pred_and(pred_type_eq(CardType::Creature), pred_not(pred_has_color(Color::Black))),
+            filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Creature), pred_not(pred_has_color(Color::Black)))),
         },
         alternate_costs: vec![
             AlternateCost { costs: vec![CostComponent::Life(4)], ..Default::default() },
         ],
-        spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("3BB", false, true), None)
 }
@@ -373,28 +404,144 @@ fn bitter_triumph() -> CardDef {
         target_spec: TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
+            filter: obj_pred_from_card(pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker))),
         },
-        spell_factory: Some(Arc::new(|who, _source_id| eff_destroy_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_destroy_target(who))),
         ..Default::default()
     }), parse_colors("1B", false, false), None);
     def.additional_costs = vec![
         CostComponent::CostOr(vec![
-            CostComponent::DiscardCard(cost_pred_from_card(pred_any())),
+            CostComponent::DiscardCard(obj_pred_from_card(pred_any())),
             CostComponent::Life(3),
         ]),
     ];
     def
 }
 
+/// Destroy target creature or planeswalker with MV ≤ 3. This spell can't be countered (CR 608.2b).
+fn long_goodbye() -> CardDef {
+    let mut def = simple("Long Goodbye", CardKind::Instant(SpellData {
+        mana_cost: "1B".to_string(),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: obj_pred_from_card(pred_and(
+                pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
+                pred_mana_value_le(3),
+            )),
+        },
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_destroy_target(who))),
+        ..Default::default()
+    }), parse_colors("1B", false, false), None);
+    def.counterable = false;
+    def
+}
+
+/// Counter target triggered ability or colorless spell.
+/// Replicate {1} (CR 702.58): optional additional cost paid 0+ times; each payment
+/// creates a copy of the spell targeting another triggered ability or colorless spell.
+fn consign_to_memory() -> CardDef {
+    let mut def = simple("Consign to Memory", CardKind::Instant(SpellData {
+        mana_cost: "U".to_string(),
+        exileable: true,
+        target_spec: TargetSpec::Union(vec![
+            TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered },
+            TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Stack,
+                filter: obj_pred_from_card(pred_no_colored_pips()),
+            },
+        ]),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_counter_target(who))),
+        ..Default::default()
+    }), parse_colors("U", false, false), None);
+    def.additional_costs = vec![CostComponent::Replicate(parse_mana_cost("1"))];
+    def
+}
+
+/// Exile target card in a graveyard (not basic land), then exile all cards with the
+/// same name from that player's graveyard, hand, and library (CR 107.4f phyrexian mana).
+/// {B/P}: pay {B} or pay 2 life.
+fn surgical_extraction() -> CardDef {
+    simple("Surgical Extraction", CardKind::Instant(SpellData {
+        mana_cost: "B".to_string(),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Graveyard,
+            filter: obj_pred_from_card(pred_not(pred_and(
+                pred_type_eq(CardType::Land),
+                pred_has_supertype(Supertype::Basic),
+            ))),
+        },
+        alternate_costs: vec![
+            AlternateCost { costs: vec![CostComponent::Life(2)], hand_min: 0, ..Default::default() },
+        ],
+        spell_factory: Some(Arc::new(|caster, _source_id, _x| {
+            Effect(Arc::new(move |state, t, targets| {
+                let Some(&target_id) = targets.first() else { return };
+                let (name, owner) = match state.objects.get(&target_id) {
+                    Some(o) => (o.catalog_key.clone(), o.owner),
+                    None => return,
+                };
+                // Exile all cards with the same name from owner's graveyard, hand, and library.
+                // Card names are used as identity per CLAUDE.md principle 2.
+                let to_exile: Vec<ObjId> = state.objects.values()
+                    .filter(|o| o.catalog_key == name && o.owner == owner)
+                    .filter(|o| matches!(o.zone,
+                        CardZone::Graveyard | CardZone::Hand { .. } | CardZone::Library
+                    ))
+                    .map(|o| o.id)
+                    .collect();
+                let count = to_exile.len();
+                for id in to_exile {
+                    change_zone(id, ZoneId::Exile, state, t, caster);
+                }
+                state.log(t, caster, format!("→ extracted {} × '{}'", count, name));
+            }))
+        })),
+        ..Default::default()
+    }), parse_colors("B", false, false), None)
+}
+
 // ── Sorceries ─────────────────────────────────────────────────────────────────
+
+/// All creatures get -X/-X until end of turn; additional cost: pay X life (CR 107.2).
+/// The -X/-X is a Layer 7 ContinuousInstance; creatures with resulting toughness ≤ 0
+/// die when the engine checks state-based actions before the next priority grant.
+/// X is chosen by the strategy (default: 3) via `choose_x_for_spell`.
+fn toxic_deluge() -> CardDef {
+    let mut def = simple("Toxic Deluge", CardKind::Sorcery(SpellData {
+        mana_cost: "2B".to_string(),
+        spell_factory: Some(Arc::new(|caster, source_id, x| {
+            let xi = x as i32;
+            Effect(Arc::new(move |state, t, _targets| {
+                state.continuous_instances.push(ContinuousInstance {
+                    source_id,
+                    controller: caster,
+                    layer: ContinuousLayer::L7PowerToughness,
+                    filter: std::sync::Arc::new(|_, _| true),
+                    modifier: std::sync::Arc::new(move |def, _state| {
+                        if let CardKind::Creature(c) = &mut def.kind {
+                            c.adjust_pt(-xi, -xi);
+                        }
+                    }),
+                    expiry: ContinuousExpiry::EndOfTurn,
+                });
+                state.log(t, caster, format!("→ all creatures get -{xi}/-{xi} until end of turn"));
+            }))
+        })),
+        ..Default::default()
+    }), parse_colors("2B", false, false), None);
+    def.additional_costs = vec![CostComponent::XLife];
+    def
+}
 
 /// Win condition: set success=true. In full rules: opponent's library and graveyard become
 /// their library; controller searches for exactly five cards. CR 101.1 (shortcut).
 fn doomsday() -> CardDef {
     simple("Doomsday", CardKind::Sorcery(SpellData {
         mana_cost: "BBB".to_string(),
-        spell_factory: Some(Arc::new(|_who, _source_id| eff_doomsday())),
+        spell_factory: Some(Arc::new(|_who, _source_id, _x| eff_doomsday())),
         ..Default::default()
     }), parse_colors("BBB", false, false), None)
 }
@@ -404,7 +551,7 @@ fn ponder() -> CardDef {
     simple("Ponder", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
         exileable: true,
-        spell_factory: Some(Arc::new(|who, _source_id| eff_draw(who, 1))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_draw(who, 1))),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
@@ -413,7 +560,7 @@ fn ponder() -> CardDef {
 fn thoughtseize() -> CardDef {
     simple("Thoughtseize", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
-        spell_factory: Some(Arc::new(|who, _source_id| {
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
             eff_discard(who, Who::Opp, 1, pred_not(pred_type_eq(CardType::Land)))
                 .then(eff_life_loss(who, 2))
         })),
@@ -428,9 +575,9 @@ fn unearth() -> CardDef {
         target_spec: TargetSpec::ObjectInZone {
             controller: Who::Actor,
             zone: ZoneId::Graveyard,
-            filter: pred_type_eq(CardType::Creature),
+            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
         },
-        spell_factory: Some(Arc::new(|who, _source_id| eff_reanimate(who))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_reanimate(who))),
         ..Default::default()
     }), parse_colors("B", false, false), None)
 }
@@ -439,7 +586,7 @@ fn unearth() -> CardDef {
 fn hymn_to_tourach() -> CardDef {
     simple("Hymn to Tourach", CardKind::Sorcery(SpellData {
         mana_cost: "BB".to_string(),
-        spell_factory: Some(Arc::new(|who, _source_id| eff_discard(who, Who::Opp, 2, pred_any()))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_discard(who, Who::Opp, 2, pred_any()))),
         ..Default::default()
     }), parse_colors("BB", false, false), None)
 }
@@ -462,7 +609,7 @@ fn edge_of_autumn() -> CardDef {
 fn personal_tutor() -> CardDef {
     simple("Personal Tutor", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        spell_factory: Some(Arc::new(|who, _source_id| {
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
             eff_fetch_search(who, pred_type_eq(CardType::Sorcery), ZoneId::Library)
         })),
         ..Default::default()
@@ -474,7 +621,7 @@ fn personal_tutor() -> CardDef {
 fn green_suns_zenith() -> CardDef {
     simple("Green Sun's Zenith", CardKind::Sorcery(SpellData {
         mana_cost: "1G".to_string(),
-        spell_factory: Some(Arc::new(|who, _source_id| {
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
             eff_fetch_search(
                 who,
                 pred_and(pred_type_eq(CardType::Creature), pred_has_color(Color::Green)),
@@ -586,7 +733,7 @@ fn murktide_regent() -> CardDef {
         vec![], CardLayout::Normal, None,
         vec![Arc::new(murktide_check)],
         vec![ReplacementDef {
-            check: murktide_etb_check,
+            check: Arc::new(murktide_etb_check),
             make_effect: Arc::new(|_source_id, controller: PlayerId| {
                 Effect(Arc::new(move |state, t, targets| {
                     let Some(&id) = targets.first() else { return; };
@@ -613,6 +760,58 @@ fn murktide_regent() -> CardDef {
                         },
                         state, t, controller,
                     );
+                }))
+            }),
+        }],
+        vec![],
+    )
+}
+
+/// Shadow (evasion — see strategy.rs), replacement effect (opponent's GY-bound cards
+/// exile with a void counter), and {T}, SacSelf activated ability (choose an exiled
+/// opponent card with a void counter; grant a free-cast permission for it this turn).
+/// CR 702.28 (shadow), CR 614.1a (replacement).
+fn dauthi_voidwalker() -> CardDef {
+    let mut data = CreatureData::new("BB", 3, 2);
+    data.keywords = vec!["shadow".to_string()];
+    data.abilities = vec![AbilityDef {
+        source_zone: SourceZone::Battlefield,
+        costs: vec![CostComponent::TapSelf, CostComponent::SacSelf],
+        target_spec: TargetSpec::None,
+        choice_spec: Some(ChoiceSpec {
+            controller: Who::Opp,
+            zone: ZoneId::Exile,
+            filter: pred_has_counter(CounterType::Void),
+        }),
+        ability_factory: Some(Arc::new(|who, _source_id| {
+            Effect(Arc::new(move |state, _t, targets| {
+                if let Some(&id) = targets.first() {
+                    state.free_cast_permissions.push(FreeCastPermission {
+                        controller: who,
+                        target_id: id,
+                    });
+                }
+            }))
+        })),
+    }];
+
+    CardDef::new(
+        "Dauthi Voidwalker",
+        CardKind::Creature(data),
+        parse_colors("BB", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![],
+        vec![ReplacementDef {
+            check: Arc::new(dv_replacement_check),
+            make_effect: Arc::new(|_source_id, controller: PlayerId| {
+                Effect(Arc::new(move |state, t, targets| {
+                    if let Some(&id) = targets.first() {
+                        change_zone(id, ZoneId::Exile, state, t, controller);
+                        if let Some(obj) = state.objects.get_mut(&id) {
+                            *obj.counters.entry(CounterType::Void).or_insert(0) += 1;
+                        }
+                    }
                 }))
             }),
         }],
@@ -663,7 +862,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
 /// Enchantment for {2BB}. Replacement: any card going to any graveyard goes to exile instead.
 fn leyline_of_the_void() -> CardDef {
     let replacement = ReplacementDef {
-        check: leyline_check,
+        check: Arc::new(leyline_check),
         make_effect: Arc::new(|_source_id, controller: PlayerId| {
             Effect(Arc::new(move |state, t, targets| {
                 if let Some(&id) = targets.first() {
@@ -717,10 +916,10 @@ fn brazen_borrower() -> CardDef {
             target_spec: TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: pred_not(pred_type_eq(CardType::Land)),
+                filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Land))),
             },
             subtypes: vec!["adventure".to_string()],
-            spell_factory: Some(Arc::new(|who, _source_id| eff_bounce_target(who))),
+            spell_factory: Some(Arc::new(|who, _source_id, _x| eff_bounce_target(who))),
             ..Default::default()
         }),
         parse_colors("1UU", true, false),

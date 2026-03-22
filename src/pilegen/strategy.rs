@@ -18,6 +18,20 @@ pub(super) trait Strategy {
     fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)>;
     fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)>;
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool;
+
+    /// Called when an ability resolves with a `ChoiceSpec` (CR "choose" ≠ "target").
+    /// `effect_id` is the `ObjId` of the `StackAbility` that is resolving.
+    /// Default: pick the first valid option.
+    fn choose_for_effect(&mut self, _effect_id: ObjId, choices: &[ObjId], _state: &SimState) -> Option<ObjId> {
+        choices.first().copied()
+    }
+
+    /// Called when the strategy is deciding to cast an X spell.
+    /// Returns the strategy's chosen value for X (used for life payment and the effect).
+    /// Default: 3.
+    fn choose_x_for_spell(&self, _card_id: ObjId, _state: &SimState) -> u32 {
+        3
+    }
 }
 
 // ── DoomsdayStrategy ─────────────────────────────────────────────────────────
@@ -155,6 +169,11 @@ fn pick_on_board_action(
 ) -> Option<PriorityAction> {
     let mut candidates: Vec<PriorityAction> = Vec::new();
 
+    // If we have a free-cast permission, play that card immediately.
+    if let Some(perm) = state.free_cast_permissions.iter().find(|p| p.controller == ap).cloned() {
+        return Some(PriorityAction::PlayFreeCast(perm.target_id));
+    }
+
     // 75% roll per land (permanent that is_land) with an available ability.
     let land_ids: Vec<ObjId> = state.permanents_of(ap)
         .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
@@ -275,7 +294,7 @@ fn pick_on_board_action(
             if rng.gen_bool(0.75) {
                 let targets = legal_targets(def.target_spec(), ap, state);
                 let chosen = pick_target(&targets, state).into_iter().collect();
-                candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen });
+                candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x: 0 });
             }
         }
     }
@@ -509,10 +528,15 @@ fn pick_attackers(
         .filter_map(|p| {
             let def = state.def_of(p.id)?;
             if !def.is_creature() { return None; }
-            let atk_flies = creature_has_keyword(p.id, "flying", state);
+            let atk_flies  = creature_has_keyword(p.id, "flying", state);
+            let atk_shadow = creature_has_keyword(p.id, "shadow", state);
             // Sum power of NAP creatures that can block this attacker.
             let blocking_power: i32 = nap_blockers.iter()
-                .filter(|(blk_id, _)| !atk_flies || creature_has_keyword(*blk_id, "flying", state))
+                .filter(|(blk_id, _)| {
+                    if atk_flies && !creature_has_keyword(*blk_id, "flying", state) { return false; }
+                    let blk_shadow = creature_has_keyword(*blk_id, "shadow", state);
+                    atk_shadow == blk_shadow
+                })
                 .map(|(_, pow)| *pow)
                 .sum();
             let tgh = state.def_of(p.id)
@@ -556,13 +580,17 @@ fn pick_blockers(
             }
             None => continue,
         };
-        let atk_flies = creature_has_keyword(atk_id, "flying", state);
+        let atk_flies  = creature_has_keyword(atk_id, "flying", state);
+        let atk_shadow = creature_has_keyword(atk_id, "shadow", state);
         let blocker = state.permanents_of(nap)
             .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
             .find_map(|p| {
                 if !state.def_of(p.id).map(|d| d.is_creature()).unwrap_or(false) { return None; }
                 // Flying attackers can only be blocked by flying creatures.
                 if atk_flies && !creature_has_keyword(p.id, "flying", state) { return None; }
+                // Shadow: shadow creatures can only block/be blocked by other shadow creatures.
+                let blk_shadow = creature_has_keyword(p.id, "shadow", state);
+                if atk_shadow != blk_shadow { return None; }
                 let blk_pow = state.def_of(p.id)
                     .and_then(|d| d.as_creature())
                     .map(|c| c.power())
@@ -593,13 +621,14 @@ fn ability_available(
     source_id: ObjId,
     source_untapped: bool,
 ) -> bool {
-    can_pay_costs(&ability.costs, state, who, source_id, source_untapped)
+    can_pay_costs(&ability.costs, state, who, source_id, source_untapped, 0)
         && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who))
 }
 
 /// True if the player can currently afford to cast `name` via any available cost.
 ///
 /// Tries the standard mana cost first; falls back to alternate costs (e.g. delve, pitch).
+/// For XLife additional costs, uses strategy default X=3 (`choose_x_for_spell` default).
 fn spell_is_affordable(
     card_id: ObjId,
     def: &CardDef,
@@ -616,10 +645,12 @@ fn spell_is_affordable(
         true
     } else {
         def.alternate_costs().iter().any(|c| {
-            state.hand_size(who) >= c.hand_min && can_pay_costs(&c.costs, state, who, card_id, false)
+            state.hand_size(who) >= c.hand_min && can_pay_costs(&c.costs, state, who, card_id, false, 0)
         })
     };
-    base_payable && can_pay_costs(&def.additional_costs, state, who, card_id, false)
+    // Use strategy default X=3 for XLife cost affordability check.
+    let default_x = 3u32;
+    base_payable && can_pay_costs(&def.additional_costs, state, who, card_id, false, default_x)
 }
 
 fn hand_ability_affordable(ability: &AbilityDef, state: &SimState, who: PlayerId, source_id: ObjId) -> bool {
@@ -650,7 +681,8 @@ fn collect_hand_actions(
         if seen_names.insert(name.clone()) {
             let targets = legal_targets(def.target_spec(), who, state);
             let chosen = pick_target(&targets, state).into_iter().collect();
-            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen });
+            let chosen_x = if def.additional_costs.iter().any(|c| matches!(c, CostComponent::XLife)) { 3u32 } else { 0 };
+            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x });
         }
 
         // In-hand abilities (cycling, channel, etc.)
@@ -671,7 +703,7 @@ fn collect_hand_actions(
             if !face.target_spec().is_none() && !has_valid_target(face.target_spec(), state, who) { continue; }
             let adv_targets = legal_targets(face.target_spec(), who, state);
             let adv_chosen = pick_target(&adv_targets, state).into_iter().collect();
-            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None, chosen_targets: adv_chosen });
+            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None, chosen_targets: adv_chosen, chosen_x: 0 });
         }
     }
 
@@ -744,18 +776,17 @@ fn respond_with_counter(
         c.bf.as_ref().map_or(false, |bf| !bf.tapped) && !state.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
     });
 
-    // Collect (ObjId, name) for each unique counterspell type in hand that can target the stack spell.
+    // Collect (ObjId, name) for each unique counterspell type in hand that can target this stack item.
     let mut seen = std::collections::HashSet::new();
     let counterspells: Vec<(ObjId, String)> = state.hand_of(responding_who)
         .filter_map(|c| {
             let def = state.def_of(c.id)?;
-            let stack_pred = if let TargetSpec::ObjectInZone { zone: ZoneId::Stack, ref filter, .. } = def.target_spec() {
-                filter.clone()
-            } else {
+            // Only instants can be cast as a response.
+            if !def.is_instant() { return None; }
+            // Check if this card has a valid target matching the stack item.
+            if !legal_targets(def.target_spec(), responding_who, state).contains(&target_id) {
                 return None;
-            };
-            if !state.def_of(target_id).map(|d| stack_pred(d)).unwrap_or(true) { return None; }
-            if def.alternate_costs().is_empty() { return None; }
+            }
             if c.catalog_key == "Daze" && target_has_untapped_lands { return None; }
             seen.insert(c.catalog_key.clone()).then(|| (c.id, c.catalog_key.clone()))
         })
@@ -773,18 +804,16 @@ fn respond_with_counter(
             Some(d) => d,
             None => continue,
         };
+
         if probabilistic {
             let copies = state.hand_of(responding_who).filter(|c| c.catalog_key == *cs_name).count();
             let p_have = p_card_in_hand(lib_size, hand_size, copies);
             if !rng.gen_bool(p_have.max(f64::MIN_POSITIVE)) { continue; }
-
-            let costs = def.alternate_costs();
-            let strategic = costs.first().and_then(|c| c.prob).unwrap_or(0.5);
-            if !rng.gen_bool(strategic) { continue; }
         }
 
-        let costs = def.alternate_costs().to_vec();
-        for cost in &costs {
+        // Try alternate costs first (free/cheaper), then fall back to mana cost.
+        let alt_costs = def.alternate_costs().to_vec();
+        for cost in &alt_costs {
             let has_exile_blue = cost.costs.iter().any(|c| matches!(c, CostComponent::ExileFromHand(_)));
             if probabilistic && has_exile_blue {
                 let n_blue = state.hand_of(responding_who)
@@ -794,14 +823,34 @@ fn respond_with_counter(
                 let p_have_blue = p_card_in_hand(lib_size, hand_size, n_blue);
                 if !rng.gen_bool(p_have_blue.max(f64::MIN_POSITIVE)) { continue; }
             }
+            let strategic = cost.prob.unwrap_or(0.5);
+            if probabilistic && !rng.gen_bool(strategic) { continue; }
             if state.hand_size(responding_who) >= cost.hand_min
-                && can_pay_costs(&cost.costs, state, responding_who, *cs_id, false) {
+                && can_pay_costs(&cost.costs, state, responding_who, *cs_id, false, 0) {
                 return Some(PriorityAction::CastSpell {
                     card_id: *cs_id,
                     face: SpellFace::Main,
                     preferred_cost: Some(cost.clone()),
                     chosen_targets: vec![target_id],
+                    chosen_x: 0,
                 });
+            }
+        }
+
+        // Fall back to regular mana cost if no alternate cost worked.
+        if !def.mana_cost().is_empty() {
+            let mc = parse_mana_cost(def.mana_cost());
+            if state.potential_mana(responding_who).can_pay(&mc) {
+                let strategic = if probabilistic { 0.65f64 } else { 1.0 };
+                if !probabilistic || rng.gen_bool(strategic) {
+                    return Some(PriorityAction::CastSpell {
+                        card_id: *cs_id,
+                        face: SpellFace::Main,
+                        preferred_cost: None,
+                        chosen_targets: vec![target_id],
+                        chosen_x: 0,
+                    });
+                }
             }
         }
     }

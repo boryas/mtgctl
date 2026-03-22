@@ -40,6 +40,22 @@ mod tests;
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub(crate) struct ObjId(u64);
 
+/// Type of a counter placed on a game object.
+/// Counters persist across zone changes (stored on `GameObject`, not `BattlefieldState`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) enum CounterType {
+    /// Placed on cards exiled by Dauthi Voidwalker's replacement effect.
+    Void,
+}
+
+/// Permission granted by an effect allowing a player to play one specific exiled card
+/// without paying its mana cost, until end of turn.
+#[derive(Clone)]
+pub(super) struct FreeCastPermission {
+    pub(super) controller: PlayerId,
+    pub(super) target_id: ObjId,
+}
+
 impl ObjId {
     const UNSET: ObjId = ObjId(0);
 
@@ -81,6 +97,11 @@ pub(crate) struct CostsPaidCtx {
     /// For each `ReturnFromBattlefield` payment, the `attack_target` the returned
     /// permanent had at the time it left the battlefield (in payment order).
     pub(crate) returned_attack_targets: Vec<Option<ObjId>>,
+    /// Number of times a Replicate cost was paid for the spell (CR 702.58).
+    /// Set during cost payment; used by cast_spell to push copies to the stack.
+    pub(crate) replicate_count: u32,
+    /// Strategy-chosen X value paid as `XLife` additional cost (0 if no X cost).
+    pub(crate) chosen_x: u32,
 }
 
 /// Spell-on-stack state for a card while it's on the stack.
@@ -141,6 +162,9 @@ struct GameObject {
     spell: Option<SpellState>,         // Some only when zone == Stack (spell on stack)
     /// Inlined post-CE materialized snapshot. Rebuilt by `recompute` after each state-mutating tick.
     materialized: Option<CardDef>,
+    /// Zone-independent counters (e.g. void counters from Dauthi Voidwalker).
+    /// Persists across zone changes.
+    pub(super) counters: HashMap<CounterType, u32>,
 }
 
 impl GameObject {
@@ -148,13 +172,13 @@ impl GameObject {
         GameObject {
             id, catalog_key: catalog_key.into(), controller: owner, owner,
             zone: CardZone::Library, is_token: false, bf: None, spell: None,
-            materialized: None,
+            materialized: None, counters: HashMap::new(),
         }
     }
 }
 
 
-/// An activated or triggered ability on the stack. Not counterable.
+/// An activated or triggered ability on the stack.
 #[derive(Clone)]
 pub(crate) struct StackAbility {
     /// The stable ObjId for this ability (also the key in `SimState::abilities`).
@@ -167,6 +191,18 @@ pub(crate) struct StackAbility {
     /// Objects moved during cost payment (for effects that depend on what was paid).
     #[allow(dead_code)]
     pub(crate) costs_paid_ctx: CostsPaidCtx,
+    /// True iff this is a triggered ability (vs. an activated ability).
+    /// Used by `TargetSpec::AbilityOnStack` with `AbilityType::Triggered` to match triggered abilities.
+    /// All stack items — including activated and triggered abilities — are legal targets
+    /// for counters that specify them; "can't be countered" is a resolution rule, not a
+    /// targeting restriction (CR 608.2b).
+    pub(crate) is_triggered: bool,
+    /// False iff this ability can't be countered (CR 608.2b). Checked at resolution;
+    /// the ability is still a legal target for counter effects.
+    pub(crate) counterable: bool,
+    /// If `Some`, the engine enumerates choices at resolution and asks strategy to pick one.
+    /// The chosen ObjId is prepended to `chosen_targets` before calling `effect`.
+    pub(crate) choice_spec: Option<ChoiceSpec>,
 }
 
 // ── Trigger system ────────────────────────────────────────────────────────────
@@ -246,7 +282,7 @@ pub(super) type TriggerCheckFn =
 /// Signature for a per-card replacement check function.
 /// Returns Some(targets) if this replacement applies to the event; None otherwise.
 /// `source_id` is passed so self-ETB checks work without string dispatch.
-pub(super) type ReplacementCheckFn = fn(&GameEvent, ObjId, PlayerId) -> Option<Vec<ObjId>>;
+pub(super) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId) -> Option<Vec<ObjId>> + Send + Sync>;
 
 /// One trigger registration per card object in the simulation.
 /// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
@@ -476,7 +512,9 @@ enum PriorityAction {
     /// `face` selects main vs adventure face/cost; card zone identifies the source zone.
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
     /// `chosen_targets` — targets picked by strategy at action-construction time.
-    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<ObjId> },
+    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<ObjId>, chosen_x: u32 },
+    /// Play a card from exile via a free-cast permission (e.g. Dauthi Voidwalker ability).
+    PlayFreeCast(ObjId),
     /// Pass priority.
     Pass,
 }
@@ -673,7 +711,7 @@ pub(crate) struct SimState {
     /// handle_priority_round; empty between priority rounds.
     pub(crate) stack: Vec<ObjId>,
     /// Activated and triggered abilities on the stack, keyed by their allocated ObjId.
-    abilities: HashMap<ObjId, StackAbility>,
+    pub(super) abilities: HashMap<ObjId, StackAbility>,
     /// All cards in all zones, keyed by stable ObjId. Added as part of staged object model migration.
     objects: HashMap<ObjId, GameObject>,
     /// ID allocator — starts at 1; 0 is reserved as ObjId::UNSET.
@@ -693,6 +731,9 @@ pub(crate) struct SimState {
     /// All active continuous-effect instances. Checked at `recompute` time; expired entries
     /// are removed at Cleanup / start-of-turn as appropriate.
     pub(super) continuous_instances: Vec<ContinuousInstance>,
+    /// Cards that a player is permitted to play for free (without mana cost) this turn.
+    /// Granted by Dauthi Voidwalker's activated ability; cleared at end-of-turn.
+    pub(super) free_cast_permissions: Vec<FreeCastPermission>,
     /// Owned card catalog — populated once at sim init, never mutated.
     /// All runtime card-definition reads go through `state.def_of(id)` (live objects)
     /// or `state.catalog` (bootstrap / non-battlefield lookups).
@@ -738,6 +779,7 @@ impl SimState {
             repl_applied: HashSet::new(),
             repl_depth: 0,
             continuous_instances: Vec::new(),
+            free_cast_permissions: Vec::new(),
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
         };
@@ -1014,8 +1056,17 @@ impl SimState {
         ""
     }
 
+    /// True iff `id` is a stack item (spell or ability) that a counter could target.
+    /// All spells and all triggered/activated abilities on the stack are legal targets
+    /// for appropriate counters — "can't be countered" is enforced at resolution, not targeting.
     pub(crate) fn stack_item_is_counterable(&self, id: ObjId) -> bool {
-        self.objects.contains_key(&id) && self.objects[&id].zone == CardZone::Stack
+        (self.objects.contains_key(&id) && self.objects[&id].zone == CardZone::Stack)
+            || self.abilities.contains_key(&id)
+    }
+
+    /// Iterate over all triggered/activated abilities currently on the stack.
+    pub(crate) fn abilities_on_stack(&self) -> impl Iterator<Item = (ObjId, &StackAbility)> {
+        self.abilities.iter().map(|(&id, ab)| (id, ab))
     }
 }
 
@@ -1542,6 +1593,29 @@ pub(super) fn change_zone(
     );
 }
 
+/// Play the exiled card granted by a free-cast permission (e.g. Dauthi Voidwalker ability).
+/// For permanents: removes the exiled object and re-enters it via `eff_enter_permanent`
+/// (which properly registers instances for ETB). For instants/sorceries: runs the spell
+/// factory and moves the card to graveyard.
+pub(super) fn play_free_cast(id: ObjId, actor: PlayerId, state: &mut SimState, t: u8) {
+    state.free_cast_permissions.retain(|p| p.target_id != id);
+    let Some(obj) = state.objects.get(&id) else { return };
+    let key = obj.catalog_key.clone();
+    let def = match state.catalog.get(key.as_str()) { Some(d) => d.clone(), None => return };
+    match &def.kind {
+        CardKind::Instant(s) | CardKind::Sorcery(s) => {
+            if let Some(factory) = s.spell_factory.clone() {
+                factory(actor, id, 0).call(state, t, &[]);
+            }
+            change_zone(id, ZoneId::Graveyard, state, t, actor);
+        }
+        _ => {
+            state.objects.remove(&id);
+            eff_enter_permanent(actor, key).call(state, t, &[]);
+        }
+    }
+}
+
 // matches_search_filter is defined in predicates.rs
 
 /// Draw one card for `who` through the event pipeline. Increments draws_this_turn, fires a Draw
@@ -1563,6 +1637,7 @@ fn can_pay_single_cost(
     who: PlayerId,
     source_id: ObjId,
     source_untapped: bool,
+    chosen_x: u32,
 ) -> bool {
     match cost {
         CostComponent::Mana(mc) => state.potential_mana(who).can_pay(mc),
@@ -1570,6 +1645,7 @@ fn can_pay_single_cost(
         CostComponent::SacSelf => state.permanent_bf(source_id).is_some(),
         CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
         CostComponent::Life(n) => state.player(who).life > *n,
+        CostComponent::XLife => state.player(who).life >= chosen_x as i32,
         CostComponent::SacPermanent(pred) => {
             state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
         }
@@ -1590,11 +1666,12 @@ fn can_pay_single_cost(
             })
         }
         CostComponent::CostAnd(parts) => {
-            can_pay_costs(parts, state, who, source_id, source_untapped)
+            can_pay_costs(parts, state, who, source_id, source_untapped, chosen_x)
         }
         CostComponent::CostOr(parts) => {
-            parts.iter().any(|branch| can_pay_single_cost(branch, state, who, source_id, source_untapped))
+            parts.iter().any(|branch| can_pay_single_cost(branch, state, who, source_id, source_untapped, chosen_x))
         }
+        CostComponent::Replicate(_) => true, // optional; 0 payments always valid
     }
 }
 
@@ -1604,8 +1681,9 @@ fn can_pay_costs(
     who: PlayerId,
     source_id: ObjId,
     source_untapped: bool,
+    chosen_x: u32,
 ) -> bool {
-    costs.iter().all(|cost| can_pay_single_cost(cost, state, who, source_id, source_untapped))
+    costs.iter().all(|cost| can_pay_single_cost(cost, state, who, source_id, source_untapped, chosen_x))
 }
 
 /// Executes a single cost component, mutating state.
@@ -1617,6 +1695,7 @@ fn pay_single_cost(
     who: PlayerId,
     source_id: ObjId,
     ctx: &mut CostsPaidCtx,
+    chosen_x: u32,
 ) {
     match cost {
         CostComponent::Mana(mc) => {
@@ -1704,17 +1783,25 @@ fn pay_single_cost(
         }
         CostComponent::CostAnd(parts) => {
             for part in parts {
-                pay_single_cost(part, state, t, who, source_id, ctx);
+                pay_single_cost(part, state, t, who, source_id, ctx, chosen_x);
             }
         }
         CostComponent::CostOr(parts) => {
             // Strategy picks the first payable branch (greedy).
             let source_untapped = state.permanent_bf(source_id).map_or(true, |bf| !bf.tapped);
             if let Some(branch) = parts.iter().find(|branch| {
-                can_pay_single_cost(branch, state, who, source_id, source_untapped)
+                can_pay_single_cost(branch, state, who, source_id, source_untapped, chosen_x)
             }) {
-                pay_single_cost(branch, state, t, who, source_id, ctx);
+                pay_single_cost(branch, state, t, who, source_id, ctx, chosen_x);
             }
+        }
+        CostComponent::XLife => {
+            state.player_mut(who).life -= chosen_x as i32;
+            ctx.chosen_x = chosen_x;
+        }
+        CostComponent::Replicate(_) => {
+            // No-op: replicate payment and copy-pushing are handled in cast_spell
+            // after the spell has been placed on the stack (we need stack context).
         }
     }
 }
@@ -1730,10 +1817,11 @@ fn pay_costs(
     t: u8,
     who: PlayerId,
     source_id: ObjId,
+    chosen_x: u32,
 ) -> CostsPaidCtx {
     let mut ctx = CostsPaidCtx::default();
     for cost in costs {
-        pay_single_cost(cost, state, t, who, source_id, &mut ctx);
+        pay_single_cost(cost, state, t, who, source_id, &mut ctx, chosen_x);
     }
     ctx
 }
@@ -1762,7 +1850,7 @@ fn pay_ability_cost(
         }
     }
 
-    let ctx = pay_costs(&ability.costs, state, t, who, source_id);
+    let ctx = pay_costs(&ability.costs, state, t, who, source_id, 0);
 
     // Log loyalty adjustment.
     if let Some(n) = ability.loyalty_delta() {
@@ -1797,6 +1885,8 @@ fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
                 .collect();
             format!("({})", branches.join(" OR "))
         }
+        CostComponent::Replicate(mc) => format!("replicate {}", mc.display()),
+        CostComponent::XLife => "pay X life".to_string(),
     }).collect()
 }
 
@@ -1821,6 +1911,7 @@ fn cast_spell(
     face: SpellFace,
     preferred_cost: Option<&AlternateCost>,
     chosen_targets: &[ObjId],
+    chosen_x: u32,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
     // Prefer the post-CE materialized def (current in normal game flow where recompute
@@ -1840,7 +1931,7 @@ fn cast_spell(
         let cost = parse_mana_cost(adv.mana_cost());
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
-        let (_adv_spec, adv_eff) = build_spell_effect(&adv, who, card_id);
+        let (_adv_spec, adv_eff) = build_spell_effect(&adv, who, card_id, 0);
         let adv_targets = chosen_targets.to_vec();
         state.log(t, who, format!("Cast {} ({}, {}) [hand: {}]", adv.name, adv.mana_cost(), name, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
@@ -1883,7 +1974,11 @@ fn cast_spell(
     } else if !mana_is_usable {
         def.alternate_costs()
             .iter()
-            .find(|c| state.hand_size(who) >= c.hand_min && can_pay_costs(&c.costs, state, who, card_id, false))
+            .find(|c| {
+                state.hand_size(who) >= c.hand_min
+                    && can_pay_costs(&c.costs, state, who, card_id, false, 0)
+                    && c.condition.as_ref().map_or(true, |f| f(who, state))
+            })
             .cloned()
     } else if has_alt_costs {
         None
@@ -1894,7 +1989,7 @@ fn cast_spell(
     if alt_cost.is_none() && !mana_is_usable {
         return None;
     }
-    if !can_pay_costs(&def.additional_costs, state, who, card_id, false) {
+    if !can_pay_costs(&def.additional_costs, state, who, card_id, false, chosen_x) {
         return None;
     }
 
@@ -1905,7 +2000,7 @@ fn cast_spell(
 
     // Pay cost and build a log label.
     let (cast_label, mut costs_ctx) = if let Some(ref cost) = alt_cost {
-        let ctx = pay_costs(&cost.costs, state, t, who, card_id);
+        let ctx = pay_costs(&cost.costs, state, t, who, card_id, 0);
         (describe_costs(&cost.costs).join(", "), ctx)
     } else {
         let mana_log = state.pay_mana(who, &cost, t);
@@ -1914,10 +2009,12 @@ fn cast_spell(
     };
 
     // Pay additional costs (CR 118.9d: apply regardless of which cost path was taken).
+    // `chosen_x` is passed so XLife additional costs pay the strategy-chosen amount.
     if !def.additional_costs.is_empty() {
-        let add_ctx = pay_costs(&def.additional_costs, state, t, who, card_id);
+        let add_ctx = pay_costs(&def.additional_costs, state, t, who, card_id, chosen_x);
         costs_ctx.objects_moved.extend(add_ctx.objects_moved);
         costs_ctx.returned_attack_targets.extend(add_ctx.returned_attack_targets);
+        costs_ctx.chosen_x = add_ctx.chosen_x;
     }
 
     // Exile delve cards from graveyard (cost payment); record in costs_ctx.
@@ -1934,7 +2031,7 @@ fn cast_spell(
     };
     state.log(t, who, format!("Cast {} ({}{}) [hand: {}]", name, cast_label, delve_label, state.hand_size(who)));
 
-    let (_spell_target_spec, spell_eff) = build_spell_effect(&def, who, card_id);
+    let (_spell_target_spec, spell_eff) = build_spell_effect(&def, who, card_id, chosen_x);
     let spell_chosen_targets = chosen_targets.to_vec();
 
     if let Some(card) = state.objects.get_mut(&card_id) {
@@ -1944,6 +2041,49 @@ fn cast_spell(
             is_back_face: false,
             costs_paid_ctx: costs_ctx,
         });
+    }
+
+    // Replicate (CR 702.58): for each time the replicate cost was paid, push a copy.
+    let rep_cost = def.additional_costs.iter().find_map(|c| {
+        if let CostComponent::Replicate(mc) = c { Some(mc.clone()) } else { None }
+    });
+    if let Some(rep_mc) = rep_cost {
+        // Count other valid targets for copies (different from the original target).
+        let original_targets = chosen_targets.to_vec();
+        let extra_targets: Vec<ObjId> = legal_targets(def.target_spec(), who, state)
+            .into_iter()
+            .filter(|id| !original_targets.contains(id))
+            .collect();
+        let mut rep_count = 0u32;
+        for &tgt in &extra_targets {
+            if !state.potential_mana(who).can_pay(&rep_mc) { break; }
+            let mana_log = state.pay_mana(who, &rep_mc, t);
+            state.log_mana_activations(t, who, mana_log);
+            let (_, copy_eff) = build_spell_effect(&def, who, card_id, chosen_x);
+            let copy_id = state.alloc_id();
+            state.abilities.insert(copy_id, StackAbility {
+                id: copy_id,
+                source_name: format!("{} (replicate)", name),
+                owner: state.player_id(who),
+                effect: copy_eff,
+                chosen_targets: vec![tgt],
+                costs_paid_ctx: CostsPaidCtx::default(),
+                is_triggered: false,
+                counterable: true,
+                choice_spec: None,
+            });
+            state.stack.push(copy_id);
+            rep_count += 1;
+            let tgt_name = state.stack_item_display_name(tgt).to_string();
+            state.log(t, who, format!("Replicate → {} (targeting {})", name, tgt_name));
+        }
+        if rep_count > 0 {
+            if let Some(card_obj) = state.objects.get_mut(&card_id) {
+                if let Some(spell) = card_obj.spell.as_mut() {
+                    spell.costs_paid_ctx.replicate_count = rep_count;
+                }
+            }
+        }
     }
 
     Some(card_id)
@@ -2088,6 +2228,7 @@ pub(super) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mu
                 ..BattlefieldState::new()
             }),
             materialized: None,
+            counters: HashMap::new(),
         });
         if let Some(def) = &def {
             preregister_instances(def, new_id, controller, state);
@@ -2110,6 +2251,7 @@ pub(super) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         spell: None,
         bf: Some(BattlefieldState::new()),
         materialized: None,
+        counters: HashMap::new(),
     });
     if let Some(def) = &def {
         preregister_instances(def, new_id, controller, state);
@@ -2145,6 +2287,7 @@ fn resolve_top_of_stack(
     state: &mut SimState,
     t: u8,
     _ap: PlayerId,
+    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     let id = state.stack.pop().unwrap();
     if state.objects.contains_key(&id) {
@@ -2208,7 +2351,18 @@ fn resolve_top_of_stack(
             change_zone(id, ZoneId::Graveyard, state, t, owner);
         }
     } else if let Some(ability) = state.abilities.remove(&id) {
-        ability.effect.call(state, t, &ability.chosen_targets);
+        // If the ability has a ChoiceSpec, enumerate valid choices and ask strategy to pick one.
+        let mut effect_targets = ability.chosen_targets.clone();
+        if let Some(ref spec) = ability.choice_spec {
+            let controller = state.who_pid(ability.owner);
+            let choices = enumerate_choices(spec, controller, state);
+            if let Some(strategy) = strategies.get_mut(&controller) {
+                if let Some(chosen) = strategy.choose_for_effect(id, &choices, state) {
+                    effect_targets.insert(0, chosen);
+                }
+            }
+        }
+        ability.effect.call(state, t, &effect_targets);
     }
 }
 
@@ -2279,6 +2433,7 @@ fn handle_priority_round(
                                 ..BattlefieldState::new()
                             }),
                             materialized: None,
+                            counters: HashMap::new(),
                         });
                         state.combat_attackers.push(new_id);
                         state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
@@ -2297,6 +2452,9 @@ fn handle_priority_round(
                     effect: ability_effect.unwrap_or_else(|| Effect(std::sync::Arc::new(|_, _, _| {}))),
                     chosen_targets: ability_targets,
                     costs_paid_ctx: ctx,
+                    is_triggered: false,
+                    counterable: true,
+                    choice_spec: if is_ninjutsu { None } else { ability.choice_spec.clone() },
                 };
                 state.abilities.insert(ab_id, ab);
                 state.stack.push(ab_id);
@@ -2304,7 +2462,7 @@ fn handle_priority_round(
                 priority_holder = next;
                 last_passer = None;
             }
-            PriorityAction::CastSpell { card_id, face, ref preferred_cost, ref chosen_targets } => {
+            PriorityAction::CastSpell { card_id, face, ref preferred_cost, ref chosen_targets, chosen_x } => {
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
                 // Sorcery-speed check: for the main face read the materialized def; for the back
                 // face read the back def's kind (the back face might be instant even if the front
@@ -2322,7 +2480,7 @@ fn handle_priority_round(
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
-                } else if let Some(cid) = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(), chosen_targets) {
+                } else if let Some(cid) = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(), chosen_targets, chosen_x) {
                     state.player_mut(who).spells_cast_this_turn += 1;
                     state.stack.push(cid);
                     let next = if who == ap { nap } else { ap };
@@ -2337,13 +2495,19 @@ fn handle_priority_round(
                     priority_holder = if who == ap { nap } else { ap };
                 }
             }
+            PriorityAction::PlayFreeCast(card_id) => {
+                play_free_cast(card_id, who, state, t);
+                let next = if who == ap { nap } else { ap };
+                priority_holder = next;
+                last_passer = None;
+            }
             PriorityAction::Pass => {
                 let other = if who == ap { nap } else { ap };
                 if last_passer == Some(other) {
                     if state.stack.is_empty() {
                         break;
                     } else {
-                        resolve_top_of_stack(state, t, ap);
+                        resolve_top_of_stack(state, t, ap, strategies);
                         priority_holder = ap;
                         last_passer = None;
                         last_action = PriorityAction::Pass;
@@ -2417,6 +2581,8 @@ fn do_step(
             // Expire EndOfTurn continuous and trigger instances.
             state.continuous_instances.retain(|ci| ci.expiry != ContinuousExpiry::EndOfTurn);
             state.trigger_instances.retain(|ti| ti.expiry != Some(ContinuousExpiry::EndOfTurn));
+            // Free-cast permissions granted this turn expire.
+            state.free_cast_permissions.clear();
         }
         StepKind::DeclareAttackers => {
             // Strategy decides who attacks and what each attacker targets.

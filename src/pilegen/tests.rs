@@ -52,6 +52,7 @@
             spell: None,
             bf: Some(bf),
             materialized: None,
+            counters: HashMap::new(),
         });
         // Look up the real CardDef (including triggers/replacements) from the catalog; fall back
         // to a minimal 1/1 stub for anonymous test creatures that have no special behaviour.
@@ -85,6 +86,7 @@
             spell: None,
             bf: Some(bf),
             materialized: None,
+            counters: HashMap::new(),
         });
         preregister_instances(def, id, who, state);
         activate_instances(id, who, Some(def), state);
@@ -113,6 +115,7 @@
             spell: None,
             bf: None,
             materialized: None,
+            counters: HashMap::new(),
         });
         id
     }
@@ -135,6 +138,7 @@
             spell: None,
             bf: None,
             materialized: None,
+            counters: HashMap::new(),
         });
         id
     }
@@ -151,6 +155,7 @@
             spell: None,
             bf: None,
             materialized: None,
+            counters: HashMap::new(),
         });
         id
     }
@@ -508,7 +513,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, dark_ritual_id, SpellFace::Main, None, &[]);
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, dark_ritual_id, SpellFace::Main, None, &[], 0);
 
         assert!(card_id.is_some(), "spell should be cast");
         let card_id = card_id.unwrap();
@@ -528,7 +533,7 @@
 
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let item = cast_spell(&mut state, 1, PlayerId::Us, doomsday_id, SpellFace::Main, None, &[]);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, doomsday_id, SpellFace::Main, None, &[], 0);
 
         assert!(item.is_none(), "can't cast with no mana");
     }
@@ -548,7 +553,7 @@
         let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[]);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[], 0);
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
@@ -665,7 +670,7 @@
         state.us.pool.b = 2;
         state.us.pool.total = 2;
         let ability = AbilityDef { costs: vec![CostComponent::Mana(parse_mana_cost("B"))], ..Default::default() };
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET);
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
         assert_eq!(state.us.pool.total, 1);
@@ -676,7 +681,7 @@
         let mut state = make_state();
         let initial = state.us.life;
         let ability = AbilityDef { costs: vec![CostComponent::Life(2)], ..Default::default() };
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET);
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -686,7 +691,7 @@
         let mut state = make_state();
         let petal_id = add_default_perm(&mut state, PlayerId::Us, "Lotus Petal");
         let ability = AbilityDef { costs: vec![CostComponent::SacSelf], ..Default::default() };
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, petal_id);
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, petal_id, 0);
 
         assert!(state.permanents_of(PlayerId::Us).count() == 0, "Lotus Petal should be sacrificed");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Lotus Petal"));
@@ -731,12 +736,12 @@
     fn test_effect_destroy_ability_removes_nonbasic_land() {
         let mut state = make_state();
         make_land(&mut state, PlayerId::Opp, "Bayou", false);
-        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -749,12 +754,12 @@
     fn test_effect_destroy_ability_ignores_basic_land() {
         let mut state = make_state();
         make_land(&mut state, PlayerId::Opp, "Forest", false);
-        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic))) }, PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -781,7 +786,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, tc_id, SpellFace::Main, None, &[]);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, tc_id, SpellFace::Main, None, &[], 0);
 
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "all 7 graveyard cards exiled");
@@ -803,7 +808,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[]);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[], 0);
 
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "both graveyard cards exiled");
@@ -833,7 +838,7 @@
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[]).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[], 0).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -872,7 +877,7 @@
         let catalog = vec![murktide_def.clone(), ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[]).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[], 0).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -927,7 +932,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[]);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[], 0);
 
         assert!(item.is_none(), "can't cast — 1 generic still unpaid");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 2, "graveyard unchanged on failed cast");
@@ -939,11 +944,11 @@
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Troll");
         let troll_def = creature("Troll", 2, 2);
-        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Creature) }, ability_factory: Some(Arc::new(|who, _| eff_exile_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) }, ability_factory: Some(Arc::new(|who, _| eff_exile_target(who))), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: pred_type_eq(CardType::Creature) }, PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) }, PlayerId::Us, &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -1151,7 +1156,7 @@
         add_library_card(&mut state, PlayerId::Us, "Island");
         let initial_hand = state.hand_size(PlayerId::Us);
 
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, wraith_id);
+        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, wraith_id, 0);
 
         assert!(!state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Street Wraith"), "Street Wraith removed from hand");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Street Wraith"), "in graveyard");
@@ -1765,9 +1770,11 @@
             }),
             bf: None,
             materialized: None,
+            counters: HashMap::new(),
         });
         state.stack.push(id);
-        resolve_top_of_stack(&mut state, 1, PlayerId::Us);
+        let mut no_strats: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::new();
+        resolve_top_of_stack(&mut state, 1, PlayerId::Us, &mut no_strats);
         let log = state.log.join("\n");
         assert!(log.contains("Brainstorm resolves"), "should log 'resolves'");
         assert!(!log.contains("countered"), "resolving an instant must not produce 'countered' in the log");
@@ -1846,6 +1853,7 @@
             spell: None,
             bf: Some(BattlefieldState::new()),
             materialized: None,
+            counters: HashMap::new(),
         });
         id
     }
@@ -2312,7 +2320,7 @@
         let bs_id  = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
         let alt_cost = &fow_def.alternate_costs()[0];
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[]).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[], 0).unwrap();
         let ctx = &state.objects[&card_id].spell.as_ref().unwrap().costs_paid_ctx;
 
         assert_eq!(ctx.objects_moved, vec![bs_id], "pitched Brainstorm id recorded in objects_moved");
@@ -2326,7 +2334,7 @@
         state.catalog.insert(fow_def.name.clone(), fow_def.clone());
         let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
         // No other cards — pitch cost requires another blue non-land card; also no mana for 3UU.
-        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[], 0);
         assert!(result.is_none(), "FoW can't be cast with only itself in hand and no mana");
     }
 
@@ -2340,7 +2348,7 @@
         state.us.pool.u     = 2;
         state.us.pool.total = 5; // 3 generic + 2 blue
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[], 0);
         assert!(result.is_some(), "FoW should cast for 3UU when pool is full");
         assert_eq!(state.us.pool.total, 0, "all mana spent");
     }
@@ -2360,7 +2368,7 @@
         let initial_life = state.us.life;
         let alt = &def.alternate_costs()[0];
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), &[], 0);
         assert!(result.is_some(), "Snuff Out should cast for 4 life");
         assert_eq!(state.us.life, initial_life - 4, "paid 4 life");
         let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
@@ -2376,7 +2384,7 @@
         let snuff_id = add_hand_card(&mut state, PlayerId::Us, "Snuff Out");
         state.us.life = 4; // exactly 4 — can't pay (would reach 0)
         let alt = &def.alternate_costs()[0];
-        let ok = can_pay_costs(&alt.costs, &state, PlayerId::Us, snuff_id, false);
+        let ok = can_pay_costs(&alt.costs, &state, PlayerId::Us, snuff_id, false, 0);
         assert!(!ok, "can't pay 4 life when at 4 life (would reach 0)");
     }
 
@@ -2391,7 +2399,7 @@
         // Place the wraith in the graveyard instead of hand.
         let wraith_id = add_graveyard_card(&mut state, PlayerId::Us, "Street Wraith");
         let costs = vec![CostComponent::DiscardSelf, CostComponent::Life(2)];
-        let ok = can_pay_costs(&costs, &state, PlayerId::Us, wraith_id, false);
+        let ok = can_pay_costs(&costs, &state, PlayerId::Us, wraith_id, false, 0);
         assert!(!ok, "can't cycle from graveyard — DiscardSelf requires card in hand");
     }
 
@@ -2405,7 +2413,7 @@
         state.us.life = 20;
         let wraith_id = add_hand_card(&mut state, PlayerId::Us, "Street Wraith");
         let costs = vec![CostComponent::DiscardSelf, CostComponent::Life(2)];
-        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, wraith_id);
+        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, wraith_id, 0);
         // DiscardSelf moves the source itself — not tracked in objects_moved (only "other" objects are).
         assert!(ctx.objects_moved.is_empty(), "DiscardSelf does not appear in objects_moved");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == wraith_id), "wraith in graveyard");
@@ -2425,7 +2433,7 @@
         let daze_id = add_hand_card(&mut state, PlayerId::Us, "Daze");
         let alt = &daze_def.alternate_costs()[0]; // ReturnFromBattlefield(cost_pred_blue_producing())
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), &[], 0);
         assert!(result.is_some(), "Daze should cast by bouncing the Island");
         let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
         assert_eq!(ctx.objects_moved, vec![island_id], "bounced Island id in objects_moved");
@@ -2452,7 +2460,7 @@
         state.us.pool.u     = 1;
         state.us.pool.total = 2;
 
-        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, ObjId::UNSET);
+        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
 
         assert_eq!(ctx.objects_moved, vec![ragavan_id], "returned attacker id in objects_moved");
         assert_eq!(ctx.returned_attack_targets, vec![Some(opp_id)], "opp player id captured as attack target");
@@ -2474,7 +2482,7 @@
         state.us.pool.b = 1; state.us.pool.total = 1;
         state.us.life = 3; // can't pay Life(3) — would reach 0
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
         assert!(result.is_none(), "additional Life(3) cost blocks cast at 3 life");
     }
 
@@ -2489,7 +2497,7 @@
         state.us.pool.b = 1; state.us.pool.total = 1;
         let initial_life = state.us.life; // 20
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
         assert!(result.is_some(), "Dark Ritual + Life(3) additional cost is payable at 20 life");
         assert_eq!(state.us.life, initial_life - 3, "additional Life(3) was paid");
     }
@@ -2514,7 +2522,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         let initial_life = state.us.life;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
         assert!(result.is_some(), "Bitter Triumph should be castable");
         let extra_zone = state.objects.get(&extra_id).map(|o| &o.zone);
         assert!(
@@ -2533,7 +2541,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         let initial_life = state.us.life;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
         assert!(result.is_some(), "Bitter Triumph should be castable via life branch");
         assert_eq!(state.us.life, initial_life - 3, "3 life paid as fallback cost");
     }
@@ -2547,6 +2555,625 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         state.us.life = 3; // can't pay Life(3) — life > n is strict
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[]);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
         assert!(result.is_none(), "Bitter Triumph should be blocked when life ≤ 3 and no spare card");
+    }
+
+    // ── Section 27: Consign to Memory (Replicate + triggered-ability targeting) ──
+
+    fn setup_consign(state: &mut SimState) {
+        let def = catalog_card("Consign to Memory");
+        state.catalog.insert(def.name.clone(), def);
+    }
+
+    /// Push a fake colorless spell onto the stack for the opponent.
+    fn push_colorless_spell_for_opp(state: &mut SimState) -> ObjId {
+        // Use Lotus Petal as a colorless spell proxy.
+        let def = catalog_card("Lotus Petal");
+        state.catalog.insert(def.name.clone(), def.clone());
+        let spell_id = state.alloc_id();
+        state.objects.insert(spell_id, GameObject {
+            id: spell_id,
+            catalog_key: "Lotus Petal".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: Some(SpellState {
+                effect: None,
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            bf: None,
+            materialized: Some(def),
+            counters: HashMap::new(),
+        });
+        state.stack.push(spell_id);
+        spell_id
+    }
+
+    /// Push a fake triggered ability onto the stack for the opponent.
+    fn push_opp_triggered_ability(state: &mut SimState) -> ObjId {
+        let ab_id = state.alloc_id();
+        let opp_player_id = state.player_id(PlayerId::Opp);
+        state.abilities.insert(ab_id, StackAbility {
+            id: ab_id,
+            source_name: "Test Trigger".to_string(),
+            owner: opp_player_id,
+            effect: Effect(std::sync::Arc::new(|_, _, _| {})),
+            chosen_targets: vec![],
+            costs_paid_ctx: CostsPaidCtx::default(),
+            is_triggered: true,
+            counterable: true,
+            choice_spec: None,
+        });
+        state.stack.push(ab_id);
+        ab_id
+    }
+
+    /// Consign to Memory can counter a colorless spell on the stack.
+    #[test]
+    fn test_consign_counters_colorless_spell() {
+        let mut state = make_state();
+        setup_consign(&mut state);
+        let spell_id = push_colorless_spell_for_opp(&mut state);
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
+        state.us.pool.u = 1; state.us.pool.total = 1;
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[spell_id], 0);
+        assert!(result.is_some(), "Consign to Memory should be castable");
+
+        // Resolve — pop from stack and execute effect.
+        let card_on_stack = result.unwrap();
+        let spell_state = state.objects[&card_on_stack].spell.clone().unwrap();
+        spell_state.effect.unwrap().call(&mut state, 1, &spell_state.chosen_targets);
+
+        assert!(!state.stack.contains(&spell_id), "colorless spell should be removed from stack");
+        assert_eq!(
+            state.objects.get(&spell_id).map(|o| &o.zone),
+            Some(&CardZone::Graveyard),
+            "countered spell goes to graveyard"
+        );
+    }
+
+    /// Consign to Memory can counter a triggered ability on the stack.
+    #[test]
+    fn test_consign_counters_triggered_ability() {
+        let mut state = make_state();
+        setup_consign(&mut state);
+        let ab_id = push_opp_triggered_ability(&mut state);
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
+        state.us.pool.u = 1; state.us.pool.total = 1;
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[ab_id], 0);
+        assert!(result.is_some(), "Consign to Memory should be castable targeting a triggered ability");
+
+        // Resolve.
+        let card_on_stack = result.unwrap();
+        let spell_state = state.objects[&card_on_stack].spell.clone().unwrap();
+        spell_state.effect.unwrap().call(&mut state, 1, &spell_state.chosen_targets);
+
+        assert!(!state.stack.contains(&ab_id), "triggered ability should be removed from stack");
+        assert!(!state.abilities.contains_key(&ab_id), "triggered ability removed from abilities map");
+    }
+
+    /// `AbilityOnStack::Triggered` legal_targets enumerates opponent triggered abilities.
+    #[test]
+    fn test_triggered_ability_on_stack_legal_targets() {
+        let mut state = make_state();
+        let ab_id = push_opp_triggered_ability(&mut state);
+
+        let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered };
+        let targets = legal_targets(&spec, PlayerId::Us, &state);
+        assert!(targets.contains(&ab_id), "opp triggered ability should be a legal target");
+    }
+
+    /// Activated abilities (is_triggered=false) are not matched by `AbilityOnStack::Triggered`.
+    #[test]
+    fn test_activated_ability_not_a_trigger_target() {
+        let mut state = make_state();
+        let ab_id = state.alloc_id();
+        let opp_player_id = state.player_id(PlayerId::Opp);
+        state.abilities.insert(ab_id, StackAbility {
+            id: ab_id,
+            source_name: "Activated Ability".to_string(),
+            owner: opp_player_id,
+            effect: Effect(std::sync::Arc::new(|_, _, _| {})),
+            chosen_targets: vec![],
+            costs_paid_ctx: CostsPaidCtx::default(),
+            is_triggered: false,
+            counterable: true,
+            choice_spec: None,
+        });
+        state.stack.push(ab_id);
+
+        let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered };
+        let targets = legal_targets(&spec, PlayerId::Us, &state);
+        assert!(!targets.contains(&ab_id), "activated ability should not match AbilityOnStack::Triggered");
+    }
+
+
+    /// eff_counter_target fizzles against a spell with counterable=false (CR 608.2b).
+    #[test]
+    fn test_counter_fizzles_on_uncounterable_spell() {
+        let mut state = make_state();
+        // Push a fake uncounterable spell for the opponent.
+        let spell_id = state.alloc_id();
+        state.objects.insert(spell_id, GameObject {
+            id: spell_id,
+            catalog_key: "Long Goodbye".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Stack,
+            is_token: false,
+            bf: None,
+            spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+        state.stack.push(spell_id);
+        // Set counterable=false by inserting the card's def (with the flag) into the catalog.
+        let mut lg_def = catalog_card("Long Goodbye");
+        lg_def.counterable = false;
+        state.catalog.insert("Long Goodbye".to_string(), lg_def);
+
+        let effect = eff_counter_target(PlayerId::Us);
+        effect.call(&mut state, 1, &[spell_id]);
+
+        // Spell should still be on the stack — counter fizzled.
+        assert!(state.stack.contains(&spell_id), "uncounterable spell should remain on stack");
+        assert_eq!(state.objects[&spell_id].zone, CardZone::Stack, "zone unchanged after fizzle");
+    }
+
+    // ── 28. Force of Negation ─────────────────────────────────────────────────
+
+    /// The pitch-cost condition on Force of Negation is true when it's not the caster's turn
+    /// and false when it is. CR 118.9b (alternative costs may have conditions on card text).
+    #[test]
+    fn test_fon_pitch_condition_checks_active_player() {
+        let mut state = make_state();
+        let fon_def = catalog_card("Force of Negation");
+        let alt = &fon_def.alternate_costs()[0];
+        let condition = alt.condition.as_ref()
+            .expect("Force of Negation pitch cost must have a condition");
+
+        // Opponent's turn: condition should allow Us to pitch.
+        state.current_ap = state.player_id(PlayerId::Opp);
+        assert!(condition(PlayerId::Us, &state), "pitch cost available when it's not our turn");
+
+        // Our turn: condition should block the pitch cost.
+        state.current_ap = state.player_id(PlayerId::Us);
+        assert!(!condition(PlayerId::Us, &state), "pitch cost unavailable on our own turn");
+    }
+
+    /// eff_counter_and_exile sends the countered spell to Exile, not Graveyard.
+    /// Models Force of Negation's "exile it instead of putting it into its owner's graveyard".
+    #[test]
+    fn test_fon_counter_and_exile() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Simulate opponent's turn (required for pitch cost, though we call the effect directly).
+        state.current_ap = state.player_id(PlayerId::Opp);
+
+        // Push a noncreature opponent spell onto the stack.
+        let spell_id = state.alloc_id();
+        state.objects.insert(spell_id, GameObject {
+            id: spell_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Stack,
+            is_token: false,
+            bf: None,
+            spell: Some(SpellState {
+                effect: None,
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+        state.stack.push(spell_id);
+
+        // Fire FoN's counter-and-exile effect.
+        let fon_id = state.alloc_id();
+        let effect = eff_counter_and_exile(PlayerId::Us, fon_id);
+        effect.call(&mut state, 1, &[spell_id]);
+
+        // Spell should be in Exile, not Graveyard; stack should be empty.
+        assert!(!state.stack.contains(&spell_id), "countered spell should be off the stack");
+        assert_eq!(
+            state.objects[&spell_id].zone,
+            CardZone::Exile { on_adventure: false },
+            "countered spell should be exiled, not in graveyard",
+        );
+        assert!(state.objects[&spell_id].spell.is_none(), "spell state should be cleared");
+    }
+
+    /// If FoN itself is countered before resolving, its scoped replacement effect is never
+    /// installed, so the target remains on the stack unaffected (not exiled).
+    #[test]
+    fn test_fon_countered_target_not_exiled() {
+        let mut state = make_state();
+
+        // Y — opponent's noncreature spell (FoN's target).
+        let y_id = state.alloc_id();
+        state.objects.insert(y_id, GameObject {
+            id: y_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Stack,
+            is_token: false,
+            bf: None,
+            spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+        state.stack.push(y_id);
+
+        // FoN targeting Y — cast by us.
+        let fon_id = state.alloc_id();
+        state.objects.insert(fon_id, GameObject {
+            id: fon_id,
+            catalog_key: "Force of Negation".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Stack,
+            is_token: false,
+            bf: None,
+            spell: Some(SpellState {
+                effect: Some(eff_counter_and_exile(PlayerId::Us, fon_id)),
+                chosen_targets: vec![y_id],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+        state.stack.push(fon_id);
+
+        // Opponent counters FoN — its effect closure never runs, so the scoped RE is never installed.
+        eff_counter_target(PlayerId::Opp).call(&mut state, 1, &[fon_id]);
+
+        assert!(!state.stack.contains(&fon_id), "FoN should be off the stack after being countered");
+        assert_eq!(state.objects[&fon_id].zone, CardZone::Graveyard, "FoN goes to graveyard");
+        assert!(state.stack.contains(&y_id), "Y should still be on the stack — FoN never resolved");
+        assert_eq!(state.objects[&y_id].zone, CardZone::Stack, "Y remains in Stack zone");
+    }
+
+    /// Stack: X (bottom), Y, FoN targeting Y, FoW targeting X (top).
+    /// FoW resolves first → counters X → X to graveyard.
+    /// FoN resolves next → counters Y → Y to exile (scoped replacement).
+    /// After both resolutions: X in graveyard, Y in exile.
+    #[test]
+    fn test_fow_x_fon_y_stack_interaction() {
+        let mut state = make_state();
+
+        // X and Y — opponent noncreature spells.
+        let x_id = state.alloc_id();
+        let y_id = state.alloc_id();
+        for &id in &[x_id, y_id] {
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Dark Ritual".to_string(),
+                owner: PlayerId::Opp,
+                controller: PlayerId::Opp,
+                zone: CardZone::Stack,
+                is_token: false,
+                bf: None,
+                spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
+                materialized: None,
+                counters: HashMap::new(),
+            });
+        }
+
+        // FoN targeting Y.
+        let fon_id = state.alloc_id();
+        state.objects.insert(fon_id, GameObject {
+            id: fon_id,
+            catalog_key: "Force of Negation".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Stack,
+            is_token: false,
+            bf: None,
+            spell: Some(SpellState {
+                effect: Some(eff_counter_and_exile(PlayerId::Us, fon_id)),
+                chosen_targets: vec![y_id],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // FoW targeting X.
+        let fow_id = state.alloc_id();
+        state.objects.insert(fow_id, GameObject {
+            id: fow_id,
+            catalog_key: "Force of Will".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Stack,
+            is_token: false,
+            bf: None,
+            spell: Some(SpellState {
+                effect: Some(eff_counter_target(PlayerId::Us)),
+                chosen_targets: vec![x_id],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // Stack order bottom→top: X, Y, FoN, FoW.
+        state.stack.extend([x_id, y_id, fon_id, fow_id]);
+
+        let mut no_strats: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::new();
+        // FoW resolves: counters X → X to graveyard; FoW itself to graveyard.
+        resolve_top_of_stack(&mut state, 1, PlayerId::Us, &mut no_strats);
+        // FoN resolves: scoped RE installed, counters Y → Y intercepted to exile; FoN to graveyard.
+        resolve_top_of_stack(&mut state, 1, PlayerId::Us, &mut no_strats);
+
+        assert!(state.stack.is_empty(), "stack should be empty");
+        assert_eq!(state.objects[&x_id].zone, CardZone::Graveyard, "X countered by FoW → graveyard");
+        assert_eq!(
+            state.objects[&y_id].zone,
+            CardZone::Exile { on_adventure: false },
+            "Y countered by FoN → exile",
+        );
+        assert_eq!(state.objects[&fow_id].zone, CardZone::Graveyard, "FoW → graveyard after resolving");
+        assert_eq!(state.objects[&fon_id].zone, CardZone::Graveyard, "FoN → graveyard after resolving");
+    }
+
+    // ── Section 29: Dauthi Voidwalker ─────────────────────────────────────────
+
+    /// DV replacement: when opponent's card would go to graveyard, it exiles with a void counter.
+    #[test]
+    fn test_dv_replacement_exiles_opponent_card() {
+        let mut state = make_state();
+
+        // Put DV on battlefield under Opp's control.
+        let dv_def = catalog_card("Dauthi Voidwalker");
+        state.catalog.insert(dv_def.name.clone(), dv_def.clone());
+        let dv_id = state.alloc_id();
+        preregister_instances(&dv_def, dv_id, PlayerId::Opp, &mut state);
+        activate_instances(dv_id, PlayerId::Opp, Some(&dv_def), &mut state);
+        state.objects.insert(dv_id, GameObject {
+            id: dv_id,
+            catalog_key: "Dauthi Voidwalker".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Battlefield,
+            is_token: false,
+            spell: None,
+            bf: Some(BattlefieldState::new()),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // Put a Us-owned card in graveyard-bound position (hand card moved to GY).
+        let card_id = state.alloc_id();
+        state.objects.insert(card_id, GameObject {
+            id: card_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Hand { known: true },
+            is_token: false,
+            spell: None,
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // Trigger zone change to graveyard — DV's replacement should intercept.
+        change_zone(card_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
+
+        // Card should be in exile, not graveyard.
+        assert_eq!(
+            state.objects[&card_id].zone,
+            CardZone::Exile { on_adventure: false },
+            "DV replacement: card should be in exile, not graveyard",
+        );
+        // Card should have a void counter.
+        assert_eq!(
+            state.objects[&card_id].counters.get(&CounterType::Void).copied().unwrap_or(0),
+            1,
+            "DV replacement: exiled card should have a void counter",
+        );
+    }
+
+    /// DV replacement does NOT fire when DV's controller's own card goes to the graveyard.
+    #[test]
+    fn test_dv_replacement_does_not_fire_for_own_cards() {
+        let mut state = make_state();
+
+        // DV under Opp's control.
+        let dv_def = catalog_card("Dauthi Voidwalker");
+        state.catalog.insert(dv_def.name.clone(), dv_def.clone());
+        let dv_id = state.alloc_id();
+        preregister_instances(&dv_def, dv_id, PlayerId::Opp, &mut state);
+        activate_instances(dv_id, PlayerId::Opp, Some(&dv_def), &mut state);
+        state.objects.insert(dv_id, GameObject {
+            id: dv_id,
+            catalog_key: "Dauthi Voidwalker".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Battlefield,
+            is_token: false,
+            spell: None,
+            bf: Some(BattlefieldState::new()),
+            materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // Opp's own card going to graveyard — should NOT be intercepted.
+        let opp_card_id = state.alloc_id();
+        state.objects.insert(opp_card_id, GameObject {
+            id: opp_card_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Hand { known: true },
+            is_token: false,
+            spell: None,
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(),
+        });
+
+        change_zone(opp_card_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Opp);
+
+        assert_eq!(
+            state.objects[&opp_card_id].zone,
+            CardZone::Graveyard,
+            "DV replacement must not intercept its controller's own cards",
+        );
+        assert_eq!(
+            state.objects[&opp_card_id].counters.get(&CounterType::Void).copied().unwrap_or(0),
+            0,
+        );
+    }
+
+    // ── Section 30: Surgical Extraction ───────────────────────────────────────
+
+    /// Surgical Extraction exiles the targeted GY card plus all same-name cards
+    /// from the owner's graveyard, hand, and library. Other-named cards are untouched.
+    #[test]
+    fn test_surgical_extraction_exiles_all_copies() {
+        let mut state = make_state();
+        state.catalog.extend(test_catalog());
+
+        // Opp has 3 copies of Dark Ritual spread across zones: GY, hand, library.
+        let gy_id = state.alloc_id();
+        state.objects.insert(gy_id, GameObject {
+            id: gy_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Graveyard,
+            is_token: false, spell: None, bf: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        let hand_id = state.alloc_id();
+        state.objects.insert(hand_id, GameObject {
+            id: hand_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Hand { known: false },
+            is_token: false, spell: None, bf: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        let lib_id = state.alloc_id();
+        state.objects.insert(lib_id, GameObject {
+            id: lib_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Library,
+            is_token: false, spell: None, bf: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        // A different card in opp's hand — must not be exiled.
+        let other_id = state.alloc_id();
+        state.objects.insert(other_id, GameObject {
+            id: other_id,
+            catalog_key: "Brainstorm".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Hand { known: false },
+            is_token: false, spell: None, bf: None, materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // Build and call the Surgical Extraction effect targeting gy_id.
+        let se_def = catalog_card("Surgical Extraction");
+        let factory = match &se_def.kind {
+            CardKind::Instant(s) => s.spell_factory.clone().unwrap(),
+            _ => panic!("not an instant"),
+        };
+        let eff = factory(PlayerId::Us, ObjId::UNSET, 0);
+        eff.call(&mut state, 1, &[gy_id]);
+
+        // All 3 Dark Ritual copies should be in exile.
+        assert_eq!(state.objects[&gy_id].zone,   CardZone::Exile { on_adventure: false }, "GY copy exiled");
+        assert_eq!(state.objects[&hand_id].zone,  CardZone::Exile { on_adventure: false }, "hand copy exiled");
+        assert_eq!(state.objects[&lib_id].zone,   CardZone::Exile { on_adventure: false }, "library copy exiled");
+        // Brainstorm is untouched.
+        assert_eq!(state.objects[&other_id].zone, CardZone::Hand { known: false }, "other card unchanged");
+    }
+
+    // ── Section 31: Toxic Deluge ───────────────────────────────────────────────
+
+    /// Toxic Deluge with chosen_x=3 should register a -3/-3 ContinuousInstance.
+    /// After recompute:
+    ///   - a 1/3 creature has materialized toughness 0 (dies to SBA)
+    ///   - a 1/4 creature has materialized toughness 1 (survives)
+    #[test]
+    fn test_toxic_deluge_applies_minus_x_pt() {
+        let mut state = make_state();
+
+        // Set up test creatures on the battlefield.
+        let victim_def = CardDef::new(
+            "Victim", CardKind::Creature(CreatureData::new("", 1, 3)),
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
+        );
+        let survivor_def = CardDef::new(
+            "Survivor", CardKind::Creature(CreatureData::new("", 1, 4)),
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
+        );
+        let victim_id = add_perm_with_def(&mut state, PlayerId::Opp, &victim_def, BattlefieldState::new());
+        let survivor_id = add_perm_with_def(&mut state, PlayerId::Opp, &survivor_def, BattlefieldState::new());
+
+        // Invoke the factory directly with x=3 (strategy-chosen).
+        let td_def = catalog_card("Toxic Deluge");
+        let factory = match &td_def.kind {
+            CardKind::Sorcery(s) => s.spell_factory.clone().unwrap(),
+            _ => panic!("not a sorcery"),
+        };
+        let source_id = state.alloc_id();
+        let eff = factory(PlayerId::Us, source_id, 3);
+        eff.call(&mut state, 1, &[]);
+
+        // One ContinuousInstance should be registered.
+        assert_eq!(state.continuous_instances.len(), 1, "one CI registered");
+
+        // Apply it.
+        recompute(&mut state);
+
+        // Victim (1/3): materialized toughness should be 0 after -3/-3.
+        let victim_t = state.def_of(victim_id)
+            .and_then(|d| d.as_creature())
+            .map(|c| c.toughness())
+            .expect("victim has creature def");
+        assert_eq!(victim_t, 0, "victim (1/3) gets -3/-3 → toughness 0");
+
+        // Survivor (1/4): materialized toughness should be 1 after -3/-3.
+        let survivor_t = state.def_of(survivor_id)
+            .and_then(|d| d.as_creature())
+            .map(|c| c.toughness())
+            .expect("survivor has creature def");
+        assert_eq!(survivor_t, 1, "survivor (1/4) gets -3/-3 → toughness 1");
+    }
+
+    /// Casting Toxic Deluge with X=3 deducts 3 life as additional cost.
+    #[test]
+    fn test_toxic_deluge_pays_x_life() {
+        let mut state = make_state();
+        let td_def = catalog_card("Toxic Deluge");
+        state.catalog.insert(td_def.name.clone(), td_def);
+        state.us.pool.b = 3;
+        state.us.pool.total = 3;
+        state.us.life = 20;
+        let td_id = add_hand_card(&mut state, PlayerId::Us, "Toxic Deluge");
+        let result = cast_spell(&mut state, 1, PlayerId::Us, td_id, SpellFace::Main, None, &[], 3);
+        assert!(result.is_some(), "Toxic Deluge should cast successfully");
+        assert_eq!(state.us.life, 17, "caster pays X=3 life");
     }

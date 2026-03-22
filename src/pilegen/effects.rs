@@ -167,6 +167,7 @@ pub(crate) fn eff_enter_permanent(
                 ..BattlefieldState::new()
             }),
             materialized: None,
+            counters: HashMap::new(),
         });
         fire_event(
             GameEvent::ZoneChange {
@@ -183,24 +184,79 @@ pub(crate) fn eff_enter_permanent(
 }
 
 /// Counter the spell in `targets[0]` (a stack ObjId). Removes it from `state.stack` and
-/// puts it in the owner's graveyard. If the target is no longer on the stack, fizzles.
+/// puts it in the owner's graveyard via `change_zone` (so replacement effects can intercept).
+/// Fizzles if the target is no longer on the stack or if it can't be countered
+/// (`CardDef::counterable == false` / `StackAbility::counterable == false`,
+/// CR 608.2b — the spell was a legal target but the effect doesn't apply).
 pub(crate) fn eff_counter_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         let Some(&target_id) = targets.first() else { return; };
         let pos = state.stack.iter().position(|&id| id == target_id);
         if let Some(pos) = pos {
-            state.stack.remove(pos);
-            if let Some(card) = state.objects.get_mut(&target_id) {
-                let name = card.catalog_key.clone();
-                card.zone = CardZone::Graveyard;
-                card.spell = None;
-                state.log(t, caster, format!("→ {} countered", name));
+            // Check counterable property before removing (CR 608.2b).
+            let can_counter = if state.objects.contains_key(&target_id) {
+                state.def_of(target_id)
+                    .or_else(|| state.objects.get(&target_id)
+                        .and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+                    .map_or(true, |d| d.counterable())
             } else {
-                state.log(t, caster, "→ ability countered".to_string());
+                state.abilities.get(&target_id).map_or(true, |ab| ab.counterable)
+            };
+            if !can_counter {
+                let name = state.stack_item_display_name(target_id).to_string();
+                state.log(t, caster, format!("→ fizzled ({} can't be countered)", name));
+                return;
+            }
+            state.stack.remove(pos);
+            if state.objects.contains_key(&target_id) {
+                let name = state.objects[&target_id].catalog_key.clone();
+                state.log(t, caster, format!("→ {} countered", name));
+                change_zone(target_id, ZoneId::Graveyard, state, t, caster);
+                // `change_zone` doesn't clear spell state; do it here so countered
+                // spells don't carry stale SpellState in the graveyard (or exile).
+                if let Some(card) = state.objects.get_mut(&target_id) {
+                    card.spell = None;
+                }
+            } else if let Some(ab) = state.abilities.remove(&target_id) {
+                state.log(t, caster, format!("→ {} (triggered ability) countered", ab.source_name));
+            } else {
+                state.log(t, caster, "→ fizzled (target already resolved)".to_string());
             }
         } else {
             state.log(t, caster, "→ fizzled (target already resolved)".to_string());
         }
+    }))
+}
+
+/// Counter target spell and exile it instead of putting it into its owner's graveyard.
+/// Models cards like Force of Negation (CR 614.1a — replacement of zone-change destination).
+/// Installs a scoped replacement effect on the Stack→Graveyard zone change for the specific
+/// target, delegates to `eff_counter_target`, then removes the replacement.
+/// The lifetime mirrors a permanent's ETB/LTB-managed replacement, but bounded by the
+/// effect chain rather than the event system.
+pub(crate) fn eff_counter_and_exile(caster: PlayerId, source_id: ObjId) -> Effect {
+    Effect(Arc::new(move |state, t, targets| {
+        let Some(&target_id) = targets.first() else { return; };
+        let re_id = state.alloc_id();
+        let re = ReplacementInstance {
+            id: re_id,
+            source_id,
+            controller: caster,
+            active: true,
+            check: Arc::new(move |event, _, _| {
+                match event {
+                    GameEvent::ZoneChange { id, to, .. }
+                        if *id == target_id && matches!(to, ZoneId::Graveyard) => Some(vec![]),
+                    _ => None,
+                }
+            }),
+            effect: Effect(Arc::new(move |state, t, _| {
+                change_zone(target_id, ZoneId::Exile, state, t, caster);
+            })),
+        };
+        state.replacement_instances.push(re);
+        eff_counter_target(caster).call(state, t, targets);
+        state.replacement_instances.retain(|r| r.source_id != source_id);
     }))
 }
 
