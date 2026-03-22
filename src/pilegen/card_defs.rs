@@ -45,6 +45,7 @@ fn all_cards() -> Vec<CardDef> {
         thundering_falls(),
         underground_mortuary(),
         elegant_parlor(),
+        shadowy_backstreet(),
         // Lands — fetches
         polluted_delta(),
         flooded_strand(),
@@ -409,6 +410,14 @@ fn elegant_parlor() -> CardDef {
     dual_tapped("Elegant Parlor", LandData {
         land_types: LandTypes { mountain: true, plains: true, ..Default::default() },
         mana_abilities: vec![tap_produces("R"), tap_produces("W")],
+        ..Default::default()
+    })
+}
+
+fn shadowy_backstreet() -> CardDef {
+    dual_tapped("Shadowy Backstreet", LandData {
+        land_types: LandTypes { plains: true, swamp: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("W"), tap_produces("B")],
         ..Default::default()
     })
 }

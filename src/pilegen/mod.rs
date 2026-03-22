@@ -345,7 +345,6 @@ pub(super) enum ChoiceResult {
 
 /// Card supertypes (Legendary, Basic, Snow, World, Ongoing).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-#[allow(dead_code)] // Snow defined for completeness; not yet used
 pub(crate) enum Supertype { Legendary, Basic, Snow }
 
 /// The seven layers in which continuous effects are applied (MTG rule 613).
