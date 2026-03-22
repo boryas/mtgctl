@@ -11,18 +11,53 @@ pub(crate) fn build_catalog() -> HashMap<String, CardDef> {
 
 fn all_cards() -> Vec<CardDef> {
     vec![
-        // Lands
-        underground_sea(),
-        swamp(),
+        // Lands — basics
         island(),
+        swamp(),
+        plains(),
+        mountain(),
+        forest(),
+        wastes(),
+        snow_covered_island(),
+        snow_covered_swamp(),
+        snow_covered_plains(),
+        snow_covered_mountain(),
+        snow_covered_forest(),
+        snow_covered_wastes(),
+        // Lands — ABU duals
+        underground_sea(),
+        tundra(),
+        badlands(),
+        taiga(),
+        savannah(),
+        scrubland(),
+        volcanic_island(),
+        bayou(),
+        plateau(),
+        tropical_island(),
+        // Lands — MKM surveil duals (enter tapped)
         undercity_sewers(),
-        wasteland(),
+        meticulous_archive(),
+        raucous_theater(),
+        hedge_maze(),
+        commercial_district(),
+        lush_portico(),
+        thundering_falls(),
+        underground_mortuary(),
+        elegant_parlor(),
+        // Lands — fetches
         polluted_delta(),
         flooded_strand(),
         misty_rainforest(),
         scalding_tarn(),
         marsh_flats(),
         bloodstained_mire(),
+        windswept_heath(),
+        wooded_foothills(),
+        verdant_catacombs(),
+        arid_mesa(),
+        // Lands — other
+        wasteland(),
         cavern_of_souls(),
         // Artifacts
         lotus_petal(),
@@ -104,12 +139,118 @@ fn fetch_ability(pred: CardPredicate) -> AbilityDef {
     }
 }
 
+/// Basic land (Island, Swamp, Plains, Mountain, Forest, Wastes).
+fn basic_land(name: &str, land_types: LandTypes, mana: &str) -> CardDef {
+    CardDef::new(
+        name, CardKind::Land(LandData {
+            land_types,
+            mana_abilities: vec![tap_produces(mana)],
+            ..Default::default()
+        }),
+        vec![], Some(25), vec![Supertype::Basic], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+    )
+}
+
+/// Basic snow land (Snow-Covered X).
+fn snow_basic(name: &str, land_types: LandTypes, mana: &str) -> CardDef {
+    CardDef::new(
+        name, CardKind::Land(LandData {
+            land_types,
+            mana_abilities: vec![tap_produces(mana)],
+            ..Default::default()
+        }),
+        vec![], Some(25), vec![Supertype::Basic, Supertype::Snow], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+    )
+}
+
+/// Dual land that always enters tapped (surveil lands, etc.).
+fn dual_tapped(name: &str, data: LandData) -> CardDef {
+    CardDef::new(
+        name, CardKind::Land(data), vec![], None, vec![], CardLayout::Normal, None,
+        vec![], vec![replacement_enters_tapped()], vec![],
+    )
+}
+
 // ── Lands ─────────────────────────────────────────────────────────────────────
 
 fn underground_sea() -> CardDef {
     simple("Underground Sea", CardKind::Land(LandData {
         land_types: LandTypes { island: true, swamp: true, ..Default::default() },
         mana_abilities: vec![tap_produces("U"), tap_produces("B")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn tundra() -> CardDef {
+    simple("Tundra", CardKind::Land(LandData {
+        land_types: LandTypes { plains: true, island: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("W"), tap_produces("U")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn badlands() -> CardDef {
+    simple("Badlands", CardKind::Land(LandData {
+        land_types: LandTypes { swamp: true, mountain: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("B"), tap_produces("R")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn taiga() -> CardDef {
+    simple("Taiga", CardKind::Land(LandData {
+        land_types: LandTypes { mountain: true, forest: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("R"), tap_produces("G")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn savannah() -> CardDef {
+    simple("Savannah", CardKind::Land(LandData {
+        land_types: LandTypes { forest: true, plains: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("G"), tap_produces("W")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn scrubland() -> CardDef {
+    simple("Scrubland", CardKind::Land(LandData {
+        land_types: LandTypes { plains: true, swamp: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("W"), tap_produces("B")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn volcanic_island() -> CardDef {
+    simple("Volcanic Island", CardKind::Land(LandData {
+        land_types: LandTypes { island: true, mountain: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("U"), tap_produces("R")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn bayou() -> CardDef {
+    simple("Bayou", CardKind::Land(LandData {
+        land_types: LandTypes { swamp: true, forest: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("B"), tap_produces("G")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn plateau() -> CardDef {
+    simple("Plateau", CardKind::Land(LandData {
+        land_types: LandTypes { mountain: true, plains: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("R"), tap_produces("W")],
+        ..Default::default()
+    }), vec![], None)
+}
+
+fn tropical_island() -> CardDef {
+    simple("Tropical Island", CardKind::Land(LandData {
+        land_types: LandTypes { forest: true, island: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("G"), tap_produces("U")],
         ..Default::default()
     }), vec![], None)
 }
@@ -140,6 +281,56 @@ fn island() -> CardDef {
     )
 }
 
+fn plains() -> CardDef {
+    basic_land("Plains", LandTypes { plains: true, ..Default::default() }, "W")
+}
+
+fn mountain() -> CardDef {
+    basic_land("Mountain", LandTypes { mountain: true, ..Default::default() }, "R")
+}
+
+fn forest() -> CardDef {
+    basic_land("Forest", LandTypes { forest: true, ..Default::default() }, "G")
+}
+
+/// Wastes: basic land with no subtype, produces {C}.
+fn wastes() -> CardDef {
+    basic_land("Wastes", LandTypes::default(), "")
+}
+
+fn snow_covered_island() -> CardDef {
+    snow_basic("Snow-Covered Island", LandTypes { island: true, ..Default::default() }, "U")
+}
+
+fn snow_covered_swamp() -> CardDef {
+    snow_basic("Snow-Covered Swamp", LandTypes { swamp: true, ..Default::default() }, "B")
+}
+
+fn snow_covered_plains() -> CardDef {
+    snow_basic("Snow-Covered Plains", LandTypes { plains: true, ..Default::default() }, "W")
+}
+
+fn snow_covered_mountain() -> CardDef {
+    snow_basic("Snow-Covered Mountain", LandTypes { mountain: true, ..Default::default() }, "R")
+}
+
+fn snow_covered_forest() -> CardDef {
+    snow_basic("Snow-Covered Forest", LandTypes { forest: true, ..Default::default() }, "G")
+}
+
+fn snow_covered_wastes() -> CardDef {
+    CardDef::new(
+        "Snow-Covered Wastes",
+        CardKind::Land(LandData {
+            land_types: LandTypes::default(),
+            mana_abilities: vec![tap_produces("")],
+            ..Default::default()
+        }),
+        vec![], Some(25), vec![Supertype::Basic, Supertype::Snow], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+    )
+}
+
 /// Enters tapped. CR 614.1 (replacement effect): replaces the ETB event to set tapped=true.
 fn undercity_sewers() -> CardDef {
     CardDef::new(
@@ -154,6 +345,72 @@ fn undercity_sewers() -> CardDef {
         vec![replacement_enters_tapped()],
         vec![],
     )
+}
+
+// ── MKM surveil lands (enter tapped, surveil 1 on ETB — surveil not modeled) ──
+
+fn meticulous_archive() -> CardDef {
+    dual_tapped("Meticulous Archive", LandData {
+        land_types: LandTypes { plains: true, island: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("W"), tap_produces("U")],
+        ..Default::default()
+    })
+}
+
+fn raucous_theater() -> CardDef {
+    dual_tapped("Raucous Theater", LandData {
+        land_types: LandTypes { swamp: true, mountain: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("B"), tap_produces("R")],
+        ..Default::default()
+    })
+}
+
+fn hedge_maze() -> CardDef {
+    dual_tapped("Hedge Maze", LandData {
+        land_types: LandTypes { island: true, forest: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("U"), tap_produces("G")],
+        ..Default::default()
+    })
+}
+
+fn commercial_district() -> CardDef {
+    dual_tapped("Commercial District", LandData {
+        land_types: LandTypes { forest: true, mountain: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("G"), tap_produces("R")],
+        ..Default::default()
+    })
+}
+
+fn lush_portico() -> CardDef {
+    dual_tapped("Lush Portico", LandData {
+        land_types: LandTypes { plains: true, forest: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("W"), tap_produces("G")],
+        ..Default::default()
+    })
+}
+
+fn thundering_falls() -> CardDef {
+    dual_tapped("Thundering Falls", LandData {
+        land_types: LandTypes { island: true, mountain: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("U"), tap_produces("R")],
+        ..Default::default()
+    })
+}
+
+fn underground_mortuary() -> CardDef {
+    dual_tapped("Underground Mortuary", LandData {
+        land_types: LandTypes { swamp: true, forest: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("B"), tap_produces("G")],
+        ..Default::default()
+    })
+}
+
+fn elegant_parlor() -> CardDef {
+    dual_tapped("Elegant Parlor", LandData {
+        land_types: LandTypes { mountain: true, plains: true, ..Default::default() },
+        mana_abilities: vec![tap_produces("R"), tap_produces("W")],
+        ..Default::default()
+    })
 }
 
 /// {T}, Sacrifice: destroy target nonbasic land. CR 701.7.
@@ -228,6 +485,46 @@ fn bloodstained_mire() -> CardDef {
         abilities: vec![fetch_ability(pred_and(
             pred_type_eq(CardType::Land),
             pred_land_subtype("swamp"),
+        ))],
+        ..Default::default()
+    }), vec![], Some(25))
+}
+
+fn windswept_heath() -> CardDef {
+    simple("Windswept Heath", CardKind::Land(LandData {
+        abilities: vec![fetch_ability(pred_and(
+            pred_type_eq(CardType::Land),
+            pred_or(pred_land_subtype("forest"), pred_land_subtype("plains")),
+        ))],
+        ..Default::default()
+    }), vec![], Some(25))
+}
+
+fn wooded_foothills() -> CardDef {
+    simple("Wooded Foothills", CardKind::Land(LandData {
+        abilities: vec![fetch_ability(pred_and(
+            pred_type_eq(CardType::Land),
+            pred_or(pred_land_subtype("forest"), pred_land_subtype("mountain")),
+        ))],
+        ..Default::default()
+    }), vec![], Some(25))
+}
+
+fn verdant_catacombs() -> CardDef {
+    simple("Verdant Catacombs", CardKind::Land(LandData {
+        abilities: vec![fetch_ability(pred_and(
+            pred_type_eq(CardType::Land),
+            pred_or(pred_land_subtype("forest"), pred_land_subtype("swamp")),
+        ))],
+        ..Default::default()
+    }), vec![], Some(25))
+}
+
+fn arid_mesa() -> CardDef {
+    simple("Arid Mesa", CardKind::Land(LandData {
+        abilities: vec![fetch_ability(pred_and(
+            pred_type_eq(CardType::Land),
+            pred_or(pred_land_subtype("plains"), pred_land_subtype("mountain")),
         ))],
         ..Default::default()
     }), vec![], Some(25))
