@@ -8,7 +8,7 @@ Everything lives in `SimState`. Key fields:
 - `catalog: HashMap<String, CardDef>` — base card definitions; populated once at init, never mutated
 - `stack: Vec<ObjId>` — spell/ability stack (LIFO)
 - `abilities: HashMap<ObjId, StackAbility>` — triggered/activated abilities on the stack
-- `trigger_instances`, `replacement_instances`, `continuous_instances` — live ability registrations
+- `trigger_instances`, `replacement_instances`, `prohibition_instances`, `continuous_instances` — live ability registrations
 - `us: PlayerState`, `opp: PlayerState` — player state (life, mana pool, draw count, etc.)
 
 ### Identity: `ObjId`
@@ -45,13 +45,16 @@ reads P/T, types, or abilities of permanents.
 
 Every observable game action fires a `GameEvent` through `fire_event`, which runs:
 
-1. **Replacement check** — first matching active `ReplacementInstance` intercepts;
+1. **Prohibition check** (CR 614.17) — any active `ProhibitionInstance` whose `check`
+   returns `true` suppresses the event entirely. "Can't" effects take precedence over
+   replacements (CR 101.2); the event never reaches Stage 2.
+2. **Replacement check** — first matching active `ReplacementInstance` intercepts;
    its effect runs instead and may re-fire a modified event. Loop prevention via
    `repl_applied` (cleared at depth 0).
-2. **State mutation** — the event's own effect runs (zone change, draw, etc.).
-3. **Trigger check** — `fire_triggers` walks all active `TriggerInstance`s;
+3. **State mutation** — the event's own effect runs (zone change, draw, etc.).
+4. **Trigger check** — `fire_triggers` walks all active `TriggerInstance`s;
    matching ones append `TriggerContext`s to `pending_triggers`.
-4. **Log** — `log_event` derives display info from `state.objects` via `id`.
+5. **Log** — `log_event` derives display info from `state.objects` via `id`.
 
 `GameEvent` variants: `ZoneChange { id, actor, from, to, controller }`, `Draw`,
 `EnteredStep`, `EnteredPhase`, `CreatureAttacked`.
@@ -63,6 +66,14 @@ Every observable game action fires a `GameEvent` through `fire_event`, which run
 - Appends a `TriggerContext` to `pending` if the event matches.
 - `TriggerContext` carries the effect closure and target spec; pushed to the stack
   as a `StackAbility` at the next priority window.
+
+**`ProhibitionInstance`** — a "can't happen" suppression (CR 614.17).
+- `check: ProhibitionCheckFn` — `Arc<dyn Fn(&GameEvent, source_id, controller, &SimState) -> bool>`
+- Returns `true` if the event is prohibited; the event is dropped with no state mutation.
+- Takes `&SimState` (unlike `ReplacementCheckFn`) because prohibition often needs to inspect
+  the type of the affected object (e.g. Grafdigger's Cage checks `is_creature()` on the card
+  entering from GY/library). Checked before replacements (Stage 1).
+- Stored on `CardDef.prohibition_defs: Vec<ProhibitionDef>` and activated with the permanent.
 
 **`ReplacementInstance`** — a replacement effect registration.
 - `check: ReplacementCheckFn` — `Arc<dyn Fn(&GameEvent, source_id, controller) -> Option<Vec<ObjId>>>` (Arc allows captures)
@@ -104,7 +115,7 @@ marks X spells; the engine pays `Life(chosen_x)` and `Strategy::choose_x_for_spe
 ### Card definitions
 
 `CardDef` holds `kind: CardKind` (Land/Creature/Artifact/Instant/Sorcery/Planeswalker/Enchantment),
-`colors`, `types`, `supertypes`, `trigger_defs`, `replacement_defs`, `static_ability_defs`.
+`colors`, `types`, `supertypes`, `trigger_defs`, `replacement_defs`, `prohibition_defs`, `static_ability_defs`.
 
 Cards are defined in `card_defs.rs` using `CardDef::new(...)`. The engine never references
 specific card names — it only calls the closures stored on the def.
