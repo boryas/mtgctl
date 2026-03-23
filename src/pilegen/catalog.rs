@@ -445,6 +445,14 @@ pub(crate) struct ReplacementDef {
     pub(crate) make_effect: std::sync::Arc<dyn Fn(ObjId, PlayerId) -> Effect + Send + Sync>,
 }
 
+/// A "can't happen" prohibition stored on a `CardDef` (CR 614.17).
+/// Checked before replacements in `fire_event`. Takes `&SimState` so type/zone/controller
+/// checks can be performed without string dispatch.
+#[derive(Clone)]
+pub(crate) struct ProhibitionDef {
+    pub(crate) check: ProhibitionCheckFn,
+}
+
 #[derive(Clone)]
 pub(crate) struct CardDef {
     pub(crate) name: String,
@@ -469,6 +477,9 @@ pub(crate) struct CardDef {
     pub(super) trigger_defs: Vec<TriggerCheckFn>,
     /// Replacement effect definitions for this card (set at card definition time).
     pub(super) replacement_defs: Vec<ReplacementDef>,
+    /// Prohibition definitions for this card (CR 614.17 — "can't" effects).
+    /// Checked before replacements in `fire_event`; if any match, the event is suppressed.
+    pub(super) prohibition_defs: Vec<ProhibitionDef>,
     /// Static ability factories. Called at ETB to register a `ContinuousInstance` for this
     /// object. The CI has `expiry: WhileSourceOnBattlefield` and is removed on LTB.
     pub(super) static_ability_defs: Vec<StaticAbilityDef>,
@@ -492,9 +503,10 @@ pub(crate) struct CardDef {
     /// `mana_abilities_suppressed: bool` field. Future work: a more principled
     /// `AbilitySuppression` model when adding Null Rod / Mycosynth Lattice interactions.
     pub(crate) non_mana_abilities_suppressed: bool,
-    /// True when this permanent on the battlefield prevents free casts and creatures entering
-    /// from graveyards or libraries (e.g. Grafdigger's Cage). Checked by `play_free_cast`.
-    pub(crate) blocks_free_cast: bool,
+    /// True when this permanent on the battlefield prevents (a) casting spells from graveyards
+    /// or libraries and (b) creature cards entering the battlefield from graveyards or libraries
+    /// (e.g. Grafdigger's Cage). Checked by `play_free_cast` and `eff_reanimate`.
+    pub(crate) blocks_gy_and_lib_access: bool,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -653,6 +665,7 @@ impl CardDef {
         back: Option<Box<CardDef>>,
         trigger_defs: Vec<TriggerCheckFn>,
         replacement_defs: Vec<ReplacementDef>,
+        prohibition_defs: Vec<ProhibitionDef>,
         static_ability_defs: Vec<StaticAbilityDef>,
     ) -> Self {
         let types = vec![card_type_of(&kind)];
@@ -667,12 +680,13 @@ impl CardDef {
             back,
             trigger_defs,
             replacement_defs,
+            prohibition_defs,
             static_ability_defs,
             additional_costs: vec![],
             counterable: true,
             casting_cost_modifier: 0,
             non_mana_abilities_suppressed: false,
-            blocks_free_cast: false,
+            blocks_gy_and_lib_access: false,
         }
     }
 }
@@ -1064,6 +1078,14 @@ pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, contro
             active: false,
         });
     }
+    for prohib in &card_def.prohibition_defs {
+        state.prohibition_instances.push(ProhibitionInstance {
+            source_id,
+            controller,
+            check: prohib.check.clone(),
+            active: false,
+        });
+    }
 }
 
 /// Activate all trigger and replacement instances for a card entering the battlefield.
@@ -1081,6 +1103,9 @@ pub(super) fn activate_instances(
     for inst in &mut state.replacement_instances {
         if inst.source_id == source_id { inst.active = true; }
     }
+    for inst in &mut state.prohibition_instances {
+        if inst.source_id == source_id { inst.active = true; }
+    }
     if let Some(card_def) = def {
         for factory in &card_def.static_ability_defs {
             state.continuous_instances.push(factory(source_id, controller));
@@ -1088,8 +1113,8 @@ pub(super) fn activate_instances(
     }
 }
 
-/// Deactivate all trigger and replacement instances for a card leaving the battlefield.
-/// Also removes static-ability ContinuousInstances (WhileSourceOnBattlefield) for this object.
+/// Deactivate all trigger, replacement, and prohibition instances for a card leaving the
+/// battlefield. Also removes static-ability ContinuousInstances (WhileSourceOnBattlefield).
 pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
     for inst in &mut state.trigger_instances {
         if inst.source_id == source_id { inst.active = false; }
@@ -1097,9 +1122,26 @@ pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
     for inst in &mut state.replacement_instances {
         if inst.source_id == source_id { inst.active = false; }
     }
+    for inst in &mut state.prohibition_instances {
+        if inst.source_id == source_id { inst.active = false; }
+    }
     state.continuous_instances.retain(|ci| {
         !(ci.source_id == source_id && ci.expiry == ContinuousExpiry::WhileSourceOnBattlefield)
     });
+}
+
+// ── Grafdigger's Cage creature-entry check ───────────────────────────────────
+
+/// Matches any ZoneChange where a card moves from a graveyard or library to the battlefield.
+/// Zone-direction predicate (no creature-type check); useful as a building block for cards
+/// that restrict or replace all GY/library → BF transitions.
+#[allow(dead_code)]
+pub(super) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
+    if let GameEvent::ZoneChange { id, from: ZoneId::Graveyard | ZoneId::Library, to: ZoneId::Battlefield, .. } = event {
+        Some(vec![*id])
+    } else {
+        None
+    }
 }
 
 // ── Leyline of the Void ───────────────────────────────────────────────────────

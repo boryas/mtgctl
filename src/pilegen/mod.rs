@@ -294,6 +294,13 @@ pub(super) type TriggerCheckFn =
 /// `source_id` is passed so self-ETB checks work without string dispatch.
 pub(super) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId) -> Option<Vec<ObjId>> + Send + Sync>;
 
+/// Signature for a "can't happen" prohibition check (CR 614.17).
+/// Returns true if the event is prohibited. Takes `&SimState` so checks can inspect card types,
+/// controller, etc. Prohibition checks run before replacement effects (CR 614.17 — can't effects
+/// aren't replacements and take precedence over permissive effects).
+pub(super) type ProhibitionCheckFn =
+    std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
+
 /// One trigger registration per card object in the simulation.
 /// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
 /// Dynamically-created triggers (e.g. Tamiyo +2 watcher) start with `active: true`.
@@ -315,6 +322,16 @@ pub(super) struct ReplacementInstance {
     pub(super) controller: PlayerId,
     pub(super) check: ReplacementCheckFn,
     pub(super) effect: Effect,
+    pub(super) active: bool,
+}
+
+/// One "can't happen" prohibition per card object (CR 614.17).
+/// Shape mirrors `ReplacementInstance` but has no effect — a matching prohibition suppresses
+/// the event outright. Checked before replacements in `fire_event`.
+pub(super) struct ProhibitionInstance {
+    pub(super) source_id: ObjId,
+    pub(super) controller: PlayerId,
+    pub(super) check: ProhibitionCheckFn,
     pub(super) active: bool,
 }
 
@@ -756,6 +773,8 @@ pub(crate) struct SimState {
     /// All replacement instances for card objects in the simulation (pre-registered at init).
     /// `active` is false until the card enters the battlefield.
     pub(super) replacement_instances: Vec<ReplacementInstance>,
+    /// All prohibition instances (CR 614.17 "can't" effects). Checked before replacements.
+    pub(super) prohibition_instances: Vec<ProhibitionInstance>,
     /// Replacements already applied in the current fire_event call chain (prevents loops).
     repl_applied: HashSet<ObjId>,
     /// Recursion depth for fire_event (used to clear repl_applied at the top level).
@@ -821,6 +840,7 @@ impl SimState {
             graveyard_order: Vec::new(),
             trigger_instances: Vec::new(),
             replacement_instances: Vec::new(),
+            prohibition_instances: Vec::new(),
             repl_applied: HashSet::new(),
             repl_depth: 0,
             continuous_instances: Vec::new(),
@@ -1498,9 +1518,15 @@ pub(super) fn card_zone_to_id(zone: &CardZone) -> ZoneId {
 }
 
 
-/// The central elemental event pipeline: check_replacement → do_effect → check_triggers.
-/// Every elemental game operation (zone change, draw, step/phase entry, etc.) passes through here.
-/// If a replacement fires, the original effect is suppressed and the replacement runs immediately.
+/// The central elemental event pipeline.
+///
+/// Stage order per the Comprehensive Rules:
+///   1. Prohibition check (CR 614.17 — "can't" effects; if any match, event is suppressed)
+///   2. Replacement check (CR 614 — first applicable replacement fires instead)
+///   3. Do effect (state mutation for this event type)
+///   4. Log
+///   5. Trigger dispatch (CR 603 — collect triggered abilities)
+///   6. Recompute CE materialization (at top-level depth only)
 pub(super) fn fire_event(
     event: GameEvent,
     state: &mut SimState,
@@ -1512,7 +1538,18 @@ pub(super) fn fire_event(
         state.repl_applied.clear();
     }
 
-    // check_replacement: first active, non-applied replacement that matches
+    // Stage 1: Prohibition check (CR 614.17).
+    // "Can't" effects are not replacements — they suppress the event outright and
+    // take precedence over replacements. Checked before the replacement pipeline.
+    let prohibited = state.prohibition_instances.iter()
+        .any(|p| p.active && (p.check)(&event, p.source_id, p.controller, state));
+    if prohibited {
+        state.log(t, actor, "→ event prohibited (\"can't\" effect)".to_string());
+        state.repl_depth -= 1;
+        return;
+    }
+
+    // Stage 2: Replacement check — first active, non-applied replacement that matches.
     let repl_match = {
         let mut found = None;
         for inst in &state.replacement_instances {
@@ -1533,13 +1570,13 @@ pub(super) fn fire_event(
         return; // original effect suppressed
     }
 
-    // do_effect: apply the state mutation for this event type
+    // Stage 3: Apply state mutation.
     do_effect(&event, state);
 
-    // log
+    // Stage 4: Log.
     log_event(&event, state, t, actor);
 
-    // check_triggers
+    // Stage 5: Trigger dispatch.
     let triggers = fire_triggers(&event, state);
     state.pending_triggers.extend(triggers);
 
@@ -1682,7 +1719,7 @@ pub(super) fn play_free_cast(id: ObjId, actor: PlayerId, state: &mut SimState, t
         .map(|c| c.id)
         .collect();
     let cage_active = blocker_ids.iter().any(|&bid| {
-        state.def_of(bid).map_or(false, |d| d.blocks_free_cast)
+        state.def_of(bid).map_or(false, |d| d.blocks_gy_and_lib_access)
     });
     if cage_active {
         state.log(t, actor, "→ free cast blocked (Grafdigger's Cage effect)".to_string());

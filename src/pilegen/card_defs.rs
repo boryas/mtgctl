@@ -124,7 +124,7 @@ fn all_cards() -> Vec<CardDef> {
 fn simple(name: &str, kind: CardKind, colors: Vec<Color>, play_weight: Option<u32>) -> CardDef {
     CardDef::new(
         name, kind, colors, play_weight,
-        vec![], CardLayout::Normal, None, vec![], vec![], vec![],
+        vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![],
     )
 }
 
@@ -166,7 +166,7 @@ fn basic_land(name: &str, land_types: LandTypes, mana: &str) -> CardDef {
             ..Default::default()
         }),
         vec![], Some(25), vec![Supertype::Basic], CardLayout::Normal, None,
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     )
 }
 
@@ -179,7 +179,7 @@ fn snow_basic(name: &str, land_types: LandTypes, mana: &str) -> CardDef {
             ..Default::default()
         }),
         vec![], Some(25), vec![Supertype::Basic, Supertype::Snow], CardLayout::Normal, None,
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     )
 }
 
@@ -199,6 +199,7 @@ fn surveil_dual(name: &'static str, land_types: LandTypes, c1: &str, c2: &str) -
         vec![], None, vec![], CardLayout::Normal, None,
         vec![trigger],
         vec![replacement_enters_tapped()],
+        vec![],
         vec![],
     )
 }
@@ -294,7 +295,7 @@ fn swamp() -> CardDef {
             ..Default::default()
         }),
         vec![], Some(25), vec![Supertype::Basic], CardLayout::Normal, None,
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     )
 }
 
@@ -307,7 +308,7 @@ fn island() -> CardDef {
             ..Default::default()
         }),
         vec![], Some(25), vec![Supertype::Basic], CardLayout::Normal, None,
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     )
 }
 
@@ -357,7 +358,7 @@ fn snow_covered_wastes() -> CardDef {
             ..Default::default()
         }),
         vec![], Some(25), vec![Supertype::Basic, Supertype::Snow], CardLayout::Normal, None,
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     )
 }
 
@@ -421,7 +422,7 @@ fn karakas() -> CardDef {
             ..Default::default()
         }),
         vec![], None, vec![Supertype::Legendary], CardLayout::Normal, None,
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     )
 }
 
@@ -582,6 +583,7 @@ fn cavern_of_souls() -> CardDef {
         vec![],
         vec![repl],
         vec![],
+        vec![],
     )
 }
 
@@ -634,8 +636,12 @@ fn ursas_saga() -> CardDef {
 
 /// {1}. Static: creature cards in graveyards and libraries can't enter the battlefield.
 /// Players can't cast spells from graveyards or libraries.
-/// Modeled as a CE that sets `blocks_free_cast = true` on the Cage itself while it's on the
-/// battlefield; `play_free_cast` checks this flag before allowing any free cast or free entry.
+/// Modeled as a CE that sets `blocks_gy_and_lib_access = true` on the Cage itself while it's on the
+/// Two static effects while on the battlefield:
+///   (a) CR 614.17 prohibition: creature cards from graveyards/libraries can't enter the BF.
+///       Implemented as a `ProhibitionDef` — checked in `fire_event` before replacements.
+///   (b) CE sets `blocks_gy_and_lib_access = true` on Cage's own materialized def, gating
+///       `play_free_cast` so spells can't be cast from graveyards or libraries either.
 fn grafdiggers_cage() -> CardDef {
     CardDef::new(
         "Grafdigger's Cage",
@@ -646,7 +652,8 @@ fn grafdiggers_cage() -> CardDef {
         vec![],
         Some(40),
         vec![], CardLayout::Normal, None,
-        vec![],
+        vec![],  // no trigger_defs
+        // (b): ETB replacement installs a CE that gates play_free_cast
         vec![etb_self_replacement(|source_id, _id, _controller, state, _t| {
             let controller = state.objects.get(&source_id).map_or(PlayerId::Us, |o| o.controller);
             state.continuous_instances.push(ContinuousInstance {
@@ -654,11 +661,24 @@ fn grafdiggers_cage() -> CardDef {
                 controller,
                 layer: ContinuousLayer::L3TextEffects,
                 filter: Arc::new(move |cid, _| cid == source_id),
-                modifier: Arc::new(|def, _| { def.blocks_free_cast = true; }),
+                modifier: Arc::new(|def, _| { def.blocks_gy_and_lib_access = true; }),
                 expiry: ContinuousExpiry::WhileSourceOnBattlefield,
             });
         })],
-        vec![],
+        // (a): prohibition blocks ZoneChange from GY/library to BF for creature cards
+        vec![ProhibitionDef {
+            check: Arc::new(|event, _source_id, _controller, state| {
+                if let GameEvent::ZoneChange {
+                    id, from: ZoneId::Graveyard | ZoneId::Library, to: ZoneId::Battlefield, ..
+                } = event {
+                    let key = state.objects.get(id).map(|o| o.catalog_key.as_str()).unwrap_or("");
+                    state.catalog.get(key).map_or(false, |d| d.is_creature())
+                } else {
+                    false
+                }
+            }),
+        }],
+        vec![],  // no static_ability_defs
     )
 }
 
@@ -1226,6 +1246,7 @@ fn recruiter_of_the_guard() -> CardDef {
         vec![Arc::new(recruiter_check)],
         vec![],
         vec![],
+        vec![],
     )
 }
 
@@ -1241,6 +1262,7 @@ fn orcish_bowmasters() -> CardDef {
         None,
         vec![], CardLayout::Normal, None,
         vec![Arc::new(bowmasters_check)],
+        vec![],
         vec![],
         vec![],
     )
@@ -1289,6 +1311,7 @@ fn murktide_regent() -> CardDef {
                 }))
             }),
         }],
+        vec![],
         vec![],
     )
 }
@@ -1342,6 +1365,7 @@ fn dauthi_voidwalker() -> CardDef {
             }),
         }],
         vec![],
+        vec![],
     )
 }
 
@@ -1368,6 +1392,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
         vec![],
         vec![replacement_planeswalker_etb(2)],
         vec![],
+        vec![],
     );
 
     let mut front_data = CreatureData::new("U", 0, 3);
@@ -1380,6 +1405,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
         None,
         vec![Supertype::Legendary], CardLayout::DoubleFaced, Some(Box::new(back)),
         vec![Arc::new(tamiyo_check)],
+        vec![],
         vec![],
         vec![],
     )
@@ -1417,6 +1443,7 @@ fn painters_servant() -> CardDef {
         vec![],
         vec![repl],
         vec![],
+        vec![],
     );
     // Painter's Servant is an Artifact Creature; the constructor derives only one type from
     // CardKind, so we push the second type explicitly.
@@ -1442,7 +1469,7 @@ fn leyline_of_the_void() -> CardDef {
         parse_colors("2BB", false, true),
         None,
         vec![], CardLayout::Normal, None,
-        vec![], vec![replacement], vec![],
+        vec![], vec![replacement], vec![], vec![],
     )
 }
 
@@ -1482,6 +1509,7 @@ fn disruptor_flute() -> CardDef {
                 expiry: ContinuousExpiry::WhileSourceOnBattlefield,
             });
         })],
+        vec![],  // no prohibition_defs
         vec![],  // no static_ability_defs
     )
 }
@@ -1546,6 +1574,6 @@ fn brazen_borrower() -> CardDef {
         parse_colors("1UU", true, false),
         None,
         vec![], CardLayout::Split, Some(Box::new(back)),
-        vec![], vec![], vec![],
+        vec![], vec![], vec![], vec![],
     )
 }

@@ -34,8 +34,7 @@
     fn creature(name: &str, power: i32, toughness: i32) -> CardDef {
         CardDef::new(
             name, CardKind::Creature(CreatureData::new("", power, toughness)),
-            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
-        )
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
     }
 
     /// Insert a permanent into `state.objects` for `who` and return its ObjId.
@@ -58,7 +57,7 @@
         // to a minimal 1/1 stub for anonymous test creatures that have no special behaviour.
         let def = test_catalog().remove(name).unwrap_or_else(|| {
             CardDef::new(name, CardKind::Creature(CreatureData::new("", 1, 1)),
-                         vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![])
+                         vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
         });
         preregister_instances(&def, id, who, state);
         activate_instances(id, who, Some(&def), state);
@@ -728,8 +727,7 @@
             name, CardKind::Land(LandData::default()),
             vec![], None,
             if basic { vec![Supertype::Basic] } else { vec![] },
-            CardLayout::Normal, None, vec![], vec![], vec![],
-        )
+            CardLayout::Normal, None, vec![], vec![], vec![], vec![])
     }
 
     #[test]
@@ -775,7 +773,7 @@
         // Spell costs 3 generic + U. Two graveyard cards reduce generic to 1.
         // Pool supplies the remaining 1 generic + 1 blue.
         let mut state = make_state();
-        let def = CardDef::new("Treasure Cruise", CardKind::Instant(SpellData { mana_cost: "7U".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let def = CardDef::new("Treasure Cruise", CardKind::Instant(SpellData { mana_cost: "7U".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         for name in &["A", "B", "C", "D", "E", "F", "G"] {
             add_graveyard_card(&mut state, PlayerId::Us, name);
         }
@@ -799,7 +797,7 @@
         // Spell costs 3 generic. Graveyard has 2 cards — reduces cost to 1.
         // Pool must cover the remaining 1 generic.
         let mut state = make_state();
-        let def = CardDef::new("Dead Drop", CardKind::Sorcery(SpellData { mana_cost: "3".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let def = CardDef::new("Dead Drop", CardKind::Sorcery(SpellData { mana_cost: "3".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         add_graveyard_card(&mut state, PlayerId::Us, "Ritual");
         add_graveyard_card(&mut state, PlayerId::Us, "Ponder");
         let dead_drop_id = add_hand_card(&mut state, PlayerId::Us, "Dead Drop");
@@ -923,7 +921,7 @@
         // Spell costs 3 generic. Graveyard has 2 cards — reduces cost to 1.
         // Pool is empty — still can't cast.
         let mut state = make_state();
-        let def = CardDef::new("Dead Drop", CardKind::Sorcery(SpellData { mana_cost: "3".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let def = CardDef::new("Dead Drop", CardKind::Sorcery(SpellData { mana_cost: "3".to_string(), delve: true, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         add_graveyard_card(&mut state, PlayerId::Us, "Ritual");
         add_graveyard_card(&mut state, PlayerId::Us, "Ponder");
         let dead_drop_id = add_hand_card(&mut state, PlayerId::Us, "Dead Drop");
@@ -963,7 +961,7 @@
     fn ninja_def() -> CardDef {
         let mut data = CreatureData::new("", 2, 1);
         data.ninjutsu = Some(NinjutsuAbility { mana_cost: "U".to_string() });
-        CardDef::new("Ninja", CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![])
+        CardDef::new("Ninja", CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
     }
 
     fn island_land(state: &mut SimState, who: PlayerId) -> ObjId {
@@ -1215,7 +1213,7 @@
                 make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "U")),
             }],
             ..Default::default()
-        }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let catalog = vec![borrower_def.clone(), catalog_card("Island"), island2_def.clone(), catalog_card("Swamp")];
 
         let make_fresh_state = || {
@@ -1254,7 +1252,7 @@
     fn flying_creature(name: &str, power: i32, toughness: i32) -> CardDef {
         let mut data = CreatureData::new("", power, toughness);
         data.keywords = vec!["flying".to_string()];
-        CardDef::new(name, CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![])
+        CardDef::new(name, CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
     }
 
     #[test]
@@ -1933,7 +1931,7 @@
             loyalty: 0,
             ..BattlefieldState::new()
         });
-        let def = CardDef::new("Jace", CardKind::Planeswalker(PlaneswalkerData { mana_cost: "3U".to_string(), loyalty: 3, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let def = CardDef::new("Jace", CardKind::Planeswalker(PlaneswalkerData { mana_cost: "3U".to_string(), loyalty: 3, ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         check_state_based_actions(&mut state, 1);
@@ -1948,7 +1946,7 @@
         let _second = add_default_perm(&mut state, PlayerId::Us, "Bowmasters");
         let mut bowmasters_data = CreatureData::new("1B", 1, 1);
         bowmasters_data.legendary = true;
-        let def = CardDef::new("Bowmasters", CardKind::Creature(bowmasters_data), parse_colors("1B", false, true), None, vec![Supertype::Legendary], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let def = CardDef::new("Bowmasters", CardKind::Creature(bowmasters_data), parse_colors("1B", false, true), None, vec![Supertype::Legendary], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         check_state_based_actions(&mut state, 1);
@@ -1965,7 +1963,7 @@
         add_default_perm(&mut state, PlayerId::Us, "Bowmasters");
         let mut bowmasters_data = CreatureData::new("1B", 1, 1);
         bowmasters_data.legendary = true;
-        let def = CardDef::new("Bowmasters", CardKind::Creature(bowmasters_data), parse_colors("1B", false, true), None, vec![Supertype::Legendary], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let def = CardDef::new("Bowmasters", CardKind::Creature(bowmasters_data), parse_colors("1B", false, true), None, vec![Supertype::Legendary], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         check_state_based_actions(&mut state, 1);
@@ -2057,7 +2055,7 @@
     #[test]
     fn test_static_ability_def_grants_flying_at_etb() {
         let mut state = make_state();
-        let def = CardDef::new("Flyer", CardKind::Creature(CreatureData::new("", 2, 2)), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![flying_static_ability()]);
+        let def = CardDef::new("Flyer", CardKind::Creature(CreatureData::new("", 2, 2)), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![flying_static_ability()]);
         let catalog = vec![def.clone()];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
@@ -2074,7 +2072,7 @@
     #[test]
     fn test_static_ability_def_removed_at_ltb() {
         let mut state = make_state();
-        let def = CardDef::new("Flyer", CardKind::Creature(CreatureData::new("", 2, 2)), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![flying_static_ability()]);
+        let def = CardDef::new("Flyer", CardKind::Creature(CreatureData::new("", 2, 2)), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![flying_static_ability()]);
         let catalog = vec![def.clone()];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
@@ -2239,7 +2237,7 @@
     /// Urza's Saga does not fetch an artifact with a colored pip (e.g. {W}).
     #[test]
     fn test_urza_saga_ignores_colored_artifact() {
-        let white_art_def = CardDef::new("White Artifact", CardKind::Artifact(ArtifactData { mana_cost: "W".to_string(), ..Default::default() }), parse_colors("W", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let white_art_def = CardDef::new("White Artifact", CardKind::Artifact(ArtifactData { mana_cost: "W".to_string(), ..Default::default() }), parse_colors("W", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let mut state = make_state();
         state.catalog.insert(white_art_def.name.clone(), white_art_def);
         add_library_card(&mut state, PlayerId::Us, "White Artifact");
@@ -2255,7 +2253,7 @@
     /// Urza's Saga does not fetch an artifact with MV > 1 (e.g. {2}).
     #[test]
     fn test_urza_saga_ignores_high_mv_artifact() {
-        let sol_ring_def = CardDef::new("Sol Ring", CardKind::Artifact(ArtifactData { mana_cost: "2".to_string(), ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let sol_ring_def = CardDef::new("Sol Ring", CardKind::Artifact(ArtifactData { mana_cost: "2".to_string(), ..Default::default() }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let mut state = make_state();
         state.catalog.insert(sol_ring_def.name.clone(), sol_ring_def);
         add_library_card(&mut state, PlayerId::Us, "Sol Ring");
@@ -2271,8 +2269,8 @@
     /// A non-green creature in the same library is not moved.
     #[test]
     fn test_gsz_finds_green_creature() {
-        let troll_def = CardDef::new("Elvish Reclaimer", CardKind::Creature(CreatureData::new("G", 1, 1)), parse_colors("G", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
-        let ragavan_def = CardDef::new("Ragavan, Nimble Pilferer", CardKind::Creature(CreatureData::new("R", 2, 1)), parse_colors("R", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
+        let troll_def = CardDef::new("Elvish Reclaimer", CardKind::Creature(CreatureData::new("G", 1, 1)), parse_colors("G", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
+        let ragavan_def = CardDef::new("Ragavan, Nimble Pilferer", CardKind::Creature(CreatureData::new("R", 2, 1)), parse_colors("R", false, false), None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let mut state = make_state();
         state.catalog.insert(troll_def.name.clone(), troll_def);
         state.catalog.insert(ragavan_def.name.clone(), ragavan_def);
@@ -2296,7 +2294,7 @@
         let forest_def = CardDef::new("Forest", CardKind::Land(LandData {
             land_types: LandTypes { forest: true, ..Default::default() },
             ..Default::default()
-        }), vec![], None, vec![Supertype::Basic], CardLayout::Normal, None, vec![], vec![], vec![]);
+        }), vec![], None, vec![Supertype::Basic], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let mut state = make_state();
         state.catalog.insert(island_def.name.clone(), island_def);
         state.catalog.insert(forest_def.name.clone(), forest_def);
@@ -3128,12 +3126,10 @@
         // Set up test creatures on the battlefield.
         let victim_def = CardDef::new(
             "Victim", CardKind::Creature(CreatureData::new("", 1, 3)),
-            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
-        );
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let survivor_def = CardDef::new(
             "Survivor", CardKind::Creature(CreatureData::new("", 1, 4)),
-            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
-        );
+            vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let victim_id = add_perm_with_def(&mut state, PlayerId::Opp, &victim_def, BattlefieldState::new());
         let survivor_id = add_perm_with_def(&mut state, PlayerId::Opp, &survivor_def, BattlefieldState::new());
 
@@ -3657,8 +3653,7 @@
             CardDef::new(
                 "TestLegend", CardKind::Creature(CreatureData::new("1W", 2, 2)),
                 vec![], None, vec![Supertype::Legendary], CardLayout::Normal, None,
-                vec![], vec![], vec![],
-            )
+                vec![], vec![], vec![], vec![])
         };
         state.catalog.insert("TestLegend".to_string(), legendary_def.clone());
 
@@ -3729,8 +3724,7 @@
             let def = CardDef::new(
                 "TestArtifact",
                 CardKind::Artifact(ArtifactData { mana_cost: "1".to_string(), ..Default::default() }),
-                vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
-            );
+                vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
             def
         };
         let id = add_perm_with_def(&mut state, PlayerId::Opp, &artifact_def, BattlefieldState::new());
@@ -3744,7 +3738,7 @@
     // ── §42: Grafdigger's Cage ────────────────────────────────────────────────
 
     #[test]
-    fn test_grafdiggers_cage_blocks_free_cast() {
+    fn test_grafdiggers_cage_blocks_gy_and_lib_access() {
         let mut state = make_state();
         state.catalog = test_catalog();
 
@@ -3766,10 +3760,10 @@
         change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
         recompute(&mut state);
 
-        // After Cage enters, blocks_free_cast on its materialized def should be true.
+        // After Cage enters, blocks_gy_and_lib_access on its materialized def should be true.
         assert!(
-            state.def_of(cage_id).map_or(false, |d| d.blocks_free_cast),
-            "Cage's materialized def should have blocks_free_cast=true after ETB"
+            state.def_of(cage_id).map_or(false, |d| d.blocks_gy_and_lib_access),
+            "Cage's materialized def should have blocks_gy_and_lib_access=true after ETB"
         );
 
         // Place a card in exile with a free-cast permission.
@@ -3835,4 +3829,115 @@
             .filter(|ci| ci.source_id == cage_id)
             .count();
         assert_eq!(ci_count, 0, "Cage CI should be removed when Cage leaves the battlefield");
+    }
+
+    /// Helper: put Cage on the battlefield for `who` and return its id.
+    fn enter_cage(state: &mut SimState, who: PlayerId) -> ObjId {
+        let cage_id = state.alloc_id();
+        let cage_def = state.catalog.get("Grafdigger's Cage").cloned()
+            .unwrap_or_else(|| panic!("Grafdigger's Cage not in catalog"));
+        state.objects.insert(cage_id, GameObject {
+            id: cage_id,
+            catalog_key: "Grafdigger's Cage".to_string(),
+            owner: who, controller: who,
+            zone: CardZone::Hand { known: false },
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        preregister_instances(&cage_def, cage_id, who, state);
+        change_zone(cage_id, ZoneId::Battlefield, state, 1, who);
+        cage_id
+    }
+
+    #[test]
+    fn test_grafdiggers_cage_prohibition_blocks_creature_from_gy() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Troll".to_string(), creature("Troll", 3, 3));
+
+        enter_cage(&mut state, PlayerId::Opp);
+
+        // Put a creature card in Us's graveyard.
+        let creature_id = state.alloc_id();
+        state.objects.insert(creature_id, GameObject {
+            id: creature_id,
+            catalog_key: "Troll".to_string(),
+            owner: PlayerId::Us, controller: PlayerId::Us,
+            zone: CardZone::Graveyard,
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // Attempt to reanimate: fire a ZoneChange GY→BF.
+        eff_reanimate(PlayerId::Us).call(&mut state, 2, &[creature_id]);
+
+        assert_eq!(
+            state.objects[&creature_id].zone,
+            CardZone::Graveyard,
+            "Cage prohibition must block creature from entering battlefield from graveyard"
+        );
+    }
+
+    #[test]
+    fn test_grafdiggers_cage_prohibition_removed_on_ltb() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Troll".to_string(), creature("Troll", 3, 3));
+
+        let cage_id = enter_cage(&mut state, PlayerId::Opp);
+
+        // Put a creature card in Us's graveyard.
+        let creature_id = state.alloc_id();
+        state.objects.insert(creature_id, GameObject {
+            id: creature_id,
+            catalog_key: "Troll".to_string(),
+            owner: PlayerId::Us, controller: PlayerId::Us,
+            zone: CardZone::Graveyard,
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+
+        // Remove Cage.
+        change_zone(cage_id, ZoneId::Graveyard, &mut state, 2, PlayerId::Opp);
+
+        // Now reanimation should succeed.
+        eff_reanimate(PlayerId::Us).call(&mut state, 3, &[creature_id]);
+
+        assert_eq!(
+            state.objects[&creature_id].zone,
+            CardZone::Battlefield,
+            "After Cage leaves, creature should be free to enter battlefield"
+        );
+    }
+
+    #[test]
+    fn test_grafdiggers_cage_does_not_block_non_creature() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        enter_cage(&mut state, PlayerId::Opp);
+
+        // Put a non-creature (artifact) in Us's graveyard.
+        let artifact_id = state.alloc_id();
+        let artifact_name = "Grafdigger's Cage";
+        state.objects.insert(artifact_id, GameObject {
+            id: artifact_id,
+            catalog_key: artifact_name.to_string(),
+            owner: PlayerId::Us, controller: PlayerId::Us,
+            zone: CardZone::Graveyard,
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+
+        eff_reanimate(PlayerId::Us).call(&mut state, 2, &[artifact_id]);
+
+        assert_eq!(
+            state.objects[&artifact_id].zone,
+            CardZone::Battlefield,
+            "Cage must not block non-creature cards from entering battlefield"
+        );
     }
