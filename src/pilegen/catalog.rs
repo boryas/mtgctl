@@ -492,6 +492,9 @@ pub(crate) struct CardDef {
     /// `mana_abilities_suppressed: bool` field. Future work: a more principled
     /// `AbilitySuppression` model when adding Null Rod / Mycosynth Lattice interactions.
     pub(crate) non_mana_abilities_suppressed: bool,
+    /// True when this permanent on the battlefield prevents free casts and creatures entering
+    /// from graveyards or libraries (e.g. Grafdigger's Cage). Checked by `play_free_cast`.
+    pub(crate) blocks_free_cast: bool,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -669,6 +672,7 @@ impl CardDef {
             counterable: true,
             casting_cost_modifier: 0,
             non_mana_abilities_suppressed: false,
+            blocks_free_cast: false,
         }
     }
 }

@@ -3740,3 +3740,99 @@
         assert_eq!(state.objects[&id].zone, CardZone::Graveyard,
             "artifact should be destroyed by Abrade's artifact mode");
     }
+
+    // ── §42: Grafdigger's Cage ────────────────────────────────────────────────
+
+    #[test]
+    fn test_grafdiggers_cage_blocks_free_cast() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Enter Grafdigger's Cage via change_zone (fires ETB replacement → CI installed).
+        let cage_id = state.alloc_id();
+        let cage_def = catalog_card("Grafdigger's Cage");
+        state.objects.insert(cage_id, GameObject {
+            id: cage_id,
+            catalog_key: "Grafdigger's Cage".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Hand { known: false },
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        preregister_instances(&cage_def, cage_id, PlayerId::Opp, &mut state);
+        state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
+        change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
+        recompute(&mut state);
+
+        // After Cage enters, blocks_free_cast on its materialized def should be true.
+        assert!(
+            state.def_of(cage_id).map_or(false, |d| d.blocks_free_cast),
+            "Cage's materialized def should have blocks_free_cast=true after ETB"
+        );
+
+        // Place a card in exile with a free-cast permission.
+        let target_id = state.alloc_id();
+        state.objects.insert(target_id, GameObject {
+            id: target_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Exile { on_adventure: false },
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        state.free_cast_permissions.push(FreeCastPermission {
+            controller: PlayerId::Us,
+            target_id,
+        });
+
+        // play_free_cast should be blocked by Cage.
+        play_free_cast(target_id, PlayerId::Us, &mut state, 1);
+
+        assert_eq!(
+            state.objects[&target_id].zone,
+            CardZone::Exile { on_adventure: false },
+            "Cage should block free cast — card must remain in exile"
+        );
+        // The permission should NOT have been consumed (we returned early).
+        assert!(
+            state.free_cast_permissions.iter().any(|p| p.target_id == target_id),
+            "free_cast_permission should still be present after Cage blocks"
+        );
+    }
+
+    #[test]
+    fn test_grafdiggers_cage_ci_removed_on_ltb() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Enter Cage then remove it.
+        let cage_id = state.alloc_id();
+        let cage_def = catalog_card("Grafdigger's Cage");
+        state.objects.insert(cage_id, GameObject {
+            id: cage_id,
+            catalog_key: "Grafdigger's Cage".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Hand { known: false },
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        preregister_instances(&cage_def, cage_id, PlayerId::Us, &mut state);
+        state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
+        change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        recompute(&mut state);
+
+        // Destroy Cage.
+        change_zone(cage_id, ZoneId::Graveyard, &mut state, 2, PlayerId::Us);
+
+        // No CI with source == cage_id should remain.
+        let ci_count = state.continuous_instances.iter()
+            .filter(|ci| ci.source_id == cage_id)
+            .count();
+        assert_eq!(ci_count, 0, "Cage CI should be removed when Cage leaves the battlefield");
+    }

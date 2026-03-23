@@ -1675,6 +1675,19 @@ pub(super) fn change_zone(
 /// (which properly registers instances for ETB). For instants/sorceries: runs the spell
 /// factory and moves the card to graveyard.
 pub(super) fn play_free_cast(id: ObjId, actor: PlayerId, state: &mut SimState, t: u8) {
+    // Grafdigger's Cage (and similar) block casting from graveyards/libraries and
+    // creatures entering from those zones.
+    let blocker_ids: Vec<ObjId> = state.objects.values()
+        .filter(|c| c.zone == CardZone::Battlefield)
+        .map(|c| c.id)
+        .collect();
+    let cage_active = blocker_ids.iter().any(|&bid| {
+        state.def_of(bid).map_or(false, |d| d.blocks_free_cast)
+    });
+    if cage_active {
+        state.log(t, actor, "→ free cast blocked (Grafdigger's Cage effect)".to_string());
+        return;
+    }
     state.free_cast_permissions.retain(|p| p.target_id != id);
     let Some(obj) = state.objects.get(&id) else { return };
     let key = obj.catalog_key.clone();

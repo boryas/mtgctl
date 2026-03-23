@@ -66,6 +66,7 @@ fn all_cards() -> Vec<CardDef> {
         lotus_petal(),
         lions_eye_diamond(),
         ursas_saga(),
+        grafdiggers_cage(),
         // Spells — instants
         brainstorm(),
         consider(),
@@ -629,6 +630,36 @@ fn ursas_saga() -> CardDef {
         }],
         ..Default::default()
     }), vec![], None)
+}
+
+/// {1}. Static: creature cards in graveyards and libraries can't enter the battlefield.
+/// Players can't cast spells from graveyards or libraries.
+/// Modeled as a CE that sets `blocks_free_cast = true` on the Cage itself while it's on the
+/// battlefield; `play_free_cast` checks this flag before allowing any free cast or free entry.
+fn grafdiggers_cage() -> CardDef {
+    CardDef::new(
+        "Grafdigger's Cage",
+        CardKind::Artifact(ArtifactData {
+            mana_cost: "1".to_string(),
+            ..Default::default()
+        }),
+        vec![],
+        Some(40),
+        vec![], CardLayout::Normal, None,
+        vec![],
+        vec![etb_self_replacement(|source_id, _id, _controller, state, _t| {
+            let controller = state.objects.get(&source_id).map_or(PlayerId::Us, |o| o.controller);
+            state.continuous_instances.push(ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L3TextEffects,
+                filter: Arc::new(move |cid, _| cid == source_id),
+                modifier: Arc::new(|def, _| { def.blocks_free_cast = true; }),
+                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+            });
+        })],
+        vec![],
+    )
 }
 
 // ── Instants ──────────────────────────────────────────────────────────────────
