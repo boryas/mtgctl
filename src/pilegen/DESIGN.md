@@ -151,6 +151,20 @@ Stored in `GameObject.counters: HashMap<CounterType, u32>` — survives zone cha
 Stored in `SimState.free_cast_permissions: Vec<FreeCastPermission>`; cleared at end of turn.
 Strategy returns `PriorityAction::PlayFreeCast(id)`; engine calls `play_free_cast(id, ...)`.
 
+**`ManaAbility`** (`catalog.rs`) — how a permanent produces mana.
+Fields: `costs: Vec<CostComponent>`, `produces: Vec<Color>` (for affordability prediction),
+`produces_count: usize` (default 1; 2 for Ancient Tomb), `make_effect: ManaEffectFactory`.
+`ManaEffectFactory = Arc<dyn Fn(PlayerId, Option<Color>) -> Effect + Send + Sync>` — factory
+called at activation time. `Option<Color>` is the specific pip being drawn in the color loop
+(`None` for generic-slot activation). Fixed-color sources ignore it; any-color sources
+(Lotus Petal, Cavern) use it to produce the right pip. `eff_mana` is the standard primitive.
+Side effects (e.g. Ancient Tomb: "deal 2 damage") are chained via `.then()`.
+
+`GameEvent::ManaProduced { who: PlayerId, spec: String }` — fired by `eff_mana` through the
+event pipeline so replacement effects can intercept (e.g. Damping Sphere). State mutation
+(`do_effect`) parses `spec` and adds to `ManaPool`. Mana abilities bypass the stack per
+CR 605.3b; `produce_mana` remains a synchronous call path.
+
 **`CostComponent`** (`catalog.rs`) — a single payable cost.
 Combinators: `CostAnd(Vec<CostComponent>)`, `CostOr(Vec<CostComponent>)`.
 Atomics: `Mana`, `TapSelf`, `SacSelf`, `DiscardSelf`, `Life`, `SacPermanent`,

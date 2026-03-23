@@ -239,13 +239,35 @@ impl AbilityDef {
 
 // ── Mana ability types ────────────────────────────────────────────────────────
 
+/// Factory that builds the mana-production effect for one activation.
+/// `who` — resolved controller; `color` — the specific color needed (`None` = generic slot).
+/// Fixed-color sources (e.g. Islands) ignore `color`; any-color sources (e.g. Lotus Petal)
+/// use `color` to produce exactly the requested pip.
+pub(crate) type ManaEffectFactory =
+    std::sync::Arc<dyn Fn(PlayerId, Option<Color>) -> Effect + Send + Sync>;
+
 /// How a permanent produces mana.
-/// `costs` — what must be paid to activate (typically TapSelf or SacSelf).
-/// `produces` — colors produced; empty vec → contributes to generic total only.
-#[derive(Clone, Default)]
+/// `costs`         — what must be paid to activate (typically TapSelf or SacSelf).
+/// `produces`      — colors produced; empty vec → colorless only. Used for affordability prediction.
+/// `produces_count`— number of mana produced per activation (default 1). Used for prediction.
+/// `make_effect`   — factory that builds the actual production effect (add mana + any side effects).
+#[derive(Clone)]
 pub(crate) struct ManaAbility {
     pub(crate) costs: Vec<CostComponent>,
     pub(crate) produces: Vec<Color>,
+    pub(crate) produces_count: usize,
+    pub(crate) make_effect: ManaEffectFactory,
+}
+
+impl Default for ManaAbility {
+    fn default() -> Self {
+        Self {
+            costs: vec![],
+            produces: vec![],
+            produces_count: 1,
+            make_effect: std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_, _, _| {}))),
+        }
+    }
 }
 
 /// The five basic land subtypes.

@@ -92,15 +92,11 @@ pub(crate) fn eff_life_loss(who: PlayerId, n: i32) -> Effect {
 }
 
 /// Add mana per `spec` (e.g. `"BBB"`) to `who`'s pool.
+/// Fires `GameEvent::ManaProduced` so replacement effects can intercept.
 pub(crate) fn eff_mana(who: PlayerId, spec: impl Into<String>) -> Effect {
     let spec = spec.into();
     Effect(Arc::new(move |state, t, _targets| {
-        let mc = parse_mana_cost(&spec);
-        let pool = &mut state.player_mut(who).pool;
-        pool.w += mc.w; pool.u += mc.u; pool.b += mc.b;
-        pool.r += mc.r; pool.g += mc.g; pool.c += mc.c;
-        pool.total += mc.mana_value();
-        state.log(t, who, format!("→ add {} to pool", spec));
+        fire_event(GameEvent::ManaProduced { who, spec: spec.clone() }, state, t, who);
     }))
 }
 

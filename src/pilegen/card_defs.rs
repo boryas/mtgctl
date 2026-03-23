@@ -59,6 +59,8 @@ fn all_cards() -> Vec<CardDef> {
         arid_mesa(),
         // Lands — other
         wasteland(),
+        karakas(),
+        ancient_tomb(),
         cavern_of_souls(),
         // Artifacts
         lotus_petal(),
@@ -124,9 +126,22 @@ fn simple(name: &str, kind: CardKind, colors: Vec<Color>, play_weight: Option<u3
     )
 }
 
+fn color_to_mana_char(c: Color) -> &'static str {
+    match c {
+        Color::White => "W", Color::Blue => "U", Color::Black => "B",
+        Color::Red => "R", Color::Green => "G",
+    }
+}
+
 /// `ManaAbility` that taps self and produces the given mana string (e.g. `"U"`, `"B"`).
 fn tap_produces(s: &str) -> ManaAbility {
-    ManaAbility { costs: vec![CostComponent::TapSelf], produces: produces_colors(s) }
+    let s_owned = s.to_string();
+    ManaAbility {
+        costs: vec![CostComponent::TapSelf],
+        produces: produces_colors(s),
+        produces_count: 1,
+        make_effect: std::sync::Arc::new(move |who, _color| eff_mana(who, s_owned.clone())),
+    }
 }
 
 /// `AbilityDef` for a fetch land: sacrifice self, pay 1 life, search → Battlefield.
@@ -375,6 +390,53 @@ fn wasteland() -> CardDef {
     }), vec![], None)
 }
 
+fn karakas() -> CardDef {
+    let legend_creature = obj_pred_from_card(pred_and(
+        pred_type_eq(CardType::Creature),
+        pred_has_supertype(Supertype::Legendary),
+    ));
+    CardDef::new(
+        "Karakas",
+        CardKind::Land(LandData {
+            mana_abilities: vec![tap_produces("W")],
+            abilities: vec![AbilityDef {
+                costs: vec![CostComponent::TapSelf],
+                target_spec: TargetSpec::Union(vec![
+                    TargetSpec::ObjectInZone {
+                        controller: Who::Actor,
+                        zone: ZoneId::Battlefield,
+                        filter: legend_creature.clone(),
+                    },
+                    TargetSpec::ObjectInZone {
+                        controller: Who::Opp,
+                        zone: ZoneId::Battlefield,
+                        filter: legend_creature,
+                    },
+                ]),
+                ability_factory: Some(Arc::new(|who, _| eff_bounce_target(who))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        vec![], None, vec![Supertype::Legendary], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+    )
+}
+
+fn ancient_tomb() -> CardDef {
+    simple("Ancient Tomb", CardKind::Land(LandData {
+        mana_abilities: vec![ManaAbility {
+            costs: vec![CostComponent::TapSelf],
+            produces: vec![],      // colorless
+            produces_count: 2,
+            make_effect: std::sync::Arc::new(|who, _| {
+                eff_mana(who, "CC").then(eff_life_loss(who, 2))
+            }),
+        }],
+        ..Default::default()
+    }), vec![], None)
+}
+
 fn polluted_delta() -> CardDef {
     simple("Polluted Delta", CardKind::Land(LandData {
         abilities: vec![fetch_ability(pred_and(
@@ -495,8 +557,20 @@ fn cavern_of_souls() -> CardDef {
             // {T}: Add {C} — colorless
             // {T}: Add one mana of any color (type restriction and uncounterable not yet modeled)
             mana_abilities: vec![
-                ManaAbility { costs: vec![CostComponent::TapSelf], produces: vec![] },
-                ManaAbility { costs: vec![CostComponent::TapSelf], produces: produces_colors("WUBRG") },
+                ManaAbility {
+                    costs: vec![CostComponent::TapSelf],
+                    produces: vec![],
+                    produces_count: 1,
+                    make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "C")),
+                },
+                ManaAbility {
+                    costs: vec![CostComponent::TapSelf],
+                    produces: produces_colors("WUBRG"),
+                    produces_count: 1,
+                    make_effect: std::sync::Arc::new(|who, color| {
+                        eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
+                    }),
+                },
             ],
             ..Default::default()
         }),
@@ -515,7 +589,14 @@ fn cavern_of_souls() -> CardDef {
 fn lotus_petal() -> CardDef {
     simple("Lotus Petal", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
-        mana_abilities: vec![ManaAbility { costs: vec![CostComponent::SacSelf], produces: produces_colors("WUBRG") }],
+        mana_abilities: vec![ManaAbility {
+            costs: vec![CostComponent::SacSelf],
+            produces: produces_colors("WUBRG"),
+            produces_count: 1,
+            make_effect: std::sync::Arc::new(|who, color| {
+                eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
+            }),
+        }],
         ..Default::default()
     }), vec![], Some(25))
 }

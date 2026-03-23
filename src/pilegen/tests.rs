@@ -1208,7 +1208,12 @@
         // (75% roll). Run with multiple seeds to confirm it fires and the creature enters play.
         let borrower_def = catalog_card("Brazen Borrower");
         let island2_def = CardDef::new("Island2", CardKind::Land(LandData {
-            mana_abilities: vec![ManaAbility { costs: vec![CostComponent::TapSelf], produces: produces_colors("U") }],
+            mana_abilities: vec![ManaAbility {
+                costs: vec![CostComponent::TapSelf],
+                produces: produces_colors("U"),
+                produces_count: 1,
+                make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "U")),
+            }],
             ..Default::default()
         }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![]);
         let catalog = vec![borrower_def.clone(), catalog_card("Island"), island2_def.clone(), catalog_card("Swamp")];
@@ -3599,4 +3604,85 @@
 
         assert_eq!(state.objects[&top_id].zone, CardZone::Library,
             "top library card should stay when surveil keeps");
+    }
+
+    // ── 39. Ancient Tomb ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ancient_tomb_produces_two_and_deals_damage() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.us.life = 20;
+
+        let tomb_id = {
+            let def = catalog_card("Ancient Tomb");
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Ancient Tomb".to_string(),
+                owner: PlayerId::Us,
+                controller: PlayerId::Us,
+                zone: CardZone::Hand { known: false },
+                is_token: false,
+                bf: None, spell: None, materialized: None,
+                counters: HashMap::new(),
+            });
+            preregister_instances(&def, id, PlayerId::Us, &mut state);
+            state.catalog.entry("Ancient Tomb".to_string()).or_insert(def);
+            id
+        };
+        // ETB via change_zone, which calls activate_instances and recompute (sets materialized)
+        change_zone(tomb_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+
+        let cost = ManaCost { generic: 2, ..Default::default() };
+        state.produce_mana(PlayerId::Us, &cost, 1);
+
+        assert_eq!(state.us.pool.total, 2, "Ancient Tomb should produce 2 mana");
+        assert_eq!(state.us.pool.c, 2, "both mana pips should be colorless");
+        assert_eq!(state.us.life, 18, "Ancient Tomb deals 2 damage to controller");
+        assert!(state.objects[&tomb_id].bf.as_ref().map_or(false, |bf| bf.tapped),
+            "Ancient Tomb should be tapped after activation");
+    }
+
+    // ── 40. Karakas ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_karakas_bounces_opp_legendary_creature() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Put a legendary creature on opp's battlefield (use Emrakul as a stand-in)
+        // Build a minimal legendary creature and put it on opp's battlefield.
+        let legendary_def = {
+            CardDef::new(
+                "TestLegend", CardKind::Creature(CreatureData::new("1W", 2, 2)),
+                vec![], None, vec![Supertype::Legendary], CardLayout::Normal, None,
+                vec![], vec![], vec![],
+            )
+        };
+        state.catalog.insert("TestLegend".to_string(), legendary_def.clone());
+
+        let creature_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "TestLegend".to_string(),
+                owner: PlayerId::Opp,
+                controller: PlayerId::Opp,
+                zone: CardZone::Hand { known: false },
+                is_token: false,
+                bf: None, spell: None, materialized: None,
+                counters: HashMap::new(),
+            });
+            preregister_instances(&legendary_def, id, PlayerId::Opp, &mut state);
+            id
+        };
+        change_zone(creature_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
+
+        // Activate Karakas, targeting the legendary creature
+        let effect = eff_bounce_target(PlayerId::Us);
+        effect.call(&mut state, 1, &[creature_id]);
+
+        assert_eq!(state.objects[&creature_id].zone, CardZone::Hand { known: false },
+            "legendary creature should be in opp's hand after Karakas activation");
     }

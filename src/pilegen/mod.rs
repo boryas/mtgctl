@@ -256,6 +256,9 @@ pub(super) enum GameEvent {
     EnteredPhase {
         phase: PhaseKind,
     },
+    /// Mana was added to a player's pool. Fires through the event pipeline so
+    /// replacement effects (e.g. Damping Sphere) can intercept.
+    ManaProduced { who: PlayerId, spec: String },
     /// A creature was declared as an attacker.
     CreatureAttacked {
         attacker_id: ObjId,
@@ -660,7 +663,8 @@ fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut 
         .filter(|ma| !ma_requires_tap(ma) || !tapped)
         .collect();
     if avail.is_empty() { return; }
-    p.total += 1;
+    let count = avail.iter().map(|ma| ma.produces_count).max().unwrap_or(1);
+    p.total += count as i32;
     // Track which colors this source *can* produce (union across available abilities).
     let mut produced = [false; 5]; // W U B R G
     for ma in &avail {
@@ -948,15 +952,15 @@ impl SimState {
     /// Returns a log of activations.
     fn produce_mana(&mut self, who: PlayerId, cost: &ManaCost, _t: u8) -> Vec<String> {
         let mut log: Vec<String> = Vec::new();
-        let color_specs: [(i32, Color, fn(&mut ManaPool)); 5] = [
-            (cost.b, Color::Black, |p| p.b += 1),
-            (cost.u, Color::Blue,  |p| p.u += 1),
-            (cost.w, Color::White, |p| p.w += 1),
-            (cost.r, Color::Red,   |p| p.r += 1),
-            (cost.g, Color::Green, |p| p.g += 1),
+        let color_specs: [(i32, Color); 5] = [
+            (cost.b, Color::Black),
+            (cost.u, Color::Blue),
+            (cost.w, Color::White),
+            (cost.r, Color::Red),
+            (cost.g, Color::Green),
         ];
 
-        for (need, color, add_color) in color_specs {
+        for (need, color) in color_specs {
             let mut remaining = need;
             while remaining > 0 {
                 // Find a battlefield permanent controlled by `who` with the right ability.
@@ -979,6 +983,14 @@ impl SimState {
                     });
                 if let Some((id, name, sac)) = found {
                     let color_ch = match color { Color::White=>'W', Color::Blue=>'U', Color::Black=>'B', Color::Red=>'R', Color::Green=>'G' };
+                    let make = self.def_of(id)
+                        .and_then(|d| d.mana_abilities().iter()
+                            .find(|ma| {
+                                let tapped = self.objects.get(&id)
+                                    .and_then(|o| o.bf.as_ref()).map_or(false, |bf| bf.tapped);
+                                (!ma_requires_tap(ma) || !tapped) && ma.produces.contains(&color)
+                            })
+                            .map(|ma| std::sync::Arc::clone(&ma.make_effect)));
                     if sac {
                         log.push(format!("sac {} → {}", name, color_ch));
                         if let Some(card) = self.objects.get_mut(&id) {
@@ -991,8 +1003,7 @@ impl SimState {
                             bf.tapped = true;
                         }
                     }
-                    add_color(&mut self.player_mut(who).pool);
-                    self.player_mut(who).pool.total += 1;
+                    if let Some(f) = make { f(who, Some(color)).call(self, _t, &[]); }
                     remaining -= 1;
                     continue;
                 }
@@ -1021,20 +1032,29 @@ impl SimState {
                     (*id, c.catalog_key.clone(), sac)
                 });
             if let Some((id, name, sac)) = found {
+                let (make, count) = {
+                    let tapped = self.objects.get(&id)
+                        .and_then(|o| o.bf.as_ref()).map_or(false, |bf| bf.tapped);
+                    self.def_of(id)
+                        .and_then(|d| d.mana_abilities().iter()
+                            .find(|ma| !ma_requires_tap(ma) || !tapped)
+                            .map(|ma| (std::sync::Arc::clone(&ma.make_effect), ma.produces_count)))
+                        .unwrap_or_else(|| (std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_,_,_| {}))), 1))
+                };
                 if sac {
-                    log.push(format!("sac {} → 1", name));
+                    log.push(format!("sac {} → {}", name, count));
                     if let Some(card) = self.objects.get_mut(&id) {
                         card.zone = CardZone::Graveyard;
                         card.bf = None;
                     }
                 } else {
-                    log.push(format!("tap {} → 1", name));
+                    log.push(format!("tap {} → {}", name, count));
                     if let Some(bf) = self.permanent_bf_mut(id) {
                         bf.tapped = true;
                     }
                 }
-                self.player_mut(who).pool.total += 1;
-                remaining_generic -= 1;
+                make(who, None).call(self, _t, &[]);
+                remaining_generic -= count as i32;
                 continue;
             }
             break;
@@ -1571,6 +1591,13 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
                 state.set_card_zone(card_id, CardZone::Hand { known: false });
             }
         }
+        GameEvent::ManaProduced { who, ref spec } => {
+            let mc = parse_mana_cost(spec);
+            let pool = &mut state.player_mut(*who).pool;
+            pool.w += mc.w; pool.u += mc.u; pool.b += mc.b;
+            pool.r += mc.r; pool.g += mc.g; pool.c += mc.c;
+            pool.total += mc.mana_value();
+        }
         // EnteredStep, EnteredPhase, CreatureAttacked — notification events, no state mutation
         _ => {}
     }
@@ -1603,6 +1630,9 @@ fn log_event(event: &GameEvent, state: &mut SimState, t: u8, actor: PlayerId) {
             } else {
                 state.log(t, controller, format!("draw ({}) [hand: {}]", draw_index, hand));
             }
+        }
+        GameEvent::ManaProduced { who, ref spec } => {
+            state.log(t, *who, format!("→ add {} to pool", spec));
         }
         _ => {}
     }
