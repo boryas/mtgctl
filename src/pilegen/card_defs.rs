@@ -79,6 +79,7 @@ fn all_cards() -> Vec<CardDef> {
         long_goodbye(),
         consign_to_memory(),
         surgical_extraction(),
+        abrade(),
         red_elemental_blast(),
         pyroblast(),
         blue_elemental_blast(),
@@ -922,6 +923,38 @@ fn counter_or_destroy_if_color(who: PlayerId, c: Color) -> Effect {
 }
 
 /// Choose one — Counter target blue spell; or destroy target blue permanent. CR 701.5, 701.7.
+/// Choose one: deal 3 damage to target creature; or destroy target artifact.
+fn abrade() -> CardDef {
+    simple("Abrade", CardKind::Instant(SpellData {
+        mana_cost: "1R".to_string(),
+        target_spec: TargetSpec::Union(vec![
+            TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Battlefield,
+                filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+            },
+            TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Battlefield,
+                filter: obj_pred_from_card(pred_type_eq(CardType::Artifact)),
+            },
+        ]),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
+            Effect(Arc::new(move |state, t, targets| {
+                if let Some(&id) = targets.first() {
+                    let is_creature = state.def_of(id).map_or(false, |d| d.is_creature());
+                    if is_creature {
+                        eff_damage_target(who, 3).call(state, t, targets);
+                    } else {
+                        eff_destroy_target(who).call(state, t, targets);
+                    }
+                }
+            }))
+        })),
+        ..Default::default()
+    }), parse_colors("1R", false, false), None)
+}
+
 fn red_elemental_blast() -> CardDef {
     simple("Red Elemental Blast", CardKind::Instant(SpellData {
         mana_cost: "R".to_string(),

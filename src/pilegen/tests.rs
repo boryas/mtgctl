@@ -3686,3 +3686,57 @@
         assert_eq!(state.objects[&creature_id].zone, CardZone::Hand { known: false },
             "legendary creature should be in opp's hand after Karakas activation");
     }
+
+    // ── 41. Abrade ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_abrade_creature_mode_deals_lethal_damage() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // 3/3 creature — 3 damage is lethal
+        let creature_def = creature("Target3_3", 3, 3);
+        let id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, BattlefieldState::new());
+
+        eff_damage_target(PlayerId::Us, 3).call(&mut state, 1, &[id]);
+        check_state_based_actions(&mut state, 1);
+
+        assert_eq!(state.objects[&id].zone, CardZone::Graveyard,
+            "3/3 hit by 3 damage should die via SBA");
+    }
+
+    #[test]
+    fn test_abrade_creature_mode_nonlethal_survives() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // 4/4 creature — 3 damage is not lethal
+        let creature_def = creature("Target4_4", 4, 4);
+        let id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, BattlefieldState::new());
+
+        eff_damage_target(PlayerId::Us, 3).call(&mut state, 1, &[id]);
+        check_state_based_actions(&mut state, 1);
+
+        assert_eq!(state.objects[&id].zone, CardZone::Battlefield,
+            "4/4 hit by 3 damage should survive");
+        assert_eq!(state.objects[&id].bf.as_ref().unwrap().damage, 3);
+    }
+
+    #[test]
+    fn test_abrade_artifact_mode_destroys() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Teferi's Puzzle Box as a stand-in artifact
+        let artifact_def = {
+            let def = CardDef::new(
+                "TestArtifact",
+                CardKind::Artifact(ArtifactData { mana_cost: "1".to_string(), ..Default::default() }),
+                vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![],
+            );
+            def
+        };
+        let id = add_perm_with_def(&mut state, PlayerId::Opp, &artifact_def, BattlefieldState::new());
+
+        eff_destroy_target(PlayerId::Us).call(&mut state, 1, &[id]);
+
+        assert_eq!(state.objects[&id].zone, CardZone::Graveyard,
+            "artifact should be destroyed by Abrade's artifact mode");
+    }

@@ -101,6 +101,19 @@ pub(crate) fn eff_mana(who: PlayerId, spec: impl Into<String>) -> Effect {
 }
 
 /// Destroy the permanent in `targets[0]`. `caster` used for logging.
+/// Deal `n` damage to the permanent in `targets[0]`. SBAs handle lethal-damage destruction.
+pub(crate) fn eff_damage_target(caster: PlayerId, n: i32) -> Effect {
+    Effect(Arc::new(move |state, t, targets| {
+        if let Some(&id) = targets.first() {
+            if let Some(bf) = state.permanent_bf_mut(id) {
+                bf.damage += n;
+            }
+            let name = state.objects.get(&id).map(|o| o.catalog_key.as_str()).unwrap_or("?");
+            state.log(t, caster, format!("→ deals {} damage to {}", n, name));
+        }
+    }))
+}
+
 pub(crate) fn eff_destroy_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
