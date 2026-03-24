@@ -46,6 +46,8 @@ pub(crate) struct ObjId(u64);
 pub(super) enum CounterType {
     /// Placed on cards exiled by Dauthi Voidwalker's replacement effect.
     Void,
+    /// Placed on Engineered Explosives (and similar) via sunburst on entry.
+    Charge,
 }
 
 /// Permission granted by an effect allowing a player to play one specific exiled card
@@ -264,7 +266,22 @@ pub(super) enum GameEvent {
         attacker_id: ObjId,
         attacker_controller: PlayerId,
     },
-    // Future variants: DamageDealt, SpellCast, SpellResolved, AbilityActivated,
+    /// Fired just before cost payment and state mutation in `cast_spell`. Prohibition gate.
+    /// If suppressed by a "can't cast" prohibition, `cast_spell` returns `None`.
+    SpellBeingCast {
+        caster: PlayerId,
+        card_id: ObjId,
+        mana_value: i32,
+        is_noncreature: bool,
+    },
+    /// Fired after all costs are paid and the spell object is on the stack.
+    /// Used by triggers that react to casting (e.g. Lavinia's counter-free-spells trigger).
+    SpellCast {
+        caster: PlayerId,
+        card_id: ObjId,
+        mana_spent: bool,
+    },
+    // Future variants: DamageDealt, SpellResolved, AbilityActivated,
     //                  CounterChanged, LifeChanged, TokenCreated.
 }
 
@@ -353,6 +370,10 @@ pub(super) enum ChoiceRequest {
     CreatureType,
     /// Choose a card name (e.g. Disruptor Flute, Pithing Needle, Meddling Mage).
     CardName,
+    /// Choose one of N modes for a modal spell (e.g. Sheoldred's Edict "Choose one —").
+    /// The payload is the number of available modes. Strategy returns `ChoiceResult::Mode(i)`
+    /// where `i < N`. Default: mode 0.
+    Mode(usize),
 }
 
 /// The value returned by `SimState.resolve_choice` for a given `ChoiceRequest`.
@@ -361,6 +382,7 @@ pub(super) enum ChoiceResult {
     Color(Color),
     CreatureType(String),
     CardName(String),
+    Mode(usize),
 }
 
 /// Card supertypes (Legendary, Basic, Snow, World, Ongoing).
@@ -806,6 +828,13 @@ pub(crate) struct SimState {
     /// Default: coin flip. Override in tests to force deterministic outcomes.
     pub(super) surveil_choice:
         std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>,
+    /// Strategy callback for forced sacrifice: given the player who must sacrifice and the
+    /// list of candidate ObjIds matching the effect's filter, returns the chosen id.
+    /// Used by `eff_sacrifice` (e.g. Sheoldred's Edict, Liliana of the Veil).
+    /// Effects clone this Arc before calling with `&*state` (same double-borrow idiom).
+    /// Default: first candidate. Override in tests or per-strategy for smarter selection.
+    pub(super) sacrifice_choice:
+        std::sync::Arc<dyn Fn(PlayerId, &[ObjId], &SimState) -> Option<ObjId> + Send + Sync>,
 }
 
 impl SimState {
@@ -851,8 +880,10 @@ impl SimState {
                 ChoiceRequest::Color        => ChoiceResult::Color(Color::Blue),
                 ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
                 ChoiceRequest::CardName     => ChoiceResult::CardName(String::new()),
+                ChoiceRequest::Mode(_)      => ChoiceResult::Mode(0),
             }),
             surveil_choice: std::sync::Arc::new(|_, _| rand::thread_rng().gen_bool(0.5)),
+            sacrifice_choice: std::sync::Arc::new(|_, candidates, _| candidates.first().copied()),
         };
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();
@@ -1527,12 +1558,13 @@ pub(super) fn card_zone_to_id(zone: &CardZone) -> ZoneId {
 ///   4. Log
 ///   5. Trigger dispatch (CR 603 — collect triggered abilities)
 ///   6. Recompute CE materialization (at top-level depth only)
+/// Returns `true` iff the event was suppressed by a "can't" prohibition (CR 614.17).
 pub(super) fn fire_event(
     event: GameEvent,
     state: &mut SimState,
     t: u8,
     actor: PlayerId,
-) {
+) -> bool {
     state.repl_depth += 1;
     if state.repl_depth == 1 {
         state.repl_applied.clear();
@@ -1546,7 +1578,7 @@ pub(super) fn fire_event(
     if prohibited {
         state.log(t, actor, "→ event prohibited (\"can't\" effect)".to_string());
         state.repl_depth -= 1;
-        return;
+        return true;
     }
 
     // Stage 2: Replacement check — first active, non-applied replacement that matches.
@@ -1567,7 +1599,7 @@ pub(super) fn fire_event(
         state.repl_applied.insert(repl_id);
         effect.call(state, t, &targets);
         state.repl_depth -= 1;
-        return; // original effect suppressed
+        return false; // original effect suppressed by replacement (not a prohibition)
     }
 
     // Stage 3: Apply state mutation.
@@ -1586,6 +1618,7 @@ pub(super) fn fire_event(
         // strategy, display, and combat damage always see a current, CE-adjusted view.
         recompute(state);
     }
+    false
 }
 
 fn do_effect(event: &GameEvent, state: &mut SimState) {
@@ -1773,6 +1806,7 @@ fn can_pay_single_cost(
         CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
         CostComponent::Life(n) => state.player(who).life > *n,
         CostComponent::XLife => state.player(who).life >= chosen_x as i32,
+        CostComponent::XMana => state.potential_mana(who).total >= chosen_x as i32,
         CostComponent::SacPermanent(pred) => {
             state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
         }
@@ -1926,6 +1960,12 @@ fn pay_single_cost(
             state.player_mut(who).life -= chosen_x as i32;
             ctx.chosen_x = chosen_x;
         }
+        CostComponent::XMana => {
+            let mc = ManaCost { generic: chosen_x as i32, ..ManaCost::default() };
+            let mana_log = state.pay_mana(who, &mc, t);
+            state.log_mana_activations(t, who, mana_log);
+            ctx.chosen_x = chosen_x;
+        }
         CostComponent::Replicate(_) => {
             // No-op: replicate payment and copy-pushing are handled in cast_spell
             // after the spell has been placed on the stack (we need stack context).
@@ -2014,6 +2054,7 @@ fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
         }
         CostComponent::Replicate(mc) => format!("replicate {}", mc.display()),
         CostComponent::XLife => "pay X life".to_string(),
+        CostComponent::XMana => "pay X mana".to_string(),
     }).collect()
 }
 
@@ -2055,6 +2096,15 @@ fn cast_spell(
             eprintln!("[priority] BUG: split-back sorcery {} on non-empty stack, treating as Pass", adv.name);
             return None;
         }
+        // Prohibition gate for back-face casts.
+        if fire_event(GameEvent::SpellBeingCast {
+            caster: who,
+            card_id,
+            mana_value: mana_value(adv.mana_cost()),
+            is_noncreature: !adv.is_creature(),
+        }, state, t, who) {
+            return None;
+        }
         let cost = parse_mana_cost(adv.mana_cost());
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
@@ -2070,6 +2120,8 @@ fn cast_spell(
                 costs_paid_ctx: CostsPaidCtx::default(),
             });
         }
+        let back_mana_spent = mana_value(adv.mana_cost()) > 0;
+        fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent }, state, t, who);
         return Some(card_id);
     }
 
@@ -2117,6 +2169,17 @@ fn cast_spell(
         return None;
     }
     if !can_pay_costs(&def.additional_costs, state, who, card_id, false, chosen_x) {
+        return None;
+    }
+
+    // Prohibition gate: fire SpellBeingCast before any state mutation.
+    // "Can't cast" effects (CR 614.17) suppress this event; if prohibited, bail out.
+    if fire_event(GameEvent::SpellBeingCast {
+        caster: who,
+        card_id,
+        mana_value: mana_value(def.mana_cost()),
+        is_noncreature: !def.is_creature(),
+    }, state, t, who) {
         return None;
     }
 
@@ -2213,6 +2276,13 @@ fn cast_spell(
         }
     }
 
+    // SpellCast fires after all costs paid and spell is on the stack.
+    let mana_spent = match &alt_cost {
+        None     => mana_value(def.mana_cost()) > 0,
+        Some(ac) => ac.costs.iter().any(|c| matches!(c, CostComponent::Mana(_))),
+    };
+    fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent }, state, t, who);
+
     Some(card_id)
 }
 
@@ -2265,21 +2335,29 @@ fn check_state_based_actions(
         }
 
         // SBA: creature with toughness ≤ 0 goes to graveyard (rule 704.5f).
-        // SBA: creature with lethal damage goes to graveyard (rule 704.5g).
+        // SBA: creature with toughness ≤ 0 ceases to exist (CR 704.5f) — not "destroyed",
+        // so indestructible does not apply; use change_zone directly.
+        // SBA: creature with lethal damage is destroyed (CR 704.5g) — indestructible applies;
+        // use destroy_one so indestructibility checks there will fire when added.
         for who in [PlayerId::Us, PlayerId::Opp] {
-            let dying: Vec<ObjId> = state.permanents_of(who)
-                .filter_map(|card| {
-                    let bf = card.bf.as_ref()?;
-                    if !state.def_of(card.id).map_or(false, |d| d.is_creature()) { return None; }
-                    let tgh = state.def_of(card.id)
-                        .and_then(|d| d.as_creature())
-                        .map(|c| c.toughness())
-                        .unwrap_or(1);
-                    if tgh <= 0 || bf.damage >= tgh { Some(card.id) } else { None }
-                })
-                .collect();
-            for id in dying {
+            let mut zero_tgh: Vec<ObjId> = Vec::new();
+            let mut lethal_dmg: Vec<ObjId> = Vec::new();
+            for card in state.permanents_of(who).collect::<Vec<_>>() {
+                let Some(bf) = card.bf.as_ref() else { continue };
+                if !state.def_of(card.id).map_or(false, |d| d.is_creature()) { continue; }
+                let tgh = state.def_of(card.id)
+                    .and_then(|d| d.as_creature())
+                    .map(|c| c.toughness())
+                    .unwrap_or(1);
+                if tgh <= 0 { zero_tgh.push(card.id); }
+                else if bf.damage >= tgh { lethal_dmg.push(card.id); }
+            }
+            for id in zero_tgh {
                 change_zone(id, ZoneId::Graveyard, state, t, who);
+                any = true;
+            }
+            for id in lethal_dmg {
+                destroy_one(id, state, t, who);
                 any = true;
             }
         }

@@ -66,6 +66,7 @@ fn all_cards() -> Vec<CardDef> {
         lotus_petal(),
         lions_eye_diamond(),
         ursas_saga(),
+        engineered_explosives(),
         grafdiggers_cage(),
         // Spells — instants
         brainstorm(),
@@ -85,6 +86,7 @@ fn all_cards() -> Vec<CardDef> {
         pyroblast(),
         blue_elemental_blast(),
         hydroblast(),
+        sheoldreds_edict(),
         // Spells — sorceries
         toxic_deluge(),
         doomsday(),
@@ -105,6 +107,7 @@ fn all_cards() -> Vec<CardDef> {
         orcish_bowmasters(),
         murktide_regent(),
         dauthi_voidwalker(),
+        lavinia_azorius_renegade(),
         // DFCs / split
         tamiyo_inquisitive_student(),
         brazen_borrower(),
@@ -642,6 +645,69 @@ fn ursas_saga() -> CardDef {
 ///       Implemented as a `ProhibitionDef` — checked in `fire_event` before replacements.
 ///   (b) CE sets `blocks_gy_and_lib_access = true` on Cage's own materialized def, gating
 ///       `play_free_cast` so spells can't be cast from graveyards or libraries either.
+/// Sunburst: enters with a charge counter for each distinct color of mana spent to cast it.
+/// Modeled via `CostComponent::XMana` (strategy declares the intended distinct-color count
+/// as chosen_x; the engine pays that many generic mana). The ETB replacement reads
+/// `resolving_costs_ctx.chosen_x` and places that many Charge counters.
+/// {2}, Sacrifice: destroy each nonland permanent with MV equal to the charge count.
+/// CR 702.43 sunburst, CR 701.7 destroy.
+fn engineered_explosives() -> CardDef {
+    let mut def = CardDef::new(
+        "Engineered Explosives",
+        CardKind::Artifact(ArtifactData {
+            mana_cost: "0".to_string(),
+            abilities: vec![AbilityDef {
+                source_zone: SourceZone::Battlefield,
+                costs: vec![
+                    CostComponent::Mana(parse_mana_cost("2")),
+                    CostComponent::SacSelf,
+                ],
+                ability_factory: Some(Arc::new(|who, source_id| {
+                    Effect(Arc::new(move |state, t, _targets| {
+                        // EE has been sacrificed; zone-independent counters persist in objects map.
+                        let n = state.objects.get(&source_id)
+                            .and_then(|o| o.counters.get(&CounterType::Charge))
+                            .copied()
+                            .unwrap_or(0) as i32;
+                        let filter = obj_pred_from_card(
+                            pred_and(pred_not(pred_type_eq(CardType::Land)), pred_mana_value_eq(n)),
+                        );
+                        state.log(t, who, format!("→ EE[{}]: destroy all nonland MV {}", n, n));
+                        eff_destroy_all(who, filter).call(state, t, &[]);
+                    }))
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        vec![],
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![],
+        vec![ReplacementDef {
+            check: Arc::new(etb_self_check),
+            make_effect: Arc::new(|_source_id, controller: PlayerId| {
+                Effect(Arc::new(move |state, t, targets| {
+                    let Some(&id) = targets.first() else { return; };
+                    let chosen_x = state.resolving_costs_ctx.chosen_x;
+                    if let Some(obj) = state.objects.get_mut(&id) {
+                        *obj.counters.entry(CounterType::Charge).or_insert(0) = chosen_x;
+                    }
+                    let from = current_zone_id(id, state);
+                    fire_event(
+                        GameEvent::ZoneChange { id, actor: controller, from, to: ZoneId::Battlefield, controller },
+                        state, t, controller,
+                    );
+                }))
+            }),
+        }],
+        vec![],
+        vec![],
+    );
+    def.additional_costs = vec![CostComponent::XMana];
+    def
+}
+
 fn grafdiggers_cage() -> CardDef {
     CardDef::new(
         "Grafdigger's Cage",
@@ -842,6 +908,38 @@ fn long_goodbye() -> CardDef {
     }), parse_colors("1B", false, false), None);
     def.counterable = false;
     def
+}
+
+/// Choose one — each opponent sacrifices a nontoken creature (mode 0), a creature token
+/// (mode 1), or a planeswalker (mode 2) of their choice. Mode selected via `resolve_choice`;
+/// the opponent's specific sacrifice goes through `sacrifice_choice`. CR 700.2, CR 701.16.
+fn sheoldreds_edict() -> CardDef {
+    simple("Sheoldred's Edict", CardKind::Instant(SpellData {
+        mana_cost: "1B".to_string(),
+        spell_factory: Some(Arc::new(|who, source_id, _x| {
+            Effect(Arc::new(move |state, t, _targets| {
+                let f = Arc::clone(&state.resolve_choice);
+                let mode = match f(source_id, &ChoiceRequest::Mode(3), &*state) {
+                    ChoiceResult::Mode(m) => m,
+                    _ => 0,
+                };
+                let filter: ObjPredicate = match mode {
+                    1 => Arc::new(|id, state: &SimState| {
+                        state.objects.get(&id).map_or(false, |o| o.is_token)
+                    }),
+                    2 => obj_pred_from_card(pred_type_eq(CardType::Planeswalker)),
+                    _ => Arc::new(|id, state: &SimState| {
+                        state.objects.get(&id).map_or(false, |o| {
+                            !o.is_token && state.catalog.get(o.catalog_key.as_str())
+                                .map_or(false, |d| d.is_creature())
+                        })
+                    }),
+                };
+                eff_sacrifice(who, Who::Opp, filter).call(state, t, &[]);
+            }))
+        })),
+        ..Default::default()
+    }), parse_colors("1B", false, false), None)
 }
 
 /// Counter target triggered ability or colorless spell.
@@ -1365,6 +1463,50 @@ fn dauthi_voidwalker() -> CardDef {
             }),
         }],
         vec![],
+        vec![],
+    )
+}
+
+/// Prohibition: each opponent can't cast noncreature spells with MV > their land count.
+/// Trigger: whenever an opponent casts a spell with no mana spent, counter it.
+/// CR 614.17 (prohibition), CR 603 (trigger).
+fn lavinia_azorius_renegade() -> CardDef {
+    let mut data = CreatureData::new("WU", 2, 2);
+    data.legendary = true;
+    CardDef::new(
+        "Lavinia, Azorius Renegade",
+        CardKind::Creature(data),
+        parse_colors("WU", true, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![Arc::new(|event, _source_id, controller, _state, pending| {
+            if let GameEvent::SpellCast { caster, card_id, mana_spent } = event {
+                if *caster != controller && !mana_spent {
+                    let spell_id = *card_id;
+                    pending.push(TriggerContext {
+                        source_name: "Lavinia, Azorius Renegade".into(),
+                        controller,
+                        target_spec: TargetSpec::None,
+                        effect: Effect(Arc::new(move |state, t, _| {
+                            counter_one(spell_id, state, t, controller);
+                        })),
+                    });
+                }
+            }
+        })],
+        vec![],
+        vec![ProhibitionDef {
+            check: Arc::new(|event, _source_id, controller, state| {
+                if let GameEvent::SpellBeingCast { caster, mana_value, is_noncreature, .. } = event {
+                    if *caster == controller || !is_noncreature { return false; }
+                    let land_count = state.permanents_of(*caster)
+                        .filter(|o| state.catalog.get(o.catalog_key.as_str())
+                            .map_or(false, |d| d.is_land()))
+                        .count() as i32;
+                    *mana_value > land_count
+                } else { false }
+            }),
+        }],
         vec![],
     )
 }

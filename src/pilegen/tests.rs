@@ -3297,6 +3297,7 @@
             ChoiceRequest::Color => ChoiceResult::Color(chosen_color),
             ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
             ChoiceRequest::CardName => ChoiceResult::CardName(String::new()),
+            ChoiceRequest::Mode(_) => ChoiceResult::Mode(0),
         });
         let id = state.alloc_id();
         let def = catalog_card("Painter's Servant");
@@ -3405,6 +3406,7 @@
             ChoiceRequest::Color => ChoiceResult::Color(Color::Blue),
             ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
             ChoiceRequest::CardName => ChoiceResult::CardName(chosen_name.to_string()),
+            ChoiceRequest::Mode(_) => ChoiceResult::Mode(0),
         });
         let id = state.alloc_id();
         let def = catalog_card("Disruptor Flute");
@@ -3940,4 +3942,240 @@
             CardZone::Battlefield,
             "Cage must not block non-creature cards from entering battlefield"
         );
+    }
+
+    // ── §43: Sheoldred's Edict ────────────────────────────────────────────────
+
+    #[test]
+    fn test_sheoldrds_edict_mode0_sacrifices_nontoken_creature() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let creature_def = creature("Threat", 2, 2);
+        let creature_id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, BattlefieldState::new());
+        // Default mode = 0 (nontoken creature)
+        let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
+            state.objects.get(&id).map_or(false, |o| {
+                !o.is_token && state.catalog.get(o.catalog_key.as_str())
+                    .map_or(false, |d| d.is_creature())
+            })
+        });
+        eff_sacrifice(PlayerId::Us, Who::Opp, filter).call(&mut state, 1, &[]);
+        assert_eq!(state.objects[&creature_id].zone, CardZone::Graveyard,
+            "nontoken creature should be sacrificed");
+    }
+
+    #[test]
+    fn test_sheoldrds_edict_token_filter_spares_nontoken() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let creature_def = creature("Nontoken", 2, 2);
+        let nontoken_id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, BattlefieldState::new());
+        // Add a token manually
+        let token_def = creature("OrcToken", 1, 1);
+        let token_id = state.alloc_id();
+        state.catalog.entry("OrcToken".to_string()).or_insert_with(|| token_def.clone());
+        state.objects.insert(token_id, GameObject {
+            id: token_id,
+            catalog_key: "OrcToken".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Battlefield,
+            is_token: true,
+            bf: Some(BattlefieldState::new()),
+            spell: None,
+            materialized: None,
+            counters: HashMap::new(),
+        });
+        // Mode 1: sacrifice a token
+        let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
+            state.objects.get(&id).map_or(false, |o| o.is_token)
+        });
+        eff_sacrifice(PlayerId::Us, Who::Opp, filter).call(&mut state, 1, &[]);
+        assert_eq!(state.objects[&token_id].zone, CardZone::Graveyard,
+            "token should be sacrificed by mode 1");
+        assert_eq!(state.objects[&nontoken_id].zone, CardZone::Battlefield,
+            "nontoken creature should not be sacrificed by mode 1");
+    }
+
+    // ── §44: Engineered Explosives ────────────────────────────────────────────
+
+    #[test]
+    fn test_ee_etb_places_charge_counters() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Simulate casting EE with chosen_x = 2 by setting resolving_costs_ctx before ETB.
+        state.resolving_costs_ctx.chosen_x = 2;
+        let ee_def = state.catalog.get("Engineered Explosives").cloned()
+            .expect("EE must be in catalog");
+        let ee_id = state.alloc_id();
+        state.objects.insert(ee_id, GameObject {
+            id: ee_id,
+            catalog_key: "Engineered Explosives".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Hand { known: false },
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(),
+        });
+        preregister_instances(&ee_def, ee_id, PlayerId::Us, &mut state);
+        change_zone(ee_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+        assert_eq!(
+            state.objects[&ee_id].counters.get(&CounterType::Charge).copied().unwrap_or(0),
+            2,
+            "EE should enter with 2 charge counters when chosen_x = 2"
+        );
+    }
+
+    #[test]
+    fn test_ee_ability_destroys_matching_mv() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Put EE in play with 2 charge counters (no casting, manual setup).
+        let ee_def = state.catalog.get("Engineered Explosives").cloned()
+            .expect("EE must be in catalog");
+        let ee_id = add_perm_with_def(&mut state, PlayerId::Us, &ee_def, BattlefieldState::new());
+        *state.objects.get_mut(&ee_id).unwrap().counters.entry(CounterType::Charge).or_insert(0) = 2;
+        // MV 2 permanent: a 2/2 creature with mana_cost "1B" (MV=2).
+        let mv2_def = {
+            let mut data = CreatureData::new("1B", 2, 2);
+            data.exileable = false;
+            CardDef::new("MV2Creature", CardKind::Creature(data), parse_colors("1B", false, false),
+                None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
+        };
+        let mv2_id = add_perm_with_def(&mut state, PlayerId::Opp, &mv2_def, BattlefieldState::new());
+        // MV 3 permanent: should survive.
+        let mv3_def = {
+            let data = CreatureData::new("2B", 2, 2);
+            CardDef::new("MV3Creature", CardKind::Creature(data), parse_colors("2B", false, false),
+                None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
+        };
+        let mv3_id = add_perm_with_def(&mut state, PlayerId::Opp, &mv3_def, BattlefieldState::new());
+        // Manually fire the ability effect (skip cost payment for the test).
+        let ability_factory = ee_def.abilities().iter()
+            .find(|ab| matches!(ab.source_zone, SourceZone::Battlefield))
+            .and_then(|ab| ab.ability_factory.clone())
+            .expect("EE must have a battlefield ability");
+        let eff = ability_factory(PlayerId::Us, ee_id);
+        eff.call(&mut state, 1, &[]);
+        assert_eq!(state.objects[&mv2_id].zone, CardZone::Graveyard,
+            "MV 2 permanent should be destroyed by EE[2]");
+        assert_eq!(state.objects[&mv3_id].zone, CardZone::Battlefield,
+            "MV 3 permanent should survive EE[2]");
+    }
+
+    // ── §45: Lavinia, Azorius Renegade ────────────────────────────────────────
+
+    /// Helper: put Lavinia on the battlefield for `who` and return her id.
+    fn enter_lavinia(state: &mut SimState, who: PlayerId) -> ObjId {
+        add_default_perm(state, who, "Lavinia, Azorius Renegade")
+    }
+
+    #[test]
+    fn test_lavinia_prohibition_blocks_noncreature_over_land_count() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Lavinia on our side.
+        enter_lavinia(&mut state, PlayerId::Us);
+
+        // Opponent has exactly 1 land.
+        make_land(&mut state, PlayerId::Opp, "Swamp", false);
+
+        // A noncreature sorcery with MV 2 (cost "1B").
+        let sorcery_def = CardDef::new(
+            "TestSorcery2", CardKind::Sorcery(SpellData {
+                mana_cost: "1B".to_string(),
+                ..Default::default()
+            }),
+            parse_colors("1B", false, true),
+            None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![],
+        );
+        state.catalog.insert("TestSorcery2".to_string(), sorcery_def);
+        let spell_id = add_hand_card(&mut state, PlayerId::Opp, "TestSorcery2");
+
+        // Give Opp 2 black mana (covers "1B").
+        state.opp.pool.b = 2;
+        state.opp.pool.total = 2;
+
+        // With 1 land, MV 2 > 1 → prohibited.
+        let result = cast_spell(&mut state, 1, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0);
+        assert!(result.is_none(), "Lavinia should prohibit MV-2 noncreature spell when opponent has only 1 land");
+        assert_eq!(state.objects[&spell_id].zone, CardZone::Hand { known: false },
+            "spell should remain in hand after prohibition");
+
+        // Add a second land so opponent now has 2 lands — MV 2 is no longer > 2.
+        make_land(&mut state, PlayerId::Opp, "Swamp", false);
+        state.opp.pool.b = 2;
+        state.opp.pool.total = 2;
+
+        let result = cast_spell(&mut state, 2, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0);
+        assert!(result.is_some(), "Lavinia should allow MV-2 noncreature spell when opponent has 2 lands");
+    }
+
+    #[test]
+    fn test_lavinia_trigger_counters_free_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Lavinia on our side.
+        enter_lavinia(&mut state, PlayerId::Us);
+
+        // Opponent has 5 lands so the prohibition doesn't block FoW (MV 5 ≤ 5 lands → allowed).
+        for _ in 0..5 {
+            make_land(&mut state, PlayerId::Opp, "Swamp", false);
+        }
+
+        // Opponent casts Force of Will via pitch cost (no mana spent).
+        let fow_def = state.catalog.get("Force of Will").cloned().unwrap();
+        let fow_id = add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm"); // pitch target
+        let alt_cost = fow_def.alternate_costs()[0].clone();
+
+        cast_spell(&mut state, 1, PlayerId::Opp, fow_id, SpellFace::Main, Some(&alt_cost), &[], 0)
+            .expect("FoW should cast via pitch cost");
+        // Lavinia trigger queued at SpellCast; push spell onto stack so counter_one can find it.
+        state.stack.push(fow_id);
+
+        assert!(
+            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Lavinia, Azorius Renegade"),
+            "Lavinia trigger should be queued"
+        );
+
+        for ctx in std::mem::take(&mut state.pending_triggers) {
+            ctx.effect.call(&mut state, 1, &[]);
+        }
+
+        assert_eq!(state.objects[&fow_id].zone, CardZone::Graveyard,
+            "FoW should be countered and in graveyard");
+        assert!(!state.stack.contains(&fow_id), "FoW should be off the stack");
+    }
+
+    #[test]
+    fn test_lavinia_trigger_lotus_petal() {
+        // Lotus Petal has mana cost "0" — MV 0 is not > any land count, so the
+        // prohibition does NOT fire. But mana_spent = false (MV 0), so Lavinia's
+        // trigger DOES fire and counters the Petal.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        enter_lavinia(&mut state, PlayerId::Us);
+
+        let petal_id = add_hand_card(&mut state, PlayerId::Opp, "Lotus Petal");
+
+        cast_spell(&mut state, 1, PlayerId::Opp, petal_id, SpellFace::Main, None, &[], 0)
+            .expect("Lotus Petal should not be prohibited (MV 0 ≤ any land count)");
+        state.stack.push(petal_id);
+
+        assert!(
+            state.pending_triggers.iter().any(|ctx| ctx.source_name == "Lavinia, Azorius Renegade"),
+            "Lavinia trigger should fire for free spell (no mana spent)"
+        );
+
+        for ctx in std::mem::take(&mut state.pending_triggers) {
+            ctx.effect.call(&mut state, 1, &[]);
+        }
+
+        assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
+            "Lotus Petal should be countered by Lavinia");
     }

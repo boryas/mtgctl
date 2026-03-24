@@ -114,10 +114,52 @@ pub(crate) fn eff_damage_target(caster: PlayerId, n: i32) -> Effect {
     }))
 }
 
+/// Force `who` to sacrifice one permanent matching `filter`, chosen via `state.sacrifice_choice`.
+/// Models "sacrifice a [X] of your choice" (CR 701.16). The sacrificing player decides;
+/// the effect moves the chosen permanent to the graveyard. No-ops if no match exists.
+pub(crate) fn eff_sacrifice(caster: PlayerId, who: Who, filter: ObjPredicate) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        let target_who = who.resolve(caster);
+        let candidates: Vec<ObjId> = state.permanents_of(target_who)
+            .filter(|o| o.bf.is_some() && filter(o.id, state))
+            .map(|o| o.id)
+            .collect();
+        if candidates.is_empty() { return; }
+        let f = Arc::clone(&state.sacrifice_choice);
+        if let Some(id) = f(target_who, &candidates, &*state) {
+            let name = state.objects.get(&id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+            state.log(t, caster, format!("→ {} sacrificed", name));
+            change_zone(id, ZoneId::Graveyard, state, t, caster);
+        }
+    }))
+}
+
+/// Core "destroy" action for a single permanent. The future home for indestructibility checks.
+/// Use this (not `change_zone`) wherever the rules say a permanent is "destroyed".
+pub(super) fn destroy_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerId) {
+    change_zone(id, ZoneId::Graveyard, state, t, actor);
+}
+
 pub(crate) fn eff_destroy_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
-            change_zone(id, ZoneId::Graveyard, state, t, caster);
+            destroy_one(id, state, t, caster);
+        }
+    }))
+}
+
+/// Destroy every permanent on the battlefield matching `filter`. Both this and
+/// `eff_destroy_target` route through `destroy_one`; indestructibility added there
+/// will apply to both. Use for "destroy each" oracle text; sacrifice and 0-toughness
+/// SBAs bypass indestructible and must use `change_zone` directly instead.
+pub(crate) fn eff_destroy_all(caster: PlayerId, filter: ObjPredicate) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        let to_destroy: Vec<ObjId> = state.objects.values()
+            .filter(|o| o.zone == CardZone::Battlefield && filter(o.id, state))
+            .map(|o| o.id)
+            .collect();
+        for id in to_destroy {
+            destroy_one(id, state, t, caster);
         }
     }))
 }
@@ -210,6 +252,46 @@ pub(crate) fn eff_enter_permanent(
     }))
 }
 
+/// Counter a single spell or ability by id. Called by `eff_counter_target` and
+/// Lavinia-style triggers that capture the spell id at trigger time.
+/// Fizzles gracefully if the id is no longer on the stack.
+pub(super) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerId) {
+    let pos = state.stack.iter().position(|&sid| sid == id);
+    if let Some(pos) = pos {
+        // Check counterable property before removing (CR 608.2b).
+        let can_counter = if state.objects.contains_key(&id) {
+            state.def_of(id)
+                .or_else(|| state.objects.get(&id)
+                    .and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+                .map_or(true, |d| d.counterable())
+        } else {
+            state.abilities.get(&id).map_or(true, |ab| ab.counterable)
+        };
+        if !can_counter {
+            let name = state.stack_item_display_name(id).to_string();
+            state.log(t, actor, format!("→ fizzled ({} can't be countered)", name));
+            return;
+        }
+        state.stack.remove(pos);
+        if state.objects.contains_key(&id) {
+            let name = state.objects[&id].catalog_key.clone();
+            state.log(t, actor, format!("→ {} countered", name));
+            change_zone(id, ZoneId::Graveyard, state, t, actor);
+            // `change_zone` doesn't clear spell state; do it here so countered
+            // spells don't carry stale SpellState in the graveyard (or exile).
+            if let Some(card) = state.objects.get_mut(&id) {
+                card.spell = None;
+            }
+        } else if let Some(ab) = state.abilities.remove(&id) {
+            state.log(t, actor, format!("→ {} (triggered ability) countered", ab.source_name));
+        } else {
+            state.log(t, actor, "→ fizzled (target already resolved)".to_string());
+        }
+    } else {
+        state.log(t, actor, "→ fizzled (target already resolved)".to_string());
+    }
+}
+
 /// Counter the spell in `targets[0]` (a stack ObjId). Removes it from `state.stack` and
 /// puts it in the owner's graveyard via `change_zone` (so replacement effects can intercept).
 /// Fizzles if the target is no longer on the stack or if it can't be countered
@@ -217,40 +299,8 @@ pub(crate) fn eff_enter_permanent(
 /// CR 608.2b — the spell was a legal target but the effect doesn't apply).
 pub(crate) fn eff_counter_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
-        let Some(&target_id) = targets.first() else { return; };
-        let pos = state.stack.iter().position(|&id| id == target_id);
-        if let Some(pos) = pos {
-            // Check counterable property before removing (CR 608.2b).
-            let can_counter = if state.objects.contains_key(&target_id) {
-                state.def_of(target_id)
-                    .or_else(|| state.objects.get(&target_id)
-                        .and_then(|o| state.catalog.get(o.catalog_key.as_str())))
-                    .map_or(true, |d| d.counterable())
-            } else {
-                state.abilities.get(&target_id).map_or(true, |ab| ab.counterable)
-            };
-            if !can_counter {
-                let name = state.stack_item_display_name(target_id).to_string();
-                state.log(t, caster, format!("→ fizzled ({} can't be countered)", name));
-                return;
-            }
-            state.stack.remove(pos);
-            if state.objects.contains_key(&target_id) {
-                let name = state.objects[&target_id].catalog_key.clone();
-                state.log(t, caster, format!("→ {} countered", name));
-                change_zone(target_id, ZoneId::Graveyard, state, t, caster);
-                // `change_zone` doesn't clear spell state; do it here so countered
-                // spells don't carry stale SpellState in the graveyard (or exile).
-                if let Some(card) = state.objects.get_mut(&target_id) {
-                    card.spell = None;
-                }
-            } else if let Some(ab) = state.abilities.remove(&target_id) {
-                state.log(t, caster, format!("→ {} (triggered ability) countered", ab.source_name));
-            } else {
-                state.log(t, caster, "→ fizzled (target already resolved)".to_string());
-            }
-        } else {
-            state.log(t, caster, "→ fizzled (target already resolved)".to_string());
+        if let Some(&id) = targets.first() {
+            counter_one(id, state, t, caster);
         }
     }))
 }
