@@ -90,6 +90,7 @@ fn all_cards() -> Vec<CardDef> {
         // Spells — sorceries
         toxic_deluge(),
         doomsday(),
+        stock_up(),
         ponder(),
         thoughtseize(),
         unearth(),
@@ -1188,6 +1189,15 @@ fn doomsday() -> CardDef {
         spell_factory: Some(Arc::new(|_who, _source_id, _x| eff_doomsday())),
         ..Default::default()
     }), parse_colors("BBB", false, false), None)
+}
+
+/// Look at top 5, put two in hand, rest on bottom in any order. Modeled as draw:2. CR 701.26.
+fn stock_up() -> CardDef {
+    simple("Stock Up", CardKind::Sorcery(SpellData {
+        mana_cost: "2U".to_string(),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_draw(who, 2))),
+        ..Default::default()
+    }), parse_colors("U", false, false), None)
 }
 
 /// Look at top 3, put one in hand, rest on bottom in any order. Modeled as draw:1. CR 701.26.
