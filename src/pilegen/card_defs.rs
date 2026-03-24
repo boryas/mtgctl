@@ -109,6 +109,7 @@ fn all_cards() -> Vec<CardDef> {
         murktide_regent(),
         dauthi_voidwalker(),
         lavinia_azorius_renegade(),
+        hexing_squelcher(),
         // DFCs / split
         tamiyo_inquisitive_student(),
         brazen_borrower(),
@@ -894,21 +895,33 @@ fn bitter_triumph() -> CardDef {
 
 /// Destroy target creature or planeswalker with MV ≤ 3. This spell can't be countered (CR 608.2b).
 fn long_goodbye() -> CardDef {
-    let mut def = simple("Long Goodbye", CardKind::Instant(SpellData {
-        mana_cost: "1B".to_string(),
-        target_spec: TargetSpec::ObjectInZone {
-            controller: Who::Opp,
-            zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_and(
-                pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
-                pred_mana_value_le(3),
-            )),
-        },
-        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_destroy_target(who))),
-        ..Default::default()
-    }), parse_colors("1B", false, false), None);
-    def.counterable = false;
-    def
+    CardDef::new(
+        "Long Goodbye",
+        CardKind::Instant(SpellData {
+            mana_cost: "1B".to_string(),
+            target_spec: TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Battlefield,
+                filter: obj_pred_from_card(pred_and(
+                    pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
+                    pred_mana_value_le(3),
+                )),
+            },
+            spell_factory: Some(Arc::new(|who, _source_id, _x| eff_destroy_target(who))),
+            ..Default::default()
+        }),
+        parse_colors("1B", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![],
+        // "This spell can't be countered": ProhibitionDef active while on the stack.
+        vec![ProhibitionDef {
+            check: Arc::new(|event, source_id, _controller, _state| {
+                matches!(event, GameEvent::SpellBeingCountered { card_id, .. } if *card_id == source_id)
+            }),
+        }],
+        vec![],
+    )
 }
 
 /// Choose one — each opponent sacrifices a nontoken creature (mode 0), a creature token
@@ -1517,6 +1530,67 @@ fn lavinia_azorius_renegade() -> CardDef {
                 } else { false }
             }),
         }],
+        vec![],
+    )
+}
+
+/// {1}{R}, 2/2 Goblin Sorcerer.
+/// "This spell can't be countered." — ProhibitionDef active while on stack.
+/// "Ward—Pay 2 life." — TriggerCheckFn on SpellCast, checks spell's chosen_targets.
+/// "Spells you control can't be countered." — ProhibitionDef active while on battlefield.
+/// "Other creatures you control have Ward—Pay 2 life." — deferred (CE-granted triggers).
+fn hexing_squelcher() -> CardDef {
+    let data = CreatureData::new("1R", 2, 2);
+    CardDef::new(
+        "Hexing Squelcher",
+        CardKind::Creature(data),
+        parse_colors("R", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        // Ward—Pay 2 life: fires when an opponent's spell targets this permanent.
+        vec![Arc::new(|event, source_id, controller, state, pending| {
+            if let GameEvent::SpellCast { caster, card_id, .. } = event {
+                if *caster == controller { return; }
+                let is_targeted = state.objects.get(card_id)
+                    .and_then(|o| o.spell.as_ref())
+                    .map_or(false, |s| s.chosen_targets.contains(&source_id));
+                if is_targeted {
+                    let spell_id = *card_id;
+                    let targeting_caster = *caster;
+                    pending.push(TriggerContext {
+                        source_name: "Hexing Squelcher (Ward)".into(),
+                        controller,
+                        target_spec: TargetSpec::None,
+                        effect: Effect(Arc::new(move |state, t, _| {
+                            ward_pay_or_counter(
+                                source_id,
+                                &[CostComponent::Life(2)],
+                                spell_id,
+                                targeting_caster,
+                                controller,
+                                state,
+                                t,
+                            );
+                        })),
+                    });
+                }
+            }
+        })],
+        vec![],
+        vec![
+            // "Spells you control can't be countered." (while on battlefield)
+            ProhibitionDef {
+                check: Arc::new(|event, _source_id, controller, _state| {
+                    matches!(event, GameEvent::SpellBeingCountered { caster, .. } if *caster == controller)
+                }),
+            },
+            // "This spell can't be countered." (while on stack)
+            ProhibitionDef {
+                check: Arc::new(|event, source_id, _controller, _state| {
+                    matches!(event, GameEvent::SpellBeingCountered { card_id, .. } if *card_id == source_id)
+                }),
+            },
+        ],
         vec![],
     )
 }

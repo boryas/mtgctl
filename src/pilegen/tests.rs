@@ -3294,10 +3294,11 @@
     /// Calls recompute() so materialized views reflect the new CE immediately.
     fn etb_painter(state: &mut SimState, who: PlayerId, chosen_color: Color) -> ObjId {
         state.resolve_choice = std::sync::Arc::new(move |_, req, _| match req {
-            ChoiceRequest::Color => ChoiceResult::Color(chosen_color),
-            ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
-            ChoiceRequest::CardName => ChoiceResult::CardName(String::new()),
-            ChoiceRequest::Mode(_) => ChoiceResult::Mode(0),
+            ChoiceRequest::Color             => ChoiceResult::Color(chosen_color),
+            ChoiceRequest::CreatureType      => ChoiceResult::CreatureType("Wizard".to_string()),
+            ChoiceRequest::CardName          => ChoiceResult::CardName(String::new()),
+            ChoiceRequest::Mode(_)           => ChoiceResult::Mode(0),
+            ChoiceRequest::WardPayment {..}  => ChoiceResult::Bool(true),
         });
         let id = state.alloc_id();
         let def = catalog_card("Painter's Servant");
@@ -3403,10 +3404,11 @@
     /// Helper: ETB Disruptor Flute naming the given card name.
     fn etb_flute(state: &mut SimState, who: PlayerId, chosen_name: &'static str) -> ObjId {
         state.resolve_choice = std::sync::Arc::new(move |_, req, _| match req {
-            ChoiceRequest::Color => ChoiceResult::Color(Color::Blue),
-            ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
-            ChoiceRequest::CardName => ChoiceResult::CardName(chosen_name.to_string()),
-            ChoiceRequest::Mode(_) => ChoiceResult::Mode(0),
+            ChoiceRequest::Color             => ChoiceResult::Color(Color::Blue),
+            ChoiceRequest::CreatureType      => ChoiceResult::CreatureType("Wizard".to_string()),
+            ChoiceRequest::CardName          => ChoiceResult::CardName(chosen_name.to_string()),
+            ChoiceRequest::Mode(_)           => ChoiceResult::Mode(0),
+            ChoiceRequest::WardPayment {..}  => ChoiceResult::Bool(true),
         });
         let id = state.alloc_id();
         let def = catalog_card("Disruptor Flute");
@@ -4178,4 +4180,76 @@
 
         assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
             "Lotus Petal should be countered by Lavinia");
+    }
+
+    // ── §46: Hexing Squelcher ──────────────────────────────────────────────────
+
+    fn enter_hexing_squelcher(state: &mut SimState, who: PlayerId) -> ObjId {
+        add_default_perm(state, who, "Hexing Squelcher")
+    }
+
+    /// Hexing Squelcher's "Spells you control can't be countered" protects Us's spells.
+    #[test]
+    fn test_hexing_squelcher_protects_your_spells() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        enter_hexing_squelcher(&mut state, PlayerId::Us);
+
+        // Put a plain counterable spell for Us on the stack directly.
+        let spell_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        // move to stack (activates stack prohibitions — Brainstorm has none, but wires change_zone path)
+        change_zone(spell_id, ZoneId::Stack, &mut state, 1, PlayerId::Us);
+        state.stack.push(spell_id);
+
+        // Opponent tries to counter it.
+        counter_one(spell_id, &mut state, 1, PlayerId::Opp);
+
+        assert!(state.stack.contains(&spell_id),
+            "Hexing Squelcher should prevent the opponent from countering our spell");
+        assert_ne!(state.objects[&spell_id].zone, CardZone::Graveyard);
+    }
+
+    /// Hexing Squelcher only protects YOUR spells; opponent's spells can still be countered.
+    #[test]
+    fn test_hexing_squelcher_does_not_protect_opponent_spells() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        enter_hexing_squelcher(&mut state, PlayerId::Us);
+
+        // Put a spell controlled by Opp on the stack.
+        let spell_id = add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        change_zone(spell_id, ZoneId::Stack, &mut state, 1, PlayerId::Opp);
+        state.stack.push(spell_id);
+
+        // We counter it.
+        counter_one(spell_id, &mut state, 1, PlayerId::Us);
+
+        assert!(!state.stack.contains(&spell_id), "Opponent's spell should be countered normally");
+        assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard);
+    }
+
+    /// Long Goodbye's "This spell can't be countered" still works after the ProhibitionDef refactor.
+    #[test]
+    fn test_long_goodbye_still_uncounterable() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Pre-register Long Goodbye's prohibition instances before casting.
+        let def = catalog_card("Long Goodbye");
+        let lg_id = add_hand_card(&mut state, PlayerId::Us, "Long Goodbye");
+        preregister_instances(&def, lg_id, PlayerId::Us, &mut state);
+        state.catalog.insert("Long Goodbye".to_string(), def);
+
+        // Move to stack — activates Long Goodbye's own stack prohibition.
+        change_zone(lg_id, ZoneId::Stack, &mut state, 1, PlayerId::Us);
+        state.stack.push(lg_id);
+
+        // Opponent tries to counter it.
+        counter_one(lg_id, &mut state, 1, PlayerId::Opp);
+
+        assert!(state.stack.contains(&lg_id),
+            "Long Goodbye can't be countered (ProhibitionDef on SpellBeingCountered)");
+        assert_ne!(state.objects[&lg_id].zone, CardZone::Graveyard);
     }

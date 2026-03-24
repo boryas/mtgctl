@@ -1134,6 +1134,24 @@ pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
     });
 }
 
+/// Activate prohibition instances for a spell entering the stack (CR 614.17).
+/// Unlike `activate_instances` (ETB only), this only activates prohibitions — not
+/// triggers or replacements, which don't meaningfully apply to stack objects.
+/// Used to implement "This spell can't be countered" via `ProhibitionDef`.
+pub(super) fn activate_stack_prohibitions(source_id: ObjId, controller: PlayerId, state: &mut SimState) {
+    for inst in state.prohibition_instances.iter_mut().filter(|i| i.source_id == source_id) {
+        inst.active = true;
+        inst.controller = controller;
+    }
+}
+
+/// Deactivate prohibition instances when a spell leaves the stack.
+pub(super) fn deactivate_stack_prohibitions(source_id: ObjId, state: &mut SimState) {
+    for inst in state.prohibition_instances.iter_mut().filter(|i| i.source_id == source_id) {
+        inst.active = false;
+    }
+}
+
 // ── Grafdigger's Cage creature-entry check ───────────────────────────────────
 
 /// Matches any ZoneChange where a card moves from a graveyard or library to the battlefield.

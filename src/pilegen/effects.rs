@@ -258,6 +258,14 @@ pub(crate) fn eff_enter_permanent(
 pub(super) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerId) {
     let pos = state.stack.iter().position(|&sid| sid == id);
     if let Some(pos) = pos {
+        // Prohibition gate: "can't be countered" CE effects (CR 614.17).
+        // Only fires for spell objects; triggered abilities on the stack are not spells.
+        if state.objects.contains_key(&id) {
+            let spell_caster = state.objects[&id].controller;
+            if fire_event(GameEvent::SpellBeingCountered { caster: spell_caster, card_id: id }, state, t, actor) {
+                return;
+            }
+        }
         // Check counterable property before removing (CR 608.2b).
         let can_counter = if state.objects.contains_key(&id) {
             state.def_of(id)
@@ -372,4 +380,30 @@ pub(crate) fn eff_fetch_search(
             change_zone(chosen_id, dest, state, t, who);
         }
     }))
+}
+
+/// Ward pay-or-counter effect (CR 702.20).
+/// Offers `targeting_caster` the chance to pay `cost`; if they decline (or can't pay),
+/// `targeting_spell` is countered. Called from Ward `TriggerContext` effects.
+pub(super) fn ward_pay_or_counter(
+    ward_source: ObjId,
+    cost: &[CostComponent],
+    targeting_spell: ObjId,
+    targeting_caster: PlayerId,
+    ward_holder: PlayerId,
+    state: &mut SimState,
+    t: u8,
+) {
+    let can_pay = can_pay_costs(cost, state, targeting_caster, ward_source, false, 0);
+    let will_pay = can_pay && {
+        let f = std::sync::Arc::clone(&state.resolve_choice);
+        matches!(f(ward_source, &ChoiceRequest::WardPayment { cost: cost.to_vec() }, state), ChoiceResult::Bool(true))
+    };
+    if will_pay {
+        pay_costs(cost, state, t, targeting_caster, ward_source, 0);
+        state.log(t, targeting_caster, "→ pays ward cost".to_string());
+    } else {
+        state.log(t, ward_holder, "→ ward: countering spell (cost not paid)".to_string());
+        counter_one(targeting_spell, state, t, ward_holder);
+    }
 }

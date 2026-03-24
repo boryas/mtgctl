@@ -281,6 +281,13 @@ pub(super) enum GameEvent {
         card_id: ObjId,
         mana_spent: bool,
     },
+    /// Fired inside `counter_one` before the counterable check, for spell objects only.
+    /// Prohibition gate: "can't be countered" effects suppress this event (CR 614.17).
+    /// `caster` is the controller of the spell being countered.
+    SpellBeingCountered {
+        caster: PlayerId,
+        card_id: ObjId,
+    },
     // Future variants: DamageDealt, SpellResolved, AbilityActivated,
     //                  CounterChanged, LifeChanged, TokenCreated.
 }
@@ -362,7 +369,7 @@ pub(crate) enum Color { White, Blue, Black, Red, Green }
 /// Passed to `SimState.resolve_choice`; the installed closure returns a `ChoiceResult`.
 /// This covers decisions that are not targets (`TargetSpec`) and not object selections
 /// (`ChoiceSpec`) — specifically, choices over abstract typed values.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) enum ChoiceRequest {
     /// Choose one of the five colors (e.g. Painter's Servant ETB).
     Color,
@@ -374,15 +381,20 @@ pub(super) enum ChoiceRequest {
     /// The payload is the number of available modes. Strategy returns `ChoiceResult::Mode(i)`
     /// where `i < N`. Default: mode 0.
     Mode(usize),
+    /// Offered when a Ward trigger resolves: should the targeting player pay the ward cost?
+    /// Returns `ChoiceResult::Bool(true)` to pay (spell proceeds), `false` to decline (spell countered).
+    WardPayment { cost: Vec<CostComponent> },
 }
 
 /// The value returned by `SimState.resolve_choice` for a given `ChoiceRequest`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(super) enum ChoiceResult {
     Color(Color),
     CreatureType(String),
     CardName(String),
     Mode(usize),
+    /// Returned for `ChoiceRequest::WardPayment`: true = pay, false = decline.
+    Bool(bool),
 }
 
 /// Card supertypes (Legendary, Basic, Snow, World, Ongoing).
@@ -877,10 +889,11 @@ impl SimState {
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
             resolve_choice: std::sync::Arc::new(|_, req, _| match req {
-                ChoiceRequest::Color        => ChoiceResult::Color(Color::Blue),
-                ChoiceRequest::CreatureType => ChoiceResult::CreatureType("Wizard".to_string()),
-                ChoiceRequest::CardName     => ChoiceResult::CardName(String::new()),
-                ChoiceRequest::Mode(_)      => ChoiceResult::Mode(0),
+                ChoiceRequest::Color           => ChoiceResult::Color(Color::Blue),
+                ChoiceRequest::CreatureType    => ChoiceResult::CreatureType("Wizard".to_string()),
+                ChoiceRequest::CardName        => ChoiceResult::CardName(String::new()),
+                ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
+                ChoiceRequest::WardPayment {..} => ChoiceResult::Bool(true),
             }),
             surveil_choice: std::sync::Arc::new(|_, _| rand::thread_rng().gen_bool(0.5)),
             sacrifice_choice: std::sync::Arc::new(|_, candidates, _| candidates.first().copied()),
@@ -1734,6 +1747,10 @@ pub(super) fn change_zone(
         let def = state.catalog.get(catalog_key.as_str()).cloned();
         activate_instances(id, controller, def.as_ref(), state);
     }
+    // Spells on the stack activate their prohibition instances so "can't be countered"
+    // ProhibitionDefs fire correctly via SpellBeingCountered (CR 614.17).
+    if from == ZoneId::Stack { deactivate_stack_prohibitions(id, state); }
+    if to   == ZoneId::Stack { activate_stack_prohibitions(id, controller, state); }
     fire_event(
         GameEvent::ZoneChange { id, actor, from, to, controller },
         state, t, actor,
