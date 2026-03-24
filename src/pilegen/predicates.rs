@@ -46,6 +46,11 @@ pub(crate) fn pred_mana_value_le(n: i32) -> CardPredicate {
     std::sync::Arc::new(move |d| mana_value(d.mana_cost()) <= n)
 }
 
+/// True iff the card's mana value equals `n`.
+pub(crate) fn pred_mana_value_eq(n: i32) -> CardPredicate {
+    std::sync::Arc::new(move |d| mana_value(d.mana_cost()) == n)
+}
+
 /// True iff the card is a creature with toughness ≤ `n`.
 pub(crate) fn pred_toughness_le(n: i32) -> CardPredicate {
     std::sync::Arc::new(move |d| d.as_creature().map_or(false, |c| c.toughness() <= n))

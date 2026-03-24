@@ -18,3 +18,25 @@ If your implementation is more specific than the oracle text, you've modeled the
 
 **3. Is the player making a decision? If so, is there a strategy callback for it?**
 If a player would be asked at the table, the engine must not answer for them.
+
+Oracle text signal words — each implies a player choice:
+- **choose** — active player selects a mode, color, card name, etc.
+- **target** — active player selects a legal target
+- **sacrifice** — the player told to sacrifice selects which permanent
+- **discard** — the player told to discard selects which card (unless "at random")
+- **may** — the affected player decides whether the effect applies
+- **up to** — active player selects a quantity within a bound
+
+Oracle text signal words — each implies a triggered ability (React to the game):
+- **when** — triggers once on a specific event
+- **whenever** — triggers every time the event occurs
+- **at** — triggers at a defined game step or phase
+
+Oracle text signal words — each implies a replacement effect:
+- **skip** — replaces an event with nothing
+- **as [event happens]** — modifies how an event occurs as it happens
+- **if [event] instead [replacement]** — redirects an event to a different outcome
+
+Oracle text signal words — each implies a prohibition effect:
+- **can't** — permanently forbids an action or event
+- **prevent** — stops damage or an effect from occurring

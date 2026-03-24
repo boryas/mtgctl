@@ -121,6 +121,10 @@ pub(crate) enum CostComponent {
     /// Variable life payment: "as an additional cost, pay X life" where X is strategy-chosen.
     /// `can_pay` checks `life >= chosen_x`; payment records `chosen_x` in `CostsPaidCtx`.
     XLife,
+    /// Variable generic-mana payment: "pay X generic mana" where X is strategy-chosen.
+    /// Models sunburst (Engineered Explosives): spend X mana of different colors.
+    /// `can_pay` checks `total_mana >= chosen_x`; payment spends X generic and records chosen_x.
+    XMana,
 }
 
 /// Factory for a spell effect: takes (controller, source_id, chosen_x) and returns the resolved `Effect`.

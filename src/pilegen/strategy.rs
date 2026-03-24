@@ -687,7 +687,7 @@ fn collect_hand_actions(
         if seen_names.insert(name.clone()) {
             let targets = legal_targets(def.target_spec(), who, state);
             let chosen = pick_target(&targets, state).into_iter().collect();
-            let chosen_x = if def.additional_costs.iter().any(|c| matches!(c, CostComponent::XLife)) { 3u32 } else { 0 };
+            let chosen_x = if def.additional_costs.iter().any(|c| matches!(c, CostComponent::XLife | CostComponent::XMana)) { 3u32 } else { 0 };
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x });
         }
 
