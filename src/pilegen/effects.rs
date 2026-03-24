@@ -382,6 +382,66 @@ pub(crate) fn eff_fetch_search(
     }))
 }
 
+/// Each player may put a card matching `filter` from their hand onto the battlefield.
+/// Both choices are collected before either placement, so the placements are simultaneous
+/// (CR 101.4 — "each" effects are simultaneous; no triggers fire between them).
+pub(crate) fn eff_each_may_put(caster: PlayerId, filter: CardPredicate) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        let f = std::sync::Arc::clone(&state.resolve_choice);
+        let mut to_place: Vec<(ObjId, PlayerId)> = Vec::new();
+        for &player in &[caster, caster.opp()] {
+            let candidates: Vec<ObjId> = state.hand_of(player)
+                .filter(|c| {
+                    state.def_of(c.id)
+                        .or_else(|| state.catalog.get(c.catalog_key.as_str()))
+                        .map_or(false, |d| filter(d))
+                })
+                .map(|c| c.id)
+                .collect();
+            if candidates.is_empty() { continue; }
+            let req = ChoiceRequest::MayPutOnBattlefield { candidates };
+            if let ChoiceResult::OptionalObject(Some(id)) = f(ObjId(0), &req, state) {
+                // Validate the chosen id is actually in the candidate set.
+                if let ChoiceRequest::MayPutOnBattlefield { ref candidates } = req {
+                    if candidates.contains(&id) {
+                        to_place.push((id, player));
+                    }
+                }
+            }
+        }
+        // Place all chosen cards simultaneously — no triggers fire between placements.
+        for (id, player) in to_place {
+            let name = state.objects.get(&id).map(|c| c.catalog_key.clone()).unwrap_or_default();
+            state.log(t, player, format!("puts {} onto the battlefield", name));
+            change_zone(id, ZoneId::Battlefield, state, t, player);
+        }
+    }))
+}
+
+/// Counter target spell unless its controller pays `cost` (CR 700.2).
+/// Reuses `ChoiceRequest::WardPayment` for the pay-or-decline decision.
+pub(crate) fn eff_counter_unless_pays(caster: PlayerId, cost: Vec<CostComponent>) -> Effect {
+    Effect(Arc::new(move |state, t, targets| {
+        if let Some(&spell_id) = targets.first() {
+            let spell_controller = state.objects.get(&spell_id)
+                .map(|o| o.controller)
+                .unwrap_or(caster.opp());
+            let can_pay = can_pay_costs(&cost, state, spell_controller, spell_id, false, 0);
+            let will_pay = can_pay && {
+                let f = std::sync::Arc::clone(&state.resolve_choice);
+                matches!(f(spell_id, &ChoiceRequest::WardPayment { cost: cost.to_vec() }, state), ChoiceResult::Bool(true))
+            };
+            if will_pay {
+                pay_costs(&cost, state, t, spell_controller, spell_id, 0);
+                let name = state.objects.get(&spell_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+                state.log(t, spell_controller, format!("→ pays tax for {}", name));
+            } else {
+                counter_one(spell_id, state, t, caster);
+            }
+        }
+    }))
+}
+
 /// Ward pay-or-counter effect (CR 702.20).
 /// Offers `targeting_caster` the chance to pay `cost`; if they decline (or can't pay),
 /// `targeting_spell` is countered. Called from Ward `TriggerContext` effects.

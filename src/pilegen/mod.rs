@@ -384,6 +384,9 @@ pub(super) enum ChoiceRequest {
     /// Offered when a Ward trigger resolves: should the targeting player pay the ward cost?
     /// Returns `ChoiceResult::Bool(true)` to pay (spell proceeds), `false` to decline (spell countered).
     WardPayment { cost: Vec<CostComponent> },
+    /// "You may put one of these onto the battlefield" (CR 101.4, e.g. Show and Tell).
+    /// Returns `ChoiceResult::OptionalObject(Some(id))` to place, or `None` to decline.
+    MayPutOnBattlefield { candidates: Vec<ObjId> },
 }
 
 /// The value returned by `SimState.resolve_choice` for a given `ChoiceRequest`.
@@ -395,6 +398,8 @@ pub(super) enum ChoiceResult {
     Mode(usize),
     /// Returned for `ChoiceRequest::WardPayment`: true = pay, false = decline.
     Bool(bool),
+    /// Returned for `ChoiceRequest::MayPutOnBattlefield`: chosen object or decline.
+    OptionalObject(Option<ObjId>),
 }
 
 /// Card supertypes (Legendary, Basic, Snow, World, Ongoing).
@@ -894,6 +899,7 @@ impl SimState {
                 ChoiceRequest::CardName        => ChoiceResult::CardName(String::new()),
                 ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
                 ChoiceRequest::WardPayment {..} => ChoiceResult::Bool(true),
+                ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
             }),
             surveil_choice: std::sync::Arc::new(|_, _| rand::thread_rng().gen_bool(0.5)),
             sacrifice_choice: std::sync::Arc::new(|_, candidates, _| candidates.first().copied()),

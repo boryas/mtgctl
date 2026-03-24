@@ -87,6 +87,7 @@ fn all_cards() -> Vec<CardDef> {
         blue_elemental_blast(),
         hydroblast(),
         sheoldreds_edict(),
+        spell_pierce(),
         // Spells — sorceries
         toxic_deluge(),
         doomsday(),
@@ -98,6 +99,7 @@ fn all_cards() -> Vec<CardDef> {
         edge_of_autumn(),
         personal_tutor(),
         green_suns_zenith(),
+        show_and_tell(),
         // Creatures
         thassas_oracle(),
         street_wraith(),
@@ -776,6 +778,7 @@ fn consider() -> CardDef {
 
 /// Counter target spell. Alternate costs: bounce a blue-producing island (free),
 /// or pay {1U} (20% probability). CR 701.5.
+/// "Counter target spell unless its controller pays {1}."
 fn daze() -> CardDef {
     simple("Daze", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
@@ -786,7 +789,9 @@ fn daze() -> CardDef {
             AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(cost_pred_blue_producing())], hand_min: 1, ..Default::default() },
             AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("1U"))], hand_min: 1, prob: Some(0.2), ..Default::default() },
         ],
-        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_counter_target(who))),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
+            eff_counter_unless_pays(who, vec![CostComponent::Mana(parse_mana_cost("1"))])
+        })),
         ..Default::default()
     }), parse_colors("U", true, false), None)
 }
@@ -954,6 +959,23 @@ fn sheoldreds_edict() -> CardDef {
         })),
         ..Default::default()
     }), parse_colors("1B", false, false), None)
+}
+
+/// Counter target noncreature spell unless its controller pays {2}. CR 700.2.
+fn spell_pierce() -> CardDef {
+    simple("Spell Pierce", CardKind::Instant(SpellData {
+        mana_cost: "U".to_string(),
+        exileable: true,
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Stack,
+            filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Creature))),
+        },
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
+            eff_counter_unless_pays(who, vec![CostComponent::Mana(parse_mana_cost("2"))])
+        })),
+        ..Default::default()
+    }), parse_colors("U", true, false), None)
 }
 
 /// Counter target triggered ability or colorless spell.
@@ -1299,6 +1321,21 @@ fn green_suns_zenith() -> CardDef {
     }), parse_colors("1G", false, false), None)
 }
 
+/// Each player may put an artifact, creature, enchantment, or land card from their
+/// hand onto the battlefield. Both placements are simultaneous (CR 101.4).
+fn show_and_tell() -> CardDef {
+    simple("Show and Tell", CardKind::Sorcery(SpellData {
+        mana_cost: "2U".to_string(),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
+            eff_each_may_put(who, pred_or(
+                pred_or(pred_type_eq(CardType::Artifact), pred_type_eq(CardType::Creature)),
+                pred_or(pred_type_eq(CardType::Enchantment), pred_type_eq(CardType::Land)),
+            ))
+        })),
+        ..Default::default()
+    }), parse_colors("U", false, false), None)
+}
+
 // ── Creatures ─────────────────────────────────────────────────────────────────
 
 /// ETB: look at top X cards of your library, where X is the number of cards in it;
@@ -1538,7 +1575,8 @@ fn lavinia_azorius_renegade() -> CardDef {
 /// "This spell can't be countered." — ProhibitionDef active while on stack.
 /// "Ward—Pay 2 life." — TriggerCheckFn on SpellCast, checks spell's chosen_targets.
 /// "Spells you control can't be countered." — ProhibitionDef active while on battlefield.
-/// "Other creatures you control have Ward—Pay 2 life." — deferred (CE-granted triggers).
+/// "Other creatures you control have Ward—Pay 2 life." — second TriggerCheckFn (approximation;
+///   see TODO below for the true CE-layer-6 implementation).
 fn hexing_squelcher() -> CardDef {
     let data = CreatureData::new("1R", 2, 2);
     CardDef::new(
@@ -1591,7 +1629,50 @@ fn hexing_squelcher() -> CardDef {
                 }),
             },
         ],
-        vec![],
+        // "Other creatures you control have Ward—Pay 2 life."
+        // L6 CE: while Hexing Squelcher is on the battlefield, push a Ward trigger into each
+        // other creature controlled by the same player via granted_trigger_defs.
+        vec![Arc::new(move |source_id, controller| ContinuousInstance {
+            source_id,
+            controller,
+            layer: ContinuousLayer::L6AbilityEffects,
+            filter: Arc::new(move |id, ctr| ctr == controller && id != source_id),
+            modifier: Arc::new(|def, _state| {
+                if matches!(def.kind, CardKind::Creature(_)) {
+                    def.granted_trigger_defs.push(Arc::new(
+                        |event, source_id, controller, state, pending| {
+                            if let GameEvent::SpellCast { caster, card_id, .. } = event {
+                                if *caster == controller { return; }
+                                let is_targeted = state.objects.get(card_id)
+                                    .and_then(|o| o.spell.as_ref())
+                                    .map_or(false, |s| s.chosen_targets.contains(&source_id));
+                                if is_targeted {
+                                    let spell_id = *card_id;
+                                    let targeting_caster = *caster;
+                                    pending.push(TriggerContext {
+                                        source_name: "Hexing Squelcher (Ward grant)".into(),
+                                        controller,
+                                        target_spec: TargetSpec::None,
+                                        effect: Effect(Arc::new(move |state, t, _| {
+                                            ward_pay_or_counter(
+                                                source_id,
+                                                &[CostComponent::Life(2)],
+                                                spell_id,
+                                                targeting_caster,
+                                                controller,
+                                                state,
+                                                t,
+                                            );
+                                        })),
+                                    });
+                                }
+                            }
+                        },
+                    ));
+                }
+            }),
+            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+        })],
     )
 }
 

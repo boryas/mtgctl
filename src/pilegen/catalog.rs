@@ -487,6 +487,11 @@ pub(crate) struct CardDef {
     /// Static ability factories. Called at ETB to register a `ContinuousInstance` for this
     /// object. The CI has `expiry: WhileSourceOnBattlefield` and is removed on LTB.
     pub(super) static_ability_defs: Vec<StaticAbilityDef>,
+    /// Trigger check functions granted to this object by continuous effects (Layer 6).
+    /// Reset to empty at the start of each `recompute` cycle (since recompute clones from the
+    /// catalog where this is always empty). CE modifiers push to this during recompute.
+    /// Checked by `fire_triggers` for each active battlefield object.
+    pub(super) granted_trigger_defs: Vec<TriggerCheckFn>,
     /// Costs that must always be paid in addition to the chosen base/alternative cost.
     /// Per CR 118.9d these apply regardless of which cost path is taken.
     pub(crate) additional_costs: Vec<CostComponent>,
@@ -686,6 +691,7 @@ impl CardDef {
             replacement_defs,
             prohibition_defs,
             static_ability_defs,
+            granted_trigger_defs: vec![],
             additional_costs: vec![],
             counterable: true,
             casting_cost_modifier: 0,
@@ -940,6 +946,19 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
     for inst in &state.trigger_instances {
         if !inst.active { continue; }
         (inst.check)(event, inst.source_id, inst.controller, state, &mut pending);
+    }
+    // Also check CE-granted triggers from materialized CardDefs (Layer 6 ability grants).
+    // These are populated during recompute and reset each cycle.
+    let bf_ids: Vec<(ObjId, PlayerId)> = state.objects.iter()
+        .filter(|(_, o)| matches!(o.zone, CardZone::Battlefield) && o.materialized.is_some())
+        .map(|(id, o)| (*id, o.controller))
+        .collect();
+    for (obj_id, controller) in bf_ids {
+        if let Some(mat) = state.objects.get(&obj_id).and_then(|o| o.materialized.as_ref()) {
+            for check in &mat.granted_trigger_defs {
+                (check)(event, obj_id, controller, state, &mut pending);
+            }
+        }
     }
     pending
 }
