@@ -57,7 +57,12 @@ Every observable game action fires a `GameEvent` through `fire_event`, which run
 5. **Log** — `log_event` derives display info from `state.objects` via `id`.
 
 `GameEvent` variants: `ZoneChange { id, actor, from, to, controller }`, `Draw`,
-`EnteredStep`, `EnteredPhase`, `CreatureAttacked`.
+`EnteredStep`, `EnteredPhase`, `CreatureAttacked`, `SpellBeingCast { caster, card_id, mana_value, is_noncreature }`,
+`SpellCast { caster, card_id, mana_spent }`.
+
+`fire_event` returns `bool` — `true` iff the event was suppressed by a prohibition.
+Callers that need to gate on prohibition (e.g. `cast_spell`) check the return value;
+all other call sites ignore it.
 
 ### The three instance types
 
@@ -234,6 +239,43 @@ use `CardDef.additional_costs = vec![CostComponent::XLife]`. The X value flows a
 - `SpellFactory = Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect>` — third arg is `chosen_x`;
   non-X spells receive 0 and ignore it (`_x`).
 - `CardDef.additional_costs` lives on the `CardDef` wrapper, not on `SpellData`.
+
+### CR 701 keyword actions → engine primitives
+
+Every oracle text verb in CR 701 that could appear on a Legacy card, and how it maps
+to the engine. "Effect context" = the verb appears as a spell/ability effect;
+"Cost context" = the verb appears as a cost component.
+
+| CR 701 verb | Status | Engine entry point |
+|---|---|---|
+| **Cast** (701.4) | ✓ | `cast_spell` / `GameEvent::SpellBeingCast` (prohibition gate) + `SpellCast` (trigger source) |
+| **Counter** (701.5) | ✓ | `counter_one(id, state, t, actor)` · `eff_counter_target(caster)` · `eff_counter_and_exile` |
+| **Create** token (701.6) | ✓ | `eff_enter_permanent(controller, catalog_key)` with `is_token: true` on the `GameObject` |
+| **Destroy** (701.7) | ✓ | `destroy_one(id, state, t, actor)` · `eff_destroy_target(caster)` · `eff_destroy_all(caster, filter)` |
+| **Discard** — cost (701.8) | ✓ | `CostComponent::DiscardSelf` · `CostComponent::DiscardCard(ObjPredicate)` |
+| **Discard** — effect | ✓ | `change_zone(id, ZoneId::Graveyard, ...)` (no dedicated `eff_discard` yet; same end state) |
+| **Draw** (701.—) | ✓ | `eff_draw(who, n)` · `sim_draw` — fires `GameEvent::Draw` through the full pipeline |
+| **Exile** — effect (701.11) | ✓ | `eff_exile_target(caster)` · `change_zone(id, ZoneId::Exile, ...)` |
+| **Exile** — cost | ✓ | `CostComponent::ExileFromHand(ObjPredicate)` (pitch costs, delve exile) |
+| **Mill** (701.13) | ~ | No dedicated primitive; use `change_zone(top_of_library_id, ZoneId::Graveyard, ...)` |
+| **Return** to hand | ✓ | `eff_bounce_target(caster)` · `change_zone(id, ZoneId::Hand, ...)` |
+| **Return** to battlefield | ✓ | `eff_reanimate(actor)` · `change_zone(id, ZoneId::Battlefield, ...)` |
+| **Sacrifice** — cost (701.17) | ✓ | `CostComponent::SacSelf` · `CostComponent::SacPermanent(ObjPredicate)` |
+| **Search** (701.19) | ✓ | `eff_fetch_search(who, CardPredicate, to_zone)` — searches library, puts card in `to_zone` |
+| **Surveil** (701.30) | ✓ | `eff_surveil(who, n)` — calls `state.surveil_choice` per card (strategy callback) |
+| **Tap** — cost (701.21) | ✓ | `CostComponent::TapSelf` · `CostComponent::TapPermanent(ObjPredicate)` |
+| **Amass** (701.31) | ✓ | `do_amass(token_name, controller, n, state, t)` (internal; not an `Effect` primitive) |
+| **Transform** (701.34) | ~ | `bf.active_face = 1` (flip) — no event fired; used for Tamiyo front→back |
+| **Scry** (701.18) | ✗ | Not implemented; similar to Surveil — add `eff_scry(who, n)` when needed |
+| **Fight** (701.12) | ✗ | Not implemented |
+| **Attach** (701.3) | ✗ | Not implemented (no equipment/aura mechanics) |
+| **Shuffle** (701.20) | ✗ | Library order not tracked; `eff_fetch_search` implicitly shuffles (no shuffle step) |
+| **Investigate** (701.25) | ~ | `eff_create_clue(controller)` (internal helper, not a named primitive) |
+| **Double** (701.9) | ✗ | Not implemented (double P/T, life, or mana — L7 CE or `eff_mana` extension) |
+| **Exchange** (701.10) | ✗ | Not implemented |
+| **Reveal** (701.16) | — | Hidden information not modeled; treat as no-op where oracle requires reveal |
+
+**Legend:** ✓ = implemented · ~ = partial/indirect · ✗ = not yet implemented · — = out of scope
 
 ### Known seams
 
