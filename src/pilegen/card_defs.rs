@@ -77,6 +77,7 @@ fn all_cards() -> Vec<CardDef> {
         dark_ritual(),
         fatal_push(),
         snuff_out(),
+        swords_to_plowshares(),
         bitter_triumph(),
         long_goodbye(),
         consign_to_memory(),
@@ -88,6 +89,7 @@ fn all_cards() -> Vec<CardDef> {
         hydroblast(),
         sheoldreds_edict(),
         spell_pierce(),
+        flusterstorm(),
         // Spells — sorceries
         toxic_deluge(),
         doomsday(),
@@ -112,6 +114,7 @@ fn all_cards() -> Vec<CardDef> {
         dauthi_voidwalker(),
         lavinia_azorius_renegade(),
         hexing_squelcher(),
+        simian_spirit_guide(),
         // DFCs / split
         tamiyo_inquisitive_student(),
         brazen_borrower(),
@@ -146,6 +149,7 @@ fn color_to_mana_char(c: Color) -> &'static str {
 fn tap_produces(s: &str) -> ManaAbility {
     let s_owned = s.to_string();
     ManaAbility {
+        source_zone: SourceZone::Battlefield,
         costs: vec![CostComponent::TapSelf],
         produces: produces_colors(s),
         produces_count: 1,
@@ -436,6 +440,7 @@ fn karakas() -> CardDef {
 fn ancient_tomb() -> CardDef {
     simple("Ancient Tomb", CardKind::Land(LandData {
         mana_abilities: vec![ManaAbility {
+            source_zone: SourceZone::Battlefield,
             costs: vec![CostComponent::TapSelf],
             produces: vec![],      // colorless
             produces_count: 2,
@@ -568,12 +573,14 @@ fn cavern_of_souls() -> CardDef {
             // {T}: Add one mana of any color (type restriction and uncounterable not yet modeled)
             mana_abilities: vec![
                 ManaAbility {
+                    source_zone: SourceZone::Battlefield,
                     costs: vec![CostComponent::TapSelf],
                     produces: vec![],
                     produces_count: 1,
                     make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "C")),
                 },
                 ManaAbility {
+                    source_zone: SourceZone::Battlefield,
                     costs: vec![CostComponent::TapSelf],
                     produces: produces_colors("WUBRG"),
                     produces_count: 1,
@@ -601,6 +608,7 @@ fn lotus_petal() -> CardDef {
     simple("Lotus Petal", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
         mana_abilities: vec![ManaAbility {
+            source_zone: SourceZone::Battlefield,
             costs: vec![CostComponent::SacSelf],
             produces: produces_colors("WUBRG"),
             produces_count: 1,
@@ -876,6 +884,20 @@ fn snuff_out() -> CardDef {
     }), parse_colors("3BB", false, true), None)
 }
 
+/// Exile target creature. Its controller gains life equal to its power. CR 701.10.
+fn swords_to_plowshares() -> CardDef {
+    simple("Swords to Plowshares", CardKind::Instant(SpellData {
+        mana_cost: "W".to_string(),
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+        },
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_exile_target_gain_power(who))),
+        ..Default::default()
+    }), parse_colors("W", true, false), None)
+}
+
 /// Destroy target creature or planeswalker.
 /// Additional cost: discard a card OR pay 3 life (CR 118.9d).
 fn bitter_triumph() -> CardDef {
@@ -976,6 +998,99 @@ fn spell_pierce() -> CardDef {
         })),
         ..Default::default()
     }), parse_colors("U", true, false), None)
+}
+
+/// Counter target instant or sorcery spell unless its controller pays {1}.
+/// Storm (CR 702.40): when you cast this spell, copy it for each spell cast before it
+/// this turn. Copies are counterable stack abilities targeting other legal targets.
+fn flusterstorm() -> CardDef {
+    let spell_data = SpellData {
+        mana_cost: "U".to_string(),
+        exileable: true,
+        target_spec: TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Stack,
+            filter: obj_pred_from_card(pred_or(
+                pred_type_eq(CardType::Instant),
+                pred_type_eq(CardType::Sorcery),
+            )),
+        },
+        spell_factory: Some(Arc::new(|who, _source_id, _x| {
+            eff_counter_unless_pays(who, vec![CostComponent::Mana(parse_mana_cost("1"))])
+        })),
+        ..Default::default()
+    };
+    // Clone spell_data fields we need for the storm trigger closure.
+    let storm_target_spec = spell_data.target_spec.clone();
+    let storm_factory = spell_data.spell_factory.clone().unwrap();
+    CardDef::new(
+        "Flusterstorm",
+        CardKind::Instant(spell_data),
+        parse_colors("U", true, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![TriggerDef {
+            // Storm trigger: fires on SpellCast where card_id == source_id (self-referential).
+            check: Arc::new(move |event, source_id, controller, state, pending| {
+                if let GameEvent::SpellCast { caster, card_id, .. } = event {
+                    if *card_id != source_id || *caster != controller { return; }
+                    // Capture storm count now — spells cast before this one.
+                    // spells_cast_this_turn hasn't been incremented yet for this spell
+                    // (that happens after cast_spell returns).
+                    let storm_count = state.player(controller).spells_cast_this_turn as usize;
+                    if storm_count == 0 { return; }
+                    let tspec = storm_target_spec.clone();
+                    let factory = storm_factory.clone();
+                    let spell_source = source_id;
+                    pending.push(TriggerContext {
+                        source_name: "Flusterstorm (storm trigger)".into(),
+                        controller,
+                        target_spec: TargetSpec::None,
+                        effect: Effect(Arc::new(move |state, t, _| {
+                            // Find legal targets for the copies.
+                            let all_targets = legal_targets(&tspec, controller, state);
+                            // Original target from the spell on the stack.
+                            let original_targets: Vec<ObjId> = state.objects.get(&spell_source)
+                                .and_then(|o| o.spell.as_ref())
+                                .map(|s| s.chosen_targets.clone())
+                                .unwrap_or_default();
+                            let extra_targets: Vec<ObjId> = all_targets.iter()
+                                .filter(|id| !original_targets.contains(id))
+                                .copied()
+                                .collect();
+                            for i in 0..storm_count {
+                                let tgt = if i < extra_targets.len() {
+                                    extra_targets[i]
+                                } else if !original_targets.is_empty() {
+                                    original_targets[0]
+                                } else {
+                                    break;
+                                };
+                                let copy_eff = factory(controller, spell_source, 0);
+                                let copy_id = state.alloc_id();
+                                state.abilities.insert(copy_id, StackAbility {
+                                    id: copy_id,
+                                    source_name: "Flusterstorm (storm copy)".into(),
+                                    owner: state.player_id(controller),
+                                    effect: copy_eff,
+                                    chosen_targets: vec![tgt],
+                                    costs_paid_ctx: CostsPaidCtx::default(),
+                                    is_triggered: false,
+                                    counterable: true,
+                                    choice_spec: None,
+                                });
+                                state.stack.push(copy_id);
+                                let tgt_name = state.stack_item_display_name(tgt).to_string();
+                                state.log(t, controller, format!("Storm → Flusterstorm (targeting {})", tgt_name));
+                            }
+                        })),
+                    });
+                }
+            }),
+            always_active: true,
+        }],
+        vec![], vec![], vec![],
+    )
 }
 
 /// Counter target triggered ability or colorless spell.
@@ -1401,7 +1516,7 @@ fn recruiter_of_the_guard() -> CardDef {
         parse_colors("2W", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![Arc::new(recruiter_check)],
+        vec![TriggerDef { check: Arc::new(recruiter_check), always_active: true }],
         vec![],
         vec![],
         vec![],
@@ -1419,7 +1534,7 @@ fn orcish_bowmasters() -> CardDef {
         parse_colors("1B", false, true),
         None,
         vec![], CardLayout::Normal, None,
-        vec![Arc::new(bowmasters_check)],
+        vec![TriggerDef { check: Arc::new(bowmasters_check), always_active: false }],
         vec![],
         vec![],
         vec![],
@@ -1437,7 +1552,7 @@ fn murktide_regent() -> CardDef {
         parse_colors("5UU", true, false),
         Some(25),
         vec![], CardLayout::Normal, None,
-        vec![Arc::new(murktide_check)],
+        vec![TriggerDef { check: Arc::new(murktide_check), always_active: false }],
         vec![ReplacementDef {
             check: Arc::new(murktide_etb_check),
             make_effect: Arc::new(|_source_id, controller: PlayerId| {
@@ -1539,7 +1654,7 @@ fn lavinia_azorius_renegade() -> CardDef {
         parse_colors("WU", true, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![Arc::new(|event, _source_id, controller, _state, pending| {
+        vec![TriggerDef { check: Arc::new(|event, _source_id, controller, _state, pending| {
             if let GameEvent::SpellCast { caster, card_id, mana_spent } = event {
                 if *caster != controller && !mana_spent {
                     let spell_id = *card_id;
@@ -1553,7 +1668,7 @@ fn lavinia_azorius_renegade() -> CardDef {
                     });
                 }
             }
-        })],
+        }), always_active: false }],
         vec![],
         vec![ProhibitionDef {
             check: Arc::new(|event, _source_id, controller, state| {
@@ -1586,7 +1701,7 @@ fn hexing_squelcher() -> CardDef {
         None,
         vec![], CardLayout::Normal, None,
         // Ward—Pay 2 life: fires when an opponent's spell targets this permanent.
-        vec![Arc::new(|event, source_id, controller, state, pending| {
+        vec![TriggerDef { check: Arc::new(|event, source_id, controller, state, pending| {
             if let GameEvent::SpellCast { caster, card_id, .. } = event {
                 if *caster == controller { return; }
                 let is_targeted = state.objects.get(card_id)
@@ -1613,7 +1728,7 @@ fn hexing_squelcher() -> CardDef {
                     });
                 }
             }
-        })],
+        }), always_active: true }],
         vec![],
         vec![
             // "Spells you control can't be countered." (while on battlefield)
@@ -1711,7 +1826,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
         parse_colors("U", false, false),
         None,
         vec![Supertype::Legendary], CardLayout::DoubleFaced, Some(Box::new(back)),
-        vec![Arc::new(tamiyo_check)],
+        vec![TriggerDef { check: Arc::new(tamiyo_check), always_active: false }],
         vec![],
         vec![],
         vec![],
@@ -1846,6 +1961,20 @@ fn clue_token() -> CardDef {
         }],
         ..Default::default()
     }), vec![], None)
+}
+
+/// Creature — Ape Spirit, 2/2. {2}{R}.
+/// "Exile this card from your hand: Add {R}." — hand-zone mana ability (CR 605.3).
+fn simian_spirit_guide() -> CardDef {
+    let mut data = CreatureData::new("2R", 2, 2);
+    data.mana_abilities = vec![ManaAbility {
+        source_zone: SourceZone::Hand,
+        costs: vec![CostComponent::ExileSelf],
+        produces: produces_colors("R"),
+        produces_count: 1,
+        make_effect: std::sync::Arc::new(|who, _color| eff_mana(who, "R")),
+    }];
+    simple("Simian Spirit Guide", CardKind::Creature(data), parse_colors("R", false, false), None)
 }
 
 fn brazen_borrower() -> CardDef {

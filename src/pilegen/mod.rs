@@ -325,6 +325,17 @@ pub(super) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, Pl
 pub(super) type ProhibitionCheckFn =
     std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
 
+/// A trigger definition on a CardDef.  Pairs the check function with metadata
+/// that controls instance lifecycle (e.g. self-referential triggers are always active).
+#[derive(Clone)]
+pub(super) struct TriggerDef {
+    pub(super) check: TriggerCheckFn,
+    /// If true, the trigger fires regardless of what zone the source is in.
+    /// The `TriggerCheckFn` itself guards on `source_id` appearing in the event
+    /// (self-referential triggers: ETB-self, Ward-self, Storm-self-cast).
+    pub(super) always_active: bool,
+}
+
 /// One trigger registration per card object in the simulation.
 /// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
 /// Dynamically-created triggers (e.g. Tamiyo +2 watcher) start with `active: true`.
@@ -335,6 +346,8 @@ pub(super) struct TriggerInstance {
     /// None for permanent (card-based) triggers; Some for floating triggers created by abilities.
     pub(super) expiry: Option<ContinuousExpiry>,
     pub(super) active: bool,
+    /// If true, `deactivate_instances` skips this trigger — it stays active across zone changes.
+    pub(super) always_active: bool,
 }
 
 /// One replacement registration per card object in the simulation.
@@ -714,6 +727,30 @@ fn ma_requires_sac(ma: &ManaAbility) -> bool {
     ma.costs.iter().any(|c| matches!(c, CostComponent::SacSelf))
 }
 
+/// Find a hand card with a hand-zone mana ability that produces the requested color
+/// (or any mana if `color` is None for generic). Returns (id, name, make_effect).
+fn find_hand_mana_source(
+    state: &SimState,
+    who: PlayerId,
+    color: Option<Color>,
+) -> Option<(ObjId, String, ManaEffectFactory)> {
+    let hand_ids: Vec<_> = state.hand_of(who).map(|c| (c.id, c.catalog_key.clone())).collect();
+    for (id, key) in hand_ids {
+        let mas = state.catalog.get(&key).map(|d| d.mana_abilities()).unwrap_or(&[]);
+        for ma in mas {
+            if !matches!(ma.source_zone, SourceZone::Hand) { continue; }
+            let color_ok = match color {
+                Some(c) => ma.produces.contains(&c),
+                None => true, // any mana for generic
+            };
+            if color_ok {
+                return Some((id, key, std::sync::Arc::clone(&ma.make_effect)));
+            }
+        }
+    }
+    None
+}
+
 fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
     let avail: Vec<_> = abilities.iter()
         .filter(|ma| !ma_requires_tap(ma) || !tapped)
@@ -1012,8 +1049,20 @@ impl SimState {
         for card in self.permanents_of(who) {
             if let Some(bf) = &card.bf {
                 let mas = self.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
-                accumulate_source_potential(mas, bf.tapped, &mut p);
+                let bf_mas: Vec<_> = mas.iter()
+                    .filter(|ma| matches!(ma.source_zone, SourceZone::Battlefield))
+                    .cloned().collect();
+                accumulate_source_potential(&bf_mas, bf.tapped, &mut p);
             }
+        }
+        // Hand-zone mana abilities (e.g. Simian Spirit Guide).
+        for card in self.hand_of(who) {
+            let mas = self.catalog.get(&card.catalog_key)
+                .map(|d| d.mana_abilities()).unwrap_or(&[]);
+            let hand_mas: Vec<_> = mas.iter()
+                .filter(|ma| matches!(ma.source_zone, SourceZone::Hand))
+                .cloned().collect();
+            accumulate_source_potential(&hand_mas, false, &mut p);
         }
         p
     }
@@ -1077,6 +1126,15 @@ impl SimState {
                     remaining -= 1;
                     continue;
                 }
+                // Fallback: hand-zone mana source (e.g. Simian Spirit Guide).
+                if let Some((id, name, make)) = find_hand_mana_source(self, who, Some(color)) {
+                    let color_ch = match color { Color::White=>'W', Color::Blue=>'U', Color::Black=>'B', Color::Red=>'R', Color::Green=>'G' };
+                    log.push(format!("exile {} → {}", name, color_ch));
+                    self.set_card_zone(id, CardZone::Exile { on_adventure: false });
+                    make(who, Some(color)).call(self, _t, &[]);
+                    remaining -= 1;
+                    continue;
+                }
                 break;
             }
         }
@@ -1127,6 +1185,14 @@ impl SimState {
                 remaining_generic -= count as i32;
                 continue;
             }
+            // Fallback: hand-zone mana source for generic mana.
+            if let Some((id, name, make)) = find_hand_mana_source(self, who, None) {
+                log.push(format!("exile {} → 1", name));
+                self.set_card_zone(id, CardZone::Exile { on_adventure: false });
+                make(who, None).call(self, _t, &[]);
+                remaining_generic -= 1;
+                continue;
+            }
             break;
         }
         log
@@ -1150,6 +1216,10 @@ impl SimState {
 
     fn lose_life(&mut self, who: PlayerId, n: i32) {
         self.player_mut(who).life -= n;
+    }
+
+    fn gain_life(&mut self, who: PlayerId, n: i32) {
+        self.player_mut(who).life += n;
     }
 
     fn log(&mut self, t: u8, who: PlayerId, msg: impl Into<String>) {
@@ -1827,6 +1897,7 @@ fn can_pay_single_cost(
         CostComponent::TapSelf => source_untapped,
         CostComponent::SacSelf => state.permanent_bf(source_id).is_some(),
         CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
+        CostComponent::ExileSelf => state.hand_of(who).any(|c| c.id == source_id),
         CostComponent::Life(n) => state.player(who).life > *n,
         CostComponent::XLife => state.player(who).life >= chosen_x as i32,
         CostComponent::XMana => state.potential_mana(who).total >= chosen_x as i32,
@@ -1896,6 +1967,9 @@ fn pay_single_cost(
         }
         CostComponent::DiscardSelf => {
             state.set_card_zone(source_id, CardZone::Graveyard);
+        }
+        CostComponent::ExileSelf => {
+            state.set_card_zone(source_id, CardZone::Exile { on_adventure: false });
         }
         CostComponent::Life(n) => {
             state.lose_life(who, *n);
@@ -2061,6 +2135,7 @@ fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
         CostComponent::TapSelf => "tap".to_string(),
         CostComponent::SacSelf => "sac self".to_string(),
         CostComponent::DiscardSelf => "discard self".to_string(),
+        CostComponent::ExileSelf => "exile self".to_string(),
         CostComponent::Life(n) => format!("-{} life", n),
         CostComponent::SacPermanent(_) => "sac permanent".to_string(),
         CostComponent::DiscardCard(_) => "discard card".to_string(),
@@ -2305,6 +2380,7 @@ fn cast_spell(
         Some(ac) => ac.costs.iter().any(|c| matches!(c, CostComponent::Mana(_))),
     };
     fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent }, state, t, who);
+
 
     Some(card_id)
 }

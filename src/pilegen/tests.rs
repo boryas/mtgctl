@@ -1207,6 +1207,7 @@
         let borrower_def = catalog_card("Brazen Borrower");
         let island2_def = CardDef::new("Island2", CardKind::Land(LandData {
             mana_abilities: vec![ManaAbility {
+                source_zone: SourceZone::Battlefield,
                 costs: vec![CostComponent::TapSelf],
                 produces: produces_colors("U"),
                 produces_count: 1,
@@ -1581,6 +1582,7 @@
             check: std::sync::Arc::new(tamiyo_plus_two_check),
             expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
             active: true,
+            always_active: false,
         });
         // Opp has a 3/3 attacker.
         let atk_def = creature("Dragon", 3, 3);
@@ -1610,6 +1612,7 @@
             check: std::sync::Arc::new(tamiyo_plus_two_check),
             expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
             active: true,
+            always_active: false,
         });
         assert_eq!(state.trigger_instances.len(), 1);
 
@@ -1691,6 +1694,7 @@
                 }),
                 expiry: Some(ContinuousExpiry::EndOfTurn),
                 active: true,
+                always_active: false,
             });
             let ev = GameEvent::EnteredStep { step: step_kind, active_player: PlayerId::Us };
             fire_event(ev, &mut state, 1, PlayerId::Us);
@@ -1723,6 +1727,7 @@
                 }),
                 expiry: Some(ContinuousExpiry::EndOfTurn),
                 active: true,
+                always_active: false,
             });
             let ev = GameEvent::EnteredPhase { phase: phase_kind };
             fire_event(ev, &mut state, 1, PlayerId::Us);
@@ -4559,4 +4564,197 @@
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
             "Daze should counter when opponent can't pay 1");
+    }
+
+    // ── §50: Flusterstorm / Storm trigger ──────────────────────────────────────
+
+    #[test]
+    fn test_flusterstorm_storm_trigger_creates_copies() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Register Flusterstorm's trigger instance (always_active).
+        let fluster_def = catalog_card("Flusterstorm");
+        let fluster_id = state.alloc_id();
+        preregister_instances(&fluster_def, fluster_id, PlayerId::Us, &mut state);
+        assert!(state.trigger_instances.last().unwrap().active,
+            "storm trigger should start active (always_active)");
+
+        // Put two opponent instants on the stack as targets.
+        let spell_a = state.alloc_id();
+        let spell_b = state.alloc_id();
+        for (id, name) in [(spell_a, "Brainstorm"), (spell_b, "Ponder")] {
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: name.to_string(),
+                owner: PlayerId::Opp,
+                controller: PlayerId::Opp,
+                zone: CardZone::Stack,
+                is_token: false,
+                spell: Some(SpellState {
+                    effect: Some(eff_draw(PlayerId::Opp, 1)),
+                    chosen_targets: vec![],
+                    is_back_face: false,
+                    costs_paid_ctx: CostsPaidCtx::default(),
+                }),
+                bf: None,
+                materialized: None,
+                counters: HashMap::new(),
+            });
+            state.stack.push(id);
+        }
+
+        // Simulate 2 spells cast before Flusterstorm.
+        state.us.spells_cast_this_turn = 2;
+
+        // Also put flusterstorm on the stack (as if we just cast it) with spell_a as target.
+        state.objects.insert(fluster_id, GameObject {
+            id: fluster_id,
+            catalog_key: "Flusterstorm".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: Some(SpellState {
+                effect: Some(eff_counter_unless_pays(PlayerId::Us, vec![CostComponent::Mana(parse_mana_cost("1"))])),
+                chosen_targets: vec![spell_a],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(),
+        });
+        state.stack.push(fluster_id);
+
+        // Fire the SpellCast event — storm trigger should fire.
+        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        let triggers = fire_triggers(&event, &state);
+        assert_eq!(triggers.len(), 1, "storm should produce exactly one trigger context");
+        assert_eq!(triggers[0].source_name, "Flusterstorm (storm trigger)");
+
+        // Resolve the storm trigger effect — should create 2 copies on the stack.
+        let stack_before = state.stack.len();
+        triggers[0].effect.call(&mut state, 1, &[]);
+        let copies_pushed = state.stack.len() - stack_before;
+        assert_eq!(copies_pushed, 2, "storm count 2 → 2 copies");
+
+        // Verify copies are StackAbilities.
+        for &copy_id in &state.stack[stack_before..] {
+            let ability = state.abilities.get(&copy_id)
+                .expect("copy should be a StackAbility");
+            assert_eq!(ability.source_name, "Flusterstorm (storm copy)");
+            assert!(ability.counterable, "storm copies should be counterable");
+        }
+    }
+
+    #[test]
+    fn test_flusterstorm_no_storm_when_first_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let fluster_def = catalog_card("Flusterstorm");
+        let fluster_id = state.alloc_id();
+        preregister_instances(&fluster_def, fluster_id, PlayerId::Us, &mut state);
+
+        // No spells cast before this one.
+        state.us.spells_cast_this_turn = 0;
+
+        let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        let triggers = fire_triggers(&event, &state);
+        assert!(triggers.is_empty(), "no storm copies when first spell of the turn");
+    }
+
+    #[test]
+    fn test_flusterstorm_storm_copies_counter_spells() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Opponent has no lands — can't pay {1}.
+        let spell_id = state.alloc_id();
+        state.objects.insert(spell_id, GameObject {
+            id: spell_id,
+            catalog_key: "Ponder".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: Some(SpellState {
+                effect: Some(eff_draw(PlayerId::Opp, 1)),
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(),
+        });
+        state.stack.push(spell_id);
+
+        // A storm copy's effect is the same as the original: counter unless pays {1}.
+        eff_counter_unless_pays(PlayerId::Us, vec![CostComponent::Mana(parse_mana_cost("1"))])
+            .call(&mut state, 1, &[spell_id]);
+
+        assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
+            "storm copy should counter spell when opponent can't pay 1");
+    }
+
+    // ── §51: Simian Spirit Guide / hand-zone mana ──────────────────────────────
+
+    #[test]
+    fn test_ssg_potential_mana_includes_hand() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // SSG in hand → potential_mana should include {R}.
+        add_hand_card(&mut state, PlayerId::Us, "Simian Spirit Guide");
+        let pool = state.potential_mana(PlayerId::Us);
+        assert!(pool.r >= 1, "potential_mana should see SSG's R from hand");
+        assert!(pool.total >= 1);
+    }
+
+    #[test]
+    fn test_ssg_produce_mana_exiles_from_hand() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let ssg_id = add_hand_card(&mut state, PlayerId::Us, "Simian Spirit Guide");
+        // Pay {R} — should exile SSG from hand.
+        let log = state.pay_mana(PlayerId::Us, &parse_mana_cost("R"), 1);
+        assert!(!log.is_empty(), "should have logged the exile");
+        assert!(log[0].contains("exile"), "log should mention exile: {:?}", log);
+        assert_eq!(state.objects[&ssg_id].zone, CardZone::Exile { on_adventure: false },
+            "SSG should be exiled after paying mana");
+    }
+
+    #[test]
+    fn test_ssg_on_battlefield_does_not_tap_for_mana() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // SSG on battlefield — its mana ability is hand-zone only.
+        let ssg_def = catalog_card("Simian Spirit Guide");
+        add_perm_with_def(&mut state, PlayerId::Us, &ssg_def, BattlefieldState::new());
+        let pool = state.potential_mana(PlayerId::Us);
+        assert_eq!(pool.r, 0, "SSG on battlefield should not produce R");
+        assert_eq!(pool.total, 0);
+    }
+
+    // ── §52: Swords to Plowshares ──────────────────────────────────────────────
+
+    #[test]
+    fn test_swords_exiles_creature_and_gains_life() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Opponent has a 3/3 creature.
+        let creature_def = catalog_card("Murktide Regent");
+        let bf = BattlefieldState { counters: 0, ..BattlefieldState::new() };
+        let creature_id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, bf);
+        recompute(&mut state);
+        let opp_life_before = state.opp.life;
+
+        // Swords to Plowshares: exile + controller gains life equal to power.
+        eff_exile_target_gain_power(PlayerId::Us).call(&mut state, 1, &[creature_id]);
+
+        assert_eq!(state.objects[&creature_id].zone, CardZone::Exile { on_adventure: false },
+            "creature should be exiled");
+        assert!(state.opp.life > opp_life_before,
+            "opponent should gain life equal to creature's power");
     }

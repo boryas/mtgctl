@@ -103,6 +103,7 @@ pub(crate) enum CostComponent {
     TapSelf,
     SacSelf,                              // sacrifice the source from battlefield
     DiscardSelf,                          // discard the source from hand
+    ExileSelf,                            // exile the source (hand → exile; e.g. Simian Spirit Guide)
     Life(i32),
     SacPermanent(ObjPredicate),          // sacrifice another permanent from battlefield
     DiscardCard(ObjPredicate),           // discard another card from hand
@@ -250,13 +251,15 @@ impl AbilityDef {
 pub(crate) type ManaEffectFactory =
     std::sync::Arc<dyn Fn(PlayerId, Option<Color>) -> Effect + Send + Sync>;
 
-/// How a permanent produces mana.
+/// How a permanent (or hand card) produces mana.
+/// `source_zone`   — where the source must be to activate (default Battlefield).
 /// `costs`         — what must be paid to activate (typically TapSelf or SacSelf).
 /// `produces`      — colors produced; empty vec → colorless only. Used for affordability prediction.
 /// `produces_count`— number of mana produced per activation (default 1). Used for prediction.
 /// `make_effect`   — factory that builds the actual production effect (add mana + any side effects).
 #[derive(Clone)]
 pub(crate) struct ManaAbility {
+    pub(crate) source_zone: SourceZone,
     pub(crate) costs: Vec<CostComponent>,
     pub(crate) produces: Vec<Color>,
     pub(crate) produces_count: usize,
@@ -266,6 +269,7 @@ pub(crate) struct ManaAbility {
 impl Default for ManaAbility {
     fn default() -> Self {
         Self {
+            source_zone: SourceZone::Battlefield,
             costs: vec![],
             produces: vec![],
             produces_count: 1,
@@ -478,7 +482,7 @@ pub(crate) struct CardDef {
     /// For Split cards (including adventures), this is the second castable half.
     pub(crate) back: Option<Box<CardDef>>,
     /// Trigger check functions for this card (set at card definition time).
-    pub(super) trigger_defs: Vec<TriggerCheckFn>,
+    pub(super) trigger_defs: Vec<TriggerDef>,
     /// Replacement effect definitions for this card (set at card definition time).
     pub(super) replacement_defs: Vec<ReplacementDef>,
     /// Prohibition definitions for this card (CR 614.17 — "can't" effects).
@@ -672,7 +676,7 @@ impl CardDef {
         supertypes: Vec<Supertype>,
         layout: CardLayout,
         back: Option<Box<CardDef>>,
-        trigger_defs: Vec<TriggerCheckFn>,
+        trigger_defs: Vec<TriggerDef>,
         replacement_defs: Vec<ReplacementDef>,
         prohibition_defs: Vec<ProhibitionDef>,
         static_ability_defs: Vec<StaticAbilityDef>,
@@ -735,10 +739,11 @@ where
     }
 }
 
-/// Build a `TriggerCheckFn` for simple self-ETB triggers.
+/// Build a `TriggerDef` for simple self-ETB triggers.
 ///
 /// Fires when this permanent enters the battlefield under its controller's control.
 /// Pushes a `TriggerContext` with the given `source_name`, `target_spec`, and effect.
+/// Always-active: the event match (`id == source_id`) is the guard.
 ///
 /// Cards with combined ETB+other triggers (e.g. Orcish Bowmasters) or effects that read state
 /// at trigger-push time keep their trigger inline.
@@ -746,22 +751,25 @@ pub(super) fn etb_self_trigger<F>(
     source_name: &'static str,
     target_spec: TargetSpec,
     make_effect: F,
-) -> TriggerCheckFn
+) -> TriggerDef
 where
     F: Fn(ObjId, PlayerId) -> Effect + Send + Sync + 'static,
 {
-    std::sync::Arc::new(move |event, source_id, controller, _state, pending| {
-        if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
-            if *id == source_id && *ctlr == controller {
-                pending.push(TriggerContext {
-                    source_name: source_name.into(),
-                    controller,
-                    target_spec: target_spec.clone(),
-                    effect: make_effect(source_id, controller),
-                });
+    TriggerDef {
+        check: std::sync::Arc::new(move |event, source_id, controller, _state, pending| {
+            if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+                if *id == source_id && *ctlr == controller {
+                    pending.push(TriggerContext {
+                        source_name: source_name.into(),
+                        controller,
+                        target_spec: target_spec.clone(),
+                        effect: make_effect(source_id, controller),
+                    });
+                }
             }
-        }
-    })
+        }),
+        always_active: true,
+    }
 }
 
 /// Build a `ReplacementDef` for permanents that enter the battlefield tapped.
@@ -1039,6 +1047,7 @@ pub(super) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
             check: std::sync::Arc::new(tamiyo_plus_two_check),
             expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
             active: true,
+            always_active: false,
         });
         state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
     }))
@@ -1079,15 +1088,16 @@ pub(super) fn build_spell_effect(
 
 /// Pre-register trigger and replacement instances for a card object at simulation init.
 /// Reads directly from `card_def.trigger_defs` and `card_def.replacement_defs` — no table lookup.
-/// Instances start with `active: false`; they are activated when the card enters the battlefield.
+/// Instances start with `active: false` unless the TriggerDef is `always_active`.
 pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, controller: PlayerId, state: &mut SimState) {
-    for check in card_def.trigger_defs.iter().cloned() {
+    for tdef in &card_def.trigger_defs {
         state.trigger_instances.push(TriggerInstance {
             source_id,
             controller,
-            check,
+            check: tdef.check.clone(),
             expiry: None,
-            active: false,
+            active: tdef.always_active,
+            always_active: tdef.always_active,
         });
     }
     for repl in &card_def.replacement_defs {
@@ -1140,7 +1150,7 @@ pub(super) fn activate_instances(
 /// battlefield. Also removes static-ability ContinuousInstances (WhileSourceOnBattlefield).
 pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
     for inst in &mut state.trigger_instances {
-        if inst.source_id == source_id { inst.active = false; }
+        if inst.source_id == source_id && !inst.always_active { inst.active = false; }
     }
     for inst in &mut state.replacement_instances {
         if inst.source_id == source_id { inst.active = false; }
