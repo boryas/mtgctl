@@ -174,6 +174,9 @@ struct GameObject {
     /// Zone-independent counters (e.g. void counters from Dauthi Voidwalker).
     /// Persists across zone changes.
     pub(super) counters: HashMap<CounterType, u32>,
+    /// Incremented each time this card enters the stack. Used by CR 611.2f delayed CEs
+    /// (e.g. "next spell can't be countered") to distinguish separate casts of the same card.
+    pub(super) cast_generation: u32,
 }
 
 impl GameObject {
@@ -181,7 +184,7 @@ impl GameObject {
         GameObject {
             id, catalog_key: catalog_key.into(), controller: owner, owner,
             zone: CardZone::Library, is_token: false, bf: None, spell: None,
-            materialized: None, counters: HashMap::new(),
+            materialized: None, counters: HashMap::new(), cast_generation: 0,
         }
     }
 }
@@ -288,6 +291,9 @@ pub(super) enum GameEvent {
         caster: PlayerId,
         card_id: ObjId,
     },
+    /// Fired in `sim_play_land` after the zone change. Distinguishes the once-per-turn
+    /// land play from hand vs. lands entering via fetch, reanimate, etc.
+    LandPlayed { id: ObjId, controller: PlayerId },
     // Future variants: DamageDealt, SpellResolved, AbilityActivated,
     //                  CounterChanged, LifeChanged, TokenCreated.
 }
@@ -323,6 +329,11 @@ pub(super) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, Pl
 /// controller, etc. Prohibition checks run before replacement effects (CR 614.17 — can't effects
 /// aren't replacements and take precedence over permissive effects).
 pub(super) type ProhibitionCheckFn =
+    std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
+
+/// Predicate over game events, used for event-based CE activation (CR 611.2f).
+/// Same shape as `ProhibitionCheckFn`: receives the event, source_id, controller, and state.
+pub(super) type EventPredicate =
     std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
 
 /// A trigger definition on a CardDef.  Pairs the check function with metadata
@@ -439,9 +450,34 @@ pub(super) type ContinuousModFn =
     std::sync::Arc<dyn Fn(&mut CardDef, &SimState) + Send + Sync>;
 
 /// Predicate that decides whether a continuous effect applies to a given object.
-/// Receives (target_id, target_controller).
+/// Receives (target_id, target_controller, state).
 pub(super) type ContinuousFilterFn =
-    std::sync::Arc<dyn Fn(ObjId, PlayerId) -> bool + Send + Sync>;
+    std::sync::Arc<dyn Fn(ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
+
+/// What characteristics a CE reads from targets (for CR 613.7 dependency analysis).
+/// If CE_A reads a category that CE_B writes, A depends on B within the same layer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub(super) enum CeReads {
+    LandTypes,
+    Supertypes,
+    Abilities,
+    Color,
+    PowerToughness,
+    CardTypes,
+}
+
+/// What characteristics a CE writes (modifies) on targets.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub(super) enum CeWrites {
+    LandTypes,
+    Supertypes,
+    Abilities,
+    Color,
+    PowerToughness,
+    CardTypes,
+}
 
 /// When a `ContinuousInstance` expires and should be removed.
 #[derive(Clone, PartialEq, Debug)]
@@ -465,12 +501,28 @@ pub(super) struct ContinuousInstance {
     pub(super) controller: PlayerId,
     /// Which layer this modifier applies in (determines application order).
     pub(super) layer: ContinuousLayer,
+    /// CR 613.7: what this CE reads from targets to determine applicability/behavior.
+    /// Used to compute dependency edges within a layer.
+    pub(super) reads: Vec<CeReads>,
+    /// CR 613.7: what this CE writes (modifies) on targets.
+    pub(super) writes: Vec<CeWrites>,
+    /// CR 613.6: registration sequence — tiebreaker after dependency ordering.
+    pub(super) timestamp: u32,
     /// Determines which game objects this CE affects.
     pub(super) filter: ContinuousFilterFn,
     /// Mutates the target object's cloned `CardDef`.
     pub(super) modifier: ContinuousModFn,
     /// When this instance should be removed.
     pub(super) expiry: ContinuousExpiry,
+    /// Dormant until this event fires (CR 611.2f). None = always active from creation.
+    /// When the predicate matches, `active` is set to true. If `one_shot`, the
+    /// predicate is cleared so it never re-matches.
+    pub(super) activate_on: Option<EventPredicate>,
+    /// If true, `activate_on` matches at most once (cleared after first match).
+    pub(super) one_shot: bool,
+    /// Whether this CI is currently applying during recompute. Dormant CIs
+    /// (those with an unmatched `activate_on`) start as false.
+    pub(super) active: bool,
 }
 
 
@@ -487,6 +539,72 @@ fn fold_game_state_into_def(def: &mut CardDef, obj: &GameObject) {
     }
 }
 
+/// CR 613.7: A depends on B if B writes a category that A reads.
+fn ce_categories_match(r: CeReads, w: CeWrites) -> bool {
+    matches!(
+        (r, w),
+        (CeReads::LandTypes, CeWrites::LandTypes)
+            | (CeReads::Supertypes, CeWrites::Supertypes)
+            | (CeReads::Abilities, CeWrites::Abilities)
+            | (CeReads::Color, CeWrites::Color)
+            | (CeReads::PowerToughness, CeWrites::PowerToughness)
+            | (CeReads::CardTypes, CeWrites::CardTypes)
+    )
+}
+
+/// Topological sort of CIs within a single layer using Kahn's algorithm.
+/// Ties broken by timestamp (CR 613.6). Cycles fall back to timestamp order.
+fn topo_sort_layer(
+    layer_slice: &[usize],
+    cis: &[ContinuousInstance],
+    out: &mut Vec<usize>,
+) {
+    use std::collections::BinaryHeap;
+    use std::cmp::Reverse;
+
+    let n = layer_slice.len();
+    // Build dependency edges: in_degree[i] = count of CIs that i depends on.
+    let mut in_degree = vec![0usize; n];
+    let mut dependents: Vec<Vec<usize>> = vec![vec![]; n];
+    for i in 0..n {
+        for j in 0..n {
+            if i == j { continue; }
+            // i depends on j if j writes something i reads
+            let ci_i = &cis[layer_slice[i]];
+            let ci_j = &cis[layer_slice[j]];
+            if ci_i.reads.iter().any(|r| ci_j.writes.iter().any(|w| ce_categories_match(*r, *w))) {
+                in_degree[i] += 1;
+                dependents[j].push(i);
+            }
+        }
+    }
+    // Min-heap keyed by timestamp — independent CIs with lowest timestamp first.
+    let mut ready: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
+    for i in 0..n {
+        if in_degree[i] == 0 {
+            ready.push(Reverse((cis[layer_slice[i]].timestamp, i)));
+        }
+    }
+    let start = out.len();
+    while let Some(Reverse((_, idx))) = ready.pop() {
+        out.push(layer_slice[idx]);
+        for &dep in &dependents[idx] {
+            in_degree[dep] -= 1;
+            if in_degree[dep] == 0 {
+                ready.push(Reverse((cis[layer_slice[dep]].timestamp, dep)));
+            }
+        }
+    }
+    // Cycle fallback: append remaining in timestamp order.
+    if out.len() - start < n {
+        for i in 0..n {
+            if !out[start..].contains(&layer_slice[i]) {
+                out.push(layer_slice[i]);
+            }
+        }
+    }
+}
+
 /// Rebuild each game object's inlined `materialized` field by applying all active
 /// `ContinuousInstance`s to clones of the object's `CardDef` from the catalog.
 ///
@@ -499,18 +617,21 @@ fn fold_game_state_into_def(def: &mut CardDef, obj: &GameObject) {
 /// code read `state.def_of(id)` which returns the inlined snapshot; they never access raw
 /// `CardDef` fields directly.
 ///
-/// Application order: instances sorted by `layer` ascending (L1 before L7), then by
-/// insertion order within the same layer (stable sort preserves registration order).
+/// Application order: CIs sorted by layer, then topologically by reads/writes
+/// dependency within each layer, with timestamp as tiebreaker (CR 613.6/613.7).
+/// CIs are applied **one at a time across all objects** (CE-by-CE, not object-by-object).
+/// After each CI is applied, dependent CIs check whether their source still has the
+/// generating ability via the in-progress materialized state (CR 613.7 dependency).
 pub(super) fn recompute(state: &mut SimState) {
     let ids: Vec<ObjId> = state.objects.keys().copied().collect();
-    for id in ids {
+
+    // Phase 1: initialize each object's materialized def from catalog base.
+    for &id in &ids {
         let Some(catalog_key) = state.objects.get(&id).map(|o| o.catalog_key.clone()) else { continue };
         let Some(base) = state.catalog.get(&catalog_key) else { continue };
         let mut def = base.clone();
 
-        // Step 0: for double-faced cards on their back face, substitute the back-face kind
-        // and name before folding. This ensures fold sees the correct variant (e.g. Planeswalker
-        // instead of Creature for flipped Tamiyo) and CEs apply to the active face.
+        // DFC back-face substitution.
         {
             let obj = state.objects.get(&id).unwrap();
             if obj.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
@@ -521,29 +642,82 @@ pub(super) fn recompute(state: &mut SimState) {
             }
         }
 
-        // Step 1: fold game-accumulated state (counters, temporary mods) into the clone.
+        // Fold game-accumulated state (counters, temporary P/T mods).
         {
             let obj = state.objects.get(&id).unwrap();
             fold_game_state_into_def(&mut def, obj);
         }
 
-        // Step 2: collect applicable CI indices (not references) and sort by layer.
-        let controller = state.objects.get(&id).unwrap().controller;
-        let mut applicable: Vec<(usize, ContinuousLayer)> = state.continuous_instances.iter()
-            .enumerate()
-            .filter(|(_, ci)| (ci.filter)(id, controller))
-            .map(|(i, ci)| (i, ci.layer))
-            .collect();
-        applicable.sort_by_key(|&(_, l)| l);
+        state.objects.get_mut(&id).unwrap().materialized = Some(def);
+    }
 
-        // Step 3: apply modifiers — clone the Arc to release borrow on state.continuous_instances
-        // while calling the modifier with &*state.
-        for (idx, _) in applicable {
-            let modifier = std::sync::Arc::clone(&state.continuous_instances[idx].modifier);
-            (modifier)(&mut def, state);
+    // Phase 2: within each layer, compute dependency DAG and topological sort (CR 613.7).
+    // A depends on B if B.writes overlaps A.reads. Ties broken by timestamp (CR 613.6).
+    let mut ci_order: Vec<usize> = (0..state.continuous_instances.len()).collect();
+    ci_order.sort_by_key(|&i| (state.continuous_instances[i].layer, state.continuous_instances[i].timestamp));
+    let mut final_order: Vec<usize> = Vec::with_capacity(ci_order.len());
+    let mut layer_start = 0;
+    while layer_start < ci_order.len() {
+        let current_layer = state.continuous_instances[ci_order[layer_start]].layer;
+        let mut layer_end = layer_start;
+        while layer_end < ci_order.len()
+            && state.continuous_instances[ci_order[layer_end]].layer == current_layer
+        {
+            layer_end += 1;
+        }
+        let layer_slice = &ci_order[layer_start..layer_end];
+        if layer_slice.len() <= 1 {
+            final_order.extend_from_slice(layer_slice);
+        } else {
+            topo_sort_layer(layer_slice, &state.continuous_instances, &mut final_order);
+        }
+        layer_start = layer_end;
+    }
+    let ci_order = final_order;
+
+    // Phase 3: apply CIs one at a time across all objects.
+    for ci_idx in ci_order {
+        // Skip dormant CIs (CR 611.2f: waiting for activation event).
+        if !state.continuous_instances[ci_idx].active { continue; }
+
+        // CR 613.7: for WhileSourceOnBattlefield CIs, check whether the source's
+        // in-progress materialized state still has static abilities. If an earlier CI
+        // (e.g. Blood Moon) stripped them, this CI's generating ability no longer exists.
+        if state.continuous_instances[ci_idx].expiry == ContinuousExpiry::WhileSourceOnBattlefield {
+            let src = state.continuous_instances[ci_idx].source_id;
+            // Only check suppression if the source's base def has static abilities.
+            // CIs registered via ETB replacements (Painter, Flute, etc.) have no
+            // static_ability_defs in the catalog and should never be suppressed.
+            let base_has_statics = state.objects.get(&src)
+                .and_then(|o| state.catalog.get(&o.catalog_key))
+                .map(|d| !d.static_ability_defs.is_empty())
+                .unwrap_or(false);
+            if base_has_statics {
+                let suppressed = state.objects.get(&src)
+                    .and_then(|o| o.materialized.as_ref())
+                    .map(|d| d.static_ability_defs.is_empty())
+                    .unwrap_or(false);
+                if suppressed { continue; }
+            }
         }
 
-        state.objects.get_mut(&id).unwrap().materialized = Some(def);
+        let modifier = std::sync::Arc::clone(&state.continuous_instances[ci_idx].modifier);
+        let filter = std::sync::Arc::clone(&state.continuous_instances[ci_idx].filter);
+
+        for &id in &ids {
+            let controller = match state.objects.get(&id) {
+                Some(o) => o.controller,
+                None => continue,
+            };
+            if !filter(id, controller, state) { continue; }
+            // Extract → modify → reinsert to avoid borrow conflict with &SimState.
+            let mut def = match state.objects.get_mut(&id).and_then(|o| o.materialized.take()) {
+                Some(d) => d,
+                None => continue,
+            };
+            (modifier)(&mut def, state);
+            state.objects.get_mut(&id).unwrap().materialized = Some(def);
+        }
     }
 }
 
@@ -858,6 +1032,8 @@ pub(crate) struct SimState {
     /// All active continuous-effect instances. Checked at `recompute` time; expired entries
     /// are removed at Cleanup / start-of-turn as appropriate.
     pub(super) continuous_instances: Vec<ContinuousInstance>,
+    /// Monotonic counter for assigning timestamps to CIs (CR 613.6).
+    pub(super) ci_timestamp_counter: u32,
     /// Cards that a player is permitted to play for free (without mana cost) this turn.
     /// Granted by Dauthi Voidwalker's activated ability; cleared at end-of-turn.
     pub(super) free_cast_permissions: Vec<FreeCastPermission>,
@@ -927,6 +1103,7 @@ impl SimState {
             repl_applied: HashSet::new(),
             repl_depth: 0,
             continuous_instances: Vec::new(),
+            ci_timestamp_counter: 0,
             free_cast_permissions: Vec::new(),
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
@@ -944,6 +1121,12 @@ impl SimState {
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();
         s
+    }
+
+    pub(super) fn next_ci_timestamp(&mut self) -> u32 {
+        let t = self.ci_timestamp_counter;
+        self.ci_timestamp_counter += 1;
+        t
     }
 
     fn alloc_id(&mut self) -> ObjId {
@@ -1601,6 +1784,7 @@ fn sim_play_land(
     };
     state.log(t, who, format!("Play {} [hand: {}]", land_name, state.hand_size(who)));
     change_zone(card_id, ZoneId::Battlefield, state, t, who);
+    fire_event(GameEvent::LandPlayed { id: card_id, controller: who }, state, t, who);
 }
 
 
@@ -1700,6 +1884,23 @@ pub(super) fn fire_event(
     // Stage 5: Trigger dispatch.
     let triggers = fire_triggers(&event, state);
     state.pending_triggers.extend(triggers);
+
+    // Stage 6: CE activation check (CR 611.2f).
+    // Dormant CIs with a matching activate_on predicate become active.
+    // Two-pass to avoid borrow conflict (predicate needs &SimState).
+    let activations: Vec<usize> = state.continuous_instances.iter().enumerate()
+        .filter(|(_, ci)| !ci.active)
+        .filter(|(_, ci)| ci.activate_on.as_ref().map_or(false, |pred| {
+            (pred)(&event, ci.source_id, ci.controller, state)
+        }))
+        .map(|(i, _)| i)
+        .collect();
+    for i in activations {
+        state.continuous_instances[i].active = true;
+        if state.continuous_instances[i].one_shot {
+            state.continuous_instances[i].activate_on = None;
+        }
+    }
 
     state.repl_depth -= 1;
     if state.repl_depth == 0 {
@@ -1826,7 +2027,10 @@ pub(super) fn change_zone(
     // Spells on the stack activate their prohibition instances so "can't be countered"
     // ProhibitionDefs fire correctly via SpellBeingCountered (CR 614.17).
     if from == ZoneId::Stack { deactivate_stack_prohibitions(id, state); }
-    if to   == ZoneId::Stack { activate_stack_prohibitions(id, controller, state); }
+    if to   == ZoneId::Stack {
+        if let Some(card) = state.objects.get_mut(&id) { card.cast_generation += 1; }
+        activate_stack_prohibitions(id, controller, state);
+    }
     fire_event(
         GameEvent::ZoneChange { id, actor, from, to, controller },
         state, t, actor,
@@ -2284,6 +2488,7 @@ fn cast_spell(
     // Move to Stack zone.
     if let Some(card) = state.objects.get_mut(&card_id) {
         card.zone = CardZone::Stack;
+        card.cast_generation += 1;
     }
 
     // Pay cost and build a log label.
@@ -2338,7 +2543,7 @@ fn cast_spell(
     if let Some(rep_mc) = rep_cost {
         // Count other valid targets for copies (different from the original target).
         let original_targets = chosen_targets.to_vec();
-        let extra_targets: Vec<ObjId> = legal_targets(def.target_spec(), who, state)
+        let extra_targets: Vec<ObjId> = legal_targets(def.target_spec(), who, card_id, state)
             .into_iter()
             .filter(|id| !original_targets.contains(id))
             .collect();
@@ -2532,7 +2737,7 @@ pub(super) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mu
                 ..BattlefieldState::new()
             }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         if let Some(def) = &def {
             preregister_instances(def, new_id, controller, state);
@@ -2555,7 +2760,7 @@ pub(super) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         spell: None,
         bf: Some(BattlefieldState::new()),
         materialized: None,
-        counters: HashMap::new(),
+        counters: HashMap::new(), cast_generation: 0,
     });
     if let Some(def) = &def {
         preregister_instances(def, new_id, controller, state);
@@ -2628,7 +2833,7 @@ fn resolve_top_of_stack(
         } else if let Some(ref eff) = spell.effect {
             let is_perm = state.def_of(id)
                 .map(|d| matches!(d.kind, CardKind::Creature(_) | CardKind::Artifact(_)
-                    | CardKind::Planeswalker(_) | CardKind::Enchantment))
+                    | CardKind::Planeswalker(_) | CardKind::Enchantment(_)))
                 .unwrap_or(false);
             if !is_perm {
                 if let Some(card_obj) = state.objects.get_mut(&id) {
@@ -2737,7 +2942,7 @@ fn handle_priority_round(
                                 ..BattlefieldState::new()
                             }),
                             materialized: None,
-                            counters: HashMap::new(),
+                            counters: HashMap::new(), cast_generation: 0,
                         });
                         state.combat_attackers.push(new_id);
                         state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
@@ -2927,6 +3132,10 @@ fn do_step(
             let nap = ap.opp();
             // Strategy decides which blockers to assign.
             let blocks = strategies.get_mut(&ap.opp()).unwrap().declare_blockers(state);
+            // Engine validation: drop illegal blocks (protection, etc.) as a safety net.
+            let blocks: Vec<(ObjId, ObjId)> = blocks.into_iter()
+                .filter(|&(atk_id, blk_id)| !is_protected_from(atk_id, blk_id, state))
+                .collect();
             for &(atk_id, blk_id) in &blocks {
                 let atk_name = state.objects.get(&atk_id).map(|p| p.catalog_key.as_str()).unwrap_or("");
                 let blk_name = state.objects.get(&blk_id).map(|p| p.catalog_key.clone()).unwrap_or_default();
@@ -2963,11 +3172,16 @@ fn do_step(
                         .and_then(|d| d.as_creature())
                         .map(|c| c.power())
                         .unwrap_or(1);
-                    if let Some(bf) = state.permanent_bf_mut(atk_id) {
-                        bf.damage += blk_pow;
+                    // CR 702.16b: protection prevents damage from sources with the quality.
+                    if !is_protected_from(atk_id, blk_id, state) {
+                        if let Some(bf) = state.permanent_bf_mut(atk_id) {
+                            bf.damage += blk_pow;
+                        }
                     }
-                    if let Some(bf) = state.permanent_bf_mut(blk_id) {
-                        bf.damage += atk_pow;
+                    if !is_protected_from(blk_id, atk_id, state) {
+                        if let Some(bf) = state.permanent_bf_mut(blk_id) {
+                            bf.damage += atk_pow;
+                        }
                     }
                 }
 
@@ -3288,7 +3502,7 @@ fn card_has_implementation(def: &CardDef) -> bool {
     if !def.target_spec().is_none() { return true; }
     match &def.kind {
         CardKind::Creature(_) | CardKind::Artifact(_)
-        | CardKind::Planeswalker(_) | CardKind::Enchantment => true,
+        | CardKind::Planeswalker(_) | CardKind::Enchantment(_) => true,
         CardKind::Instant(s) | CardKind::Sorcery(s) => s.spell_factory.is_some(),
         CardKind::Land(_) => true,
     }

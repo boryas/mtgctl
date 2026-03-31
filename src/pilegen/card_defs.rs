@@ -61,7 +61,11 @@ fn all_cards() -> Vec<CardDef> {
         wasteland(),
         karakas(),
         ancient_tomb(),
+        city_of_traitors(),
         cavern_of_souls(),
+        urborg_tomb_of_yawgmoth(),
+        yavimaya_cradle_of_growth(),
+        mistrise_village(),
         // Artifacts
         lotus_petal(),
         lions_eye_diamond(),
@@ -90,6 +94,7 @@ fn all_cards() -> Vec<CardDef> {
         sheoldreds_edict(),
         spell_pierce(),
         flusterstorm(),
+        mindbreak_trap(),
         // Spells — sorceries
         toxic_deluge(),
         doomsday(),
@@ -102,6 +107,8 @@ fn all_cards() -> Vec<CardDef> {
         personal_tutor(),
         green_suns_zenith(),
         show_and_tell(),
+        omniscience(),
+        sneak_attack(),
         // Creatures
         thassas_oracle(),
         street_wraith(),
@@ -115,6 +122,9 @@ fn all_cards() -> Vec<CardDef> {
         lavinia_azorius_renegade(),
         hexing_squelcher(),
         simian_spirit_guide(),
+        griselbrand(),
+        emrakul_the_aeons_torn(),
+        atraxa_grand_unifier(),
         // DFCs / split
         tamiyo_inquisitive_student(),
         brazen_borrower(),
@@ -122,6 +132,8 @@ fn all_cards() -> Vec<CardDef> {
         painters_servant(),
         leyline_of_the_void(),
         disruptor_flute(),
+        blood_moon(),
+        magus_of_the_moon(),
         // Tokens
         orc_army_token(),
         clue_token(),
@@ -452,6 +464,46 @@ fn ancient_tomb() -> CardDef {
     }), vec![], None)
 }
 
+fn city_of_traitors() -> CardDef {
+    CardDef::new(
+        "City of Traitors",
+        CardKind::Land(LandData {
+            mana_abilities: vec![ManaAbility {
+                source_zone: SourceZone::Battlefield,
+                costs: vec![CostComponent::TapSelf],
+                produces: vec![],      // colorless
+                produces_count: 2,
+                make_effect: Arc::new(|who, _| eff_mana(who, "CC")),
+            }],
+            ..Default::default()
+        }),
+        vec![], None,
+        vec![], CardLayout::Normal, None,
+        vec![TriggerDef {
+            check: Arc::new(|event, source_id, controller, _state, pending| {
+                // "When you play another land, sacrifice City of Traitors."
+                if let GameEvent::LandPlayed { id, controller: ctlr } = event {
+                    if *id != source_id && *ctlr == controller {
+                        pending.push(TriggerContext {
+                            source_name: "City of Traitors".into(),
+                            controller,
+                            target_spec: TargetSpec::None,
+                            effect: Effect(Arc::new(move |state, t, _targets| {
+                                if state.permanent_bf(source_id).is_some() {
+                                    state.log(t, controller, "City of Traitors → sacrifice (another land played)");
+                                    change_zone(source_id, ZoneId::Graveyard, state, t, controller);
+                                }
+                            })),
+                        });
+                    }
+                }
+            }),
+            always_active: false,
+        }],
+        vec![], vec![], vec![],
+    )
+}
+
 fn polluted_delta() -> CardDef {
     simple("Polluted Delta", CardKind::Land(LandData {
         abilities: vec![fetch_ability(pred_and(
@@ -734,13 +786,18 @@ fn grafdiggers_cage() -> CardDef {
         // (b): ETB replacement installs a CE that gates play_free_cast
         vec![etb_self_replacement(|source_id, _id, _controller, state, _t| {
             let controller = state.objects.get(&source_id).map_or(PlayerId::Us, |o| o.controller);
+            let ts = state.next_ci_timestamp();
             state.continuous_instances.push(ContinuousInstance {
                 source_id,
                 controller,
                 layer: ContinuousLayer::L3TextEffects,
-                filter: Arc::new(move |cid, _| cid == source_id),
+                reads: vec![],
+                writes: vec![],
+                timestamp: ts,
+                filter: Arc::new(move |cid, _, _| cid == source_id),
                 modifier: Arc::new(|def, _| { def.blocks_gy_and_lib_access = true; }),
                 expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
             });
         })],
         // (a): prohibition blocks ZoneChange from GY/library to BF for creature cards
@@ -788,60 +845,60 @@ fn consider() -> CardDef {
 /// or pay {1U} (20% probability). CR 701.5.
 /// "Counter target spell unless its controller pays {1}."
 fn daze() -> CardDef {
-    simple("Daze", CardKind::Instant(SpellData {
-        mana_cost: "U".to_string(),
+    let mut c = simple("Daze", CardKind::Instant(SpellData {
+        mana_cost: "1U".to_string(),
         exileable: true,
-        // blue=true so it can be pitched to Force of Will
         target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
-        alternate_costs: vec![
-            AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(cost_pred_blue_producing())], hand_min: 1, ..Default::default() },
-            AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("1U"))], hand_min: 1, prob: Some(0.2), ..Default::default() },
-        ],
         spell_factory: Some(Arc::new(|who, _source_id, _x| {
             eff_counter_unless_pays(who, vec![CostComponent::Mana(parse_mana_cost("1"))])
         })),
         ..Default::default()
-    }), parse_colors("U", true, false), None)
+    }), parse_colors("1U", true, false), None);
+    c.alternate_costs = vec![
+        AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(obj_pred_from_card(pred_land_subtype("island")))], ..Default::default() },
+    ];
+    c
 }
 
 /// Counter target noncreature spell. Pitch cost (exile a blue card) only available when it's
 /// not your turn; the countered spell is exiled via a scoped replacement (CR 118.9b, 614.1a).
 fn force_of_negation() -> CardDef {
-    simple("Force of Negation", CardKind::Instant(SpellData {
+    let mut c = simple("Force of Negation", CardKind::Instant(SpellData {
         mana_cost: "1UU".to_string(),
         target_spec: TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Stack,
             filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Creature))),
         },
-        alternate_costs: vec![
-            AlternateCost {
-                costs: vec![CostComponent::ExileFromHand(cost_pred_blue_nonland())],
-                hand_min: 2,
-                condition: Some(std::sync::Arc::new(|caster, state| {
-                    state.current_ap != state.player_id(caster)
-                })),
-                ..Default::default()
-            },
-        ],
         spell_factory: Some(Arc::new(|who, source_id, _x| eff_counter_and_exile(who, source_id))),
         ..Default::default()
-    }), parse_colors("1UU", true, false), None)
+    }), parse_colors("1UU", true, false), None);
+    c.alternate_costs = vec![
+        AlternateCost {
+            costs: vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue)))],
+            hand_min: 2,
+            condition: Some(std::sync::Arc::new(|caster, state| {
+                state.current_ap != state.player_id(caster)
+            })),
+            ..Default::default()
+        },
+    ];
+    c
 }
 
 /// Counter target spell. Alternate costs: exile a blue card from hand + pay 1 life (pitch),
 /// or pay {3UU} (hard cost, rare). CR 702.14 (pitch cost), CR 701.5.
 fn force_of_will() -> CardDef {
-    simple("Force of Will", CardKind::Instant(SpellData {
+    let mut c = simple("Force of Will", CardKind::Instant(SpellData {
         mana_cost: "3UU".to_string(),
         target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
-        alternate_costs: vec![
-            AlternateCost { costs: vec![CostComponent::ExileFromHand(cost_pred_blue_nonland()), CostComponent::Life(1)], hand_min: 2, ..Default::default() },
-            AlternateCost { costs: vec![CostComponent::Mana(parse_mana_cost("3UU"))], hand_min: 1, ..Default::default() },
-        ],
         spell_factory: Some(Arc::new(|who, _source_id, _x| eff_counter_target(who))),
         ..Default::default()
-    }), parse_colors("3UU", true, false), None)
+    }), parse_colors("3UU", true, false), None);
+    c.alternate_costs = vec![
+        AlternateCost { costs: vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue))), CostComponent::Life(1)], hand_min: 2, ..Default::default() },
+    ];
+    c
 }
 
 /// Add {B}{B}{B}. CR 106.3.
@@ -869,19 +926,20 @@ fn fatal_push() -> CardDef {
 
 /// Destroy target non-black creature. Alternate cost: pay 4 life (free spell). CR 701.7.
 fn snuff_out() -> CardDef {
-    simple("Snuff Out", CardKind::Instant(SpellData {
+    let mut c = simple("Snuff Out", CardKind::Instant(SpellData {
         mana_cost: "3BB".to_string(),
         target_spec: TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
             filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Creature), pred_not(pred_has_color(Color::Black)))),
         },
-        alternate_costs: vec![
-            AlternateCost { costs: vec![CostComponent::Life(4)], ..Default::default() },
-        ],
         spell_factory: Some(Arc::new(|who, _source_id, _x| eff_destroy_target(who))),
         ..Default::default()
-    }), parse_colors("3BB", false, true), None)
+    }), parse_colors("3BB", false, true), None);
+    c.alternate_costs = vec![
+        AlternateCost { costs: vec![CostComponent::Life(4)], ..Default::default() },
+    ];
+    c
 }
 
 /// Exile target creature. Its controller gains life equal to its power. CR 701.10.
@@ -1048,7 +1106,7 @@ fn flusterstorm() -> CardDef {
                         target_spec: TargetSpec::None,
                         effect: Effect(Arc::new(move |state, t, _| {
                             // Find legal targets for the copies.
-                            let all_targets = legal_targets(&tspec, controller, state);
+                            let all_targets = legal_targets(&tspec, controller, spell_source, state);
                             // Original target from the spell on the stack.
                             let original_targets: Vec<ObjId> = state.objects.get(&spell_source)
                                 .and_then(|o| o.spell.as_ref())
@@ -1093,6 +1151,32 @@ fn flusterstorm() -> CardDef {
     )
 }
 
+/// Exile any number of target spells. If an opponent cast three or more spells this turn,
+/// you may pay {0} rather than pay this spell's mana cost. CR 107.1c, CR 118.9.
+fn mindbreak_trap() -> CardDef {
+    let mut c = simple("Mindbreak Trap", CardKind::Instant(SpellData {
+        mana_cost: "2UU".to_string(),
+        exileable: true,
+        target_spec: TargetSpec::Any(Box::new(TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Stack,
+            filter: obj_pred_from_card(pred_any()),
+        })),
+        spell_factory: Some(Arc::new(|who, _source_id, _x| eff_exile_all_targets(who))),
+        ..Default::default()
+    }), parse_colors("2UU", true, false), None);
+    c.alternate_costs = vec![
+        AlternateCost {
+            costs: vec![],
+            condition: Some(Arc::new(|caster, state| {
+                state.player(caster.opp()).spells_cast_this_turn >= 3
+            })),
+            ..Default::default()
+        },
+    ];
+    c
+}
+
 /// Counter target triggered ability or colorless spell.
 /// Replicate {1} (CR 702.58): optional additional cost paid 0+ times; each payment
 /// creates a copy of the spell targeting another triggered ability or colorless spell.
@@ -1119,7 +1203,7 @@ fn consign_to_memory() -> CardDef {
 /// same name from that player's graveyard, hand, and library (CR 107.4f phyrexian mana).
 /// {B/P}: pay {B} or pay 2 life.
 fn surgical_extraction() -> CardDef {
-    simple("Surgical Extraction", CardKind::Instant(SpellData {
+    let mut c = simple("Surgical Extraction", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
         target_spec: TargetSpec::ObjectInZone {
             controller: Who::Opp,
@@ -1129,9 +1213,6 @@ fn surgical_extraction() -> CardDef {
                 pred_has_supertype(Supertype::Basic),
             ))),
         },
-        alternate_costs: vec![
-            AlternateCost { costs: vec![CostComponent::Life(2)], hand_min: 0, ..Default::default() },
-        ],
         spell_factory: Some(Arc::new(|caster, _source_id, _x| {
             Effect(Arc::new(move |state, t, targets| {
                 let Some(&target_id) = targets.first() else { return };
@@ -1156,7 +1237,11 @@ fn surgical_extraction() -> CardDef {
             }))
         })),
         ..Default::default()
-    }), parse_colors("B", false, false), None)
+    }), parse_colors("B", false, false), None);
+    c.alternate_costs = vec![
+        AlternateCost { costs: vec![CostComponent::Life(2)], ..Default::default() },
+    ];
+    c
 }
 
 /// Build a TargetSpec for the modal color-hate instants: either a spell on the stack
@@ -1239,12 +1324,12 @@ fn abrade() -> CardDef {
                 filter: obj_pred_from_card(pred_type_eq(CardType::Artifact)),
             },
         ]),
-        spell_factory: Some(Arc::new(|who, _source_id, _x| {
+        spell_factory: Some(Arc::new(|who, source_id, _x| {
             Effect(Arc::new(move |state, t, targets| {
                 if let Some(&id) = targets.first() {
                     let is_creature = state.def_of(id).map_or(false, |d| d.is_creature());
                     if is_creature {
-                        eff_damage_target(who, 3).call(state, t, targets);
+                        eff_damage_target(who, 3, source_id).call(state, t, targets);
                     } else {
                         eff_destroy_target(who).call(state, t, targets);
                     }
@@ -1310,17 +1395,22 @@ fn toxic_deluge() -> CardDef {
         spell_factory: Some(Arc::new(|caster, source_id, x| {
             let xi = x as i32;
             Effect(Arc::new(move |state, t, _targets| {
+                let ts = state.next_ci_timestamp();
                 state.continuous_instances.push(ContinuousInstance {
                     source_id,
                     controller: caster,
                     layer: ContinuousLayer::L7PowerToughness,
-                    filter: std::sync::Arc::new(|_, _| true),
+                    reads: vec![],
+                    writes: vec![CeWrites::PowerToughness],
+                    timestamp: ts,
+                    filter: std::sync::Arc::new(|_, _, _| true),
                     modifier: std::sync::Arc::new(move |def, _state| {
                         if let CardKind::Creature(c) = &mut def.kind {
                             c.adjust_pt(-xi, -xi);
                         }
                     }),
                     expiry: ContinuousExpiry::EndOfTurn,
+                activate_on: None, one_shot: false, active: true,
                 });
                 state.log(t, caster, format!("→ all creatures get -{xi}/-{xi} until end of turn"));
             }))
@@ -1449,6 +1539,113 @@ fn show_and_tell() -> CardDef {
         })),
         ..Default::default()
     }), parse_colors("U", false, false), None)
+}
+
+fn omniscience() -> CardDef {
+    // "You may cast spells from your hand without paying their mana costs."
+    // Static ability: L3TextEffects CE sets `free_cast = true` on all non-land cards
+    // controlled by Omniscience's controller.
+    CardDef::new(
+        "Omniscience",
+        CardKind::Enchantment(EnchantmentData::default()),
+        parse_colors("UUUUUUUUU", false, false),  // blue; {7}{U}{U}{U}
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+        vec![Arc::new(move |source_id, controller| ContinuousInstance {
+            source_id,
+            controller,
+            layer: ContinuousLayer::L3TextEffects,
+            reads: vec![],
+            writes: vec![],
+            timestamp: 0, // assigned by activate_instances
+            filter: Arc::new(move |_id, ctr, _| ctr == controller),
+            modifier: Arc::new(|def, _state| {
+                if !def.is_land() {
+                    def.alternate_costs.push(AlternateCost::default());
+                }
+            }),
+            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
+        })],
+    )
+}
+
+fn sneak_attack() -> CardDef {
+    // "{R}: You may put a creature card from your hand onto the battlefield.
+    // That creature gains haste. Sacrifice the creature at the beginning of
+    // the next end step."
+    CardDef::new(
+        "Sneak Attack",
+        CardKind::Enchantment(EnchantmentData {
+            abilities: vec![AbilityDef {
+                costs: vec![CostComponent::Mana(parse_mana_cost("R"))],
+                choice_spec: Some(ChoiceSpec {
+                    controller: Who::Actor,
+                    zone: ZoneId::Hand,
+                    filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                }),
+                ability_factory: Some(Arc::new(|who, _source_id| {
+                    Effect(Arc::new(move |state, t, targets| {
+                        let Some(&creature_id) = targets.first() else { return };
+                        let name = state.objects.get(&creature_id)
+                            .map(|c| c.catalog_key.clone())
+                            .unwrap_or_default();
+                        state.log(t, who, format!("Sneak Attack → {} onto the battlefield", name));
+                        change_zone(creature_id, ZoneId::Battlefield, state, t, who);
+
+                        // Grant haste via L6 CE (expires when the creature leaves the battlefield).
+                        let ts = state.next_ci_timestamp();
+                        state.continuous_instances.push(ContinuousInstance {
+                            source_id: creature_id,
+                            controller: who,
+                            layer: ContinuousLayer::L6AbilityEffects,
+                            reads: vec![],
+                            writes: vec![CeWrites::Abilities],
+                            timestamp: ts,
+                            filter: Arc::new(move |id, _ctr, _| id == creature_id),
+                            modifier: Arc::new(|def, _state| {
+                                if let CardKind::Creature(c) = &mut def.kind {
+                                    if !c.keywords.contains(&"haste".to_string()) {
+                                        c.keywords.push("haste".to_string());
+                                    }
+                                }
+                            }),
+                            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
+                        });
+
+                        // Delayed trigger: at the beginning of the next end step, sacrifice this creature.
+                        let sac_pred: ObjPredicate = Arc::new(move |id, _state| id == creature_id);
+                        state.trigger_instances.push(TriggerInstance {
+                            source_id: creature_id,
+                            controller: who,
+                            check: Arc::new(move |event, _source_id, controller, _state, pending| {
+                                if let GameEvent::EnteredStep { step: StepKind::End, .. } = event {
+                                    let sac = sac_pred.clone();
+                                    pending.push(TriggerContext {
+                                        source_name: "Sneak Attack (delayed)".into(),
+                                        controller,
+                                        target_spec: TargetSpec::None,
+                                        effect: eff_sacrifice(controller, Who::Actor, sac),
+                                    });
+                                }
+                            }),
+                            expiry: None,
+                            active: true,
+                            always_active: false,
+                        });
+                    }))
+                })),
+                ..Default::default()
+            }],
+        }),
+        parse_colors("3R", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+        vec![],
+    )
 }
 
 // ── Creatures ─────────────────────────────────────────────────────────────────
@@ -1751,7 +1948,10 @@ fn hexing_squelcher() -> CardDef {
             source_id,
             controller,
             layer: ContinuousLayer::L6AbilityEffects,
-            filter: Arc::new(move |id, ctr| ctr == controller && id != source_id),
+            reads: vec![],
+            writes: vec![CeWrites::Abilities],
+            timestamp: 0, // assigned by activate_instances
+            filter: Arc::new(move |id, ctr, _| ctr == controller && id != source_id),
             modifier: Arc::new(|def, _state| {
                 if matches!(def.kind, CardKind::Creature(_)) {
                     def.granted_trigger_defs.push(Arc::new(
@@ -1787,6 +1987,7 @@ fn hexing_squelcher() -> CardDef {
                 }
             }),
             expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
         })],
     )
 }
@@ -1845,15 +2046,20 @@ fn painters_servant() -> CardDef {
             bf.etb_choice = Some(ChoiceResult::Color(chosen));
         }
         // Register L5 CE: all objects everywhere gain chosen_color while Painter is in play.
+        let ts = state.next_ci_timestamp();
         state.continuous_instances.push(ContinuousInstance {
             source_id,
             controller,
             layer: ContinuousLayer::L5ColorEffects,
-            filter: Arc::new(|_, _| true),
+            reads: vec![],
+            writes: vec![CeWrites::Color],
+            timestamp: ts,
+            filter: Arc::new(|_, _, _| true),
             modifier: Arc::new(move |def, _| {
                 if !def.colors.contains(&chosen) { def.colors.push(chosen); }
             }),
             expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
         });
     });
     let mut def = CardDef::new(
@@ -1887,7 +2093,7 @@ fn leyline_of_the_void() -> CardDef {
     };
     CardDef::new(
         "Leyline of the Void",
-        CardKind::Enchantment,
+        CardKind::Enchantment(EnchantmentData::default()),
         parse_colors("2BB", false, true),
         None,
         vec![], CardLayout::Normal, None,
@@ -1918,10 +2124,14 @@ fn disruptor_flute() -> CardDef {
             }
             // L3TextEffects CE: cost +3 and ability suppression for matching card name.
             let controller = state.objects.get(&id).map_or(PlayerId::Us, |o| o.controller);
+            let ts = state.next_ci_timestamp();
             state.continuous_instances.push(ContinuousInstance {
                 source_id, controller,
                 layer: ContinuousLayer::L3TextEffects,
-                filter: Arc::new(|_, _| true),
+                reads: vec![],
+                writes: vec![],
+                timestamp: ts,
+                filter: Arc::new(|_, _, _| true),
                 modifier: Arc::new(move |def, _| {
                     if def.name == chosen {
                         def.casting_cost_modifier += 3;
@@ -1929,10 +2139,214 @@ fn disruptor_flute() -> CardDef {
                     }
                 }),
                 expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
             });
         })],
         vec![],  // no prohibition_defs
         vec![],  // no static_ability_defs
+    )
+}
+
+/// "Nonbasic lands are Mountains." — shared L4 static ability for Blood Moon / Magus of the Moon.
+/// Sets land types to Mountain, replaces mana abilities with "{T}: Add {R}", clears non-mana
+/// abilities. Supertypes (Legendary, Basic) preserved. CR 305.7, 613.1d.
+fn nonbasic_lands_are_mountains() -> StaticAbilityDef {
+    Arc::new(move |source_id, controller| ContinuousInstance {
+        source_id,
+        controller,
+        layer: ContinuousLayer::L4TypeEffects,
+        reads: vec![CeReads::Supertypes],  // checks "is basic?"
+        writes: vec![CeWrites::LandTypes, CeWrites::Abilities],
+        timestamp: 0, // assigned by activate_instances
+        filter: Arc::new(|_id, _ctr, _| true),
+        modifier: Arc::new(|def, _state| {
+            if !matches!(def.kind, CardKind::Land(_)) { return; }
+            if def.supertypes.contains(&Supertype::Basic) { return; }
+            if let CardKind::Land(ref mut land) = def.kind {
+                land.land_types = LandTypes { mountain: true, ..Default::default() };
+                land.mana_abilities = vec![tap_produces("R")];
+                land.abilities.clear();
+            }
+            // CR 305.7: land loses all abilities — including static abilities.
+            def.static_ability_defs.clear();
+        }),
+        expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
+    })
+}
+
+/// Enchantment {2R}. Static: "Nonbasic lands are Mountains." CR 305.7, 613.1d.
+fn blood_moon() -> CardDef {
+    CardDef::new(
+        "Blood Moon",
+        CardKind::Enchantment(EnchantmentData::default()),
+        parse_colors("2R", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+        vec![nonbasic_lands_are_mountains()],
+    )
+}
+
+/// Creature {2R}, 2/2. Static: "Nonbasic lands are Mountains." CR 305.7, 613.1d.
+fn magus_of_the_moon() -> CardDef {
+    let data = CreatureData::new("2R", 2, 2);
+    CardDef::new(
+        "Magus of the Moon",
+        CardKind::Creature(data),
+        parse_colors("2R", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+        vec![nonbasic_lands_are_mountains()],
+    )
+}
+
+/// "Each land is a [type] in addition to its other land types." — shared L4 static ability
+/// for Urborg, Tomb of Yawgmoth and Yavimaya, Cradle of Growth. Adds the land subtype and
+/// its intrinsic mana ability without removing existing types or abilities. CR 305.7.
+fn each_land_gains_subtype(
+    set_type: fn(&mut LandTypes),
+    has_type: fn(&LandTypes) -> bool,
+    mana: &'static str,
+) -> StaticAbilityDef {
+    Arc::new(move |source_id, controller| ContinuousInstance {
+        source_id,
+        controller,
+        layer: ContinuousLayer::L4TypeEffects,
+        reads: vec![CeReads::LandTypes],  // checks "already has this type?"
+        writes: vec![CeWrites::LandTypes],
+        timestamp: 0, // assigned by activate_instances
+        filter: Arc::new(|_id, _ctr, _| true),
+        modifier: Arc::new(move |def, _state| {
+            if let CardKind::Land(ref mut land) = def.kind {
+                if !has_type(&land.land_types) {
+                    set_type(&mut land.land_types);
+                    land.mana_abilities.push(tap_produces(mana));
+                }
+            }
+        }),
+        expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
+    })
+}
+
+/// Legendary Land. "Each land is a Swamp in addition to its other land types."
+/// Adds Swamp type and "{T}: Add {B}" to all lands. CR 305.7, 613.1d.
+fn urborg_tomb_of_yawgmoth() -> CardDef {
+    CardDef::new(
+        "Urborg, Tomb of Yawgmoth",
+        CardKind::Land(LandData::default()),
+        vec![],
+        None,
+        vec![Supertype::Legendary], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+        vec![each_land_gains_subtype(
+            |lt| lt.swamp = true,
+            |lt| lt.swamp,
+            "B",
+        )],
+    )
+}
+
+/// Legendary Land. "Each land is a Forest in addition to its other land types."
+/// Adds Forest type and "{T}: Add {G}" to all lands. CR 305.7, 613.1d.
+fn yavimaya_cradle_of_growth() -> CardDef {
+    CardDef::new(
+        "Yavimaya, Cradle of Growth",
+        CardKind::Land(LandData::default()),
+        vec![],
+        None,
+        vec![Supertype::Legendary], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+        vec![each_land_gains_subtype(
+            |lt| lt.forest = true,
+            |lt| lt.forest,
+            "G",
+        )],
+    )
+}
+
+/// Land. "This land enters tapped unless you control a Mountain or a Forest."
+/// {T}: Add {U}.
+/// {U}, {T}: The next spell you cast this turn can't be countered. (CR 611.2f)
+fn mistrise_village() -> CardDef {
+    // Conditional ETB tapped: unless you control a Mountain or Forest.
+    let repl = etb_self_replacement(|_source_id, id, controller, state, _t| {
+        let has_mountain_or_forest = state.permanents_of(controller).any(|perm| {
+            // Check materialized def for land types (CE-aware, e.g. Urborg/Yavimaya).
+            perm.materialized.as_ref()
+                .and_then(|d| d.as_land())
+                .map_or(false, |land| land.land_types.mountain || land.land_types.forest)
+        });
+        if !has_mountain_or_forest {
+            if let Some(bf) = state.permanent_bf_mut(id) { bf.tapped = true; }
+        }
+    });
+    CardDef::new(
+        "Mistrise Village",
+        CardKind::Land(LandData {
+            mana_abilities: vec![tap_produces("U")],
+            // {U}, {T}: The next spell you cast this turn can't be countered.
+            abilities: vec![AbilityDef {
+                costs: vec![CostComponent::Mana(parse_mana_cost("U")), CostComponent::TapSelf],
+                ability_factory: Some(Arc::new(|who, source_id| {
+                    Effect(Arc::new(move |state, t, _targets| {
+                        // Shared capture slot for the activation event callback and the filter.
+                        let captured: Arc<std::sync::Mutex<Option<(ObjId, u32)>>> =
+                            Arc::new(std::sync::Mutex::new(None));
+                        let cap_activate = captured.clone();
+                        let cap_filter = captured.clone();
+                        let ts = state.next_ci_timestamp();
+                        state.continuous_instances.push(ContinuousInstance {
+                            source_id,
+                            controller: who,
+                            layer: ContinuousLayer::L6AbilityEffects,
+                            reads: vec![],
+                            writes: vec![CeWrites::Abilities],
+                            timestamp: ts,
+                            filter: Arc::new(move |id, _ctr, state: &SimState| {
+                                cap_filter.lock().unwrap()
+                                    .map_or(false, |(cid, gen)| {
+                                        id == cid && state.objects.get(&id)
+                                            .map_or(false, |o| o.cast_generation == gen)
+                                    })
+                            }),
+                            modifier: Arc::new(|def, _state| {
+                                def.prohibition_defs.push(ProhibitionDef {
+                                    check: Arc::new(|event, source_id, _controller, _state| {
+                                        matches!(event, GameEvent::SpellBeingCountered { card_id, .. }
+                                                 if *card_id == source_id)
+                                    }),
+                                });
+                            }),
+                            expiry: ContinuousExpiry::EndOfTurn,
+                            activate_on: Some(Arc::new(move |event, _source_id, controller, state| {
+                                if let GameEvent::SpellCast { caster, card_id, .. } = event {
+                                    if *caster == controller {
+                                        let gen = state.objects.get(card_id)
+                                            .map(|o| o.cast_generation).unwrap_or(0);
+                                        *cap_activate.lock().unwrap() = Some((*card_id, gen));
+                                        return true;
+                                    }
+                                }
+                                false
+                            })),
+                            one_shot: true,
+                            active: false,
+                        });
+                        state.log(t, who, "Mistrise Village → next spell can't be countered".to_string());
+                    }))
+                })),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }),
+        vec![], None, vec![], CardLayout::Normal, None,
+        vec![],
+        vec![repl],
+        vec![],
+        vec![],
     )
 }
 
@@ -1975,6 +2389,72 @@ fn simian_spirit_guide() -> CardDef {
         make_effect: std::sync::Arc::new(|who, _color| eff_mana(who, "R")),
     }];
     simple("Simian Spirit Guide", CardKind::Creature(data), parse_colors("R", false, false), None)
+}
+
+/// Griselbrand — {4}{B}{B}{B}{B} Legendary 7/7 Demon.
+/// Flying, lifelink. Pay 7 life: Draw seven cards.
+fn griselbrand() -> CardDef {
+    let mut data = CreatureData::new("4BBBB", 7, 7);
+    data.legendary = true;
+    data.keywords = vec!["flying".into(), "lifelink".into()];
+    data.abilities = vec![AbilityDef {
+        costs: vec![CostComponent::Life(7)],
+        ability_factory: Some(Arc::new(|who, _| eff_draw(who, 7))),
+        ..Default::default()
+    }];
+    simple("Griselbrand", CardKind::Creature(data), parse_colors("4BBBB", false, false), None)
+}
+
+/// Emrakul, the Aeons Torn — {15} Legendary 15/15 Eldrazi.
+/// Flying, annihilator 6, protection from spells that are one or more colors.
+/// This spell can't be countered.
+/// When you cast this spell, take an extra turn after this one.
+/// When put into a graveyard from anywhere, owner shuffles graveyard into library.
+/// TODO: cast trigger (extra turn), annihilator 6, graveyard shuffle not modeled.
+fn emrakul_the_aeons_torn() -> CardDef {
+    let mut data = CreatureData::new("15", 15, 15);
+    data.legendary = true;
+    data.keywords = vec!["flying".into(), "annihilator 6".into()];
+    let mut def = CardDef::new(
+        "Emrakul, the Aeons Torn",
+        CardKind::Creature(data),
+        vec![],  // colorless
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![],
+        // "This spell can't be countered."
+        vec![ProhibitionDef { check: Arc::new(|event, source_id, _, _| {
+            matches!(event, GameEvent::SpellBeingCountered { card_id, .. } if *card_id == source_id)
+        }) }],
+        vec![],
+    );
+    def.counterable = false;
+    def.protection_from = vec![obj_pred_colored_spell()];
+    def
+}
+
+/// Atraxa, Grand Unifier — {3}{G}{W}{U}{B} Legendary 7/7 Phyrexian Angel.
+/// Flying, vigilance, deathtouch, lifelink.
+/// ETB: reveal top 10 of library, for each card type you may put one into hand, rest to bottom.
+/// TODO: real ETB needs per-type strategy choices over actual revealed cards; placeholder
+/// adds 4 cards to hand silently (no Draw events).
+fn atraxa_grand_unifier() -> CardDef {
+    let mut data = CreatureData::new("3GWUB", 7, 7);
+    data.legendary = true;
+    data.keywords = vec![
+        "flying".into(), "vigilance".into(), "deathtouch".into(), "lifelink".into(),
+    ];
+    CardDef::new(
+        "Atraxa, Grand Unifier",
+        CardKind::Creature(data),
+        parse_colors("3GWUB", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![TriggerDef { check: Arc::new(atraxa_etb_check), always_active: true }],
+        vec![],
+        vec![],
+        vec![],
+    )
 }
 
 fn brazen_borrower() -> CardDef {

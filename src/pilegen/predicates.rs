@@ -131,11 +131,6 @@ pub(crate) fn cost_pred_land() -> ObjPredicate {
     obj_pred_from_card(pred_type_eq(CardType::Land))
 }
 
-/// True iff the object is blue and not a land.
-pub(crate) fn cost_pred_blue_nonland() -> ObjPredicate {
-    obj_pred_from_card(pred_and(pred_has_color(Color::Blue), pred_not(pred_type_eq(CardType::Land))))
-}
-
 /// True iff the object is a permanent on the battlefield that is attacking and unblocked.
 pub(crate) fn cost_pred_unblocked_attacker() -> ObjPredicate {
     std::sync::Arc::new(|id, state| {
@@ -143,12 +138,30 @@ pub(crate) fn cost_pred_unblocked_attacker() -> ObjPredicate {
     })
 }
 
-/// True iff the object is a land with a mana ability that produces blue mana.
-pub(crate) fn cost_pred_blue_producing() -> ObjPredicate {
-    std::sync::Arc::new(|id, state| {
-        state.def_of(id).map_or(false, |d| {
-            d.mana_abilities().iter().any(|ma| ma.produces.contains(&Color::Blue))
-        })
+
+// ── Protection ───────────────────────────────────────────────────────────────
+
+/// True if `target_id` has protection from `source_id` (CR 702.16).
+/// Checks each predicate in the target's `protection_from` against the source.
+pub(crate) fn is_protected_from(target_id: ObjId, source_id: ObjId, state: &SimState) -> bool {
+    let target_def = state.def_of(target_id)
+        .or_else(|| state.objects.get(&target_id)
+            .and_then(|o| state.catalog.get(o.catalog_key.as_str())));
+    target_def.map_or(false, |td| {
+        td.protection_from.iter().any(|pred| pred(source_id, state))
+    })
+}
+
+/// Protection predicate: source is a colored spell (on the stack with ≥1 color).
+/// Used by Emrakul, the Aeons Torn.
+pub(crate) fn obj_pred_colored_spell() -> ObjPredicate {
+    std::sync::Arc::new(|source_id, state| {
+        let obj = state.objects.get(&source_id);
+        let is_spell = obj.map_or(false, |o| o.zone == CardZone::Stack);
+        let is_colored = state.def_of(source_id)
+            .or_else(|| obj.and_then(|o| state.catalog.get(o.catalog_key.as_str())))
+            .map_or(false, |d| !d.colors.is_empty());
+        is_spell && is_colored
     })
 }
 
@@ -177,6 +190,10 @@ pub(crate) enum TargetSpec {
     /// optionally filtered by `ability_type` (Triggered / Activated / Any).
     /// Abilities don't have a `CardDef` so they can't be reached via `ObjectInZone`.
     AbilityOnStack { controller: Who, ability_type: AbilityType },
+    /// Composable "any number of targets" wrapper (CR 107.1c).
+    /// `legal_targets` delegates to the inner spec; `pick_targets` returns all legal targets
+    /// instead of applying the single-target heuristic.
+    Any(Box<TargetSpec>),
 }
 
 impl TargetSpec {
@@ -185,11 +202,14 @@ impl TargetSpec {
 }
 
 
-/// Pick one target from a list of legal targets using the standard heuristic:
-/// prefer a killable creature (tgh - damage <= 1), then planeswalker or player over
-/// non-killable creatures, then fall back to the first available target.
-pub(crate) fn pick_target(targets: &[ObjId], state: &SimState) -> Option<ObjId> {
-    if targets.is_empty() { return None; }
+/// Pick targets from a list of legal targets.
+/// `TargetSpec::Any(_)` → return all targets.
+/// Everything else → single-target heuristic: prefer killable creature, then
+/// planeswalker/player over non-killable creatures, then first available.
+pub(crate) fn pick_targets(spec: &TargetSpec, targets: &[ObjId], state: &SimState) -> Vec<ObjId> {
+    if targets.is_empty() { return vec![]; }
+    if matches!(spec, TargetSpec::Any(_)) { return targets.to_vec(); }
+    // Single-target heuristic
     // Prefer a killable creature
     if let Some(&id) = targets.iter().find(|&&id| {
         let is_creature = state.def_of(id)
@@ -202,7 +222,7 @@ pub(crate) fn pick_target(targets: &[ObjId], state: &SimState) -> Option<ObjId> 
         let dmg = state.permanent_bf(id).map(|bf| bf.damage).unwrap_or(0);
         tgh > 0 && tgh - dmg <= 1
     }) {
-        return Some(id);
+        return vec![id];
     }
     // Skip non-killable creatures — prefer planeswalker or player over them
     if let Some(&id) = targets.iter().find(|&&id| {
@@ -210,15 +230,15 @@ pub(crate) fn pick_target(targets: &[ObjId], state: &SimState) -> Option<ObjId> 
             .or_else(|| state.objects.get(&id).and_then(|o| state.catalog.get(o.catalog_key.as_str())))
             .map(|d| d.is_creature()).unwrap_or(false)
     }) {
-        return Some(id);
+        return vec![id];
     }
     // Fallback: first target
-    Some(targets[0])
+    vec![targets[0]]
 }
 
 /// Enumerate all legal targets for `spec` given the current game state.
 /// No heuristic — returns every valid option. Caller picks.
-pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, state: &SimState) -> Vec<ObjId> {
+pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: ObjId, state: &SimState) -> Vec<ObjId> {
     match spec {
         TargetSpec::None => vec![],
         TargetSpec::Player(who) => vec![state.player_id(who.resolve(controller))],
@@ -231,6 +251,8 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, state: &Sim
                         if state.stack_item_owner(id) == actor_id
                             || !state.stack_item_is_counterable(id) { return false; }
                     }
+                    // CR 702.16d: protection prevents targeting.
+                    if is_protected_from(id, source_id, state) { return false; }
                     filter(id, state)
                 })
                 .collect()
@@ -240,7 +262,7 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, state: &Sim
             let mut seen = std::collections::HashSet::new();
             let mut result = Vec::new();
             for sub in specs {
-                for id in legal_targets(sub, controller, state) {
+                for id in legal_targets(sub, controller, source_id, state) {
                     if seen.insert(id) {
                         result.push(id);
                     }
@@ -262,6 +284,7 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, state: &Sim
                 .map(|(id, _)| id)
                 .collect()
         }
+        TargetSpec::Any(inner) => legal_targets(inner, controller, source_id, state),
     }
 }
 
@@ -273,14 +296,16 @@ pub(crate) fn has_valid_target(
     spec: &TargetSpec,
     state: &SimState,
     actor: PlayerId,
+    source_id: ObjId,
 ) -> bool {
-    has_valid_target_spec(spec, state, actor)
+    has_valid_target_spec(spec, state, actor, source_id)
 }
 
 fn has_valid_target_spec(
     spec: &TargetSpec,
     state: &SimState,
     actor: PlayerId,
+    source_id: ObjId,
 ) -> bool {
     match spec {
         TargetSpec::None => false,
@@ -294,10 +319,11 @@ fn has_valid_target_spec(
                         if state.stack_item_owner(id) == actor_id
                             || !state.stack_item_is_counterable(id) { return false; }
                     }
+                    if is_protected_from(id, source_id, state) { return false; }
                     filter(id, state)
                 })
         }
-        TargetSpec::Union(specs) => specs.iter().any(|s| has_valid_target_spec(s, state, actor)),
+        TargetSpec::Union(specs) => specs.iter().any(|s| has_valid_target_spec(s, state, actor, source_id)),
         TargetSpec::AbilityOnStack { controller: who, ability_type } => {
             let target_who = who.resolve(actor);
             let target_who_id = state.player_id(target_who);
@@ -310,6 +336,7 @@ fn has_valid_target_spec(
                     }
                 })
         }
+        TargetSpec::Any(inner) => has_valid_target_spec(inner, state, actor, source_id),
     }
 }
 

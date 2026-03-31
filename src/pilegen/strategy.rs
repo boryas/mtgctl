@@ -189,8 +189,8 @@ fn pick_on_board_action(
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
-                    let targets = legal_targets(&ab.target_spec, ap, state);
-                    let chosen = pick_target(&targets, state).into_iter().collect();
+                    let targets = legal_targets(&ab.target_spec, ap, land_id, state);
+                    let chosen = pick_targets(&ab.target_spec, &targets, state);
                     candidates.push(PriorityAction::ActivateAbility(land_id, ab, chosen));
                 }
             }
@@ -215,8 +215,8 @@ fn pick_on_board_action(
                 .cloned()
             {
                 if rng.gen_bool(0.75) {
-                    let targets = legal_targets(&ab.target_spec, ap, state);
-                    let chosen = pick_target(&targets, state).into_iter().collect();
+                    let targets = legal_targets(&ab.target_spec, ap, perm_id, state);
+                    let chosen = pick_targets(&ab.target_spec, &targets, state);
                     candidates.push(PriorityAction::ActivateAbility(perm_id, ab, chosen));
                 }
             }
@@ -245,8 +245,8 @@ fn pick_on_board_action(
                     .next()
                     .cloned()
                 {
-                    let targets = legal_targets(&ab.target_spec, ap, state);
-                    let chosen = pick_target(&targets, state).into_iter().collect();
+                    let targets = legal_targets(&ab.target_spec, ap, pw_id, state);
+                    let chosen = pick_targets(&ab.target_spec, &targets, state);
                     candidates.push(PriorityAction::ActivateAbility(pw_id, ab, chosen));
                 }
             }
@@ -272,8 +272,8 @@ fn pick_on_board_action(
                             .find(|ab| ability_available(ab, state, PlayerId::Us, fid, true))
                             .cloned()
                         {
-                            let targets = legal_targets(&ab.target_spec, PlayerId::Us, state);
-                            let chosen = pick_target(&targets, state).into_iter().collect();
+                            let targets = legal_targets(&ab.target_spec, PlayerId::Us, fid, state);
+                            let chosen = pick_targets(&ab.target_spec, &targets, state);
                             candidates.push(PriorityAction::ActivateAbility(fid, ab, chosen));
                         }
                     }
@@ -292,8 +292,8 @@ fn pick_on_board_action(
             let cost = parse_mana_cost(def.mana_cost());
             if !state.potential_mana(ap).can_pay(&cost) { continue; }
             if rng.gen_bool(0.75) {
-                let targets = legal_targets(def.target_spec(), ap, state);
-                let chosen = pick_target(&targets, state).into_iter().collect();
+                let targets = legal_targets(def.target_spec(), ap, card_id, state);
+                let chosen = pick_targets(def.target_spec(), &targets, state);
                 candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x: 0 });
             }
         }
@@ -308,7 +308,7 @@ fn worth_countering(id: ObjId, name: &str, state: &SimState) -> bool {
     if let Some(def) = state.def_of(id) {
         match &def.kind {
             CardKind::Creature(_) | CardKind::Planeswalker(_)
-            | CardKind::Artifact(_) | CardKind::Enchantment => return true,
+            | CardKind::Artifact(_) | CardKind::Enchantment(_) => return true,
             _ => {}
         }
     }
@@ -524,7 +524,7 @@ fn pick_attackers(
         .map(|p| p.id)
         .collect();
     state.permanents_of(ap)
-        .filter(|p| p.bf.as_ref().map_or(false, |bf| !bf.tapped && !bf.entered_this_turn))
+        .filter(|p| p.bf.as_ref().map_or(false, |bf| !bf.tapped && (!bf.entered_this_turn || creature_has_keyword(p.id, "haste", state))))
         .filter_map(|p| {
             let def = state.def_of(p.id)?;
             if !def.is_creature() { return None; }
@@ -591,6 +591,9 @@ fn pick_blockers(
                 // Shadow: shadow creatures can only block/be blocked by other shadow creatures.
                 let blk_shadow = creature_has_keyword(p.id, "shadow", state);
                 if atk_shadow != blk_shadow { return None; }
+                // CR 702.16c: a creature with protection from [quality] can't be blocked by
+                // creatures with that quality.
+                if is_protected_from(atk_id, p.id, state) { return None; }
                 let blk_pow = state.def_of(p.id)
                     .and_then(|d| d.as_creature())
                     .map(|c| c.power())
@@ -626,7 +629,7 @@ fn ability_available(
         return false;
     }
     can_pay_costs(&ability.costs, state, who, source_id, source_untapped, 0)
-        && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who))
+        && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who, source_id))
 }
 
 /// True if the player can currently afford to cast `name` via any available cost.
@@ -651,7 +654,9 @@ fn spell_is_affordable(
         true
     } else {
         def.alternate_costs().iter().any(|c| {
-            state.hand_size(who) >= c.hand_min && can_pay_costs(&c.costs, state, who, card_id, false, 0)
+            state.hand_size(who) >= c.hand_min
+                && can_pay_costs(&c.costs, state, who, card_id, false, 0)
+                && c.condition.as_ref().map_or(true, |f| f(who, state))
         })
     };
     // Use strategy default X=3 for XLife cost affordability check.
@@ -682,11 +687,11 @@ fn collect_hand_actions(
         if def.is_land() { continue; }
         if !card_has_implementation(def) { continue; }
         if def.legendary() && state.permanents_of(who).any(|c| c.catalog_key == name.as_str()) { continue; }
-        if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who) { continue; }
+        if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, *card_id) { continue; }
         if !spell_is_affordable(*card_id, def, state, who) { continue; }
         if seen_names.insert(name.clone()) {
-            let targets = legal_targets(def.target_spec(), who, state);
-            let chosen = pick_target(&targets, state).into_iter().collect();
+            let targets = legal_targets(def.target_spec(), who, *card_id, state);
+            let chosen = pick_targets(def.target_spec(), &targets, state);
             let chosen_x = if def.additional_costs.iter().any(|c| matches!(c, CostComponent::XLife | CostComponent::XMana)) { 3u32 } else { 0 };
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x });
         }
@@ -694,8 +699,8 @@ fn collect_hand_actions(
         // In-hand abilities (cycling, channel, etc.)
         for ab in def.abilities().iter().filter(|ab| matches!(ab.source_zone, SourceZone::Hand)) {
             if hand_ability_affordable(ab, state, who, *card_id) {
-                let targets = legal_targets(&ab.target_spec, who, state);
-                let chosen = pick_target(&targets, state).into_iter().collect();
+                let targets = legal_targets(&ab.target_spec, who, *card_id, state);
+                let chosen = pick_targets(&ab.target_spec, &targets, state);
                 actions.push(PriorityAction::ActivateAbility(*card_id, ab.clone(), chosen));
             }
         }
@@ -706,9 +711,9 @@ fn collect_hand_actions(
                 let cost = parse_mana_cost(face.mana_cost());
                 if !state.potential_mana(who).can_pay(&cost) { continue; }
             }
-            if !face.target_spec().is_none() && !has_valid_target(face.target_spec(), state, who) { continue; }
-            let adv_targets = legal_targets(face.target_spec(), who, state);
-            let adv_chosen = pick_target(&adv_targets, state).into_iter().collect();
+            if !face.target_spec().is_none() && !has_valid_target(face.target_spec(), state, who, *card_id) { continue; }
+            let adv_targets = legal_targets(face.target_spec(), who, *card_id, state);
+            let adv_chosen = pick_targets(face.target_spec(), &adv_targets, state);
             actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None, chosen_targets: adv_chosen, chosen_x: 0 });
         }
     }
@@ -790,7 +795,7 @@ fn respond_with_counter(
             // Only instants can be cast as a response.
             if !def.is_instant() { return None; }
             // Check if this card has a valid target matching the stack item.
-            if !legal_targets(def.target_spec(), responding_who, state).contains(&target_id) {
+            if !legal_targets(def.target_spec(), responding_who, c.id, state).contains(&target_id) {
                 return None;
             }
             if c.catalog_key == "Daze" && target_has_untapped_lands { return None; }
@@ -833,11 +838,16 @@ fn respond_with_counter(
             if probabilistic && !rng.gen_bool(strategic) { continue; }
             if state.hand_size(responding_who) >= cost.hand_min
                 && can_pay_costs(&cost.costs, state, responding_who, *cs_id, false, 0) {
+                let chosen_targets = if matches!(def.target_spec(), TargetSpec::Any(_)) {
+                    legal_targets(def.target_spec(), responding_who, *cs_id, state)
+                } else {
+                    vec![target_id]
+                };
                 return Some(PriorityAction::CastSpell {
                     card_id: *cs_id,
                     face: SpellFace::Main,
                     preferred_cost: Some(cost.clone()),
-                    chosen_targets: vec![target_id],
+                    chosen_targets,
                     chosen_x: 0,
                 });
             }
@@ -849,11 +859,16 @@ fn respond_with_counter(
             if state.potential_mana(responding_who).can_pay(&mc) {
                 let strategic = if probabilistic { 0.65f64 } else { 1.0 };
                 if !probabilistic || rng.gen_bool(strategic) {
+                    let chosen_targets = if matches!(def.target_spec(), TargetSpec::Any(_)) {
+                        legal_targets(def.target_spec(), responding_who, *cs_id, state)
+                    } else {
+                        vec![target_id]
+                    };
                     return Some(PriorityAction::CastSpell {
                         card_id: *cs_id,
                         face: SpellFace::Main,
                         preferred_cost: None,
-                        chosen_targets: vec![target_id],
+                        chosen_targets,
                         chosen_x: 0,
                     });
                 }

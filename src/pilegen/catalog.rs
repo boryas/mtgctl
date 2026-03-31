@@ -321,6 +321,11 @@ pub(crate) struct ArtifactData {
     pub(crate) mana_abilities: Vec<ManaAbility>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct EnchantmentData {
+    pub(crate) abilities: Vec<AbilityDef>,
+}
+
 /// The ninjutsu ability on a ninja creature.
 #[derive(Clone)]
 pub(crate) struct NinjutsuAbility {
@@ -383,7 +388,6 @@ pub(crate) struct SpellData {
     /// Declarative target specification. `TargetSpec::None` means no target required.
     pub(crate) target_spec: TargetSpec,
 
-    pub(crate) alternate_costs: Vec<AlternateCost>,
     pub(crate) delve: bool,
     /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
     pub(crate) subtypes: Vec<String>,
@@ -398,7 +402,6 @@ impl Default for SpellData {
             exileable: false,
             target_spec: TargetSpec::None,
 
-            alternate_costs: Vec::new(),
             delve: false,
             subtypes: Vec::new(),
             spell_factory: None,
@@ -421,7 +424,7 @@ pub(crate) enum CardKind {
     Instant(SpellData),
     Sorcery(SpellData),
     Planeswalker(PlaneswalkerData),
-    Enchantment,
+    Enchantment(EnchantmentData),
 }
 
 /// Layout of a multi-face card. Determines how `back` is interpreted at cast/flip time.
@@ -520,6 +523,15 @@ pub(crate) struct CardDef {
     /// or libraries and (b) creature cards entering the battlefield from graveyards or libraries
     /// (e.g. Grafdigger's Cage). Checked by `play_free_cast` and `eff_reanimate`.
     pub(crate) blocks_gy_and_lib_access: bool,
+    /// Alternate costs granted by continuous effects (e.g. Omniscience grants a zero-cost
+    /// alternate). Works for ALL card types, unlike `SpellData.alternate_costs` which only
+    /// covers Instant/Sorcery. Reset to empty on each `recompute`.
+    pub(crate) alternate_costs: Vec<AlternateCost>,
+    /// Protection predicates (CR 702.16). Each predicate tests a *source* ObjId:
+    /// if any returns true, the source cannot target, damage, or block this object.
+    /// Uses `ObjPredicate` — the predicate can inspect the source's CardDef, zone,
+    /// controller, etc. via the uniform id model.
+    pub(crate) protection_from: Vec<ObjPredicate>,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -536,7 +548,7 @@ impl CardDef {
 
     pub(crate) fn mana_cost(&self) -> &str {
         match &self.kind {
-            CardKind::Land(_) | CardKind::Enchantment => "",
+            CardKind::Land(_) | CardKind::Enchantment(_) => "",
             CardKind::Creature(c) => &c.mana_cost,
             CardKind::Artifact(a) => &a.mana_cost,
             CardKind::Instant(s) | CardKind::Sorcery(s) => &s.mana_cost,
@@ -550,15 +562,13 @@ impl CardDef {
             CardKind::Creature(c) => &c.abilities,
             CardKind::Artifact(a) => &a.abilities,
             CardKind::Planeswalker(p) => &p.abilities,
-            CardKind::Instant(_) | CardKind::Sorcery(_) | CardKind::Enchantment => &[],
+            CardKind::Enchantment(e) => &e.abilities,
+            CardKind::Instant(_) | CardKind::Sorcery(_) => &[],
         }
     }
 
     pub(crate) fn alternate_costs(&self) -> &[AlternateCost] {
-        match &self.kind {
-            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.alternate_costs,
-            _ => &[],
-        }
+        &self.alternate_costs
     }
 
     pub(crate) fn target_spec(&self) -> &TargetSpec {
@@ -660,7 +670,7 @@ pub(crate) fn card_type_of(kind: &CardKind) -> CardType {
         CardKind::Instant(_)      => CardType::Instant,
         CardKind::Sorcery(_)      => CardType::Sorcery,
         CardKind::Planeswalker(_) => CardType::Planeswalker,
-        CardKind::Enchantment     => CardType::Enchantment,
+        CardKind::Enchantment(_)  => CardType::Enchantment,
     }
 }
 
@@ -701,6 +711,8 @@ impl CardDef {
             casting_cost_modifier: 0,
             non_mana_abilities_suppressed: false,
             blocks_gy_and_lib_access: false,
+            alternate_costs: vec![],
+            protection_from: vec![],
         }
     }
 }
@@ -886,6 +898,21 @@ pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: P
     }
 }
 
+/// ETB trigger for Atraxa, Grand Unifier: placeholder — adds 4 cards to hand.
+/// TODO: replace with real reveal-top-10-by-card-type once hands are fully tracked.
+pub(super) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+        if *id == source_id && *ctlr == controller {
+            pending.push(TriggerContext {
+                source_name: "Atraxa, Grand Unifier".into(),
+                controller,
+                target_spec: TargetSpec::None,
+                effect: eff_hand_boost(controller, 4),
+            });
+        }
+    }
+}
+
 pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange {
         id, from: ZoneId::Graveyard, to: ZoneId::Exile,
@@ -975,9 +1002,8 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
 /// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
 pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
     for ctx in triggers {
-        let all_targets = legal_targets(&ctx.target_spec, ctx.controller, state);
-        let chosen_targets = pick_target(&all_targets, state)
-            .into_iter().collect::<Vec<_>>();
+        let all_targets = legal_targets(&ctx.target_spec, ctx.controller, ObjId(0), state);
+        let chosen_targets = pick_targets(&ctx.target_spec, &all_targets, state);
         let ab_id = state.alloc_id();
         let ab_owner = state.player_id(ctx.controller);
         let ab = StackAbility {
@@ -1016,17 +1042,22 @@ pub(super) fn tamiyo_plus_two_check(
                 effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
                     let atk_name = state.permanent_name(attacker_id).unwrap_or_default();
                     if state.permanent_bf(attacker_id).is_some() {
+                        let ts = state.next_ci_timestamp();
                         state.continuous_instances.push(ContinuousInstance {
                             source_id: tamiyo_id,
                             controller,
                             layer: ContinuousLayer::L7PowerToughness,
-                            filter: std::sync::Arc::new(move |id, _| id == attacker_id),
+                            reads: vec![],
+                            writes: vec![CeWrites::PowerToughness],
+                            timestamp: ts,
+                            filter: std::sync::Arc::new(move |id, _, _| id == attacker_id),
                             modifier: std::sync::Arc::new(|def, _state| {
                                 if let CardKind::Creature(c) = &mut def.kind {
                                     c.adjust_pt(-1, 0);
                                 }
                             }),
                             expiry: ContinuousExpiry::EndOfTurn,
+                activate_on: None, one_shot: false, active: true,
                         });
                     }
                     state.log(t, controller, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
@@ -1141,7 +1172,9 @@ pub(super) fn activate_instances(
     }
     if let Some(card_def) = def {
         for factory in &card_def.static_ability_defs {
-            state.continuous_instances.push(factory(source_id, controller));
+            let mut ci = factory(source_id, controller);
+            ci.timestamp = state.next_ci_timestamp();
+            state.continuous_instances.push(ci);
         }
     }
 }

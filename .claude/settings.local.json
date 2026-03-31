@@ -49,7 +49,12 @@
       "Bash(for f:*)",
       "Bash(do echo:*)",
       "Read(//home/bo/repos/mtgctl/**)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "WebFetch(domain:scryfall.com)",
+      "WebFetch(domain:yawgatog.com)",
+      "WebFetch(domain:ancestral.vision)",
+      "Read(//home/bo/**)",
+      "WebFetch(domain:api.scryfall.com)"
     ],
     "deny": []
   }

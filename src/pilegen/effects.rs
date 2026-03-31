@@ -100,11 +100,16 @@ pub(crate) fn eff_mana(who: PlayerId, spec: impl Into<String>) -> Effect {
     }))
 }
 
-/// Destroy the permanent in `targets[0]`. `caster` used for logging.
 /// Deal `n` damage to the permanent in `targets[0]`. SBAs handle lethal-damage destruction.
-pub(crate) fn eff_damage_target(caster: PlayerId, n: i32) -> Effect {
+/// `source_id` identifies the damage source for protection checks (CR 702.16b).
+pub(crate) fn eff_damage_target(caster: PlayerId, n: i32, source_id: ObjId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
+            if is_protected_from(id, source_id, state) {
+                let name = state.objects.get(&id).map(|o| o.catalog_key.as_str()).unwrap_or("?");
+                state.log(t, caster, format!("→ damage to {} prevented (protection)", name));
+                return;
+            }
             if let Some(bf) = state.permanent_bf_mut(id) {
                 bf.damage += n;
             }
@@ -169,6 +174,15 @@ pub(crate) fn eff_destroy_all(caster: PlayerId, filter: ObjPredicate) -> Effect 
 pub(crate) fn eff_exile_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
+            change_zone(id, ZoneId::Exile, state, t, caster);
+        }
+    }))
+}
+
+/// Exile all targets (for "exile any number of target ..." effects).
+pub(crate) fn eff_exile_all_targets(caster: PlayerId) -> Effect {
+    Effect(Arc::new(move |state, t, targets| {
+        for &id in targets {
             change_zone(id, ZoneId::Exile, state, t, caster);
         }
     }))
@@ -254,7 +268,7 @@ pub(crate) fn eff_enter_permanent(
                 ..BattlefieldState::new()
             }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         fire_event(
             GameEvent::ZoneChange {
@@ -281,6 +295,17 @@ pub(super) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
         if state.objects.contains_key(&id) {
             let spell_caster = state.objects[&id].controller;
             if fire_event(GameEvent::SpellBeingCountered { caster: spell_caster, card_id: id }, state, t, actor) {
+                return;
+            }
+            // Check materialized prohibition_defs (CE-granted "can't be countered").
+            // Mirrors how fire_triggers reads granted_trigger_defs from materialized defs.
+            let mat_prohibited = state.def_of(id).map_or(false, |d| {
+                let event = GameEvent::SpellBeingCountered { caster: spell_caster, card_id: id };
+                d.prohibition_defs.iter().any(|p| (p.check)(&event, id, spell_caster, state))
+            });
+            if mat_prohibited {
+                let name = state.stack_item_display_name(id).to_string();
+                state.log(t, actor, format!("→ fizzled ({} can't be countered)", name));
                 return;
             }
         }
@@ -457,6 +482,23 @@ pub(crate) fn eff_counter_unless_pays(caster: PlayerId, cost: Vec<CostComponent>
                 counter_one(spell_id, state, t, caster);
             }
         }
+    }))
+}
+
+/// Placeholder for Atraxa, Grand Unifier's ETB: reveal top 10, for each card type
+/// you may put one into your hand. Real implementation needs per-type strategy choices
+/// over actual revealed cards; for now just silently move `n` library cards to hand
+/// (no Draw events — does not trigger Bowmasters etc.).
+///
+/// TODO: replace with real reveal-top-10-by-card-type once hands are fully tracked.
+pub(crate) fn eff_hand_boost(who: PlayerId, n: usize) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        let ids: Vec<ObjId> = state.library_of(who).map(|o| o.id).take(n).collect();
+        let count = ids.len();
+        for id in ids {
+            state.set_card_zone(id, CardZone::Hand { known: true });
+        }
+        state.log(t, who, format!("Atraxa ETB: {} cards to hand (placeholder)", count));
     }))
 }
 

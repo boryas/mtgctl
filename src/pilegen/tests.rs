@@ -51,7 +51,7 @@
             spell: None,
             bf: Some(bf),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         // Look up the real CardDef (including triggers/replacements) from the catalog; fall back
         // to a minimal 1/1 stub for anonymous test creatures that have no special behaviour.
@@ -85,7 +85,7 @@
             spell: None,
             bf: Some(bf),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         preregister_instances(def, id, who, state);
         activate_instances(id, who, Some(def), state);
@@ -114,7 +114,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         id
     }
@@ -137,8 +137,27 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
+        id
+    }
+
+    /// Put a spell on the stack (for targeting / protection tests).
+    fn add_stack_spell(state: &mut SimState, who: PlayerId, def: &CardDef) -> ObjId {
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject {
+            id,
+            catalog_key: def.name.clone(),
+            owner: who,
+            controller: who,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: None,
+            bf: None,
+            materialized: Some(def.clone()),
+            counters: HashMap::new(), cast_generation: 0,
+        });
+        state.catalog.entry(def.name.clone()).or_insert_with(|| def.clone());
         id
     }
 
@@ -154,7 +173,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         id
     }
@@ -739,7 +758,7 @@
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, ObjId(0), &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -757,7 +776,7 @@
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, ObjId(0), &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -946,7 +965,7 @@
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) }, PlayerId::Us, &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) }, PlayerId::Us, ObjId(0), &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -1378,8 +1397,8 @@
         // Rebuild materialized so choose_trigger_target sees current P/T.
         recompute(state);
         let ctx = bowmasters_etb_ctx(controller);
-        let all_targets = legal_targets(&ctx.target_spec, controller, state);
-        let targets: Vec<ObjId> = pick_target(&all_targets, state).into_iter().collect();
+        let all_targets = legal_targets(&ctx.target_spec, controller, ObjId(0), state);
+        let targets: Vec<ObjId> = pick_targets(&ctx.target_spec, &all_targets, state);
         ctx.effect.call(state, 1, &targets);
     }
 
@@ -1638,11 +1657,15 @@
             source_id: dragon_id,
             controller: PlayerId::Us,
             layer: ContinuousLayer::L7PowerToughness,
-            filter: std::sync::Arc::new(move |id, _| id == dragon_id),
+            reads: vec![],
+            writes: vec![],
+            timestamp: 0,
+            filter: std::sync::Arc::new(move |id, _, _| id == dragon_id),
             modifier: std::sync::Arc::new(|def, _state| {
                 if let CardKind::Creature(c) = &mut def.kind { c.adjust_pt(-1, 0); }
             }),
             expiry: ContinuousExpiry::EndOfTurn,
+                activate_on: None, one_shot: false, active: true,
         });
 
         // Before Cleanup: effective power = 2.
@@ -1778,7 +1801,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(id);
         let mut no_strats: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::new();
@@ -1861,7 +1884,7 @@
             spell: None,
             bf: Some(BattlefieldState::new()),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         id
     }
@@ -2001,13 +2024,17 @@
             source_id: ObjId::UNSET,
             controller: PlayerId::Us,
             layer: ContinuousLayer::L7PowerToughness,
-            filter: std::sync::Arc::new(|_id, controller| controller == PlayerId::Us),
+            reads: vec![],
+            writes: vec![],
+            timestamp: 0,
+            filter: std::sync::Arc::new(|_id, controller, _| controller == PlayerId::Us),
             modifier: std::sync::Arc::new(|def, _state| {
                 if let CardKind::Creature(c) = &mut def.kind {
                     c.adjust_pt(2, 1);
                 }
             }),
             expiry: ContinuousExpiry::EndOfTurn,
+                activate_on: None, one_shot: false, active: true,
         });
 
         // Recompute: effective P/T should now be 4/3.
@@ -2043,7 +2070,10 @@
             source_id,
             controller,
             layer: ContinuousLayer::L6AbilityEffects,
-            filter: std::sync::Arc::new(move |id, _| id == source_id),
+            reads: vec![],
+            writes: vec![],
+            timestamp: 0,
+            filter: std::sync::Arc::new(move |id, _, _| id == source_id),
             modifier: std::sync::Arc::new(|def, _state| {
                 if let CardKind::Creature(c) = &mut def.kind {
                     if !c.keywords.contains(&"flying".to_string()) {
@@ -2052,6 +2082,7 @@
                 }
             }),
             expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
         })
     }
 
@@ -2113,7 +2144,10 @@
             source_id: id,
             controller: PlayerId::Us,
             layer: ContinuousLayer::L7PowerToughness,
-            filter: std::sync::Arc::new(move |obj_id, _| obj_id == id),
+            reads: vec![],
+            writes: vec![],
+            timestamp: 0,
+            filter: std::sync::Arc::new(move |obj_id, _, _| obj_id == id),
             modifier: std::sync::Arc::new(|def, state| {
                 let gy = state.graveyard_of(PlayerId::Us).count() as i32;
                 if let CardKind::Creature(c) = &mut def.kind {
@@ -2122,6 +2156,7 @@
                 }
             }),
             expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
         });
 
         // No cards in GY → power = 0.
@@ -2439,7 +2474,7 @@
         // Island on the battlefield (blue-producing).
         let island_id = island_land(&mut state, PlayerId::Us);
         let daze_id = add_hand_card(&mut state, PlayerId::Us, "Daze");
-        let alt = &daze_def.alternate_costs()[0]; // ReturnFromBattlefield(cost_pred_blue_producing())
+        let alt = &daze_def.alternate_costs()[0]; // ReturnFromBattlefield(Island subtype)
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), &[], 0);
         assert!(result.is_some(), "Daze should cast by bouncing the Island");
@@ -2595,7 +2630,7 @@
             }),
             bf: None,
             materialized: Some(def),
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(spell_id);
         spell_id
@@ -2673,7 +2708,7 @@
         let ab_id = push_opp_triggered_ability(&mut state);
 
         let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered };
-        let targets = legal_targets(&spec, PlayerId::Us, &state);
+        let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
         assert!(targets.contains(&ab_id), "opp triggered ability should be a legal target");
     }
 
@@ -2697,7 +2732,7 @@
         state.stack.push(ab_id);
 
         let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered };
-        let targets = legal_targets(&spec, PlayerId::Us, &state);
+        let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
         assert!(!targets.contains(&ab_id), "activated ability should not match AbilityOnStack::Triggered");
     }
 
@@ -2718,7 +2753,7 @@
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(spell_id);
         // Set counterable=false by inserting the card's def (with the flag) into the catalog.
@@ -2782,7 +2817,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(spell_id);
 
@@ -2819,7 +2854,7 @@
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(y_id);
 
@@ -2840,7 +2875,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(fon_id);
 
@@ -2875,7 +2910,7 @@
                 bf: None,
                 spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
                 materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
         }
 
@@ -2896,7 +2931,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // FoW targeting X.
@@ -2916,7 +2951,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // Stack order bottom→top: X, Y, FoN, FoW.
@@ -2962,7 +2997,7 @@
             spell: None,
             bf: Some(BattlefieldState::new()),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // Put a Us-owned card in graveyard-bound position (hand card moved to GY).
@@ -2977,7 +3012,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // Trigger zone change to graveyard — DV's replacement should intercept.
@@ -3018,7 +3053,7 @@
             spell: None,
             bf: Some(BattlefieldState::new()),
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // Opp's own card going to graveyard — should NOT be intercepted.
@@ -3033,7 +3068,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         change_zone(opp_card_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Opp);
@@ -3067,7 +3102,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Graveyard,
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         let hand_id = state.alloc_id();
         state.objects.insert(hand_id, GameObject {
@@ -3077,7 +3112,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         let lib_id = state.alloc_id();
         state.objects.insert(lib_id, GameObject {
@@ -3087,7 +3122,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Library,
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         // A different card in opp's hand — must not be exiled.
         let other_id = state.alloc_id();
@@ -3098,7 +3133,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // Build and call the Surgical Extraction effect targeting gy_id.
@@ -3206,7 +3241,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: def,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(id);
         id
@@ -3318,7 +3353,7 @@
             bf: None,
             spell: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         preregister_instances(&def, id, who, state);
         state.catalog.entry("Painter's Servant".to_string()).or_insert(def);
@@ -3358,8 +3393,8 @@
             "Pyroblast should destroy the now-Blue Lotus Petal");
     }
 
-    /// After Painter's Servant names Blue, any nonland card in hand satisfies the Force of
-    /// Will pitch predicate (cost_pred_blue_nonland). Dark Ritual is normally Black, not Blue.
+    /// After Painter's Servant names Blue, any card in hand satisfies the Force of
+    /// Will pitch predicate (blue card). Dark Ritual is normally Black, not Blue.
     #[test]
     fn test_painters_servant_names_blue_enables_force_of_will_pitch() {
         let mut state = make_state();
@@ -3373,7 +3408,7 @@
 
         // Seed materialized on the hand card so def_of works.
         // (recompute populates materialized for objects in all zones.)
-        let pred = cost_pred_blue_nonland();
+        let pred = obj_pred_from_card(pred_has_color(Color::Blue));
         assert!(pred(ritual_id, &state),
             "After Painter names Blue, Dark Ritual should satisfy FoW pitch predicate");
     }
@@ -3429,7 +3464,7 @@
             bf: None,
             spell: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         preregister_instances(&def, id, who, state);
         state.catalog.entry("Disruptor Flute".to_string()).or_insert(def);
@@ -3455,7 +3490,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         recompute(&mut state);
 
@@ -3501,7 +3536,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         recompute(&mut state);
 
@@ -3532,7 +3567,7 @@
                 zone: CardZone::Library,
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
@@ -3550,7 +3585,7 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
             preregister_instances(&def, id, PlayerId::Us, &mut state);
             state.catalog.entry("Undercity Sewers".to_string()).or_insert(def);
@@ -3583,7 +3618,7 @@
                 zone: CardZone::Library,
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
@@ -3600,7 +3635,7 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
             preregister_instances(&def, id, PlayerId::Us, &mut state);
             state.catalog.entry("Undercity Sewers".to_string()).or_insert(def);
@@ -3632,7 +3667,7 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
             preregister_instances(&def, id, PlayerId::Us, &mut state);
             state.catalog.entry("Ancient Tomb".to_string()).or_insert(def);
@@ -3678,7 +3713,7 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
             preregister_instances(&legendary_def, id, PlayerId::Opp, &mut state);
             id
@@ -3703,7 +3738,7 @@
         let creature_def = creature("Target3_3", 3, 3);
         let id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, BattlefieldState::new());
 
-        eff_damage_target(PlayerId::Us, 3).call(&mut state, 1, &[id]);
+        eff_damage_target(PlayerId::Us, 3, ObjId(0)).call(&mut state, 1, &[id]);
         check_state_based_actions(&mut state, 1);
 
         assert_eq!(state.objects[&id].zone, CardZone::Graveyard,
@@ -3718,7 +3753,7 @@
         let creature_def = creature("Target4_4", 4, 4);
         let id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, BattlefieldState::new());
 
-        eff_damage_target(PlayerId::Us, 3).call(&mut state, 1, &[id]);
+        eff_damage_target(PlayerId::Us, 3, ObjId(0)).call(&mut state, 1, &[id]);
         check_state_based_actions(&mut state, 1);
 
         assert_eq!(state.objects[&id].zone, CardZone::Battlefield,
@@ -3764,7 +3799,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         preregister_instances(&cage_def, cage_id, PlayerId::Opp, &mut state);
         state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
@@ -3787,7 +3822,7 @@
             zone: CardZone::Exile { on_adventure: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.free_cast_permissions.push(FreeCastPermission {
             controller: PlayerId::Us,
@@ -3825,7 +3860,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         preregister_instances(&cage_def, cage_id, PlayerId::Us, &mut state);
         state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
@@ -3854,7 +3889,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         preregister_instances(&cage_def, cage_id, who, state);
         change_zone(cage_id, ZoneId::Battlefield, state, 1, who);
@@ -3878,7 +3913,7 @@
             zone: CardZone::Graveyard,
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // Attempt to reanimate: fire a ZoneChange GY→BF.
@@ -3908,7 +3943,7 @@
             zone: CardZone::Graveyard,
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         // Remove Cage.
@@ -3941,7 +3976,7 @@
             zone: CardZone::Graveyard,
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         eff_reanimate(PlayerId::Us).call(&mut state, 2, &[artifact_id]);
@@ -3993,7 +4028,7 @@
             bf: Some(BattlefieldState::new()),
             spell: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         // Mode 1: sacrifice a token
         let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
@@ -4025,7 +4060,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         preregister_instances(&ee_def, ee_id, PlayerId::Us, &mut state);
         change_zone(ee_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
@@ -4267,7 +4302,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         fire_event(
@@ -4309,7 +4344,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         fire_event(
@@ -4363,7 +4398,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
 
         fire_event(
@@ -4475,7 +4510,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(spell_id);
 
@@ -4521,7 +4556,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(spell_id);
 
@@ -4554,7 +4589,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(spell_id);
 
@@ -4599,7 +4634,7 @@
                 }),
                 bf: None,
                 materialized: None,
-                counters: HashMap::new(),
+                counters: HashMap::new(), cast_generation: 0,
             });
             state.stack.push(id);
         }
@@ -4623,7 +4658,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(fluster_id);
 
@@ -4687,7 +4722,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(),
+            counters: HashMap::new(), cast_generation: 0,
         });
         state.stack.push(spell_id);
 
@@ -4697,6 +4732,83 @@
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
             "storm copy should counter spell when opponent can't pay 1");
+    }
+
+    // ── §50b: Mindbreak Trap / any-number targeting ────────────────────────────
+
+    #[test]
+    fn test_mindbreak_trap_exiles_all_targeted_spells() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Put two opponent spells on the stack.
+        let spell_a = state.alloc_id();
+        state.objects.insert(spell_a, GameObject {
+            id: spell_a,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: Some(SpellState {
+                effect: Some(eff_mana(PlayerId::Us, "BBB")),
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(), cast_generation: 0,
+        });
+        state.stack.push(spell_a);
+
+        let spell_b = state.alloc_id();
+        state.objects.insert(spell_b, GameObject {
+            id: spell_b,
+            catalog_key: "Ponder".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: Some(SpellState {
+                effect: Some(eff_draw(PlayerId::Us, 1)),
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(), cast_generation: 0,
+        });
+        state.stack.push(spell_b);
+
+        // Opponent casts Mindbreak Trap targeting both spells.
+        eff_exile_all_targets(PlayerId::Opp).call(&mut state, 1, &[spell_a, spell_b]);
+
+        assert!(matches!(state.objects[&spell_a].zone, CardZone::Exile { .. }),
+            "spell A should be exiled");
+        assert!(matches!(state.objects[&spell_b].zone, CardZone::Exile { .. }),
+            "spell B should be exiled");
+    }
+
+    #[test]
+    fn test_mindbreak_trap_condition_checks_opponent_spell_count() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let trap_def = state.catalog.get("Mindbreak Trap").unwrap().clone();
+        let alt = &trap_def.alternate_costs[0];
+        let condition = alt.condition.as_ref().unwrap();
+
+        // Opponent (Us from their perspective) has cast 2 spells — condition false for Opp caster.
+        state.us.spells_cast_this_turn = 2;
+        assert!(!condition(PlayerId::Opp, &state),
+            "trap condition should be false when opponent cast only 2 spells");
+
+        // Opponent has cast 3 spells — condition true.
+        state.us.spells_cast_this_turn = 3;
+        assert!(condition(PlayerId::Opp, &state),
+            "trap condition should be true when opponent cast 3+ spells");
     }
 
     // ── §51: Simian Spirit Guide / hand-zone mana ──────────────────────────────
@@ -4757,4 +4869,875 @@
             "creature should be exiled");
         assert!(state.opp.life > opp_life_before,
             "opponent should gain life equal to creature's power");
+    }
+
+    // ── §53: City of Traitors ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_city_of_traitors_sacrificed_when_another_land_played() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let cot_def = catalog_card("City of Traitors");
+        let cot_id = add_perm_with_def(&mut state, PlayerId::Us, &cot_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // Playing another land fires LandPlayed — should trigger CoT's sacrifice.
+        let other_land_id = state.alloc_id();
+        fire_event(
+            GameEvent::LandPlayed { id: other_land_id, controller: PlayerId::Us },
+            &mut state, 1, PlayerId::Us,
+        );
+        assert!(!state.pending_triggers.is_empty(),
+            "LandPlayed should produce a pending trigger for City of Traitors");
+
+        // Resolve the trigger — CoT goes to graveyard.
+        let ctx = state.pending_triggers.remove(0);
+        ctx.effect.call(&mut state, 1, &[]);
+        assert_eq!(state.objects[&cot_id].zone, CardZone::Graveyard,
+            "City of Traitors should be sacrificed");
+    }
+
+    #[test]
+    fn test_city_of_traitors_not_triggered_by_fetch() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let cot_def = catalog_card("City of Traitors");
+        let _cot_id = add_perm_with_def(&mut state, PlayerId::Us, &cot_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // A land entering via fetch fires ZoneChange but NOT LandPlayed.
+        let fetched_id = state.alloc_id();
+        fire_event(
+            GameEvent::ZoneChange {
+                id: fetched_id,
+                actor: PlayerId::Us,
+                from: ZoneId::Library,
+                to: ZoneId::Battlefield,
+                controller: PlayerId::Us,
+            },
+            &mut state, 1, PlayerId::Us,
+        );
+        assert!(state.pending_triggers.is_empty(),
+            "ZoneChange (fetch) should NOT trigger City of Traitors");
+    }
+
+    #[test]
+    fn test_city_of_traitors_produces_two_colorless() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let cot_def = catalog_card("City of Traitors");
+        add_perm_with_def(&mut state, PlayerId::Us, &cot_def, BattlefieldState::new());
+        recompute(&mut state);
+        let pool = state.potential_mana(PlayerId::Us);
+        assert_eq!(pool.total, 2, "City of Traitors should produce 2 mana");
+    }
+
+    // ── §54: Omniscience ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_omniscience_grants_free_alternate_cost_to_hand_spells() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let omni_def = catalog_card("Omniscience");
+        add_perm_with_def(&mut state, PlayerId::Us, &omni_def, BattlefieldState::new());
+        let spell_id = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        recompute(&mut state);
+
+        let def = state.def_of(spell_id).expect("hand card should have materialized def");
+        assert!(def.alternate_costs().iter().any(|c| c.costs.is_empty()),
+            "Omniscience should grant a zero-cost alternate to hand spells");
+    }
+
+    #[test]
+    fn test_omniscience_does_not_affect_lands() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let omni_def = catalog_card("Omniscience");
+        add_perm_with_def(&mut state, PlayerId::Us, &omni_def, BattlefieldState::new());
+        let land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        recompute(&mut state);
+
+        let def = state.def_of(land_id).expect("hand card should have materialized def");
+        assert!(def.alternate_costs().is_empty(),
+            "Omniscience should not grant alternate costs to lands");
+    }
+
+    #[test]
+    fn test_omniscience_does_not_affect_opponent() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let omni_def = catalog_card("Omniscience");
+        add_perm_with_def(&mut state, PlayerId::Us, &omni_def, BattlefieldState::new());
+        let opp_spell = add_hand_card(&mut state, PlayerId::Opp, "Doomsday");
+        recompute(&mut state);
+
+        let def = state.def_of(opp_spell).expect("hand card should have materialized def");
+        assert!(def.alternate_costs().is_empty(),
+            "Omniscience should not affect opponent's spells");
+    }
+
+    // ── §55: Sneak Attack ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sneak_attack_enchantment_has_ability() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let sa_def = catalog_card("Sneak Attack");
+        add_perm_with_def(&mut state, PlayerId::Us, &sa_def, BattlefieldState::new());
+        recompute(&mut state);
+        assert_eq!(sa_def.abilities().len(), 1, "Sneak Attack should have one activated ability");
+    }
+
+    #[test]
+    fn test_sneak_attack_puts_creature_with_haste() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let sa_def = catalog_card("Sneak Attack");
+        add_perm_with_def(&mut state, PlayerId::Us, &sa_def, BattlefieldState::new());
+        let creature_id = add_hand_card(&mut state, PlayerId::Us, "Orcish Bowmasters");
+        recompute(&mut state);
+
+        // Resolve the ability effect with the creature as the chosen target.
+        let ability = &sa_def.abilities()[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, ObjId::UNSET);
+        eff.call(&mut state, 1, &[creature_id]);
+        recompute(&mut state);
+
+        // Creature should be on the battlefield with haste.
+        assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield,
+            "creature should be on the battlefield");
+        let def = state.def_of(creature_id).expect("should have materialized def");
+        assert!(def.has_keyword("haste"), "creature should have haste");
+    }
+
+    #[test]
+    fn test_sneak_attack_delayed_trigger_sacrifices_at_end_step() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let sa_def = catalog_card("Sneak Attack");
+        add_perm_with_def(&mut state, PlayerId::Us, &sa_def, BattlefieldState::new());
+        let creature_id = add_hand_card(&mut state, PlayerId::Us, "Orcish Bowmasters");
+        recompute(&mut state);
+
+        // Resolve the ability to put creature onto battlefield.
+        let ability = &sa_def.abilities()[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, ObjId::UNSET);
+        eff.call(&mut state, 1, &[creature_id]);
+        recompute(&mut state);
+        assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield);
+
+        // Fire end step event — should produce a delayed sacrifice trigger.
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::End, active_player: PlayerId::Us },
+            &mut state, 2, PlayerId::Us,
+        );
+        assert!(!state.pending_triggers.is_empty(),
+            "end step should produce a sacrifice trigger");
+
+        // Resolve the trigger — creature should be sacrificed.
+        let ctx = state.pending_triggers.remove(0);
+        ctx.effect.call(&mut state, 2, &[]);
+        assert_eq!(state.objects[&creature_id].zone, CardZone::Graveyard,
+            "creature should be sacrificed at end step");
+    }
+
+    // ── 42. Magus of the Moon ─────────────────────────────────────────────────
+
+    /// Helper: place Magus of the Moon on the battlefield with its static CE registered.
+    fn etb_magus_of_the_moon(state: &mut SimState, who: PlayerId) -> ObjId {
+        let def = catalog_card("Magus of the Moon");
+        add_perm_with_def(state, who, &def, BattlefieldState::new())
+    }
+
+    /// Nonbasic dual land (Underground Sea: island + swamp) should become a Mountain
+    /// with only "{T}: Add {R}" after Magus of the Moon enters play.
+    #[test]
+    fn test_magus_nonbasic_becomes_mountain() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _magus = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        let def = state.def_of(sea_id).expect("Underground Sea should have materialized def");
+        let land = def.as_land().expect("should still be a Land");
+        assert!(land.land_types.mountain, "nonbasic should gain Mountain type");
+        assert!(!land.land_types.island, "nonbasic should lose Island type");
+        assert!(!land.land_types.swamp, "nonbasic should lose Swamp type");
+        assert_eq!(land.mana_abilities.len(), 1, "should have exactly one mana ability");
+        assert!(land.abilities.is_empty(), "non-mana abilities should be cleared");
+    }
+
+    /// Basic Island is unaffected by Magus of the Moon.
+    #[test]
+    fn test_magus_basic_land_unaffected() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _magus = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let island_def = catalog_card("Island");
+        let island_id = add_perm_with_def(&mut state, PlayerId::Us, &island_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let def = state.def_of(island_id).expect("Island should have materialized def");
+        let land = def.as_land().expect("should be a Land");
+        assert!(land.land_types.island, "basic Island should keep Island type");
+        assert!(!land.land_types.mountain, "basic Island should not gain Mountain");
+    }
+
+    /// Legendary supertype is preserved on Karakas under Magus of the Moon.
+    #[test]
+    fn test_magus_preserves_supertypes() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _magus = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let karakas_def = catalog_card("Karakas");
+        let karakas_id = add_perm_with_def(&mut state, PlayerId::Us, &karakas_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let def = state.def_of(karakas_id).expect("Karakas should have materialized def");
+        assert!(def.supertypes.contains(&Supertype::Legendary),
+            "Karakas should keep Legendary supertype");
+        let land = def.as_land().expect("should be a Land");
+        assert!(land.land_types.mountain, "Karakas should become a Mountain");
+        assert!(land.abilities.is_empty(), "Karakas activated ability should be stripped");
+    }
+
+    /// A fetch land under Magus loses its fetch ability and becomes a Mountain.
+    /// The search predicate is baked into the ability, which is cleared.
+    #[test]
+    fn test_magus_fetch_land_loses_ability() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _magus = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let delta_def = catalog_card("Polluted Delta");
+        let delta_id = add_perm_with_def(&mut state, PlayerId::Us, &delta_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let def = state.def_of(delta_id).expect("Polluted Delta should have materialized def");
+        let land = def.as_land().expect("should be a Land");
+        assert!(land.land_types.mountain, "Polluted Delta should be a Mountain");
+        assert!(!land.land_types.island, "should lose Island subtype");
+        assert!(!land.land_types.swamp, "should lose Swamp subtype");
+        assert!(land.abilities.is_empty(), "fetch ability should be cleared");
+        assert_eq!(land.mana_abilities.len(), 1, "should have exactly one mana ability");
+    }
+
+    /// When Magus of the Moon leaves the battlefield, nonbasic lands revert to original types.
+    #[test]
+    fn test_magus_ci_removed_on_ltb() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let magus_id = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        // Verify CE is active.
+        let def = state.def_of(sea_id).unwrap();
+        assert!(def.as_land().unwrap().land_types.mountain, "should be Mountain while Magus in play");
+
+        // Magus leaves the battlefield.
+        change_zone(magus_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
+        recompute(&mut state);
+
+        let def = state.def_of(sea_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.island, "Underground Sea should revert to Island");
+        assert!(land.land_types.swamp, "Underground Sea should revert to Swamp");
+        assert!(!land.land_types.mountain, "should no longer be a Mountain");
+    }
+
+    /// Magus of the Moon does not affect creatures (modifier early-returns for non-Land).
+    #[test]
+    fn test_magus_does_not_affect_creatures() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _magus = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let bowmasters_def = catalog_card("Orcish Bowmasters");
+        let bowmasters_id = add_perm_with_def(&mut state, PlayerId::Opp, &bowmasters_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let def = state.def_of(bowmasters_id).expect("Bowmasters should have materialized def");
+        assert!(def.as_creature().is_some(), "should still be a Creature");
+        assert!(def.as_land().is_none(), "should not be a Land");
+    }
+
+    /// Snow-Covered Island has Supertype::Basic and should be unaffected.
+    #[test]
+    fn test_magus_snow_basic_unaffected() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _magus = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let snow_def = catalog_card("Snow-Covered Island");
+        let snow_id = add_perm_with_def(&mut state, PlayerId::Us, &snow_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let def = state.def_of(snow_id).expect("Snow-Covered Island should have materialized def");
+        let land = def.as_land().expect("should be a Land");
+        assert!(land.land_types.island, "Snow-Covered Island should keep Island type");
+        assert!(!land.land_types.mountain, "should not gain Mountain");
+        assert!(def.supertypes.contains(&Supertype::Basic), "should keep Basic");
+        assert!(def.supertypes.contains(&Supertype::Snow), "should keep Snow");
+    }
+
+    /// Multiple nonbasic lands all become Mountains simultaneously.
+    #[test]
+    fn test_magus_multiple_nonbasics() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _magus = etb_magus_of_the_moon(&mut state, PlayerId::Us);
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        let tundra_id = add_default_perm(&mut state, PlayerId::Opp, "Tundra");
+        recompute(&mut state);
+
+        for (id, name) in [(sea_id, "Underground Sea"), (tundra_id, "Tundra")] {
+            let def = state.def_of(id).unwrap_or_else(|| panic!("{name} should have materialized def"));
+            let land = def.as_land().unwrap_or_else(|| panic!("{name} should be a Land"));
+            assert!(land.land_types.mountain, "{name} should be a Mountain");
+            assert_eq!(land.mana_abilities.len(), 1, "{name} should have one mana ability");
+            assert!(land.abilities.is_empty(), "{name} non-mana abilities should be cleared");
+        }
+    }
+
+    /// Blood Moon (enchantment) shares the same static ability as Magus of the Moon.
+    #[test]
+    fn test_blood_moon_nonbasic_becomes_mountain() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let bm_def = catalog_card("Blood Moon");
+        add_perm_with_def(&mut state, PlayerId::Us, &bm_def, BattlefieldState::new());
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        let def = state.def_of(sea_id).expect("Underground Sea should have materialized def");
+        let land = def.as_land().expect("should still be a Land");
+        assert!(land.land_types.mountain, "nonbasic should gain Mountain type");
+        assert!(!land.land_types.island, "nonbasic should lose Island type");
+        assert!(!land.land_types.swamp, "nonbasic should lose Swamp type");
+        assert_eq!(land.mana_abilities.len(), 1, "should have exactly one mana ability");
+    }
+
+    // ── 43. Urborg, Tomb of Yawgmoth / Yavimaya, Cradle of Growth ────────────
+
+    /// Urborg makes all lands Swamps in addition to their other types.
+    #[test]
+    fn test_urborg_adds_swamp_to_nonbasic() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let urborg_def = catalog_card("Urborg, Tomb of Yawgmoth");
+        let urborg_id = add_perm_with_def(&mut state, PlayerId::Us, &urborg_def, BattlefieldState::new());
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        // Underground Sea (island + swamp) should keep both and still be a swamp.
+        let def = state.def_of(sea_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.swamp, "should have Swamp");
+        assert!(land.land_types.island, "should keep Island");
+
+        // Urborg itself gains Swamp too.
+        let urborg_mat = state.def_of(urborg_id).unwrap();
+        let urborg_land = urborg_mat.as_land().unwrap();
+        assert!(urborg_land.land_types.swamp, "Urborg itself should be a Swamp");
+    }
+
+    /// Urborg adds Swamp + "{T}: Add {B}" to a basic Island.
+    #[test]
+    fn test_urborg_adds_swamp_to_basic() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let urborg_def = catalog_card("Urborg, Tomb of Yawgmoth");
+        add_perm_with_def(&mut state, PlayerId::Us, &urborg_def, BattlefieldState::new());
+        let island_def = catalog_card("Island");
+        let island_id = add_perm_with_def(&mut state, PlayerId::Us, &island_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let def = state.def_of(island_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.island, "should keep Island");
+        assert!(land.land_types.swamp, "should gain Swamp");
+        assert_eq!(land.mana_abilities.len(), 2, "should have U and B mana abilities");
+    }
+
+    /// A land that is already a Swamp does not get a duplicate mana ability from Urborg.
+    #[test]
+    fn test_urborg_no_duplicate_on_swamp() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let urborg_def = catalog_card("Urborg, Tomb of Yawgmoth");
+        add_perm_with_def(&mut state, PlayerId::Us, &urborg_def, BattlefieldState::new());
+        let swamp_def = catalog_card("Swamp");
+        let swamp_id = add_perm_with_def(&mut state, PlayerId::Us, &swamp_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let def = state.def_of(swamp_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.swamp, "should still be a Swamp");
+        assert_eq!(land.mana_abilities.len(), 1, "should not get a duplicate mana ability");
+    }
+
+    /// Yavimaya makes all lands Forests in addition to their other types.
+    #[test]
+    fn test_yavimaya_adds_forest_to_nonbasic() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let yav_def = catalog_card("Yavimaya, Cradle of Growth");
+        add_perm_with_def(&mut state, PlayerId::Us, &yav_def, BattlefieldState::new());
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        let def = state.def_of(sea_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.forest, "should gain Forest");
+        assert!(land.land_types.island, "should keep Island");
+        assert!(land.land_types.swamp, "should keep Swamp");
+    }
+
+    /// Urborg CI is removed when it leaves; lands revert.
+    #[test]
+    fn test_urborg_ci_removed_on_ltb() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let urborg_def = catalog_card("Urborg, Tomb of Yawgmoth");
+        let urborg_id = add_perm_with_def(&mut state, PlayerId::Us, &urborg_def, BattlefieldState::new());
+        let island_def = catalog_card("Island");
+        let island_id = add_perm_with_def(&mut state, PlayerId::Us, &island_def, BattlefieldState::new());
+        recompute(&mut state);
+        assert!(state.def_of(island_id).unwrap().as_land().unwrap().land_types.swamp);
+
+        change_zone(urborg_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
+        recompute(&mut state);
+
+        let land = state.def_of(island_id).unwrap().as_land().unwrap();
+        assert!(!land.land_types.swamp, "Island should revert — no longer a Swamp");
+        assert!(land.land_types.island, "Island should keep Island type");
+    }
+
+    /// Yavimaya + Blood Moon interaction: Blood Moon (L4) makes nonbasics into Mountains
+    /// (losing all types and abilities), then Yavimaya (also L4, registered later) adds Forest
+    /// on top. Result: nonbasic is Mountain + Forest with "{T}: Add {R}" and "{T}: Add {G}".
+    /// Yavimaya itself is a nonbasic, so Blood Moon turns it into a Mountain too — but
+    /// Yavimaya's CE persists because type-changing (L4) is independent of ability removal (L6).
+    #[test]
+    fn test_yavimaya_plus_blood_moon() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Blood Moon first, then Yavimaya — registration order within the same layer matters.
+        let bm_def = catalog_card("Blood Moon");
+        add_perm_with_def(&mut state, PlayerId::Us, &bm_def, BattlefieldState::new());
+        let yav_def = catalog_card("Yavimaya, Cradle of Growth");
+        let yav_id = add_perm_with_def(&mut state, PlayerId::Us, &yav_def, BattlefieldState::new());
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        // CR 613.7: Blood Moon (dep_order 0) applies before Yavimaya (dep_order 1).
+        // Blood Moon makes Yavimaya a Mountain, stripping all abilities including its
+        // static ability. Yavimaya's CE ceases to exist → nonbasics are Mountains only.
+        let def = state.def_of(sea_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.mountain, "Blood Moon should make it a Mountain");
+        assert!(!land.land_types.forest, "Yavimaya CE suppressed — no Forest");
+        assert!(!land.land_types.island, "original Island type should be gone");
+        assert!(!land.land_types.swamp, "original Swamp type should be gone");
+        assert_eq!(land.mana_abilities.len(), 1,
+            "should have only R mana ability");
+
+        // Yavimaya itself is nonbasic: Blood Moon turns it into a Mountain and
+        // strips its static ability, so its CE doesn't exist.
+        let yav_mat = state.def_of(yav_id).unwrap();
+        let yav_land = yav_mat.as_land().unwrap();
+        assert!(yav_land.land_types.mountain, "Yavimaya should be a Mountain under Blood Moon");
+        assert!(!yav_land.land_types.forest, "Yavimaya's CE is suppressed — no Forest");
+    }
+
+    /// CR 613.7: dependency (Blood Moon writes LandTypes, Yavimaya reads LandTypes)
+    /// overrides timestamp — same result regardless of registration order.
+    #[test]
+    fn test_yavimaya_before_blood_moon_same_result() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Yavimaya first, Blood Moon second — opposite registration order.
+        let yav_def = catalog_card("Yavimaya, Cradle of Growth");
+        let yav_id = add_perm_with_def(&mut state, PlayerId::Us, &yav_def, BattlefieldState::new());
+        let bm_def = catalog_card("Blood Moon");
+        add_perm_with_def(&mut state, PlayerId::Us, &bm_def, BattlefieldState::new());
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        // Same result as test_yavimaya_plus_blood_moon: Yavimaya's CE is suppressed.
+        let def = state.def_of(sea_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.mountain, "Blood Moon should make it a Mountain");
+        assert!(!land.land_types.forest, "Yavimaya CE suppressed — no Forest");
+        assert_eq!(land.mana_abilities.len(), 1, "only R mana ability");
+
+        let yav_mat = state.def_of(yav_id).unwrap();
+        let yav_land = yav_mat.as_land().unwrap();
+        assert!(yav_land.land_types.mountain);
+        assert!(!yav_land.land_types.forest, "Yavimaya's CE is suppressed");
+    }
+
+    /// Urborg's CE is also suppressed under Blood Moon — nonbasics are Mountains only.
+    #[test]
+    fn test_urborg_suppressed_under_blood_moon() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let bm_def = catalog_card("Blood Moon");
+        add_perm_with_def(&mut state, PlayerId::Us, &bm_def, BattlefieldState::new());
+        let urborg_def = catalog_card("Urborg, Tomb of Yawgmoth");
+        let urborg_id = add_perm_with_def(&mut state, PlayerId::Us, &urborg_def, BattlefieldState::new());
+        let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        // Urborg's CE suppressed — nonbasics are Mountains only, no Swamp.
+        let def = state.def_of(sea_id).unwrap();
+        let land = def.as_land().unwrap();
+        assert!(land.land_types.mountain);
+        assert!(!land.land_types.swamp, "Urborg CE suppressed — no Swamp");
+        assert_eq!(land.mana_abilities.len(), 1, "only R mana ability");
+
+        // Urborg itself is a Mountain (nonbasic, legendary).
+        let urborg_mat = state.def_of(urborg_id).unwrap();
+        let urborg_land = urborg_mat.as_land().unwrap();
+        assert!(urborg_land.land_types.mountain);
+        assert!(!urborg_land.land_types.swamp, "Urborg's own CE is suppressed");
+    }
+
+    // ── Section 32: Protection ─────────────────────────────────────────────────
+
+    /// Helper: a colored instant (blue) for protection tests.
+    fn blue_instant(name: &str) -> CardDef {
+        CardDef::new(
+            name, CardKind::Instant(SpellData { mana_cost: "U".into(), ..Default::default() }),
+            vec![Color::Blue], None, vec![], CardLayout::Normal, None,
+            vec![], vec![], vec![], vec![],
+        )
+    }
+
+    /// Helper: a colorless instant for protection tests.
+    fn colorless_instant(name: &str) -> CardDef {
+        CardDef::new(
+            name, CardKind::Instant(SpellData { mana_cost: "2".into(), ..Default::default() }),
+            vec![], None, vec![], CardLayout::Normal, None,
+            vec![], vec![], vec![], vec![],
+        )
+    }
+
+    #[test]
+    fn test_protection_colored_spell_cannot_target() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Emrakul on battlefield — protected from colored spells.
+        let emrakul_id = add_perm(&mut state, PlayerId::Us, "Emrakul, the Aeons Torn",
+                                  BattlefieldState::new());
+        // Also put a vanilla creature (no protection) for comparison.
+        let vanilla_id = add_perm_with_def(&mut state, PlayerId::Us,
+            &creature("Vanilla 2/2", 2, 2), BattlefieldState::new());
+
+        // Blue instant on the stack — colored spell.
+        let bolt_def = blue_instant("Blue Bolt");
+        let bolt_id = add_stack_spell(&mut state, PlayerId::Opp, &bolt_def);
+
+        let spec = TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+        };
+        let targets = legal_targets(&spec, PlayerId::Opp, bolt_id, &state);
+
+        assert!(!targets.contains(&emrakul_id),
+            "Emrakul should not be a legal target for a colored spell");
+        assert!(targets.contains(&vanilla_id),
+            "non-protected creature should be a legal target");
+    }
+
+    #[test]
+    fn test_protection_colorless_spell_can_target() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let emrakul_id = add_perm(&mut state, PlayerId::Us, "Emrakul, the Aeons Torn",
+                                  BattlefieldState::new());
+
+        let spell_def = colorless_instant("Colorless Zap");
+        let spell_id = add_stack_spell(&mut state, PlayerId::Opp, &spell_def);
+
+        let spec = TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+        };
+        let targets = legal_targets(&spec, PlayerId::Opp, spell_id, &state);
+
+        assert!(targets.contains(&emrakul_id),
+            "Emrakul should be a legal target for a colorless spell");
+    }
+
+    #[test]
+    fn test_protection_colored_permanent_ability_can_target() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let emrakul_id = add_perm(&mut state, PlayerId::Us, "Emrakul, the Aeons Torn",
+                                  BattlefieldState::new());
+
+        // A colored permanent on the battlefield (not a spell) — ability source.
+        let mut perm_def = creature("Blue Pinger", 1, 1);
+        perm_def.colors = vec![Color::Blue];
+        let perm_id = add_perm_with_def(&mut state, PlayerId::Opp, &perm_def,
+                                        BattlefieldState::new());
+
+        let spec = TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+        };
+        let targets = legal_targets(&spec, PlayerId::Opp, perm_id, &state);
+
+        assert!(targets.contains(&emrakul_id),
+            "Emrakul should be a legal target for a colored permanent's ability (not a spell)");
+    }
+
+    #[test]
+    fn test_protection_prevents_spell_damage() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let emrakul_id = add_perm(&mut state, PlayerId::Us, "Emrakul, the Aeons Torn",
+                                  BattlefieldState::new());
+
+        // Colored spell on the stack dealing damage.
+        let bolt_def = blue_instant("Blue Blast");
+        let bolt_id = add_stack_spell(&mut state, PlayerId::Opp, &bolt_def);
+
+        eff_damage_target(PlayerId::Opp, 15, bolt_id).call(&mut state, 1, &[emrakul_id]);
+
+        let bf = state.objects[&emrakul_id].bf.as_ref().unwrap();
+        assert_eq!(bf.damage, 0, "damage from colored spell should be prevented by protection");
+    }
+
+    #[test]
+    fn test_protection_does_not_prevent_combat_damage() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let emrakul_id = add_perm(&mut state, PlayerId::Us, "Emrakul, the Aeons Torn",
+                                  BattlefieldState::new());
+
+        // Colored creature on battlefield dealing combat damage.
+        let mut atk_def = creature("Blue Attacker", 5, 5);
+        atk_def.colors = vec![Color::Blue];
+        let atk_id = add_perm_with_def(&mut state, PlayerId::Opp, &atk_def,
+                                       BattlefieldState::new());
+
+        // Directly check: the colored creature is a permanent, not a spell.
+        assert!(!is_protected_from(emrakul_id, atk_id, &state),
+            "Emrakul is NOT protected from colored permanents (only colored spells)");
+    }
+
+    #[test]
+    fn test_protection_colorless_spell_damage_goes_through() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let emrakul_id = add_perm(&mut state, PlayerId::Us, "Emrakul, the Aeons Torn",
+                                  BattlefieldState::new());
+
+        let zap_def = colorless_instant("Colorless Zap");
+        let zap_id = add_stack_spell(&mut state, PlayerId::Opp, &zap_def);
+
+        eff_damage_target(PlayerId::Opp, 15, zap_id).call(&mut state, 1, &[emrakul_id]);
+
+        let bf = state.objects[&emrakul_id].bf.as_ref().unwrap();
+        assert_eq!(bf.damage, 15, "damage from colorless spell should not be prevented");
+    }
+
+    // ── Section 46: Mistrise Village ────────────────────────────────────────────
+
+    /// Helper: place Mistrise Village on the battlefield via change_zone (fires replacement).
+    fn etb_mistrise_village(state: &mut SimState, who: PlayerId) -> ObjId {
+        let def = catalog_card("Mistrise Village");
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject {
+            id,
+            catalog_key: "Mistrise Village".to_string(),
+            owner: who,
+            controller: who,
+            zone: CardZone::Hand { known: false },
+            is_token: false,
+            bf: None, spell: None, materialized: None,
+            counters: HashMap::new(), cast_generation: 0,
+        });
+        preregister_instances(&def, id, who, state);
+        state.catalog.entry("Mistrise Village".to_string()).or_insert(def);
+        change_zone(id, ZoneId::Battlefield, state, 1, who);
+        id
+    }
+
+    /// Mistrise Village enters untapped when you control a Forest.
+    #[test]
+    fn test_mistrise_village_etb_untapped_with_forest() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Put a Forest on the battlefield first.
+        let forest_def = catalog_card("Forest");
+        add_perm_with_def(&mut state, PlayerId::Us, &forest_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let mv_id = etb_mistrise_village(&mut state, PlayerId::Us);
+
+        let bf = state.objects[&mv_id].bf.as_ref().expect("should be on battlefield");
+        assert!(!bf.tapped, "Mistrise Village should enter untapped when you control a Forest");
+    }
+
+    /// Mistrise Village enters untapped when you control a Mountain.
+    #[test]
+    fn test_mistrise_village_etb_untapped_with_mountain() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let mtn_def = catalog_card("Mountain");
+        add_perm_with_def(&mut state, PlayerId::Us, &mtn_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let mv_id = etb_mistrise_village(&mut state, PlayerId::Us);
+
+        let bf = state.objects[&mv_id].bf.as_ref().unwrap();
+        assert!(!bf.tapped, "Mistrise Village should enter untapped when you control a Mountain");
+    }
+
+    /// Mistrise Village enters tapped when you control neither Mountain nor Forest.
+    #[test]
+    fn test_mistrise_village_etb_tapped_without_mountain_or_forest() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Only an Island on the battlefield — no Mountain or Forest.
+        let island_def = catalog_card("Island");
+        add_perm_with_def(&mut state, PlayerId::Us, &island_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let mv_id = etb_mistrise_village(&mut state, PlayerId::Us);
+
+        let bf = state.objects[&mv_id].bf.as_ref().unwrap();
+        assert!(bf.tapped, "Mistrise Village should enter tapped without Mountain or Forest");
+    }
+
+    /// Mistrise Village {U},{T} ability: the next spell you cast can't be countered.
+    #[test]
+    fn test_mistrise_village_ability_makes_next_spell_uncounterable() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Place Mistrise Village (via add_perm so it starts untapped for the ability).
+        let mv_def = catalog_card("Mistrise Village");
+        let mv_id = add_perm_with_def(&mut state, PlayerId::Us, &mv_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // Activate the {U},{T} ability (second ability, index 0 in abilities vec).
+        let ability = &mv_def.abilities()[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, mv_id);
+        eff.call(&mut state, 1, &[]);
+
+        // Should have registered a dormant CI.
+        assert_eq!(state.continuous_instances.len(), 1, "ability should register one CI");
+        assert!(!state.continuous_instances[0].active, "CI should start dormant");
+
+        // Simulate casting a spell — fire SpellCast event to activate the CI.
+        let spell_def = catalog_card("Brainstorm");
+        let spell_id = add_stack_spell(&mut state, PlayerId::Us, &spell_def);
+        state.stack.push(spell_id);
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+
+        // CI should now be active and the spell should be uncounterable.
+        assert!(state.continuous_instances[0].active, "CI should activate on SpellCast");
+
+        // Try to counter it — should fizzle.
+        eff_counter_target(PlayerId::Opp).call(&mut state, 1, &[spell_id]);
+        assert!(state.stack.contains(&spell_id),
+            "spell should remain on stack — can't be countered");
+    }
+
+    /// The CI is one-shot: only the first spell gets uncounterable, not the second.
+    #[test]
+    fn test_mistrise_village_ability_one_shot() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let mv_def = catalog_card("Mistrise Village");
+        let mv_id = add_perm_with_def(&mut state, PlayerId::Us, &mv_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // Activate ability.
+        let ability = &mv_def.abilities()[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, mv_id);
+        eff.call(&mut state, 1, &[]);
+
+        // Cast first spell — activates CI.
+        let spell1_def = catalog_card("Brainstorm");
+        let spell1_id = add_stack_spell(&mut state, PlayerId::Us, &spell1_def);
+        state.stack.push(spell1_id);
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell1_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+
+        // Cast second spell — CI is one_shot, so activate_on is None; won't activate again.
+        let spell2_def = catalog_card("Ponder");
+        let spell2_id = add_stack_spell(&mut state, PlayerId::Us, &spell2_def);
+        state.stack.push(spell2_id);
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell2_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+
+        // The second spell should be counterable.
+        eff_counter_target(PlayerId::Opp).call(&mut state, 1, &[spell2_id]);
+        assert!(!state.stack.contains(&spell2_id),
+            "second spell should be counterable — one-shot CI only protects the first");
+    }
+
+    /// The CI expires at end of turn — if no spell is cast, it's gone after cleanup.
+    #[test]
+    fn test_mistrise_village_ability_expires_eot() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let mv_def = catalog_card("Mistrise Village");
+        let mv_id = add_perm_with_def(&mut state, PlayerId::Us, &mv_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let ability = &mv_def.abilities()[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, mv_id);
+        eff.call(&mut state, 1, &[]);
+
+        assert_eq!(state.continuous_instances.len(), 1);
+
+        // Run cleanup step — should remove the EndOfTurn CI.
+        let step = Step { kind: StepKind::Cleanup, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert!(state.continuous_instances.is_empty(),
+            "Mistrise Village CI should expire at end of turn");
     }

@@ -86,11 +86,25 @@ all other call sites ignore it.
 - `effect: Effect` — runs instead of the original event.
 
 **`ContinuousInstance`** — a static or temporary ability affecting characteristics.
-- `layer: ContinuousLayer` — determines application order (L6 = type-changing, L7 = P/T).
+- `layer: ContinuousLayer` — determines application order (L4 = type-changing, L7 = P/T).
+- `reads: Vec<CeReads>` — what characteristics this CE reads from targets (CR 613.7).
+- `writes: Vec<CeWrites>` — what characteristics this CE writes on targets.
+- `timestamp: u32` — registration sequence; tiebreaker after dependency ordering (CR 613.6).
 - `filter: ContinuousFilterFn` — which objects it applies to.
 - `modifier: ContinuousModFn` — mutates a `CardDef` in place.
 - `expiry: ContinuousExpiry` — `EndOfTurn`, `WhileSourceOnBattlefield`,
   `StartOfControllerNextTurn`.
+
+**CE application order** — `recompute` applies CIs **CE-by-CE** (not object-by-object).
+Within each layer, CIs are topologically sorted by dependency (CR 613.7): if CE_B writes
+a category that CE_A reads, A depends on B and B applies first. Ties broken by timestamp
+(CR 613.6). Cycles fall back to timestamp order. After each CI is applied, CIs from
+`WhileSourceOnBattlefield` sources whose static abilities were stripped by an earlier CE
+(e.g. Blood Moon stripping Yavimaya) are skipped.
+
+**`CeReads` / `CeWrites`** — descriptor enums with variants: `LandTypes`, `Supertypes`,
+`Abilities`, `Color`, `PowerToughness`, `CardTypes`. Each CI declares what it reads and
+writes; the topo sort uses same-category overlap to detect dependencies.
 
 ### Instance lifecycle
 
@@ -140,7 +154,7 @@ Used for: targeting filters, fetch search, continuous effect applicability.
 State-aware predicate over any game object. Renamed from `CostPredicate`; now also used for
 `ObjectInZone.filter` (targeting) and `ChoiceSpec.filter` (resolution-time choice enumeration).
 Combinators: `cost_pred_and`, `cost_pred_or`, `cost_pred_not`.
-Atomics: `obj_pred_from_card` (lifts `CardPredicate`), `cost_pred_blue_nonland`, `cost_pred_blue_producing`,
+Atomics: `obj_pred_from_card` (lifts `CardPredicate`),
 `cost_pred_unblocked_attacker`, `cost_pred_land`, `pred_has_counter(ct: CounterType)`.
 Used for: cost component predicates (DiscardCard, ExileFromHand, etc.), ObjectInZone targeting,
 and ChoiceSpec choice enumeration.
