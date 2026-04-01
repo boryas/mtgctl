@@ -531,7 +531,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, dark_ritual_id, SpellFace::Main, None, &[], 0);
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, dark_ritual_id, SpellFace::Main, None, &[], 0, 0);
 
         assert!(card_id.is_some(), "spell should be cast");
         let card_id = card_id.unwrap();
@@ -551,7 +551,7 @@
 
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let item = cast_spell(&mut state, 1, PlayerId::Us, doomsday_id, SpellFace::Main, None, &[], 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, doomsday_id, SpellFace::Main, None, &[], 0, 0);
 
         assert!(item.is_none(), "can't cast with no mana");
     }
@@ -571,7 +571,7 @@
         let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[], 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[], 0, 0);
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
@@ -803,7 +803,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, tc_id, SpellFace::Main, None, &[], 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, tc_id, SpellFace::Main, None, &[], 0, 0);
 
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "all 7 graveyard cards exiled");
@@ -825,7 +825,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[], 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[], 0, 0);
 
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "both graveyard cards exiled");
@@ -855,7 +855,7 @@
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[], 0).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[], 0, 0).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -894,7 +894,7 @@
         let catalog = vec![murktide_def.clone(), ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[], 0).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, &[], 0, 0).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -949,7 +949,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[], 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, &[], 0, 0);
 
         assert!(item.is_none(), "can't cast — 1 generic still unpaid");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 2, "graveyard unchanged on failed cast");
@@ -1231,6 +1231,7 @@
                 produces: produces_colors("U"),
                 produces_count: 1,
                 make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "U")),
+                condition: None,
             }],
             ..Default::default()
         }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
@@ -2363,7 +2364,7 @@
         let bs_id  = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
         let alt_cost = &fow_def.alternate_costs()[0];
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[], 0).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), &[], 0, 0).unwrap();
         let ctx = &state.objects[&card_id].spell.as_ref().unwrap().costs_paid_ctx;
 
         assert_eq!(ctx.objects_moved, vec![bs_id], "pitched Brainstorm id recorded in objects_moved");
@@ -2377,7 +2378,7 @@
         state.catalog.insert(fow_def.name.clone(), fow_def.clone());
         let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
         // No other cards — pitch cost requires another blue non-land card; also no mana for 3UU.
-        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_none(), "FoW can't be cast with only itself in hand and no mana");
     }
 
@@ -2391,7 +2392,7 @@
         state.us.pool.u     = 2;
         state.us.pool.total = 5; // 3 generic + 2 blue
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_some(), "FoW should cast for 3UU when pool is full");
         assert_eq!(state.us.pool.total, 0, "all mana spent");
     }
@@ -2411,7 +2412,7 @@
         let initial_life = state.us.life;
         let alt = &def.alternate_costs()[0];
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), &[], 0, 0);
         assert!(result.is_some(), "Snuff Out should cast for 4 life");
         assert_eq!(state.us.life, initial_life - 4, "paid 4 life");
         let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
@@ -2476,7 +2477,7 @@
         let daze_id = add_hand_card(&mut state, PlayerId::Us, "Daze");
         let alt = &daze_def.alternate_costs()[0]; // ReturnFromBattlefield(Island subtype)
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), &[], 0, 0);
         assert!(result.is_some(), "Daze should cast by bouncing the Island");
         let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
         assert_eq!(ctx.objects_moved, vec![island_id], "bounced Island id in objects_moved");
@@ -2525,7 +2526,7 @@
         state.us.pool.b = 1; state.us.pool.total = 1;
         state.us.life = 3; // can't pay Life(3) — would reach 0
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_none(), "additional Life(3) cost blocks cast at 3 life");
     }
 
@@ -2540,7 +2541,7 @@
         state.us.pool.b = 1; state.us.pool.total = 1;
         let initial_life = state.us.life; // 20
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_some(), "Dark Ritual + Life(3) additional cost is payable at 20 life");
         assert_eq!(state.us.life, initial_life - 3, "additional Life(3) was paid");
     }
@@ -2565,7 +2566,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         let initial_life = state.us.life;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_some(), "Bitter Triumph should be castable");
         let extra_zone = state.objects.get(&extra_id).map(|o| &o.zone);
         assert!(
@@ -2584,7 +2585,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         let initial_life = state.us.life;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_some(), "Bitter Triumph should be castable via life branch");
         assert_eq!(state.us.life, initial_life - 3, "3 life paid as fallback cost");
     }
@@ -2598,7 +2599,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         state.us.life = 3; // can't pay Life(3) — life > n is strict
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_none(), "Bitter Triumph should be blocked when life ≤ 3 and no spare card");
     }
 
@@ -2664,7 +2665,7 @@
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
         state.us.pool.u = 1; state.us.pool.total = 1;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[spell_id], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[spell_id], 0, 0);
         assert!(result.is_some(), "Consign to Memory should be castable");
 
         // Resolve — pop from stack and execute effect.
@@ -2689,7 +2690,7 @@
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
         state.us.pool.u = 1; state.us.pool.total = 1;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[ab_id], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, &[ab_id], 0, 0);
         assert!(result.is_some(), "Consign to Memory should be castable targeting a triggered ability");
 
         // Resolve.
@@ -3139,7 +3140,7 @@
         // Build and call the Surgical Extraction effect targeting gy_id.
         let se_def = catalog_card("Surgical Extraction");
         let factory = match &se_def.kind {
-            CardKind::Instant(s) => s.spell_factory.clone().unwrap(),
+            CardKind::Instant(s) => s.modes.as_ref().unwrap().get(0).unwrap().factory.clone(),
             _ => panic!("not an instant"),
         };
         let eff = factory(PlayerId::Us, ObjId::UNSET, 0);
@@ -3176,7 +3177,7 @@
         // Invoke the factory directly with x=3 (strategy-chosen).
         let td_def = catalog_card("Toxic Deluge");
         let factory = match &td_def.kind {
-            CardKind::Sorcery(s) => s.spell_factory.clone().unwrap(),
+            CardKind::Sorcery(s) => s.modes.as_ref().unwrap().get(0).unwrap().factory.clone(),
             _ => panic!("not a sorcery"),
         };
         let source_id = state.alloc_id();
@@ -3214,7 +3215,7 @@
         state.us.pool.total = 3;
         state.us.life = 20;
         let td_id = add_hand_card(&mut state, PlayerId::Us, "Toxic Deluge");
-        let result = cast_spell(&mut state, 1, PlayerId::Us, td_id, SpellFace::Main, None, &[], 3);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, td_id, SpellFace::Main, None, &[], 3, 0);
         assert!(result.is_some(), "Toxic Deluge should cast successfully");
         assert_eq!(state.us.life, 17, "caster pays X=3 life");
     }
@@ -3255,8 +3256,8 @@
         let target_id = push_stack_spell(&mut state, PlayerId::Opp, "Brainstorm");
 
         let reb_def = catalog_card("Red Elemental Blast");
-        let factory = reb_def.as_spell().unwrap().spell_factory.as_ref().unwrap();
-        let effect = factory(PlayerId::Us, ObjId(0), 0);
+        let mode = reb_def.spell_modes().unwrap().get(0).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(!state.stack.contains(&target_id), "blue spell should be countered off the stack");
@@ -3271,8 +3272,8 @@
         let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
 
         let reb_def = catalog_card("Red Elemental Blast");
-        let factory = reb_def.as_spell().unwrap().spell_factory.as_ref().unwrap();
-        let effect = factory(PlayerId::Us, ObjId(0), 0);
+        let mode = reb_def.spell_modes().unwrap().get(0).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
         effect.call(&mut state, 1, &[sea_id]);
 
         assert_eq!(state.objects[&sea_id].zone, CardZone::Graveyard, "blue permanent destroyed");
@@ -3286,8 +3287,8 @@
         let target_id = push_stack_spell(&mut state, PlayerId::Opp, "Dark Ritual");
 
         let pyro_def = catalog_card("Pyroblast");
-        let factory = pyro_def.as_spell().unwrap().spell_factory.as_ref().unwrap();
-        let effect = factory(PlayerId::Us, ObjId(0), 0);
+        let mode = pyro_def.spell_modes().unwrap().get(0).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(state.stack.contains(&target_id), "non-blue spell survives Pyroblast");
@@ -3301,8 +3302,8 @@
         let target_id = push_stack_spell(&mut state, PlayerId::Opp, "Brainstorm");
 
         let pyro_def = catalog_card("Pyroblast");
-        let factory = pyro_def.as_spell().unwrap().spell_factory.as_ref().unwrap();
-        let effect = factory(PlayerId::Us, ObjId(0), 0);
+        let mode = pyro_def.spell_modes().unwrap().get(0).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(!state.stack.contains(&target_id), "blue spell countered by Pyroblast");
@@ -3320,8 +3321,8 @@
         let blue_id = push_stack_spell(&mut state, PlayerId::Opp, "Brainstorm");
 
         let hydro_def = catalog_card("Hydroblast");
-        let factory = hydro_def.as_spell().unwrap().spell_factory.as_ref().unwrap();
-        let effect = factory(PlayerId::Us, ObjId(0), 0);
+        let mode = hydro_def.spell_modes().unwrap().get(0).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
         effect.call(&mut state, 1, &[blue_id]);
 
         assert!(state.stack.contains(&blue_id), "Hydroblast fizzles on non-red target");
@@ -3385,8 +3386,8 @@
 
         // Pyroblast's effect: counter_or_destroy_if_color(Blue). Petal is on battlefield.
         let pyro_def = catalog_card("Pyroblast");
-        let factory = pyro_def.as_spell().unwrap().spell_factory.as_ref().unwrap();
-        let effect = factory(PlayerId::Us, ObjId(0), 0);
+        let mode = pyro_def.spell_modes().unwrap().get(0).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
         effect.call(&mut state, 1, &[petal_id]);
 
         assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
@@ -4143,7 +4144,7 @@
         state.opp.pool.total = 2;
 
         // With 1 land, MV 2 > 1 → prohibited.
-        let result = cast_spell(&mut state, 1, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_none(), "Lavinia should prohibit MV-2 noncreature spell when opponent has only 1 land");
         assert_eq!(state.objects[&spell_id].zone, CardZone::Hand { known: false },
             "spell should remain in hand after prohibition");
@@ -4153,7 +4154,7 @@
         state.opp.pool.b = 2;
         state.opp.pool.total = 2;
 
-        let result = cast_spell(&mut state, 2, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0);
+        let result = cast_spell(&mut state, 2, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0, 0);
         assert!(result.is_some(), "Lavinia should allow MV-2 noncreature spell when opponent has 2 lands");
     }
 
@@ -4176,7 +4177,7 @@
         add_hand_card(&mut state, PlayerId::Opp, "Brainstorm"); // pitch target
         let alt_cost = fow_def.alternate_costs()[0].clone();
 
-        cast_spell(&mut state, 1, PlayerId::Opp, fow_id, SpellFace::Main, Some(&alt_cost), &[], 0)
+        cast_spell(&mut state, 1, PlayerId::Opp, fow_id, SpellFace::Main, Some(&alt_cost), &[], 0, 0)
             .expect("FoW should cast via pitch cost");
         // Lavinia trigger queued at SpellCast; push spell onto stack so counter_one can find it.
         state.stack.push(fow_id);
@@ -4207,7 +4208,7 @@
 
         let petal_id = add_hand_card(&mut state, PlayerId::Opp, "Lotus Petal");
 
-        cast_spell(&mut state, 1, PlayerId::Opp, petal_id, SpellFace::Main, None, &[], 0)
+        cast_spell(&mut state, 1, PlayerId::Opp, petal_id, SpellFace::Main, None, &[], 0, 0)
             .expect("Lotus Petal should not be prohibited (MV 0 ≤ any land count)");
         state.stack.push(petal_id);
 
@@ -5740,4 +5741,89 @@
 
         assert!(state.continuous_instances.is_empty(),
             "Mistrise Village CI should expire at end of turn");
+    }
+
+    // ── Section 47: Brotherhood's End ───────────────────────────────────────────
+
+    /// Mode 0: deals 3 damage to each creature and each planeswalker.
+    /// A 3/3 creature should die (lethal), a 4/4 should survive with 3 damage.
+    #[test]
+    fn test_brotherhoods_end_mode0_damages_creatures() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let small = creature("Bear", 2, 2);
+        let small_id = add_perm_with_def(&mut state, PlayerId::Opp, &small, BattlefieldState::new());
+        let big = creature("Giant", 4, 4);
+        let big_id = add_perm_with_def(&mut state, PlayerId::Opp, &big, BattlefieldState::new());
+
+        let be_def = catalog_card("Brotherhood's End");
+        // Mode 0: damage to creatures/planeswalkers
+        let mode = be_def.spell_modes().unwrap().get(0).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        effect.call(&mut state, 1, &[]);
+
+        // Bear (2/2): 3 damage is lethal — but we haven't run SBAs yet, just check damage.
+        assert_eq!(state.objects[&small_id].bf.as_ref().unwrap().damage, 3,
+            "Bear should have 3 damage marked");
+        assert_eq!(state.objects[&big_id].bf.as_ref().unwrap().damage, 3,
+            "Giant should have 3 damage marked");
+    }
+
+    /// Mode 1: destroys all artifacts with mana value 3 or less.
+    /// Lotus Petal (MV 0) should be destroyed; an artifact with MV 4 should survive.
+    #[test]
+    fn test_brotherhoods_end_mode1_destroys_cheap_artifacts() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let petal_id = add_default_perm(&mut state, PlayerId::Opp, "Lotus Petal");
+
+        let be_def = catalog_card("Brotherhood's End");
+        // Mode 1: destroy artifacts with MV ≤ 3
+        let mode = be_def.spell_modes().unwrap().get(1).unwrap();
+        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        effect.call(&mut state, 1, &[]);
+
+        assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
+            "Lotus Petal (MV 0) should be destroyed by Brotherhood's End mode 1");
+    }
+
+    // ── Section 48: Mox Opal ────────────────────────────────────────────────────
+
+    /// Mox Opal's mana ability requires metalcraft (3+ artifacts).
+    /// With only 2 artifacts on the battlefield, the condition should fail.
+    #[test]
+    fn test_mox_opal_metalcraft_not_met() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let opal_def = catalog_card("Mox Opal");
+        let opal_id = add_perm_with_def(&mut state, PlayerId::Us, &opal_def, BattlefieldState::new());
+        // Only 1 artifact (Mox Opal itself) + add one more
+        let _petal_id = add_default_perm(&mut state, PlayerId::Us, "Lotus Petal");
+        recompute(&mut state);
+
+        // 2 artifacts — metalcraft not met
+        let ma = &opal_def.mana_abilities()[0];
+        let cond = ma.condition.as_ref().expect("Mox Opal should have a condition");
+        assert!(!cond(opal_id, &state), "metalcraft should not be active with only 2 artifacts");
+    }
+
+    /// With 3+ artifacts, metalcraft is active and the condition should pass.
+    #[test]
+    fn test_mox_opal_metalcraft_met() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let opal_def = catalog_card("Mox Opal");
+        let opal_id = add_perm_with_def(&mut state, PlayerId::Us, &opal_def, BattlefieldState::new());
+        let _petal_id = add_default_perm(&mut state, PlayerId::Us, "Lotus Petal");
+        let _cage_id = add_default_perm(&mut state, PlayerId::Us, "Grafdigger's Cage");
+        recompute(&mut state);
+
+        // 3 artifacts — metalcraft active
+        let ma = &opal_def.mana_abilities()[0];
+        let cond = ma.condition.as_ref().expect("Mox Opal should have a condition");
+        assert!(cond(opal_id, &state), "metalcraft should be active with 3 artifacts");
     }

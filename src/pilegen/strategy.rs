@@ -294,7 +294,7 @@ fn pick_on_board_action(
             if rng.gen_bool(0.75) {
                 let targets = legal_targets(def.target_spec(), ap, card_id, state);
                 let chosen = pick_targets(def.target_spec(), &targets, state);
-                candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x: 0 });
+                candidates.push(PriorityAction::CastSpell { card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x: 0, chosen_mode: 0 });
             }
         }
     }
@@ -693,7 +693,7 @@ fn collect_hand_actions(
             let targets = legal_targets(def.target_spec(), who, *card_id, state);
             let chosen = pick_targets(def.target_spec(), &targets, state);
             let chosen_x = if def.additional_costs.iter().any(|c| matches!(c, CostComponent::XLife | CostComponent::XMana)) { 3u32 } else { 0 };
-            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x });
+            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Main, preferred_cost: None, chosen_targets: chosen, chosen_x, chosen_mode: 0 });
         }
 
         // In-hand abilities (cycling, channel, etc.)
@@ -714,7 +714,7 @@ fn collect_hand_actions(
             if !face.target_spec().is_none() && !has_valid_target(face.target_spec(), state, who, *card_id) { continue; }
             let adv_targets = legal_targets(face.target_spec(), who, *card_id, state);
             let adv_chosen = pick_targets(face.target_spec(), &adv_targets, state);
-            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None, chosen_targets: adv_chosen, chosen_x: 0 });
+            actions.push(PriorityAction::CastSpell { card_id: *card_id, face: SpellFace::Back, preferred_cost: None, chosen_targets: adv_chosen, chosen_x: 0, chosen_mode: 0 });
         }
     }
 
@@ -849,6 +849,7 @@ fn respond_with_counter(
                     preferred_cost: Some(cost.clone()),
                     chosen_targets,
                     chosen_x: 0,
+                    chosen_mode: 0,
                 });
             }
         }
@@ -870,6 +871,7 @@ fn respond_with_counter(
                         preferred_cost: None,
                         chosen_targets,
                         chosen_x: 0,
+                        chosen_mode: 0,
                     });
                 }
             }

@@ -104,6 +104,8 @@ pub(crate) struct CostsPaidCtx {
     pub(crate) replicate_count: u32,
     /// Strategy-chosen X value paid as `XLife` additional cost (0 if no X cost).
     pub(crate) chosen_x: u32,
+    /// Chosen mode for modal spells (CR 700.2a). Set at cast time.
+    pub(crate) chosen_mode: usize,
 }
 
 /// Spell-on-stack state for a card while it's on the stack.
@@ -786,7 +788,7 @@ enum PriorityAction {
     /// `face` selects main vs adventure face/cost; card zone identifies the source zone.
     /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
     /// `chosen_targets` — targets picked by strategy at action-construction time.
-    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<ObjId>, chosen_x: u32 },
+    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<ObjId>, chosen_x: u32, chosen_mode: usize },
     /// Play a card from exile via a free-cast permission (e.g. Dauthi Voidwalker ability).
     PlayFreeCast(ObjId),
     /// Pass priority.
@@ -1231,9 +1233,11 @@ impl SimState {
         let mut p = self.player(who).pool.clone();
         for card in self.permanents_of(who) {
             if let Some(bf) = &card.bf {
-                let mas = self.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
+                let card_id = card.id;
+                let mas = self.def_of(card_id).map(|d| d.mana_abilities()).unwrap_or(&[]);
                 let bf_mas: Vec<_> = mas.iter()
                     .filter(|ma| matches!(ma.source_zone, SourceZone::Battlefield))
+                    .filter(|ma| ma.condition.as_ref().map_or(true, |cond| cond(card_id, self)))
                     .cloned().collect();
                 accumulate_source_potential(&bf_mas, bf.tapped, &mut p);
             }
@@ -1271,14 +1275,16 @@ impl SimState {
                         c.controller == who && c.zone == CardZone::Battlefield &&
                         c.bf.as_ref().map_or(false, |bf| {
                             self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[])
-                                .iter().any(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color))
+                                .iter().any(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color)
+                                    && ma.condition.as_ref().map_or(true, |cond| cond(**id, self)))
                         })
                     })
                     .map(|(id, c)| {
                         let bf = c.bf.as_ref().unwrap();
                         let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
                             .iter()
-                            .find(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color))
+                            .find(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color)
+                                && ma.condition.as_ref().map_or(true, |cond| cond(*id, self)))
                             .map(|ma| ma_requires_sac(ma))
                             .unwrap_or(false);
                         (*id, c.catalog_key.clone(), sac)
@@ -1291,6 +1297,7 @@ impl SimState {
                                 let tapped = self.objects.get(&id)
                                     .and_then(|o| o.bf.as_ref()).map_or(false, |bf| bf.tapped);
                                 (!ma_requires_tap(ma) || !tapped) && ma.produces.contains(&color)
+                                    && ma.condition.as_ref().map_or(true, |cond| cond(id, self))
                             })
                             .map(|ma| std::sync::Arc::clone(&ma.make_effect)));
                     if sac {
@@ -1330,14 +1337,16 @@ impl SimState {
                     c.controller == who && c.zone == CardZone::Battlefield &&
                     c.bf.as_ref().map_or(false, |bf| {
                         let mas = self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[]);
-                        !mas.is_empty() && mas.iter().any(|ma| !ma_requires_tap(ma) || !bf.tapped)
+                        !mas.is_empty() && mas.iter().any(|ma| (!ma_requires_tap(ma) || !bf.tapped)
+                            && ma.condition.as_ref().map_or(true, |cond| cond(**id, self)))
                     })
                 })
                 .map(|(id, c)| {
                     let bf = c.bf.as_ref().unwrap();
                     let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
                         .iter()
-                        .find(|ma| !ma_requires_tap(ma) || !bf.tapped)
+                        .find(|ma| (!ma_requires_tap(ma) || !bf.tapped)
+                            && ma.condition.as_ref().map_or(true, |cond| cond(*id, self)))
                         .map(|ma| ma_requires_sac(ma))
                         .unwrap_or(false);
                     (*id, c.catalog_key.clone(), sac)
@@ -1348,7 +1357,8 @@ impl SimState {
                         .and_then(|o| o.bf.as_ref()).map_or(false, |bf| bf.tapped);
                     self.def_of(id)
                         .and_then(|d| d.mana_abilities().iter()
-                            .find(|ma| !ma_requires_tap(ma) || !tapped)
+                            .find(|ma| (!ma_requires_tap(ma) || !tapped)
+                                && ma.condition.as_ref().map_or(true, |cond| cond(id, self)))
                             .map(|ma| (std::sync::Arc::clone(&ma.make_effect), ma.produces_count)))
                         .unwrap_or_else(|| (std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_,_,_| {}))), 1))
                 };
@@ -2061,8 +2071,8 @@ pub(super) fn play_free_cast(id: ObjId, actor: PlayerId, state: &mut SimState, t
     let def = match state.catalog.get(key.as_str()) { Some(d) => d.clone(), None => return };
     match &def.kind {
         CardKind::Instant(s) | CardKind::Sorcery(s) => {
-            if let Some(factory) = s.spell_factory.clone() {
-                factory(actor, id, 0).call(state, t, &[]);
+            if let Some(mode) = s.modes.as_ref().and_then(|m| m.get(0)) {
+                (mode.factory)(actor, id, 0).call(state, t, &[]);
             }
             change_zone(id, ZoneId::Graveyard, state, t, actor);
         }
@@ -2382,6 +2392,7 @@ fn cast_spell(
     preferred_cost: Option<&AlternateCost>,
     chosen_targets: &[ObjId],
     chosen_x: u32,
+    chosen_mode: usize,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
     // Prefer the post-CE materialized def (current in normal game flow where recompute
@@ -2410,7 +2421,7 @@ fn cast_spell(
         let cost = parse_mana_cost(adv.mana_cost());
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
-        let (_adv_spec, adv_eff) = build_spell_effect(&adv, who, card_id, 0);
+        let (_adv_spec, adv_eff) = build_spell_effect(&adv, who, card_id, 0, 0);
         let adv_targets = chosen_targets.to_vec();
         state.log(t, who, format!("Cast {} ({}, {}) [hand: {}]", adv.name, adv.mana_cost(), name, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
@@ -2509,6 +2520,7 @@ fn cast_spell(
         costs_ctx.returned_attack_targets.extend(add_ctx.returned_attack_targets);
         costs_ctx.chosen_x = add_ctx.chosen_x;
     }
+    costs_ctx.chosen_mode = chosen_mode;
 
     // Exile delve cards from graveyard (cost payment); record in costs_ctx.
     let to_exile_names: Vec<String> = to_exile_ids.iter().map(|(_, n)| n.clone()).collect();
@@ -2524,7 +2536,7 @@ fn cast_spell(
     };
     state.log(t, who, format!("Cast {} ({}{}) [hand: {}]", name, cast_label, delve_label, state.hand_size(who)));
 
-    let (_spell_target_spec, spell_eff) = build_spell_effect(&def, who, card_id, chosen_x);
+    let (_spell_target_spec, spell_eff) = build_spell_effect(&def, who, card_id, chosen_x, chosen_mode);
     let spell_chosen_targets = chosen_targets.to_vec();
 
     if let Some(card) = state.objects.get_mut(&card_id) {
@@ -2552,7 +2564,7 @@ fn cast_spell(
             if !state.potential_mana(who).can_pay(&rep_mc) { break; }
             let mana_log = state.pay_mana(who, &rep_mc, t);
             state.log_mana_activations(t, who, mana_log);
-            let (_, copy_eff) = build_spell_effect(&def, who, card_id, chosen_x);
+            let (_, copy_eff) = build_spell_effect(&def, who, card_id, chosen_x, chosen_mode);
             let copy_id = state.alloc_id();
             state.abilities.insert(copy_id, StackAbility {
                 id: copy_id,
@@ -2971,7 +2983,7 @@ fn handle_priority_round(
                 priority_holder = next;
                 last_passer = None;
             }
-            PriorityAction::CastSpell { card_id, face, ref preferred_cost, ref chosen_targets, chosen_x } => {
+            PriorityAction::CastSpell { card_id, face, ref preferred_cost, ref chosen_targets, chosen_x, chosen_mode } => {
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
                 // Sorcery-speed check: for the main face read the materialized def; for the back
                 // face read the back def's kind (the back face might be instant even if the front
@@ -2989,7 +3001,7 @@ fn handle_priority_round(
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
-                } else if let Some(cid) = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(), chosen_targets, chosen_x) {
+                } else if let Some(cid) = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(), chosen_targets, chosen_x, chosen_mode) {
                     state.player_mut(who).spells_cast_this_turn += 1;
                     state.stack.push(cid);
                     let next = if who == ap { nap } else { ap };
@@ -3503,7 +3515,7 @@ fn card_has_implementation(def: &CardDef) -> bool {
     match &def.kind {
         CardKind::Creature(_) | CardKind::Artifact(_)
         | CardKind::Planeswalker(_) | CardKind::Enchantment(_) => true,
-        CardKind::Instant(s) | CardKind::Sorcery(s) => s.spell_factory.is_some(),
+        CardKind::Instant(s) | CardKind::Sorcery(s) => s.modes.is_some(),
         CardKind::Land(_) => true,
     }
 }

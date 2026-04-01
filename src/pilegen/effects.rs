@@ -119,6 +119,24 @@ pub(crate) fn eff_damage_target(caster: PlayerId, n: i32, source_id: ObjId) -> E
     }))
 }
 
+/// Deal `n` damage to every permanent on the battlefield matching `filter`.
+/// Protection from the source prevents the damage (checked per-permanent).
+pub(crate) fn eff_damage_all(caster: PlayerId, n: i32, source_id: ObjId, filter: ObjPredicate) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        let hits: Vec<ObjId> = state.objects.values()
+            .filter(|o| o.zone == CardZone::Battlefield && filter(o.id, state))
+            .map(|o| o.id)
+            .collect();
+        for id in hits {
+            if is_protected_from(id, source_id, state) { continue; }
+            if let Some(bf) = state.permanent_bf_mut(id) {
+                bf.damage += n;
+            }
+        }
+        state.log(t, caster, format!("→ deals {} damage to each matching permanent", n));
+    }))
+}
+
 /// Force `who` to sacrifice one permanent matching `filter`, chosen via `state.sacrifice_choice`.
 /// Models "sacrifice a [X] of your choice" (CR 701.16). The sacrificing player decides;
 /// the effect moves the chosen permanent to the graveyard. No-ops if no match exists.

@@ -257,6 +257,9 @@ pub(crate) type ManaEffectFactory =
 /// `produces`      — colors produced; empty vec → colorless only. Used for affordability prediction.
 /// `produces_count`— number of mana produced per activation (default 1). Used for prediction.
 /// `make_effect`   — factory that builds the actual production effect (add mana + any side effects).
+/// `condition`     — optional gate: `(source_id, &SimState) -> bool`. When `Some`, the ability
+///                   can only be activated (and counts toward potential mana) if the predicate
+///                   returns true. Used for Metalcraft, etc.
 #[derive(Clone)]
 pub(crate) struct ManaAbility {
     pub(crate) source_zone: SourceZone,
@@ -264,6 +267,7 @@ pub(crate) struct ManaAbility {
     pub(crate) produces: Vec<Color>,
     pub(crate) produces_count: usize,
     pub(crate) make_effect: ManaEffectFactory,
+    pub(crate) condition: Option<ObjPredicate>,
 }
 
 impl Default for ManaAbility {
@@ -274,6 +278,7 @@ impl Default for ManaAbility {
             produces: vec![],
             produces_count: 1,
             make_effect: std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_, _, _| {}))),
+            condition: None,
         }
     }
 }
@@ -379,20 +384,65 @@ impl NinjutsuAbility {
     }
 }
 
+/// One mode of a spell: its targeting requirement and effect factory.
+#[derive(Clone)]
+pub(crate) struct SpellMode {
+    pub(crate) target_spec: TargetSpec,
+    pub(crate) factory: SpellFactory,
+}
+
+/// The mode structure of a spell (CR 700.2).
+/// Non-modal spells have a single mode; modal spells ("Choose one —") have two or more.
+/// Mode is chosen at cast time (CR 700.2a) and stored in `CostsPaidCtx::chosen_mode`.
+#[derive(Clone)]
+pub(crate) enum SpellModes {
+    /// Non-modal: exactly one mode.
+    Single(SpellMode),
+    /// Modal (CR 700.2): two or more modes, chosen at cast time via `ChoiceRequest::Mode`.
+    /// Invariant: len >= 2 (enforced by `SpellModes::modal`).
+    Modal(Vec<SpellMode>),
+}
+
+impl SpellModes {
+    /// Construct a modal spell. Panics if fewer than 2 modes are provided.
+    pub(crate) fn modal(modes: Vec<SpellMode>) -> Self {
+        assert!(modes.len() >= 2, "modal spells require at least 2 modes, got {}", modes.len());
+        SpellModes::Modal(modes)
+    }
+
+    pub(crate) fn get(&self, mode: usize) -> Option<&SpellMode> {
+        match self {
+            SpellModes::Single(m) if mode == 0 => Some(m),
+            SpellModes::Modal(modes) => modes.get(mode),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            SpellModes::Single(_) => 1,
+            SpellModes::Modal(modes) => modes.len(),
+        }
+    }
+
+    pub(crate) fn is_modal(&self) -> bool {
+        matches!(self, SpellModes::Modal(_))
+    }
+}
+
 /// Spell data shared by Instant and Sorcery variants.
 #[derive(Clone)]
 pub(crate) struct SpellData {
     pub(crate) mana_cost: String,
     #[allow(dead_code)]
     pub(crate) exileable: bool,
-    /// Declarative target specification. `TargetSpec::None` means no target required.
-    pub(crate) target_spec: TargetSpec,
 
     pub(crate) delve: bool,
     /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
     pub(crate) subtypes: Vec<String>,
-    /// Pre-built effect factory for Rust-defined spells.
-    pub(crate) spell_factory: Option<SpellFactory>,
+    /// Spell modes (CR 700.2). `None` for default-constructed placeholders;
+    /// real spells always have `Some`.
+    pub(crate) modes: Option<SpellModes>,
 }
 
 impl Default for SpellData {
@@ -400,11 +450,10 @@ impl Default for SpellData {
         SpellData {
             mana_cost: String::new(),
             exileable: false,
-            target_spec: TargetSpec::None,
 
             delve: false,
             subtypes: Vec::new(),
-            spell_factory: None,
+            modes: None,
         }
     }
 }
@@ -571,10 +620,27 @@ impl CardDef {
         &self.alternate_costs
     }
 
+    /// Target spec for mode 0 (non-modal spells) or the given mode.
     pub(crate) fn target_spec(&self) -> &TargetSpec {
+        self.target_spec_for_mode(0)
+    }
+
+    pub(crate) fn target_spec_for_mode(&self, mode: usize) -> &TargetSpec {
         match &self.kind {
-            CardKind::Instant(s) | CardKind::Sorcery(s) => &s.target_spec,
+            CardKind::Instant(s) | CardKind::Sorcery(s) => {
+                s.modes.as_ref()
+                    .and_then(|m| m.get(mode))
+                    .map(|m| &m.target_spec)
+                    .unwrap_or(&TargetSpec::None)
+            }
             _ => &TargetSpec::None,
+        }
+    }
+
+    pub(crate) fn spell_modes(&self) -> Option<&SpellModes> {
+        match &self.kind {
+            CardKind::Instant(s) | CardKind::Sorcery(s) => s.modes.as_ref(),
+            _ => None,
         }
     }
 
@@ -1099,19 +1165,17 @@ pub(super) fn build_ability_effect(
 
 /// Build a `(TargetSpec, Effect)` for a spell at cast time.
 ///
-/// For Rust-defined spells: uses `spell_factory` from `SpellData`.
+/// For spells with modes: uses the chosen mode's factory and target spec.
 /// For non-spell cards (permanents): returns `eff_enter_permanent`.
 pub(super) fn build_spell_effect(
     def: &CardDef,
     who: PlayerId,
     source_id: ObjId,
     chosen_x: u32,
+    chosen_mode: usize,
 ) -> (TargetSpec, Effect) {
-    let target_spec = def.target_spec().clone();
-    if let CardKind::Instant(s) | CardKind::Sorcery(s) = &def.kind {
-        if let Some(factory) = &s.spell_factory {
-            return (target_spec, factory(who, source_id, chosen_x));
-        }
+    if let Some(mode) = def.spell_modes().and_then(|m| m.get(chosen_mode)) {
+        return (mode.target_spec.clone(), (mode.factory)(who, source_id, chosen_x));
     }
     (TargetSpec::None, eff_enter_permanent(who, def.name.clone()))
 }
