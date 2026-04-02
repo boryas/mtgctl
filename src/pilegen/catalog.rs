@@ -1,5 +1,37 @@
 use super::*;
 
+// ── Keywords ──────────────────────────────────────────────────────────────────
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub(crate) enum Keyword {
+    Flying,
+    Haste,
+    Shadow,
+    Lifelink,
+    Vigilance,
+    Deathtouch,
+    Annihilator6,
+}
+
+/// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct Keywords(u32);
+
+impl Keywords {
+    pub(crate) fn contains(self, kw: Keyword) -> bool {
+        self.0 & (1 << kw as u32) != 0
+    }
+    pub(crate) fn insert(&mut self, kw: Keyword) {
+        self.0 |= 1 << kw as u32;
+    }
+    pub(crate) fn from_slice(kws: &[Keyword]) -> Self {
+        let mut s = Self(0);
+        for &kw in kws { s.insert(kw); }
+        s
+    }
+}
+
 // ── Mana cost ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Default, Debug)]
@@ -152,6 +184,7 @@ pub(crate) struct AlternateCost {
     pub(crate) condition: Option<std::sync::Arc<dyn Fn(PlayerId, &SimState) -> bool + Send + Sync>>,
 }
 
+
 /// An activated ability a permanent or hand card can use.
 ///
 /// Describes a choice made at ability-resolution time (CR: "choose" ≠ "target").
@@ -208,6 +241,10 @@ pub(crate) struct AbilityDef {
 
     // ── Effect ────────────────────────────────────────────────────────────────
     pub(crate) ability_factory: Option<AbilityFactory>,
+
+    /// False when a CE prevents activation (e.g. Disruptor Flute, Karn).
+    /// Reset to true each recompute. Checked by ability_available / collect_legal_actions.
+    pub(crate) activatable: bool,
 }
 
 impl Default for AbilityDef {
@@ -218,6 +255,7 @@ impl Default for AbilityDef {
             target_spec: TargetSpec::None,
             choice_spec: None,
             ability_factory: None,
+            activatable: true,
         }
     }
 }
@@ -268,6 +306,9 @@ pub(crate) struct ManaAbility {
     pub(crate) produces_count: usize,
     pub(crate) make_effect: ManaEffectFactory,
     pub(crate) condition: Option<ObjPredicate>,
+    /// False when a CE prevents activation (e.g. Karn, Null Rod).
+    /// Reset to true each recompute. Checked by collect_legal_actions and mana sub-loop.
+    pub(crate) activatable: bool,
 }
 
 impl Default for ManaAbility {
@@ -279,6 +320,7 @@ impl Default for ManaAbility {
             produces_count: 1,
             make_effect: std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_, _, _| {}))),
             condition: None,
+            activatable: true,
         }
     }
 }
@@ -309,14 +351,11 @@ pub(crate) struct CreatureData {
     // (which folds in counters and CE modifiers). Write only via `adjust_pt`.
     power: i32,
     toughness: i32,
-    #[allow(dead_code)]
-    pub(crate) exileable: bool,
     pub(crate) legendary: bool,
     pub(crate) delve: bool,
     pub(crate) abilities: Vec<AbilityDef>,
     pub(crate) mana_abilities: Vec<ManaAbility>,
-    pub(crate) ninjutsu: Option<NinjutsuAbility>,
-    pub(crate) keywords: Vec<String>,
+    pub(crate) keywords: Keywords,
 }
 
 #[derive(Clone, Default)]
@@ -331,10 +370,52 @@ pub(crate) struct EnchantmentData {
     pub(crate) abilities: Vec<AbilityDef>,
 }
 
-/// The ninjutsu ability on a ninja creature.
-#[derive(Clone)]
-pub(crate) struct NinjutsuAbility {
-    pub(crate) mana_cost: String,
+/// Build a ninjutsu activated ability (CR 702.49).
+///
+/// Costs: mana + return an unblocked attacker. Source zone: Hand.
+/// Effect: put this card onto the battlefield tapped and attacking the same target.
+pub(super) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
+    let mc = parse_mana_cost(mana_cost);
+    AbilityDef {
+        source_zone: SourceZone::Hand,
+        costs: vec![
+            CostComponent::Mana(mc),
+            CostComponent::ReturnFromBattlefield(cost_pred_unblocked_attacker()),
+        ],
+        ability_factory: Some(std::sync::Arc::new(|who, source_id| {
+            Effect(std::sync::Arc::new(move |state: &mut SimState, t, _targets: &[ObjId]| {
+                let attack_target = state.resolving_costs_ctx.returned_attack_targets
+                    .first().copied().flatten();
+                let ninja_name = state.objects.get(&source_id)
+                    .map(|c| c.catalog_key.clone())
+                    .unwrap_or_default();
+                if ninja_name.is_empty() { return; }
+                let new_id = state.alloc_id();
+                state.objects.insert(new_id, GameObject {
+                    id: new_id,
+                    catalog_key: ninja_name.clone(),
+                    owner: who,
+                    controller: who,
+                    zone: CardZone::Battlefield,
+                    is_token: false,
+                    spell: None,
+                    bf: Some(BattlefieldState {
+                        tapped: true,
+                        entered_this_turn: true,
+                        attacking: true,
+                        unblocked: true,
+                        attack_target,
+                        ..BattlefieldState::new()
+                    }),
+                    materialized: None,
+                    counters: HashMap::new(), cast_generation: 0,
+                });
+                state.combat_attackers.push(new_id);
+                state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
+            }))
+        })),
+        ..Default::default()
+    }
 }
 
 impl CreatureData {
@@ -353,36 +434,22 @@ impl CreatureData {
     }
 
     /// Construct a `CreatureData` with the mandatory fields.
-    /// All optional fields (exileable, legendary, delve, abilities, ninjutsu, keywords)
+    /// All optional fields (legendary, delve, abilities, keywords)
     /// default to false/empty and can be set on the returned value.
     pub(super) fn new(mana_cost: impl Into<String>, power: i32, toughness: i32) -> Self {
         CreatureData {
             mana_cost: mana_cost.into(),
             power,
             toughness,
-            exileable: false,
             legendary: false,
             delve: false,
             abilities: vec![],
             mana_abilities: vec![],
-            ninjutsu: None,
-            keywords: vec![],
+            keywords: Keywords::default(),
         }
     }
 }
 
-impl NinjutsuAbility {
-    pub(crate) fn as_ability_def(&self) -> AbilityDef {
-        AbilityDef {
-            source_zone: SourceZone::Hand,
-            costs: vec![
-                CostComponent::Mana(parse_mana_cost(&self.mana_cost)),
-                CostComponent::ReturnFromBattlefield(cost_pred_unblocked_attacker()),
-            ],
-            ..Default::default()
-        }
-    }
-}
 
 /// One mode of a spell: its targeting requirement and effect factory.
 #[derive(Clone)]
@@ -434,9 +501,6 @@ impl SpellModes {
 #[derive(Clone)]
 pub(crate) struct SpellData {
     pub(crate) mana_cost: String,
-    #[allow(dead_code)]
-    pub(crate) exileable: bool,
-
     pub(crate) delve: bool,
     /// Card subtypes (e.g. `["adventure"]` for the adventure face of a split card).
     pub(crate) subtypes: Vec<String>,
@@ -449,8 +513,6 @@ impl Default for SpellData {
     fn default() -> Self {
         SpellData {
             mana_cost: String::new(),
-            exileable: false,
-
             delve: false,
             subtypes: Vec::new(),
             modes: None,
@@ -490,7 +552,7 @@ pub(crate) enum CardLayout {
 // ── CardDef wrapper ───────────────────────────────────────────────────────────
 
 /// A card the generator knows about. Cards not in the catalog are treated as
-/// generic non-land spells: hand-eligible, not permanent candidates, not exileable.
+/// generic non-land spells: hand-eligible, not permanent candidates.
 ///
 /// Wrapper struct preserving direct `.catalog_key` access and stable HashMap keys while
 /// holding a typed `kind` that enforces card-category invariants.
@@ -559,15 +621,11 @@ pub(crate) struct CardDef {
     /// Added to `ManaCost.generic` during affordability checks. Reset to 0 on each `recompute`
     /// because materialized views start from a fresh catalog clone.
     pub(crate) casting_cost_modifier: i32,
-    /// True when a CE (e.g. Disruptor Flute, Pithing Needle) suppresses this card's non-mana
-    /// activated abilities. Reset to false on each `recompute`.
-    ///
-    /// NOTE: `AbilityDef`s (non-mana) and `ManaAbility`s are separate types checked by separate
-    /// code paths, so this flag does NOT accidentally suppress mana abilities. Null Rod
-    /// (suppress ALL activated abilities including mana) would need a companion
-    /// `mana_abilities_suppressed: bool` field. Future work: a more principled
-    /// `AbilitySuppression` model when adding Null Rod / Mycosynth Lattice interactions.
-    pub(crate) non_mana_abilities_suppressed: bool,
+    /// True when this card may be cast from its current zone.
+    /// Default true for cards in hand, false for other zones. CEs can override:
+    /// Dauthi Voidwalker sets true on exiled cards, Lavinia sets false on opponent hand cards.
+    /// Reset to zone-based default each recompute. Checked by collect_legal_actions.
+    pub(crate) castable: bool,
     /// True when this permanent on the battlefield prevents (a) casting spells from graveyards
     /// or libraries and (b) creature cards entering the battlefield from graveyards or libraries
     /// (e.g. Grafdigger's Cage). Checked by `play_free_cast` and `eff_reanimate`.
@@ -674,6 +732,26 @@ impl CardDef {
         }
     }
 
+    pub(crate) fn abilities_mut(&mut self) -> &mut [AbilityDef] {
+        match &mut self.kind {
+            CardKind::Land(l) => &mut l.abilities,
+            CardKind::Creature(c) => &mut c.abilities,
+            CardKind::Artifact(a) => &mut a.abilities,
+            CardKind::Planeswalker(p) => &mut p.abilities,
+            CardKind::Enchantment(e) => &mut e.abilities,
+            CardKind::Instant(_) | CardKind::Sorcery(_) => &mut [],
+        }
+    }
+
+    pub(crate) fn mana_abilities_mut(&mut self) -> &mut [ManaAbility] {
+        match &mut self.kind {
+            CardKind::Land(l) => &mut l.mana_abilities,
+            CardKind::Creature(c) => &mut c.mana_abilities,
+            CardKind::Artifact(a) => &mut a.mana_abilities,
+            _ => &mut [],
+        }
+    }
+
     pub(crate) fn as_land(&self) -> Option<&LandData> {
         match &self.kind { CardKind::Land(l) => Some(l), _ => None }
     }
@@ -695,22 +773,16 @@ impl CardDef {
         if self.layout == CardLayout::Split { self.back.as_deref() } else { None }
     }
 
-    pub(crate) fn ninjutsu(&self) -> Option<&NinjutsuAbility> {
+
+    pub(crate) fn keywords(&self) -> Keywords {
         match &self.kind {
-            CardKind::Creature(c) => c.ninjutsu.as_ref(),
-            _ => None,
+            CardKind::Creature(c) => c.keywords,
+            _ => Keywords::default(),
         }
     }
 
-    pub(crate) fn keywords(&self) -> &[String] {
-        match &self.kind {
-            CardKind::Creature(c) => &c.keywords,
-            _ => &[],
-        }
-    }
-
-    pub(crate) fn has_keyword(&self, kw: &str) -> bool {
-        self.keywords().iter().any(|k| k == kw)
+    pub(crate) fn has_keyword(&self, kw: Keyword) -> bool {
+        self.keywords().contains(kw)
     }
 
     /// Returns true if this card has the given subtype (e.g. `"adventure"`).
@@ -775,7 +847,7 @@ impl CardDef {
             additional_costs: vec![],
             counterable: true,
             casting_cost_modifier: 0,
-            non_mana_abilities_suppressed: false,
+            castable: false,
             blocks_gy_and_lib_access: false,
             alternate_costs: vec![],
             protection_from: vec![],

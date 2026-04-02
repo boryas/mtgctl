@@ -650,6 +650,13 @@ pub(super) fn recompute(state: &mut SimState) {
             fold_game_state_into_def(&mut def, obj);
         }
 
+        // Zone-based castable default: cards in hand are castable, others are not
+        // (CEs may override — e.g. Dauthi sets castable=true on exiled cards).
+        {
+            let obj = state.objects.get(&id).unwrap();
+            def.castable = matches!(obj.zone, CardZone::Hand { .. });
+        }
+
         state.objects.get_mut(&id).unwrap().materialized = Some(def);
     }
 
@@ -776,23 +783,72 @@ impl Phase {
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum SpellFace { Main, Back }
 
+// ── Priority action types (CR 601.2 state machine) ──────────────────────────
+
+/// Engine-provided legal action. Strategy picks one via `choose_action`.
 #[derive(Clone)]
-enum PriorityAction {
-    /// Land drop: AP only, does NOT pass priority. Carries the chosen land name.
-    LandDrop(ObjId),
-    /// Activate a permanent ability. Carries source ObjId + ability def + pre-chosen targets.
-    /// Uses the stack, passes priority after.
-    ActivateAbility(ObjId, AbilityDef, Vec<ObjId>),
-    /// Intent to cast a spell. No resources are spent until `handle_priority_round` accepts and
-    /// commits this action. The framework validates legality (sorcery-speed, etc.) there.
-    /// `face` selects main vs adventure face/cost; card zone identifies the source zone.
-    /// `preferred_cost` — pre-selected alternate cost (used by `respond_with_counter`).
-    /// `chosen_targets` — targets picked by strategy at action-construction time.
-    CastSpell { card_id: ObjId, face: SpellFace, preferred_cost: Option<AlternateCost>, chosen_targets: Vec<ObjId>, chosen_x: u32, chosen_mode: usize },
-    /// Play a card from exile via a free-cast permission (e.g. Dauthi Voidwalker ability).
-    PlayFreeCast(ObjId),
-    /// Pass priority.
+enum LegalAction {
     Pass,
+    LandDrop(ObjId),
+    /// Normal cast from hand, adventure back-face, or free cast from exile.
+    /// `forced_alt_cost` is Some for free-cast permissions (alt cost = {0}).
+    CastSpell { card_id: ObjId, face: SpellFace, forced_alt_cost: Option<AlternateCost> },
+    /// Activate a non-mana ability on a permanent.
+    ActivateAbility { source_id: ObjId, ability_index: usize },
+}
+
+/// Options presented to strategy at the Announce step (CR 601.2b).
+struct AnnounceOptions {
+    available_modes: Vec<usize>,
+    available_alt_costs: Vec<AlternateCost>,
+    has_x_cost: bool,
+}
+
+/// Strategy's choices at the Announce step.
+struct AnnounceChoice {
+    chosen_mode: usize,
+    alt_cost: Option<AlternateCost>,
+    chosen_x: u32,
+}
+
+/// Accumulated state during the cast sub-machine (CR 601.2a-i).
+#[allow(dead_code)]
+struct CastContext {
+    card_id: ObjId,
+    face: SpellFace,
+    caster: PlayerId,
+    chosen_mode: usize,
+    alt_cost: Option<AlternateCost>,
+    chosen_x: u32,
+    chosen_targets: Vec<ObjId>,
+    total_cost: Option<TotalCost>,
+    costs_paid_ctx: CostsPaidCtx,
+}
+
+/// Computed total cost after modifications (CR 601.2f).
+/// Phase 4 will use this for strategy-driven mana activation.
+#[allow(dead_code)]
+struct TotalCost {
+    mana: ManaCost,
+    additional: Vec<CostComponent>,
+}
+
+/// A mana ability the strategy can activate during ActivateMana.
+#[derive(Clone)]
+pub(super) struct ManaAbilityOption {
+    source_id: ObjId,
+    ability_index: usize,
+    produces: Vec<Color>,
+    produces_count: usize,
+}
+
+/// Strategy's decision to activate a mana ability.
+#[derive(Clone)]
+pub(super) struct ManaActivation {
+    source_id: ObjId,
+    ability_index: usize,
+    /// Which color to produce (None = colorless/any, for generic mana needs).
+    color_choice: Option<Color>,
 }
 
 // ── Phase constructors ────────────────────────────────────────────────────────
@@ -887,6 +943,202 @@ impl ManaPool {
     fn drain(&mut self) {
         *self = ManaPool::default();
     }
+}
+
+// ── Mana ability primitives ───────────────────────────────────────────────────
+
+/// Enumerate all mana abilities that `who` can currently activate.
+/// Checks zone, tapped state, activatable flag, and condition predicate.
+pub(super) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<ManaAbilityOption> {
+    let mut options = Vec::new();
+    // Battlefield permanents.
+    for card in state.permanents_of(who) {
+        let mas = state.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
+        let bf = match &card.bf { Some(bf) => bf, None => continue };
+        for (idx, ma) in mas.iter().enumerate() {
+            if !ma.activatable { continue; }
+            if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
+            if ma_requires_tap(ma) && bf.tapped { continue; }
+            if ma.condition.as_ref().map_or(false, |cond| !cond(card.id, state)) { continue; }
+            options.push(ManaAbilityOption {
+                source_id: card.id,
+                ability_index: idx,
+                produces: ma.produces.clone(),
+                produces_count: ma.produces_count,
+            });
+        }
+    }
+    // Hand-zone mana abilities (e.g. Simian Spirit Guide).
+    for card in state.hand_of(who) {
+        let mas = state.catalog.get(&card.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
+        for (idx, ma) in mas.iter().enumerate() {
+            if !ma.activatable { continue; }
+            if !matches!(ma.source_zone, SourceZone::Hand) { continue; }
+            options.push(ManaAbilityOption {
+                source_id: card.id,
+                ability_index: idx,
+                produces: ma.produces.clone(),
+                produces_count: ma.produces_count,
+            });
+        }
+    }
+    options
+}
+
+/// Compute a tap plan for paying `cost` without mutating state.
+/// Returns ManaActivations in order: specific colors first (B, U, W, R, G), then generic.
+pub(super) fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) -> Vec<ManaActivation> {
+    let mut plan = Vec::new();
+    let mut used: HashSet<ObjId> = HashSet::new();
+
+    // Helper: find a battlefield source producing `color` (or any if None).
+    let find_bf = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize, usize)> {
+        state.objects.iter().find_map(|(id, c)| {
+            if used.contains(id) { return None; }
+            if c.controller != who || c.zone != CardZone::Battlefield { return None; }
+            let bf = c.bf.as_ref()?;
+            let mas = state.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
+            let (idx, ma) = mas.iter().enumerate().find(|(_, ma)| {
+                ma.activatable
+                    && matches!(ma.source_zone, SourceZone::Battlefield)
+                    && (!ma_requires_tap(ma) || !bf.tapped)
+                    && ma.condition.as_ref().map_or(true, |cond| cond(*id, state))
+                    && color.map_or(true, |c| ma.produces.contains(&c))
+            })?;
+            Some((*id, idx, ma.produces_count))
+        })
+    };
+
+    let find_hand = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize)> {
+        state.hand_of(who).find_map(|c| {
+            if used.contains(&c.id) { return None; }
+            let mas = state.catalog.get(&c.catalog_key).map(|d| d.mana_abilities()).unwrap_or(&[]);
+            let (idx, _) = mas.iter().enumerate().find(|(_, ma)| {
+                ma.activatable
+                    && matches!(ma.source_zone, SourceZone::Hand)
+                    && color.map_or(true, |col| ma.produces.contains(&col))
+            })?;
+            Some((c.id, idx))
+        })
+    };
+
+    // Specific colors first.
+    for &(need, color) in &[
+        (cost.b, Color::Black), (cost.u, Color::Blue), (cost.w, Color::White),
+        (cost.r, Color::Red), (cost.g, Color::Green),
+    ] {
+        let mut remaining = need;
+        while remaining > 0 {
+            if let Some((id, idx, _)) = find_bf(state, &used, Some(color)) {
+                plan.push(ManaActivation { source_id: id, ability_index: idx, color_choice: Some(color) });
+                used.insert(id);
+                remaining -= 1;
+            } else if let Some((id, idx)) = find_hand(state, &used, Some(color)) {
+                plan.push(ManaActivation { source_id: id, ability_index: idx, color_choice: Some(color) });
+                used.insert(id);
+                remaining -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Generic mana.
+    let mut remaining_generic = cost.generic;
+    while remaining_generic > 0 {
+        if let Some((id, idx, count)) = find_bf(state, &used, None) {
+            plan.push(ManaActivation { source_id: id, ability_index: idx, color_choice: None });
+            used.insert(id);
+            remaining_generic -= count as i32;
+        } else if let Some((id, idx)) = find_hand(state, &used, None) {
+            plan.push(ManaActivation { source_id: id, ability_index: idx, color_choice: None });
+            used.insert(id);
+            remaining_generic -= 1;
+        } else {
+            break;
+        }
+    }
+
+    plan
+}
+
+/// Execute a single mana ability activation: pay its costs (tap/sac/exile) and run make_effect.
+/// Returns a log entry describing what happened.
+fn execute_mana_activation(
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    act: &ManaActivation,
+) -> String {
+    // Look up the mana ability — try materialized def first, fall back to catalog.
+    let ma = state.def_of(act.source_id)
+        .and_then(|d| d.mana_abilities().get(act.ability_index).cloned())
+        .or_else(|| {
+            let key = &state.objects.get(&act.source_id)?.catalog_key;
+            state.catalog.get(key.as_str())?.mana_abilities().get(act.ability_index).cloned()
+        });
+    let Some(ma) = ma else { return String::new(); };
+    let name = state.objects.get(&act.source_id)
+        .map(|c| c.catalog_key.clone()).unwrap_or_default();
+
+    let is_hand = state.objects.get(&act.source_id)
+        .map_or(false, |c| matches!(c.zone, CardZone::Hand { .. }));
+
+    // Pay costs: hand-zone sources are exiled; battlefield sources are tapped/sacrificed.
+    let action_label = if is_hand {
+        state.set_card_zone(act.source_id, CardZone::Exile { on_adventure: false });
+        "exile"
+    } else if ma_requires_sac(&ma) {
+        if let Some(card) = state.objects.get_mut(&act.source_id) {
+            card.zone = CardZone::Graveyard;
+            card.bf = None;
+        }
+        "sac"
+    } else {
+        if let Some(bf) = state.permanent_bf_mut(act.source_id) {
+            bf.tapped = true;
+        }
+        "tap"
+    };
+
+    let color_label = act.color_choice
+        .map(|c| match c {
+            Color::White => "W", Color::Blue => "U", Color::Black => "B",
+            Color::Red => "R", Color::Green => "G",
+        }.to_string())
+        .unwrap_or_else(|| ma.produces_count.to_string());
+
+    ma.make_effect.clone()(who, act.color_choice).call(state, t, &[]);
+
+    format!("{} {} → {}", action_label, name, color_label)
+}
+
+/// Strategy-driven mana ability loop (CR 601.2g).
+///
+/// Repeatedly enumerates available mana abilities and asks strategy to pick one.
+/// Stops when strategy returns None or no abilities remain.
+/// Returns a log of activations for display.
+fn run_mana_loop(
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    mana_cost: &ManaCost,
+    strategy: &mut dyn Strategy,
+) -> Vec<String> {
+    let mut log = Vec::new();
+    loop {
+        let available = enumerate_mana_abilities(state, who);
+        if available.is_empty() { break; }
+
+        let activation = strategy.choose_mana_ability(state, who, &available, mana_cost);
+        let Some(act) = activation else { break; };
+
+        let entry = execute_mana_activation(state, t, who, &act);
+        if !entry.is_empty() {
+            log.push(entry);
+        }
+    }
+    log
 }
 
 // ── Mana potential accumulation ───────────────────────────────────────────────
@@ -1815,7 +2067,7 @@ fn sim_discard_to_limit(state: &mut SimState, t: u8, who: PlayerId) {
 // ── Action system ─────────────────────────────────────────────────────────────
 
 // resolve_who, matches_target_type, has_valid_target, ability_available,
-// collect_hand_actions, choose_land_name, respond_with_counter
+// collect_legal_actions, choose_land_name
 // are defined in strategy.rs / predicates.rs
 
 // choose_permanent_target is defined in predicates.rs
@@ -2051,6 +2303,7 @@ pub(super) fn change_zone(
 /// For permanents: removes the exiled object and re-enters it via `eff_enter_permanent`
 /// (which properly registers instances for ETB). For instants/sorceries: runs the spell
 /// factory and moves the card to graveyard.
+#[cfg(test)]
 pub(super) fn play_free_cast(id: ObjId, actor: PlayerId, state: &mut SimState, t: u8) {
     // Grafdigger's Cage (and similar) block casting from graveyards/libraries and
     // creatures entering from those zones.
@@ -2306,23 +2559,22 @@ fn pay_costs(
 
 /// Log the ability activation and pay its costs via the unified `pay_costs` function.
 /// Returns a `CostsPaidCtx` with the objects moved during payment.
-/// For ninjutsu abilities the ninja is also moved to Stack zone.
+/// For hand-sourced abilities (ninjutsu, etc.) the source card is moved to Stack zone.
 fn pay_ability_cost(
     state: &mut SimState,
     t: u8,
     who: PlayerId,
     source_id: ObjId,
     ability: &AbilityDef,
-    is_ninjutsu: bool,
+    is_hand_source: bool,
 ) -> CostsPaidCtx {
     let source_name = state.permanent_name(source_id)
         .or_else(|| state.hand_of(who).find(|c| c.id == source_id).map(|c| c.catalog_key.clone()))
         .unwrap_or_default();
     state.log(t, who, format!("Activate {} ability", source_name));
 
-    // Ninjutsu: move the ninja card from hand to Stack zone before paying costs.
-    // The ReturnFromBattlefield cost in pay_costs handles returning the attacker.
-    if is_ninjutsu {
+    // Hand-sourced abilities (ninjutsu): move source from hand to Stack zone before paying costs.
+    if is_hand_source {
         if let Some(card) = state.objects.get_mut(&source_id) {
             card.zone = CardZone::Stack;
         }
@@ -2409,15 +2661,8 @@ fn cast_spell(
             eprintln!("[priority] BUG: split-back sorcery {} on non-empty stack, treating as Pass", adv.name);
             return None;
         }
-        // Prohibition gate for back-face casts.
-        if fire_event(GameEvent::SpellBeingCast {
-            caster: who,
-            card_id,
-            mana_value: mana_value(adv.mana_cost()),
-            is_noncreature: !adv.is_creature(),
-        }, state, t, who) {
-            return None;
-        }
+        // Casting legality is pre-checked via CardDef.castable (set by CEs in recompute).
+        // Strategy only offers castable cards, so no prohibition gate needed here.
         let cost = parse_mana_cost(adv.mana_cost());
         let mana_log = state.pay_mana(who, &cost, t);
         state.log_mana_activations(t, who, mana_log);
@@ -2485,16 +2730,8 @@ fn cast_spell(
         return None;
     }
 
-    // Prohibition gate: fire SpellBeingCast before any state mutation.
-    // "Can't cast" effects (CR 614.17) suppress this event; if prohibited, bail out.
-    if fire_event(GameEvent::SpellBeingCast {
-        caster: who,
-        card_id,
-        mana_value: mana_value(def.mana_cost()),
-        is_noncreature: !def.is_creature(),
-    }, state, t, who) {
-        return None;
-    }
+    // Casting legality is pre-checked via CardDef.castable (set by CEs in recompute).
+    // Strategy only offers castable cards, so no prohibition gate needed here.
 
     // Move to Stack zone.
     if let Some(card) = state.objects.get_mut(&card_id) {
@@ -2611,7 +2848,7 @@ fn cast_spell(
 
 /// Return true if the permanent with `id` has the given keyword in the materialized (CE-applied) view.
 /// Always reads from materialized state so CEs that grant or remove keywords are respected.
-pub(super) fn creature_has_keyword(id: ObjId, kw: &str, state: &SimState) -> bool {
+pub(super) fn creature_has_keyword(id: ObjId, kw: Keyword, state: &SimState) -> bool {
     state.def_of(id)
         .map(|d| d.has_keyword(kw))
         .unwrap_or(false)
@@ -2883,8 +3120,160 @@ fn resolve_top_of_stack(
                 }
             }
         }
+        // Make costs_paid_ctx visible to the effect closure (e.g. ninjutsu reads attack_target).
+        state.resolving_costs_ctx = ability.costs_paid_ctx;
         ability.effect.call(state, t, &effect_targets);
+        state.resolving_costs_ctx = CostsPaidCtx::default();
     }
+}
+
+/// Cast sub-machine (CR 601.2a-i).
+///
+/// Drives through Announce → Targets → LegalCheck → ComputeCost → ActivateMana → PayCosts → Complete.
+/// Strategy callbacks drive each decision point.
+/// `forced_alt_cost` is for free-cast permissions with a pre-set {0} alt cost.
+fn run_cast_submachine(
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    card_id: ObjId,
+    face: SpellFace,
+    forced_alt_cost: Option<AlternateCost>,
+    strategy: &mut dyn Strategy,
+) -> Option<ObjId> {
+    // ── Announce (CR 601.2b) ────────────────────────────────────────────
+    let def = state.def_of(card_id)
+        .cloned()
+        .or_else(|| {
+            let key = &state.objects.get(&card_id)?.catalog_key;
+            state.catalog.get(key.as_str()).cloned()
+        });
+    let def = def?;
+
+    let options = AnnounceOptions {
+        available_modes: def.spell_modes()
+            .map(|m| (0..m.len()).collect())
+            .unwrap_or_else(|| vec![0]),
+        available_alt_costs: if forced_alt_cost.is_some() {
+            vec![]
+        } else {
+            def.alternate_costs().to_vec()
+        },
+        has_x_cost: def.additional_costs.iter()
+            .any(|c| matches!(c, CostComponent::XLife | CostComponent::XMana)),
+    };
+    let ann = strategy.announce(state, card_id, &options);
+    let chosen_mode = ann.chosen_mode;
+    let announce_alt = ann.alt_cost;
+    let chosen_x = ann.chosen_x;
+
+    // ── Targets (CR 601.2c) ─────────────────────────────────────────────
+    let target_spec = if face == SpellFace::Back {
+        def.back.as_ref()
+            .map(|b| b.target_spec().clone())
+            .unwrap_or(TargetSpec::None)
+    } else {
+        def.target_spec_for_mode(chosen_mode).clone()
+    };
+    let legal = legal_targets(&target_spec, who, card_id, state);
+    let chosen_targets = if legal.is_empty() {
+        vec![]
+    } else {
+        strategy.choose_targets(state, card_id, &legal, &target_spec)
+    };
+
+    // ── LegalCheck (CR 601.2e) ──────────────────────────────────────────
+    // Sorcery-speed check done by caller before entering sub-machine.
+
+    // Forced alt cost (free-cast permission) overrides strategy's announced alt cost.
+    let preferred_cost = forced_alt_cost.or(announce_alt);
+
+    // ── ComputeCost + ActivateMana (CR 601.2f-g) ────────────────────────
+    let mana_cost = if let Some(ref alt) = preferred_cost {
+        alt.costs.iter().find_map(|c| {
+            if let CostComponent::Mana(mc) = c { Some(mc.clone()) } else { None }
+        }).unwrap_or_default()
+    } else if face == SpellFace::Back {
+        let def = state.def_of(card_id)
+            .or_else(|| {
+                let key = &state.objects.get(&card_id)?.catalog_key;
+                state.catalog.get(key.as_str())
+            });
+        let back_cost = def.and_then(|d| d.adventure())
+            .map(|a| a.mana_cost())
+            .unwrap_or("");
+        parse_mana_cost(back_cost)
+    } else {
+        let def = state.def_of(card_id)
+            .or_else(|| {
+                let key = &state.objects.get(&card_id)?.catalog_key;
+                state.catalog.get(key.as_str())
+            });
+        let mut mc = parse_mana_cost(def.map(|d| d.mana_cost()).unwrap_or(""));
+        mc.generic += def.map(|d| d.casting_cost_modifier).unwrap_or(0);
+        mc
+    };
+    let mana_log = run_mana_loop(state, t, who, &mana_cost, strategy);
+    state.log_mana_activations(t, who, mana_log);
+
+    // ── PayCosts + Complete (CR 601.2h-i) ───────────────────────────────
+    // cast_spell handles remaining payment (pool already filled by mana loop),
+    // zone move, effect building, and event firing.
+    cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(),
+               &chosen_targets, chosen_x, chosen_mode)
+}
+
+/// Activate sub-machine (CR 602.2b).
+///
+/// Pays ability costs, builds effect, and pushes the ability onto the stack.
+/// Strategy callback drives target selection.
+fn run_activate_submachine(
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    source_id: ObjId,
+    ability: &AbilityDef,
+    strategy: &mut dyn Strategy,
+) -> ObjId {
+    // ── Targets ─────────────────────────────────────────────────────────
+    let chosen_targets = {
+        let legal = legal_targets(&ability.target_spec, who, source_id, state);
+        if legal.is_empty() {
+            vec![]
+        } else {
+            strategy.choose_targets(state, source_id, &legal, &ability.target_spec)
+        }
+    };
+
+    let source_name_for_stack = state.permanent_name(source_id)
+        .or_else(|| state.objects.get(&source_id).map(|c| c.catalog_key.clone()))
+        .unwrap_or_default();
+    let is_hand_source = matches!(ability.source_zone, SourceZone::Hand);
+
+    // ── Pay costs ───────────────────────────────────────────────────────
+    let ctx = pay_ability_cost(state, t, who, source_id, ability, is_hand_source);
+
+    // ── Build effect ────────────────────────────────────────────────────
+    let eff = build_ability_effect(ability, who, source_id);
+
+    // ── Push to stack ───────────────────────────────────────────────────
+    let ab_id = state.alloc_id();
+    let ab_owner = state.player_id(who);
+    let ab = StackAbility {
+        id: ab_id,
+        source_name: source_name_for_stack,
+        owner: ab_owner,
+        effect: eff,
+        chosen_targets,
+        costs_paid_ctx: ctx,
+        is_triggered: false,
+        counterable: true,
+        choice_spec: ability.choice_spec.clone(),
+    };
+    state.abilities.insert(ab_id, ab);
+    state.stack.push(ab_id);
+
+    ab_id
 }
 
 fn handle_priority_round(
@@ -2896,7 +3285,6 @@ fn handle_priority_round(
     let nap = ap.opp();
     let mut priority_holder = ap;
     let mut last_passer: Option<PlayerId> = None;
-    let mut last_action: PriorityAction = PriorityAction::Pass;
 
     loop {
         let queued = std::mem::take(&mut state.pending_triggers);
@@ -2904,90 +3292,33 @@ fn handle_priority_round(
         check_state_based_actions(state, t);
 
         let who = priority_holder;
-        let action = strategies.get_mut(&who).unwrap()
-            .priority_action(state, ap, &last_action);
-        last_action = action.clone();
+        let strategy = strategies.get_mut(&who).unwrap();
+        let legal = strategy::collect_legal_actions(state, who);
+        let chosen = strategy.choose_action(state, ap, &legal);
 
-        match action {
-            PriorityAction::LandDrop(card_id) => {
+        match chosen {
+            LegalAction::Pass => {
+                let other = if who == ap { nap } else { ap };
+                if last_passer == Some(other) {
+                    if state.stack.is_empty() {
+                        break;
+                    } else {
+                        resolve_top_of_stack(state, t, ap, strategies);
+                        priority_holder = ap;
+                        last_passer = None;
+                    }
+                } else {
+                    last_passer = Some(who);
+                    priority_holder = other;
+                }
+            }
+            LegalAction::LandDrop(card_id) => {
                 sim_play_land(state, t, who, card_id);
                 state.player_mut(who).lands_played_this_turn += 1;
                 last_passer = None;
             }
-            PriorityAction::ActivateAbility(source_id, ref ability, ref chosen_targets) => {
-                if ability.is_loyalty_ability() && !state.stack.is_empty() {
-                    last_passer = Some(who);
-                    priority_holder = if who == ap { nap } else { ap };
-                    continue;
-                }
-                let source_name_for_stack = state.permanent_name(source_id)
-                    .or_else(|| state.objects.get(&source_id).map(|c| c.catalog_key.clone()))
-                    .unwrap_or_default();
-                // Detect ninjutsu via the source card's def rather than a flag on AbilityDef.
-                let is_ninjutsu = state.objects.get(&source_id)
-                    .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
-                    .map_or(false, |d| d.ninjutsu().is_some());
-                // Pay costs first; ctx carries the returned attacker's attack_target for ninjutsu.
-                let ctx = pay_ability_cost(state, t, who, source_id, ability, is_ninjutsu);
-                let (ability_effect, ability_targets): (Option<Effect>, Vec<ObjId>) = if is_ninjutsu {
-                    let attack_target = ctx.returned_attack_targets.first().copied().flatten();
-                    let ninja_effect = Effect(std::sync::Arc::new(move |state, t, _targets| {
-                        let ninja_name = state.objects.get(&source_id)
-                            .map(|c| c.catalog_key.clone())
-                            .unwrap_or_default();
-                        if ninja_name.is_empty() { return; }
-                        let new_id = state.alloc_id();
-                        state.objects.insert(new_id, GameObject {
-                            id: new_id,
-                            catalog_key: ninja_name.clone(),
-                            owner: who,
-                            controller: who,
-                            zone: CardZone::Battlefield,
-                            is_token: false,
-                            spell: None,
-                            bf: Some(BattlefieldState {
-                                tapped: true,
-                                entered_this_turn: true,
-                                attacking: true,
-                                unblocked: true,
-                                attack_target,
-                                ..BattlefieldState::new()
-                            }),
-                            materialized: None,
-                            counters: HashMap::new(), cast_generation: 0,
-                        });
-                        state.combat_attackers.push(new_id);
-                        state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
-                    }));
-                    (Some(ninja_effect), vec![])
-                } else {
-                    let eff = build_ability_effect(ability, who, source_id);
-                    (Some(eff), chosen_targets.clone())
-                };
-                let ab_id = state.alloc_id();
-                let ab_owner = state.player_id(who);
-                let ab = StackAbility {
-                    id: ab_id,
-                    source_name: source_name_for_stack,
-                    owner: ab_owner,
-                    effect: ability_effect.unwrap_or_else(|| Effect(std::sync::Arc::new(|_, _, _| {}))),
-                    chosen_targets: ability_targets,
-                    costs_paid_ctx: ctx,
-                    is_triggered: false,
-                    counterable: true,
-                    choice_spec: if is_ninjutsu { None } else { ability.choice_spec.clone() },
-                };
-                state.abilities.insert(ab_id, ab);
-                state.stack.push(ab_id);
-                let next = if who == ap { nap } else { ap };
-                priority_holder = next;
-                last_passer = None;
-            }
-            PriorityAction::CastSpell { card_id, face, ref preferred_cost, ref chosen_targets, chosen_x, chosen_mode } => {
+            LegalAction::CastSpell { card_id, face, forced_alt_cost } => {
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
-                // Sorcery-speed check: for the main face read the materialized def; for the back
-                // face read the back def's kind (the back face might be instant even if the front
-                // face creature isn't).
                 let is_instant = match face {
                     SpellFace::Main => state.def_of(card_id)
                         .map(|d| d.is_instant()).unwrap_or(false),
@@ -3001,41 +3332,37 @@ fn handle_priority_round(
                     debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
-                } else if let Some(cid) = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(), chosen_targets, chosen_x, chosen_mode) {
-                    state.player_mut(who).spells_cast_this_turn += 1;
-                    state.stack.push(cid);
-                    let next = if who == ap { nap } else { ap };
-                    priority_holder = next;
-                    last_passer = None;
                 } else {
-                    let pool = &state.player(who).pool;
-                    eprintln!("[priority] BUG: cast_spell failed for {} by {} (pool B={} U={} tot={}, hand={})",
-                        name, who, pool.b, pool.u, pool.total, state.hand_size(who));
-                    debug_assert!(false, "BUG: cast_spell failed — decision function returned unaffordable/unavailable spell");
-                    last_passer = Some(who);
-                    priority_holder = if who == ap { nap } else { ap };
+                    let strategy = strategies.get_mut(&who).unwrap();
+                    if let Some(cid) = run_cast_submachine(state, t, who, card_id, face,
+                                                           forced_alt_cost, strategy.as_mut()) {
+                        state.player_mut(who).spells_cast_this_turn += 1;
+                        state.stack.push(cid);
+                        priority_holder = if who == ap { nap } else { ap };
+                        last_passer = None;
+                    } else {
+                        let pool = &state.player(who).pool;
+                        eprintln!("[priority] BUG: cast failed for {} by {} (pool B={} U={} tot={}, hand={})",
+                            name, who, pool.b, pool.u, pool.total, state.hand_size(who));
+                        debug_assert!(false, "BUG: cast failed");
+                        last_passer = Some(who);
+                        priority_holder = if who == ap { nap } else { ap };
+                    }
                 }
             }
-            PriorityAction::PlayFreeCast(card_id) => {
-                play_free_cast(card_id, who, state, t);
-                let next = if who == ap { nap } else { ap };
-                priority_holder = next;
-                last_passer = None;
-            }
-            PriorityAction::Pass => {
-                let other = if who == ap { nap } else { ap };
-                if last_passer == Some(other) {
-                    if state.stack.is_empty() {
-                        break;
-                    } else {
-                        resolve_top_of_stack(state, t, ap, strategies);
-                        priority_holder = ap;
-                        last_passer = None;
-                        last_action = PriorityAction::Pass;
-                    }
-                } else {
+            LegalAction::ActivateAbility { source_id, ability_index } => {
+                let ab = state.def_of(source_id)
+                    .and_then(|d| d.abilities().get(ability_index).cloned())
+                    .unwrap_or_default();
+                if ab.is_loyalty_ability() && !state.stack.is_empty() {
                     last_passer = Some(who);
-                    priority_holder = other;
+                    priority_holder = if who == ap { nap } else { ap };
+                } else {
+                    let strategy = strategies.get_mut(&who).unwrap();
+                    run_activate_submachine(state, t, who, source_id, &ab,
+                                           strategy.as_mut());
+                    priority_holder = if who == ap { nap } else { ap };
+                    last_passer = None;
                 }
             }
         }

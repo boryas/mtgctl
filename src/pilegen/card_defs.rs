@@ -132,6 +132,7 @@ fn all_cards() -> Vec<CardDef> {
         tamiyo_inquisitive_student(),
         brazen_borrower(),
         // Opponent archetypes / hate cards
+        karn_the_great_creator(),
         painters_servant(),
         leyline_of_the_void(),
         disruptor_flute(),
@@ -185,6 +186,7 @@ fn tap_produces(s: &str) -> ManaAbility {
         produces_count: 1,
         make_effect: std::sync::Arc::new(move |who, _color| eff_mana(who, s_owned.clone())),
         condition: None,
+        activatable: true,
     }
 }
 
@@ -479,6 +481,7 @@ fn ancient_tomb() -> CardDef {
                 eff_mana(who, "CC").then(eff_life_loss(who, 2))
             }),
             condition: None,
+            activatable: true,
         }],
         ..Default::default()
     }), vec![], None)
@@ -495,6 +498,7 @@ fn city_of_traitors() -> CardDef {
                 produces_count: 2,
                 make_effect: Arc::new(|who, _| eff_mana(who, "CC")),
                 condition: None,
+                activatable: true,
             }],
             ..Default::default()
         }),
@@ -652,6 +656,7 @@ fn cavern_of_souls() -> CardDef {
                     produces_count: 1,
                     make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "C")),
                     condition: None,
+                    activatable: true,
                 },
                 ManaAbility {
                     source_zone: SourceZone::Battlefield,
@@ -662,6 +667,7 @@ fn cavern_of_souls() -> CardDef {
                         eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
                     }),
                     condition: None,
+                    activatable: true,
                 },
             ],
             ..Default::default()
@@ -691,6 +697,7 @@ fn lotus_petal() -> CardDef {
                 eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
             }),
             condition: None,
+            activatable: true,
         }],
         ..Default::default()
     }), vec![], Some(25))
@@ -725,6 +732,7 @@ fn mox_opal() -> CardDef {
                 eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
             }),
             condition: Some(metalcraft),
+            activatable: true,
         }],
         ..Default::default()
     }), vec![], Some(20));
@@ -874,7 +882,6 @@ fn grafdiggers_cage() -> CardDef {
 fn brainstorm() -> CardDef {
     simple("Brainstorm", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: untargeted_mode(|who, _source_id, _x| {
             eff_draw(who, 3).then(eff_put_back(who, 2))
         }),
@@ -886,7 +893,6 @@ fn brainstorm() -> CardDef {
 fn consider() -> CardDef {
     simple("Consider", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 1)),
         ..Default::default()
     }), parse_colors("U", false, false), None)
@@ -898,7 +904,6 @@ fn consider() -> CardDef {
 fn daze() -> CardDef {
     let mut c = simple("Daze", CardKind::Instant(SpellData {
         mana_cost: "1U".to_string(),
-        exileable: true,
         modes: single_mode(
             TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
             |who, _source_id, _x| eff_counter_unless_pays(who, vec![CostComponent::Mana(parse_mana_cost("1"))]),
@@ -1117,7 +1122,6 @@ fn sheoldreds_edict() -> CardDef {
 fn spell_pierce() -> CardDef {
     simple("Spell Pierce", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: single_mode(
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
@@ -1150,7 +1154,6 @@ fn flusterstorm() -> CardDef {
     let storm_factory = factory.clone();
     let spell_data = SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: Some(SpellModes::Single(SpellMode { target_spec, factory })),
         ..Default::default()
     };
@@ -1229,7 +1232,6 @@ fn flusterstorm() -> CardDef {
 fn mindbreak_trap() -> CardDef {
     let mut c = simple("Mindbreak Trap", CardKind::Instant(SpellData {
         mana_cost: "2UU".to_string(),
-        exileable: true,
         modes: single_mode(
             TargetSpec::Any(Box::new(TargetSpec::ObjectInZone {
                 controller: Who::Opp,
@@ -1258,7 +1260,6 @@ fn mindbreak_trap() -> CardDef {
 fn consign_to_memory() -> CardDef {
     let mut def = simple("Consign to Memory", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: single_mode(
             TargetSpec::Union(vec![
                 TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered },
@@ -1441,7 +1442,6 @@ fn pyroblast() -> CardDef {
 fn blue_elemental_blast() -> CardDef {
     simple("Blue Elemental Blast", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: single_mode(color_hate_target_spec(Color::Red), |who, _source_id, _x| counter_or_destroy(who)),
         ..Default::default()
     }), parse_colors("U", false, false), None)
@@ -1452,7 +1452,6 @@ fn blue_elemental_blast() -> CardDef {
 fn hydroblast() -> CardDef {
     simple("Hydroblast", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: single_mode(any_spell_or_permanent_target(), |who, _source_id, _x| counter_or_destroy_if_color(who, Color::Red)),
         ..Default::default()
     }), parse_colors("U", false, false), None)
@@ -1552,7 +1551,6 @@ fn stock_up() -> CardDef {
 fn ponder() -> CardDef {
     simple("Ponder", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        exileable: true,
         modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 1)),
         ..Default::default()
     }), parse_colors("U", false, false), None)
@@ -1716,9 +1714,7 @@ fn sneak_attack() -> CardDef {
                             filter: Arc::new(move |id, _ctr, _| id == creature_id),
                             modifier: Arc::new(|def, _state| {
                                 if let CardKind::Creature(c) = &mut def.kind {
-                                    if !c.keywords.contains(&"haste".to_string()) {
-                                        c.keywords.push("haste".to_string());
-                                    }
+                                    c.keywords.insert(Keyword::Haste);
                                 }
                             }),
                             expiry: ContinuousExpiry::WhileSourceOnBattlefield,
@@ -1765,8 +1761,7 @@ fn sneak_attack() -> CardDef {
 /// via strategy, not via trigger here (no ETB trigger — strategy checks for Oracle).
 /// CR 702.15 (devotion), CR 104.3b.
 fn thassas_oracle() -> CardDef {
-    let mut data = CreatureData::new("UU", 1, 3);
-    data.exileable = true;
+    let data = CreatureData::new("UU", 1, 3);
     simple("Thassa's Oracle", CardKind::Creature(data), parse_colors("UU", false, false), Some(1))
 }
 
@@ -1792,7 +1787,7 @@ fn barrowgoyf() -> CardDef {
 /// Ninjutsu {1U}: swap in with an unblocked attacker. CR 702.49.
 fn ingenious_infiltrator() -> CardDef {
     let mut data = CreatureData::new("1UB", 2, 1);
-    data.ninjutsu = Some(NinjutsuAbility { mana_cost: "1U".to_string() });
+    data.abilities = vec![ninjutsu_ability("1U")];
     simple(
         "Ingenious Infiltrator",
         CardKind::Creature(data),
@@ -1805,7 +1800,7 @@ fn ingenious_infiltrator() -> CardDef {
 fn kaito_bane_of_nightmares() -> CardDef {
     let mut data = CreatureData::new("2UB", 3, 4);
     data.legendary = true;
-    data.ninjutsu = Some(NinjutsuAbility { mana_cost: "1UB".to_string() });
+    data.abilities = vec![ninjutsu_ability("1UB")];
     simple(
         "Kaito, Bane of Nightmares",
         CardKind::Creature(data),
@@ -1902,7 +1897,7 @@ fn murktide_regent() -> CardDef {
 /// CR 702.28 (shadow), CR 614.1a (replacement).
 fn dauthi_voidwalker() -> CardDef {
     let mut data = CreatureData::new("BB", 3, 2);
-    data.keywords = vec!["shadow".to_string()];
+    data.keywords = Keywords::from_slice(&[Keyword::Shadow]);
     data.abilities = vec![AbilityDef {
         source_zone: SourceZone::Battlefield,
         costs: vec![CostComponent::TapSelf, CostComponent::SacSelf],
@@ -1922,6 +1917,7 @@ fn dauthi_voidwalker() -> CardDef {
                 }
             }))
         })),
+        activatable: true,
     }];
 
     CardDef::new(
@@ -1977,19 +1973,38 @@ fn lavinia_azorius_renegade() -> CardDef {
             }
         }), always_active: false }],
         vec![],
-        vec![ProhibitionDef {
-            check: Arc::new(|event, _source_id, controller, state| {
-                if let GameEvent::SpellBeingCast { caster, mana_value, is_noncreature, .. } = event {
-                    if *caster == controller || !is_noncreature { return false; }
-                    let land_count = state.permanents_of(*caster)
+        vec![],  // no prohibition_defs — casting restriction is now a CE via static_ability_defs
+        // Static ability: "Each opponent can't cast noncreature spells with mana value greater
+        // than the number of lands that player controls." — CE sets castable=false.
+        vec![Arc::new(move |source_id, controller| {
+            let opp = controller.opp();
+            ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![],
+                timestamp: 0,  // assigned at registration
+                // Filter: only opponent's cards in hand (noncreature check in modifier).
+                filter: Arc::new(move |id, card_controller, state| {
+                    card_controller == opp
+                        && state.objects.get(&id).map_or(false, |o| matches!(o.zone, CardZone::Hand { .. }))
+                }),
+                modifier: Arc::new(move |def, state| {
+                    if def.is_creature() || def.is_land() { return; }
+                    let mv = mana_value(def.mana_cost());
+                    let land_count = state.permanents_of(opp)
                         .filter(|o| state.catalog.get(o.catalog_key.as_str())
                             .map_or(false, |d| d.is_land()))
                         .count() as i32;
-                    *mana_value > land_count
-                } else { false }
-            }),
-        }],
-        vec![],
+                    if mv > land_count {
+                        def.castable = false;
+                    }
+                }),
+                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
+            }
+        })],
     )
 }
 
@@ -2245,7 +2260,9 @@ fn disruptor_flute() -> CardDef {
                 modifier: Arc::new(move |def, _| {
                     if def.name == chosen {
                         def.casting_cost_modifier += 3;
-                        def.non_mana_abilities_suppressed = true;
+                        for ab in def.abilities_mut() {
+                            ab.activatable = false;
+                        }
                     }
                 }),
                 expiry: ContinuousExpiry::WhileSourceOnBattlefield,
@@ -2254,6 +2271,51 @@ fn disruptor_flute() -> CardDef {
         })],
         vec![],  // no prohibition_defs
         vec![],  // no static_ability_defs
+    )
+}
+
+/// Legendary Planeswalker — Karn {4}. Loyalty 5.
+/// Static: "Activated abilities of artifacts your opponents control can't be activated."
+/// CE sets activatable=false on ALL abilities (AbilityDef + ManaAbility) of opponent-controlled artifacts.
+/// +1 and −2 abilities are not modeled (not relevant to the Doomsday sim).
+fn karn_the_great_creator() -> CardDef {
+    CardDef::new(
+        "Karn, the Great Creator",
+        CardKind::Planeswalker(PlaneswalkerData {
+            mana_cost: "4".to_string(),
+            loyalty: 5,
+            abilities: vec![],  // +1/−2 not modeled
+        }),
+        vec![],  // colorless
+        None,
+        vec![Supertype::Legendary], CardLayout::Normal, None,
+        vec![],  // no triggers
+        vec![replacement_planeswalker_etb(5)],
+        vec![],  // no prohibitions
+        // Static ability: suppress all activated abilities on artifacts opponents control.
+        vec![Arc::new(move |source_id, controller| {
+            let opp = controller.opp();
+            ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                timestamp: 0,
+                filter: Arc::new(move |_id, card_controller, _state| card_controller == opp),
+                modifier: Arc::new(|def, _state| {
+                    if !matches!(def.kind, CardKind::Artifact(_)) { return; }
+                    for ab in def.abilities_mut() {
+                        ab.activatable = false;
+                    }
+                    for ma in def.mana_abilities_mut() {
+                        ma.activatable = false;
+                    }
+                }),
+                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+                activate_on: None, one_shot: false, active: true,
+            }
+        })],
     )
 }
 
@@ -2509,6 +2571,7 @@ fn simian_spirit_guide() -> CardDef {
         produces_count: 1,
         make_effect: std::sync::Arc::new(|who, _color| eff_mana(who, "R")),
         condition: None,
+        activatable: true,
     }];
     simple("Simian Spirit Guide", CardKind::Creature(data), parse_colors("R", false, false), None)
 }
@@ -2518,7 +2581,7 @@ fn simian_spirit_guide() -> CardDef {
 fn griselbrand() -> CardDef {
     let mut data = CreatureData::new("4BBBB", 7, 7);
     data.legendary = true;
-    data.keywords = vec!["flying".into(), "lifelink".into()];
+    data.keywords = Keywords::from_slice(&[Keyword::Flying, Keyword::Lifelink]);
     data.abilities = vec![AbilityDef {
         costs: vec![CostComponent::Life(7)],
         ability_factory: Some(Arc::new(|who, _| eff_draw(who, 7))),
@@ -2536,7 +2599,7 @@ fn griselbrand() -> CardDef {
 fn emrakul_the_aeons_torn() -> CardDef {
     let mut data = CreatureData::new("15", 15, 15);
     data.legendary = true;
-    data.keywords = vec!["flying".into(), "annihilator 6".into()];
+    data.keywords = Keywords::from_slice(&[Keyword::Flying, Keyword::Annihilator6]);
     let mut def = CardDef::new(
         "Emrakul, the Aeons Torn",
         CardKind::Creature(data),
@@ -2563,9 +2626,9 @@ fn emrakul_the_aeons_torn() -> CardDef {
 fn atraxa_grand_unifier() -> CardDef {
     let mut data = CreatureData::new("3GWUB", 7, 7);
     data.legendary = true;
-    data.keywords = vec![
-        "flying".into(), "vigilance".into(), "deathtouch".into(), "lifelink".into(),
-    ];
+    data.keywords = Keywords::from_slice(&[
+        Keyword::Flying, Keyword::Vigilance, Keyword::Deathtouch, Keyword::Lifelink,
+    ]);
     CardDef::new(
         "Atraxa, Grand Unifier",
         CardKind::Creature(data),

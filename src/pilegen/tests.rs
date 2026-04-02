@@ -979,7 +979,7 @@
 
     fn ninja_def() -> CardDef {
         let mut data = CreatureData::new("", 2, 1);
-        data.ninjutsu = Some(NinjutsuAbility { mana_cost: "U".to_string() });
+        data.abilities = vec![ninjutsu_ability("U")];
         CardDef::new("Ninja", CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
     }
 
@@ -1232,6 +1232,7 @@
                 produces_count: 1,
                 make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "U")),
                 condition: None,
+                activatable: true,
             }],
             ..Default::default()
         }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
@@ -1272,7 +1273,7 @@
 
     fn flying_creature(name: &str, power: i32, toughness: i32) -> CardDef {
         let mut data = CreatureData::new("", power, toughness);
-        data.keywords = vec!["flying".to_string()];
+        data.keywords = Keywords::from_slice(&[Keyword::Flying]);
         CardDef::new(name, CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
     }
 
@@ -1831,18 +1832,15 @@
         state.set_card_zone(delta_id, CardZone::Graveyard);
         state.us.life -= 1;
 
-        // With the source gone, priority_action must never offer ActivateAbility for that id,
-        // regardless of how many times it is called.
+        // With the source gone, collect_legal_actions must never offer ActivateAbility for that id.
         state.current_turn = 1;
         state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
-        for _seed in 0..50u64 {
-            let mut strat = strategy::DoomsdayStrategy::new(99);
-            let action = strat.priority_action(&mut state, PlayerId::Us, &PriorityAction::Pass);
-            assert!(
-                !matches!(action, PriorityAction::ActivateAbility(id, _, _) if id == delta_id),
-                "offered ability for sacrificed permanent — effect would fire without a stack item"
-            );
-        }
+        recompute(&mut state);
+        let legal = strategy::collect_legal_actions(&state, PlayerId::Us);
+        assert!(
+            !legal.iter().any(|a| matches!(a, LegalAction::ActivateAbility { source_id, .. } if *source_id == delta_id)),
+            "offered ability for sacrificed permanent — effect would fire without a stack item"
+        );
     }
 
     #[test]
@@ -2077,9 +2075,7 @@
             filter: std::sync::Arc::new(move |id, _, _| id == source_id),
             modifier: std::sync::Arc::new(|def, _state| {
                 if let CardKind::Creature(c) = &mut def.kind {
-                    if !c.keywords.contains(&"flying".to_string()) {
-                        c.keywords.push("flying".to_string());
-                    }
+                    c.keywords.insert(Keyword::Flying);
                 }
             }),
             expiry: ContinuousExpiry::WhileSourceOnBattlefield,
@@ -2100,8 +2096,8 @@
 
         // recompute: CI from static_ability_def should add "flying" to materialized keywords.
         recompute(&mut state);
-        assert!(state.def_of(id).unwrap().has_keyword("flying"), "flying granted via static_ability_def at ETB");
-        assert!(creature_has_keyword(id, "flying", &state), "creature_has_keyword uses materialized state");
+        assert!(state.def_of(id).unwrap().has_keyword(Keyword::Flying), "flying granted via static_ability_def at ETB");
+        assert!(creature_has_keyword(id, Keyword::Flying, &state), "creature_has_keyword uses materialized state");
     }
 
     /// A creature with a flying static ability should lose the keyword CI when it
@@ -2125,7 +2121,7 @@
         // After deactivate_instances, the object may still be on the battlefield
         // in state.objects (we didn't change_zone), but the CI is gone.
         if let Some(d) = state.def_of(id) {
-            assert!(!d.has_keyword("flying"), "flying removed when CI deactivated");
+            assert!(!d.has_keyword(Keyword::Flying), "flying removed when CI deactivated");
         }
     }
 
@@ -3501,7 +3497,7 @@
 
     #[test]
     fn test_disruptor_flute_suppresses_wasteland_ability() {
-        // Flute names "Wasteland"; Wasteland's materialized non_mana_abilities_suppressed should be true.
+        // Flute names "Wasteland"; Wasteland's non-mana abilities should have activatable=false.
         // Underground Sea's mana abilities must still be available.
         let mut state = make_state();
         state.catalog = test_catalog();
@@ -3512,12 +3508,12 @@
         recompute(&mut state);
 
         assert!(
-            state.def_of(wl_id).map_or(false, |d| d.non_mana_abilities_suppressed),
+            state.def_of(wl_id).map_or(false, |d| d.abilities().iter().all(|a| !a.activatable)),
             "Wasteland non-mana abilities should be suppressed"
         );
         assert!(
-            !state.def_of(sea_id).map_or(true, |d| d.non_mana_abilities_suppressed),
-            "Underground Sea should not be suppressed"
+            state.def_of(sea_id).map_or(false, |d| d.mana_abilities().iter().all(|a| a.activatable)),
+            "Underground Sea mana abilities should not be suppressed"
         );
     }
 
@@ -3543,7 +3539,7 @@
 
         let d = state.def_of(bs_id).expect("Brainstorm should have materialized view");
         assert_eq!(d.casting_cost_modifier, 0);
-        assert!(!d.non_mana_abilities_suppressed);
+        assert!(d.abilities().iter().all(|a| a.activatable), "Brainstorm abilities should not be suppressed");
     }
 
     // ── 38. Surveil lands ──────────────────────────────────────────────────────
@@ -4083,8 +4079,7 @@
         *state.objects.get_mut(&ee_id).unwrap().counters.entry(CounterType::Charge).or_insert(0) = 2;
         // MV 2 permanent: a 2/2 creature with mana_cost "1B" (MV=2).
         let mv2_def = {
-            let mut data = CreatureData::new("1B", 2, 2);
-            data.exileable = false;
+            let data = CreatureData::new("1B", 2, 2);
             CardDef::new("MV2Creature", CardKind::Creature(data), parse_colors("1B", false, false),
                 None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
         };
@@ -4139,23 +4134,20 @@
         state.catalog.insert("TestSorcery2".to_string(), sorcery_def);
         let spell_id = add_hand_card(&mut state, PlayerId::Opp, "TestSorcery2");
 
-        // Give Opp 2 black mana (covers "1B").
-        state.opp.pool.b = 2;
-        state.opp.pool.total = 2;
-
-        // With 1 land, MV 2 > 1 → prohibited.
-        let result = cast_spell(&mut state, 1, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0, 0);
-        assert!(result.is_none(), "Lavinia should prohibit MV-2 noncreature spell when opponent has only 1 land");
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Hand { known: false },
-            "spell should remain in hand after prohibition");
+        // With 1 land, MV 2 > 1 → Lavinia CE sets castable=false.
+        recompute(&mut state);
+        assert!(
+            !state.def_of(spell_id).map_or(true, |d| d.castable),
+            "Lavinia should set castable=false for MV-2 noncreature spell when opponent has only 1 land"
+        );
 
         // Add a second land so opponent now has 2 lands — MV 2 is no longer > 2.
         make_land(&mut state, PlayerId::Opp, "Swamp", false);
-        state.opp.pool.b = 2;
-        state.opp.pool.total = 2;
-
-        let result = cast_spell(&mut state, 2, PlayerId::Opp, spell_id, SpellFace::Main, None, &[], 0, 0);
-        assert!(result.is_some(), "Lavinia should allow MV-2 noncreature spell when opponent has 2 lands");
+        recompute(&mut state);
+        assert!(
+            state.def_of(spell_id).map_or(false, |d| d.castable),
+            "Lavinia should allow MV-2 noncreature spell when opponent has 2 lands"
+        );
     }
 
     #[test]
@@ -5008,7 +5000,7 @@
         assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield,
             "creature should be on the battlefield");
         let def = state.def_of(creature_id).expect("should have materialized def");
-        assert!(def.has_keyword("haste"), "creature should have haste");
+        assert!(def.has_keyword(Keyword::Haste), "creature should have haste");
     }
 
     #[test]
@@ -5826,4 +5818,63 @@
         let ma = &opal_def.mana_abilities()[0];
         let cond = ma.condition.as_ref().expect("Mox Opal should have a condition");
         assert!(cond(opal_id, &state), "metalcraft should be active with 3 artifacts");
+    }
+
+    // ── §55: Karn, the Great Creator ──────────────────────────────────────────
+
+    /// Karn's static ability suppresses all activated abilities (including mana abilities)
+    /// on artifacts opponents control, via CE setting activatable=false.
+    #[test]
+    fn test_karn_suppresses_opponent_artifact_abilities() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Karn on our side.
+        let karn_def = catalog_card("Karn, the Great Creator");
+        let _karn_id = add_perm_with_def(&mut state, PlayerId::Us, &karn_def,
+            BattlefieldState { loyalty: 5, ..BattlefieldState::new() });
+
+        // Opponent controls a Lotus Petal (artifact with mana ability).
+        let opp_petal_id = add_default_perm(&mut state, PlayerId::Opp, "Lotus Petal");
+
+        // Our own Lotus Petal should NOT be suppressed.
+        let our_petal_id = add_default_perm(&mut state, PlayerId::Us, "Lotus Petal");
+
+        recompute(&mut state);
+
+        // Opponent's artifact: mana abilities should be suppressed.
+        let opp_def = state.def_of(opp_petal_id).expect("opponent petal should have materialized def");
+        assert!(
+            opp_def.mana_abilities().iter().all(|ma| !ma.activatable),
+            "Karn should suppress mana abilities on opponent's artifacts"
+        );
+
+        // Our own artifact: mana abilities should be unaffected.
+        let our_def = state.def_of(our_petal_id).expect("our petal should have materialized def");
+        assert!(
+            our_def.mana_abilities().iter().all(|ma| ma.activatable),
+            "Karn should NOT suppress mana abilities on our own artifacts"
+        );
+    }
+
+    /// Karn does not affect non-artifact permanents.
+    #[test]
+    fn test_karn_does_not_affect_non_artifacts() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let karn_def = catalog_card("Karn, the Great Creator");
+        let _karn_id = add_perm_with_def(&mut state, PlayerId::Us, &karn_def,
+            BattlefieldState { loyalty: 5, ..BattlefieldState::new() });
+
+        // Opponent land with mana ability — should NOT be suppressed.
+        let land_id = make_land(&mut state, PlayerId::Opp, "Underground Sea", false);
+
+        recompute(&mut state);
+
+        let land_def = state.def_of(land_id).expect("land should have materialized def");
+        assert!(
+            land_def.mana_abilities().iter().all(|ma| ma.activatable),
+            "Karn should not suppress mana abilities on non-artifact permanents"
+        );
     }

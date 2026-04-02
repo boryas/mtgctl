@@ -179,7 +179,8 @@ Stored in `GameObject.counters: HashMap<CounterType, u32>` — survives zone cha
 
 **`FreeCastPermission`** (`mod.rs`) — a deferred free-cast grant (`controller`, `target_id`).
 Stored in `SimState.free_cast_permissions: Vec<FreeCastPermission>`; cleared at end of turn.
-Strategy returns `PriorityAction::PlayFreeCast(id)`; engine calls `play_free_cast(id, ...)`.
+`collect_legal_actions` emits `LegalAction::CastSpell { forced_alt_cost: Some(free) }` for
+each permission; the cast sub-machine handles cost computation normally (per CR 118.9d).
 
 **`ManaAbility`** (`catalog.rs`) — how a permanent produces mana.
 Fields: `costs: Vec<CostComponent>`, `produces: Vec<Color>` (for affordability prediction),
@@ -247,7 +248,7 @@ and pushes a `TriggerContext` with the given spec and effect.
 **X spells and `XLife`.** Cards with "as an additional cost, pay X life" (e.g. Toxic Deluge)
 use `CardDef.additional_costs = vec![CostComponent::XLife]`. The X value flows as:
 - `Strategy::choose_x_for_spell(card_id, state) -> u32` — trait method, default 3.
-- `PriorityAction::CastSpell { chosen_x: u32 }` — strategy communicates the choice.
+- `AnnounceChoice { chosen_x: u32, .. }` — strategy communicates the choice via `announce` callback.
 - `can_pay_costs(..., chosen_x: u32)` / `pay_costs(..., chosen_x: u32)` — both accept X.
   `XLife` checks `life >= chosen_x` and deducts on payment, recording in `CostsPaidCtx.chosen_x`.
 - `SpellFactory = Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect>` — third arg is `chosen_x`;
