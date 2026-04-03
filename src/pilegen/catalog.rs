@@ -993,7 +993,7 @@ pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Colo
 // ── Trigger check functions (one per trigger-having card) ─────────────────────
 
 /// Build a Bowmasters trigger context. Target is "any_target" = creature | planeswalker | player.
-fn bowmasters_trigger_ctx(_source_id: ObjId, controller: PlayerId, log_msg: &'static str) -> TriggerContext {
+fn bowmasters_trigger_ctx(source_id: ObjId, controller: PlayerId, log_msg: &'static str) -> TriggerContext {
     TriggerContext {
         source_name: "Orcish Bowmasters".into(),
         controller,
@@ -1003,24 +1003,7 @@ fn bowmasters_trigger_ctx(_source_id: ObjId, controller: PlayerId, log_msg: &'st
             TargetSpec::Player(Who::Opp),
         ]),
         effect: Effect(std::sync::Arc::new(move |state, t, targets| {
-            // Apply 1 damage to the chosen target, then amass.
-            // ObjIds are globally unique: try player first, then permanent.
-            if let Some(&id) = targets.first() {
-                if id == state.us.id || id == state.opp.id {
-                    let player = state.who_pid(id);
-                    state.player_mut(player).life -= 1;
-                    state.log(t, controller, format!("Bowmasters: 1 damage to {player}"));
-                } else {
-                    let name = state.permanent_name(id);
-                    if let Some(name) = name {
-                        if let Some(bf) = state.permanent_bf_mut(id) {
-                            bf.damage += 1;
-                        }
-                        state.log(t, controller, format!("Bowmasters: 1 damage to {name}"));
-                    }
-                }
-            }
-            // No target chosen (no legal targets) — do nothing.
+            eff_damage_target(controller, 1, source_id).call(state, t, targets);
             do_amass("Orc Army", controller, 1, state, t);
             state.log(t, controller, log_msg);
         })),

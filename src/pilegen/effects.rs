@@ -101,15 +101,21 @@ pub(crate) fn eff_mana(who: PlayerId, spec: impl Into<String>) -> Effect {
 }
 
 /// Deal `n` damage to the permanent in `targets[0]`. SBAs handle lethal-damage destruction.
+/// Deal `n` damage to a target — creature, planeswalker, or player (CR 120.2).
 /// `source_id` identifies the damage source for protection checks (CR 702.16b).
 pub(crate) fn eff_damage_target(caster: PlayerId, n: i32, source_id: ObjId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
-        if let Some(&id) = targets.first() {
-            if is_protected_from(id, source_id, state) {
-                let name = state.objects.get(&id).map(|o| o.catalog_key.as_str()).unwrap_or("?");
-                state.log(t, caster, format!("→ damage to {} prevented (protection)", name));
-                return;
-            }
+        let Some(&id) = targets.first() else { return; };
+        if is_protected_from(id, source_id, state) {
+            let name = state.objects.get(&id).map(|o| o.catalog_key.as_str()).unwrap_or("?");
+            state.log(t, caster, format!("→ damage to {} prevented (protection)", name));
+            return;
+        }
+        if id == state.us.id || id == state.opp.id {
+            let who = state.who_pid(id);
+            state.lose_life(who, n);
+            state.log(t, caster, format!("→ deals {} damage to {}", n, who));
+        } else {
             if let Some(bf) = state.permanent_bf_mut(id) {
                 bf.damage += n;
             }

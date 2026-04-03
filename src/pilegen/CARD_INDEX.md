@@ -414,6 +414,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 
 | Card | Amount | Target |
 |------|--------|--------|
+| Lightning Bolt | 3 | Any target |
 | Orcish Bowmasters | 1 | Any (ETB + draw trigger) |
 | Fury | 4 | Creature/PW (ETB) |
 | Brotherhood's End | 3 | All creatures + PWs (mode) |

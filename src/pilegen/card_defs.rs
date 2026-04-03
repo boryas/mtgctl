@@ -88,6 +88,7 @@ fn all_cards() -> Vec<CardDef> {
         long_goodbye(),
         consign_to_memory(),
         surgical_extraction(),
+        lightning_bolt(),
         abrade(),
         red_elemental_blast(),
         pyroblast(),
@@ -1374,6 +1375,22 @@ fn counter_or_destroy_if_color(who: PlayerId, c: Color) -> Effect {
             eff_destroy_target(who).call(state, t, targets);
         }
     }))
+}
+
+/// Lightning Bolt deals 3 damage to any target. CR 120.2.
+fn lightning_bolt() -> CardDef {
+    simple("Lightning Bolt", CardKind::Instant(SpellData {
+        mana_cost: "R".to_string(),
+        modes: single_mode(
+            TargetSpec::Union(vec![
+                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) },
+                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Planeswalker)) },
+                TargetSpec::Player(Who::Opp),
+            ]),
+            |who, source_id, _x| eff_damage_target(who, 3, source_id),
+        ),
+        ..Default::default()
+    }), parse_colors("R", false, false), None)
 }
 
 /// Choose one — Counter target blue spell; or destroy target blue permanent. CR 701.5, 701.7.
