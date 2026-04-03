@@ -28,7 +28,7 @@ pub(super) trait Strategy {
     /// 601.2b: choose mode, alt cost, X. Default: mode 0, no alt cost, X=3.
     fn announce(&mut self, _state: &SimState, _card_id: ObjId,
                 _options: &AnnounceOptions) -> AnnounceChoice {
-        AnnounceChoice { chosen_mode: 0, alt_cost: None, chosen_x: 3 }
+        AnnounceChoice { chosen_mode: 0, alt_cost_index: None, chosen_x: 3 }
     }
 
     /// 601.2g: pick a mana ability to activate, or None to stop.
@@ -396,7 +396,7 @@ fn choose_ap_proactive(
     if !state.stack.is_empty() { return LegalAction::Pass; }
 
     let spell_actions: Vec<&LegalAction> = legal.iter().filter(|a| {
-        matches!(a, LegalAction::CastSpell { forced_alt_cost: None, .. })
+        matches!(a, LegalAction::CastSpell { .. })
     }).filter(|a| {
         if let LegalAction::CastSpell { card_id, .. } = a {
             let Some(def) = state.def_of(*card_id) else { return false };
@@ -463,11 +463,6 @@ fn choose_on_board_action(
     rng: &mut impl Rng,
 ) -> Option<LegalAction> {
     let mut candidates: Vec<LegalAction> = Vec::new();
-
-    // Free-cast permissions are already in legal as CastSpell with forced_alt_cost.
-    if let Some(fc) = legal.iter().find(|a| matches!(a, LegalAction::CastSpell { forced_alt_cost: Some(_), .. })) {
-        return Some(fc.clone());
-    }
 
     // Collect ability activations from legal actions, categorized.
     for action in legal {
@@ -545,7 +540,7 @@ fn announce_with_alt_costs(
     probabilistic: bool,
 ) -> AnnounceChoice {
     let chosen_x = if options.has_x_cost { 3 } else { 0 };
-    for alt in &options.available_alt_costs {
+    for (i, alt) in options.available_alt_costs.iter().enumerate() {
         if state.hand_size(who) >= alt.hand_min
             && can_pay_costs(&alt.costs, state, who, card_id, false, 0)
         {
@@ -565,10 +560,10 @@ fn announce_with_alt_costs(
                 let strategic = alt.prob.unwrap_or(0.5);
                 if !rng.gen_bool(strategic) { continue; }
             }
-            return AnnounceChoice { chosen_mode: 0, alt_cost: Some(alt.clone()), chosen_x };
+            return AnnounceChoice { chosen_mode: 0, alt_cost_index: Some(i), chosen_x };
         }
     }
-    AnnounceChoice { chosen_mode: 0, alt_cost: None, chosen_x }
+    AnnounceChoice { chosen_mode: 0, alt_cost_index: None, chosen_x }
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -774,7 +769,7 @@ pub(super) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
         if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, *card_id) { continue; }
         if !spell_is_affordable(*card_id, def, state, who) { continue; }
         if seen_names.insert(name.clone()) {
-            actions.push(LegalAction::CastSpell { card_id: *card_id, face: SpellFace::Main, forced_alt_cost: None });
+            actions.push(LegalAction::CastSpell { card_id: *card_id, face: SpellFace::Main });
         }
         // Adventure back-face.
         if let Some(face) = def.adventure() {
@@ -783,7 +778,7 @@ pub(super) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
                 if !state.potential_mana(who).can_pay(&cost) { continue; }
             }
             if !face.target_spec().is_none() && !has_valid_target(face.target_spec(), state, who, *card_id) { continue; }
-            actions.push(LegalAction::CastSpell { card_id: *card_id, face: SpellFace::Back, forced_alt_cost: None });
+            actions.push(LegalAction::CastSpell { card_id: *card_id, face: SpellFace::Back });
         }
     }
 
@@ -826,24 +821,21 @@ pub(super) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
             let cost = parse_mana_cost(def.mana_cost());
             if state.potential_mana(who).can_pay(&cost) {
                 if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, card_id) { continue; }
-                actions.push(LegalAction::CastSpell { card_id, face: SpellFace::Main, forced_alt_cost: None });
+                actions.push(LegalAction::CastSpell { card_id, face: SpellFace::Main });
             }
         }
     }
 
-    // ── Free-cast permissions (Dauthi Voidwalker, etc.) ──────────────────────
-    for perm in &state.free_cast_permissions {
-        if perm.controller == who {
-            if let Some(def) = state.def_of(perm.target_id) {
-                if def.castable {
-                    actions.push(LegalAction::CastSpell {
-                        card_id: perm.target_id,
-                        face: SpellFace::Main,
-                        forced_alt_cost: Some(AlternateCost::default()),
-                    });
-                }
-            }
-        }
+    // ── Castable cards in exile (Dauthi Voidwalker CE grants castable + free alt cost) ──
+    for card in state.exile_of(who) {
+        let card_id = card.id;
+        let Some(def) = state.def_of(card_id) else { continue };
+        if def.is_land() { continue; }
+        if !def.castable { continue; }
+        if !card_has_implementation(def) { continue; }
+        if !def.target_spec().is_none() && !has_valid_target(def.target_spec(), state, who, card_id) { continue; }
+        if !spell_is_affordable(card_id, def, state, who) { continue; }
+        actions.push(LegalAction::CastSpell { card_id, face: SpellFace::Main });
     }
 
     actions

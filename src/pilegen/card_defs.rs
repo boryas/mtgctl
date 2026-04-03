@@ -125,6 +125,7 @@ fn all_cards() -> Vec<CardDef> {
         lavinia_azorius_renegade(),
         hexing_squelcher(),
         simian_spirit_guide(),
+        fury(),
         griselbrand(),
         emrakul_the_aeons_torn(),
         atraxa_grand_unifier(),
@@ -762,12 +763,10 @@ fn ursas_saga() -> CardDef {
 
 /// {1}. Static: creature cards in graveyards and libraries can't enter the battlefield.
 /// Players can't cast spells from graveyards or libraries.
-/// Modeled as a CE that sets `blocks_gy_and_lib_access = true` on the Cage itself while it's on the
 /// Two static effects while on the battlefield:
 ///   (a) CR 614.17 prohibition: creature cards from graveyards/libraries can't enter the BF.
 ///       Implemented as a `ProhibitionDef` — checked in `fire_event` before replacements.
-///   (b) CE sets `blocks_gy_and_lib_access = true` on Cage's own materialized def, gating
-///       `play_free_cast` so spells can't be cast from graveyards or libraries either.
+///   (b) Static CE sets `castable = false` on all cards in graveyard/library zones.
 /// Sunburst: enters with a charge counter for each distinct color of mana spent to cast it.
 /// Modeled via `CostComponent::XMana` (strategy declares the intended distinct-color count
 /// as chosen_x; the engine pays that many generic mana). The ETB replacement reads
@@ -842,23 +841,7 @@ fn grafdiggers_cage() -> CardDef {
         Some(40),
         vec![], CardLayout::Normal, None,
         vec![],  // no trigger_defs
-        // (b): ETB replacement installs a CE that gates play_free_cast
-        vec![etb_self_replacement(|source_id, _id, _controller, state, _t| {
-            let controller = state.objects.get(&source_id).map_or(PlayerId::Us, |o| o.controller);
-            let ts = state.next_ci_timestamp();
-            state.continuous_instances.push(ContinuousInstance {
-                source_id,
-                controller,
-                layer: ContinuousLayer::L3TextEffects,
-                reads: vec![],
-                writes: vec![],
-                timestamp: ts,
-                filter: Arc::new(move |cid, _, _| cid == source_id),
-                modifier: Arc::new(|def, _| { def.blocks_gy_and_lib_access = true; }),
-                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
-            });
-        })],
+        vec![],  // no replacements (prohibition handles ETB blocking)
         // (a): prohibition blocks ZoneChange from GY/library to BF for creature cards
         vec![ProhibitionDef {
             check: Arc::new(|event, _source_id, _controller, state| {
@@ -872,7 +855,24 @@ fn grafdiggers_cage() -> CardDef {
                 }
             }),
         }],
-        vec![],  // no static_ability_defs
+        // (b): static CE: "Players can't cast spells from graveyards or libraries."
+        // Sets castable = false on all cards in graveyard/library zones.
+        vec![Arc::new(move |source_id, controller| ContinuousInstance {
+            source_id,
+            controller,
+            layer: ContinuousLayer::L3TextEffects,
+            reads: vec![],
+            writes: vec![],
+            timestamp: 0,
+            filter: Arc::new(move |id, _ctr, state| {
+                state.objects.get(&id).map_or(false, |o| {
+                    o.zone == CardZone::Graveyard || o.zone == CardZone::Library
+                })
+            }),
+            modifier: Arc::new(|def, _state| { def.castable = false; }),
+            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
+            activate_on: None, one_shot: false, active: true,
+        })],
     )
 }
 
@@ -1910,9 +1910,22 @@ fn dauthi_voidwalker() -> CardDef {
         ability_factory: Some(Arc::new(|who, _source_id| {
             Effect(Arc::new(move |state, _t, targets| {
                 if let Some(&id) = targets.first() {
-                    state.free_cast_permissions.push(FreeCastPermission {
+                    // Grant a free-cast permission via CE: set castable + add {0} alt cost.
+                    // Expires at end of turn (same as old FreeCastPermission.clear()).
+                    state.continuous_instances.push(ContinuousInstance {
+                        source_id: id,
                         controller: who,
-                        target_id: id,
+                        layer: ContinuousLayer::L3TextEffects,
+                        reads: vec![],
+                        writes: vec![],
+                        timestamp: 0,
+                        filter: Arc::new(move |obj_id, _ctr, _| obj_id == id),
+                        modifier: Arc::new(|def, _state| {
+                            def.castable = true;
+                            def.alternate_costs.push(AlternateCost::default());
+                        }),
+                        expiry: ContinuousExpiry::EndOfTurn,
+                        activate_on: None, one_shot: false, active: true,
                     });
                 }
             }))
@@ -2574,6 +2587,64 @@ fn simian_spirit_guide() -> CardDef {
         activatable: true,
     }];
     simple("Simian Spirit Guide", CardKind::Creature(data), parse_colors("R", false, false), None)
+}
+
+/// Fury — {3}{R}{R} Elemental Incarnation, 3/3. Double strike.
+/// ETB: deals 4 damage divided as you choose among any number of target creatures
+/// and/or planeswalkers. Evoke — Exile a red card from your hand. CR 702.74, 702.4.
+fn fury() -> CardDef {
+    let mut data = CreatureData::new("3RR", 3, 3);
+    data.keywords = Keywords::from_slice(&[Keyword::DoubleStrike]);
+    let mut c = CardDef::new(
+        "Fury",
+        CardKind::Creature(data),
+        parse_colors("3RR", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![
+            // ETB: deal 4 damage to target creature or planeswalker.
+            etb_self_trigger("Fury", TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Battlefield,
+                filter: obj_pred_from_card(pred_or(
+                    pred_type_eq(CardType::Creature),
+                    pred_type_eq(CardType::Planeswalker),
+                )),
+            }, |source_id, controller| eff_damage_target(controller, 4, source_id)),
+            // Evoke sacrifice: if an alternate cost was used, sacrifice on ETB (CR 702.74).
+            TriggerDef {
+                check: Arc::new(|event, source_id, controller, state, pending| {
+                    if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+                        if *id == source_id && *ctlr == controller
+                            && state.resolving_costs_ctx.alt_cost_index.is_some()
+                        {
+                            let sac_pred: ObjPredicate = Arc::new(move |id, _state| id == source_id);
+                            pending.push(TriggerContext {
+                                source_name: "Fury (evoke)".into(),
+                                controller,
+                                target_spec: TargetSpec::None,
+                                effect: eff_sacrifice(controller, Who::Actor, sac_pred),
+                            });
+                        }
+                    }
+                }),
+                always_active: true,
+            },
+        ],
+        vec![],  // no replacements
+        vec![],  // no statics
+        vec![],  // no prohibitions
+    );
+    c.alternate_costs = vec![
+        AlternateCost {
+            costs: vec![CostComponent::ExileFromHand(
+                obj_pred_from_card(pred_has_color(Color::Red))
+            )],
+            hand_min: 2,
+            ..Default::default()
+        },
+    ];
+    c
 }
 
 /// Griselbrand — {4}{B}{B}{B}{B} Legendary 7/7 Demon.

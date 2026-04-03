@@ -50,13 +50,6 @@ pub(super) enum CounterType {
     Charge,
 }
 
-/// Permission granted by an effect allowing a player to play one specific exiled card
-/// without paying its mana cost, until end of turn.
-#[derive(Clone)]
-pub(super) struct FreeCastPermission {
-    pub(super) controller: PlayerId,
-    pub(super) target_id: ObjId,
-}
 
 impl ObjId {
     const UNSET: ObjId = ObjId(0);
@@ -106,6 +99,10 @@ pub(crate) struct CostsPaidCtx {
     pub(crate) chosen_x: u32,
     /// Chosen mode for modal spells (CR 700.2a). Set at cast time.
     pub(crate) chosen_mode: usize,
+    /// Index of the alternate cost used from `def.alternate_costs()`, if any.
+    /// `None` = hardcast (mana cost paid). Used by evoke triggers to detect
+    /// whether the evoke cost path was taken (CR 702.74).
+    pub(crate) alt_cost_index: Option<usize>,
 }
 
 /// Spell-on-stack state for a card while it's on the stack.
@@ -791,8 +788,7 @@ enum LegalAction {
     Pass,
     LandDrop(ObjId),
     /// Normal cast from hand, adventure back-face, or free cast from exile.
-    /// `forced_alt_cost` is Some for free-cast permissions (alt cost = {0}).
-    CastSpell { card_id: ObjId, face: SpellFace, forced_alt_cost: Option<AlternateCost> },
+    CastSpell { card_id: ObjId, face: SpellFace },
     /// Activate a non-mana ability on a permanent.
     ActivateAbility { source_id: ObjId, ability_index: usize },
 }
@@ -807,7 +803,9 @@ struct AnnounceOptions {
 /// Strategy's choices at the Announce step.
 struct AnnounceChoice {
     chosen_mode: usize,
-    alt_cost: Option<AlternateCost>,
+    /// Index into `AnnounceOptions.available_alt_costs` (= `def.alternate_costs()`).
+    /// `None` = pay mana cost normally.
+    alt_cost_index: Option<usize>,
     chosen_x: u32,
 }
 
@@ -1288,9 +1286,6 @@ pub(crate) struct SimState {
     pub(super) continuous_instances: Vec<ContinuousInstance>,
     /// Monotonic counter for assigning timestamps to CIs (CR 613.6).
     pub(super) ci_timestamp_counter: u32,
-    /// Cards that a player is permitted to play for free (without mana cost) this turn.
-    /// Granted by Dauthi Voidwalker's activated ability; cleared at end-of-turn.
-    pub(super) free_cast_permissions: Vec<FreeCastPermission>,
     /// Owned card catalog — populated once at sim init, never mutated.
     /// All runtime card-definition reads go through `state.def_of(id)` (live objects)
     /// or `state.catalog` (bootstrap / non-battlefield lookups).
@@ -1358,7 +1353,6 @@ impl SimState {
             repl_depth: 0,
             continuous_instances: Vec::new(),
             ci_timestamp_counter: 0,
-            free_cast_permissions: Vec::new(),
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
             resolve_choice: std::sync::Arc::new(|_, req, _| match req {
@@ -2299,43 +2293,6 @@ pub(super) fn change_zone(
     );
 }
 
-/// Play the exiled card granted by a free-cast permission (e.g. Dauthi Voidwalker ability).
-/// For permanents: removes the exiled object and re-enters it via `eff_enter_permanent`
-/// (which properly registers instances for ETB). For instants/sorceries: runs the spell
-/// factory and moves the card to graveyard.
-#[cfg(test)]
-pub(super) fn play_free_cast(id: ObjId, actor: PlayerId, state: &mut SimState, t: u8) {
-    // Grafdigger's Cage (and similar) block casting from graveyards/libraries and
-    // creatures entering from those zones.
-    let blocker_ids: Vec<ObjId> = state.objects.values()
-        .filter(|c| c.zone == CardZone::Battlefield)
-        .map(|c| c.id)
-        .collect();
-    let cage_active = blocker_ids.iter().any(|&bid| {
-        state.def_of(bid).map_or(false, |d| d.blocks_gy_and_lib_access)
-    });
-    if cage_active {
-        state.log(t, actor, "→ free cast blocked (Grafdigger's Cage effect)".to_string());
-        return;
-    }
-    state.free_cast_permissions.retain(|p| p.target_id != id);
-    let Some(obj) = state.objects.get(&id) else { return };
-    let key = obj.catalog_key.clone();
-    let def = match state.catalog.get(key.as_str()) { Some(d) => d.clone(), None => return };
-    match &def.kind {
-        CardKind::Instant(s) | CardKind::Sorcery(s) => {
-            if let Some(mode) = s.modes.as_ref().and_then(|m| m.get(0)) {
-                (mode.factory)(actor, id, 0).call(state, t, &[]);
-            }
-            change_zone(id, ZoneId::Graveyard, state, t, actor);
-        }
-        _ => {
-            state.objects.remove(&id);
-            eff_enter_permanent(actor, key).call(state, t, &[]);
-        }
-    }
-}
-
 // matches_search_filter is defined in predicates.rs
 
 /// Draw one card for `who` through the event pipeline. Increments draws_this_turn, fires a Draw
@@ -2642,6 +2599,7 @@ fn cast_spell(
     card_id: ObjId,
     face: SpellFace,
     preferred_cost: Option<&AlternateCost>,
+    announced_alt_index: Option<usize>,
     chosen_targets: &[ObjId],
     chosen_x: u32,
     chosen_mode: usize,
@@ -2705,22 +2663,25 @@ fn cast_spell(
     let has_alt_costs = !def.alternate_costs().is_empty();
     let mana_is_usable = !def.mana_cost().is_empty() && state.potential_mana(who).can_pay(&cost);
 
-    // Select cost.
-    let alt_cost: Option<AlternateCost> = if let Some(pc) = preferred_cost {
-        Some(pc.clone())
+    // Select cost. Track the index into def.alternate_costs() for evoke/similar triggers.
+    let (alt_cost, alt_cost_idx): (Option<AlternateCost>, Option<usize>) = if let Some(pc) = preferred_cost {
+        // Strategy announced an alt cost — use the announced index.
+        (Some(pc.clone()), announced_alt_index)
     } else if !mana_is_usable {
-        def.alternate_costs()
+        let found = def.alternate_costs()
             .iter()
-            .find(|c| {
+            .enumerate()
+            .find(|(_, c)| {
                 state.hand_size(who) >= c.hand_min
                     && can_pay_costs(&c.costs, state, who, card_id, false, 0)
                     && c.condition.as_ref().map_or(true, |f| f(who, state))
-            })
-            .cloned()
-    } else if has_alt_costs {
-        None
+            });
+        match found {
+            Some((i, c)) => (Some(c.clone()), Some(i)),
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
 
     if alt_cost.is_none() && !mana_is_usable {
@@ -2758,6 +2719,7 @@ fn cast_spell(
         costs_ctx.chosen_x = add_ctx.chosen_x;
     }
     costs_ctx.chosen_mode = chosen_mode;
+    costs_ctx.alt_cost_index = alt_cost_idx;
 
     // Exile delve cards from graveyard (cost payment); record in costs_ctx.
     let to_exile_names: Vec<String> = to_exile_ids.iter().map(|(_, n)| n.clone()).collect();
@@ -3131,14 +3093,12 @@ fn resolve_top_of_stack(
 ///
 /// Drives through Announce → Targets → LegalCheck → ComputeCost → ActivateMana → PayCosts → Complete.
 /// Strategy callbacks drive each decision point.
-/// `forced_alt_cost` is for free-cast permissions with a pre-set {0} alt cost.
 fn run_cast_submachine(
     state: &mut SimState,
     t: u8,
     who: PlayerId,
     card_id: ObjId,
     face: SpellFace,
-    forced_alt_cost: Option<AlternateCost>,
     strategy: &mut dyn Strategy,
 ) -> Option<ObjId> {
     // ── Announce (CR 601.2b) ────────────────────────────────────────────
@@ -3154,17 +3114,13 @@ fn run_cast_submachine(
         available_modes: def.spell_modes()
             .map(|m| (0..m.len()).collect())
             .unwrap_or_else(|| vec![0]),
-        available_alt_costs: if forced_alt_cost.is_some() {
-            vec![]
-        } else {
-            def.alternate_costs().to_vec()
-        },
+        available_alt_costs: def.alternate_costs().to_vec(),
         has_x_cost: def.additional_costs.iter()
             .any(|c| matches!(c, CostComponent::XLife | CostComponent::XMana)),
     };
     let ann = strategy.announce(state, card_id, &options);
     let chosen_mode = ann.chosen_mode;
-    let announce_alt = ann.alt_cost;
+    let announced_alt_index = ann.alt_cost_index;
     let chosen_x = ann.chosen_x;
 
     // ── Targets (CR 601.2c) ─────────────────────────────────────────────
@@ -3185,8 +3141,8 @@ fn run_cast_submachine(
     // ── LegalCheck (CR 601.2e) ──────────────────────────────────────────
     // Sorcery-speed check done by caller before entering sub-machine.
 
-    // Forced alt cost (free-cast permission) overrides strategy's announced alt cost.
-    let preferred_cost = forced_alt_cost.or(announce_alt);
+    let preferred_cost = announced_alt_index
+        .and_then(|i| def.alternate_costs().get(i).cloned());
 
     // ── ComputeCost + ActivateMana (CR 601.2f-g) ────────────────────────
     let mana_cost = if let Some(ref alt) = preferred_cost {
@@ -3220,7 +3176,7 @@ fn run_cast_submachine(
     // cast_spell handles remaining payment (pool already filled by mana loop),
     // zone move, effect building, and event firing.
     cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(),
-               &chosen_targets, chosen_x, chosen_mode)
+               announced_alt_index, &chosen_targets, chosen_x, chosen_mode)
 }
 
 /// Activate sub-machine (CR 602.2b).
@@ -3317,7 +3273,7 @@ fn handle_priority_round(
                 state.player_mut(who).lands_played_this_turn += 1;
                 last_passer = None;
             }
-            LegalAction::CastSpell { card_id, face, forced_alt_cost } => {
+            LegalAction::CastSpell { card_id, face } => {
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
                 let is_instant = match face {
                     SpellFace::Main => state.def_of(card_id)
@@ -3335,7 +3291,7 @@ fn handle_priority_round(
                 } else {
                     let strategy = strategies.get_mut(&who).unwrap();
                     if let Some(cid) = run_cast_submachine(state, t, who, card_id, face,
-                                                           forced_alt_cost, strategy.as_mut()) {
+                                                           strategy.as_mut()) {
                         state.player_mut(who).spells_cast_this_turn += 1;
                         state.stack.push(cid);
                         priority_holder = if who == ap { nap } else { ap };
@@ -3429,8 +3385,6 @@ fn do_step(
             // Expire EndOfTurn continuous and trigger instances.
             state.continuous_instances.retain(|ci| ci.expiry != ContinuousExpiry::EndOfTurn);
             state.trigger_instances.retain(|ti| ti.expiry != Some(ContinuousExpiry::EndOfTurn));
-            // Free-cast permissions granted this turn expire.
-            state.free_cast_permissions.clear();
         }
         StepKind::DeclareAttackers => {
             // Strategy decides who attacks and what each attacker targets.

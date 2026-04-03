@@ -12,6 +12,7 @@ pub(crate) enum Keyword {
     Vigilance,
     Deathtouch,
     Annihilator6,
+    DoubleStrike,
 }
 
 /// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.
@@ -626,10 +627,6 @@ pub(crate) struct CardDef {
     /// Dauthi Voidwalker sets true on exiled cards, Lavinia sets false on opponent hand cards.
     /// Reset to zone-based default each recompute. Checked by collect_legal_actions.
     pub(crate) castable: bool,
-    /// True when this permanent on the battlefield prevents (a) casting spells from graveyards
-    /// or libraries and (b) creature cards entering the battlefield from graveyards or libraries
-    /// (e.g. Grafdigger's Cage). Checked by `play_free_cast` and `eff_reanimate`.
-    pub(crate) blocks_gy_and_lib_access: bool,
     /// Alternate costs granted by continuous effects (e.g. Omniscience grants a zero-cost
     /// alternate). Works for ALL card types, unlike `SpellData.alternate_costs` which only
     /// covers Instant/Sorcery. Reset to empty on each `recompute`.
@@ -848,7 +845,6 @@ impl CardDef {
             counterable: true,
             casting_cost_modifier: 0,
             castable: false,
-            blocks_gy_and_lib_access: false,
             alternate_costs: vec![],
             protection_from: vec![],
         }

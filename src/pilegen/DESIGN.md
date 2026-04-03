@@ -177,10 +177,10 @@ is prepended to the effect's `targets` slice. `effect_id` is the `StackAbility`'
 **`CounterType`** (`mod.rs`) — typed enum of counter kinds (currently: `Void`).
 Stored in `GameObject.counters: HashMap<CounterType, u32>` — survives zone changes.
 
-**`FreeCastPermission`** (`mod.rs`) — a deferred free-cast grant (`controller`, `target_id`).
-Stored in `SimState.free_cast_permissions: Vec<FreeCastPermission>`; cleared at end of turn.
-`collect_legal_actions` emits `LegalAction::CastSpell { forced_alt_cost: Some(free) }` for
-each permission; the cast sub-machine handles cost computation normally (per CR 118.9d).
+**Free-cast grants** (Dauthi Voidwalker, Omniscience) work via continuous effects that set
+`castable = true` and push `AlternateCost::default()` (a {0} cost) onto the card's
+`alternate_costs`. No special engine plumbing — the card goes through the normal cast
+sub-machine. `collect_legal_actions` scans exile (and hand) for castable cards.
 
 **`ManaAbility`** (`catalog.rs`) — how a permanent produces mana.
 Fields: `costs: Vec<CostComponent>`, `produces: Vec<Color>` (for affordability prediction),
