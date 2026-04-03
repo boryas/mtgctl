@@ -3257,7 +3257,7 @@ fn handle_priority_round(
 
     loop {
         let queued = std::mem::take(&mut state.pending_triggers);
-        push_triggers(queued, state);
+        push_triggers(queued, state, strategies);
         check_state_based_actions(state, t);
 
         let who = priority_holder;

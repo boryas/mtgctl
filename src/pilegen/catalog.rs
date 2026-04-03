@@ -1145,11 +1145,14 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
 }
 
 /// Push a vec of `TriggerContext`s onto the stack as triggered ability items.
-/// Target selection (choose_trigger_target) happens here — at push time, before the stack resolves.
-pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
+/// Target selection goes through the controller's strategy (CR 601.2c).
+pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
+                            strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>) {
     for ctx in triggers {
         let all_targets = legal_targets(&ctx.target_spec, ctx.controller, ObjId(0), state);
-        let chosen_targets = pick_targets(&ctx.target_spec, &all_targets, state);
+        let chosen_targets = strategies.get_mut(&ctx.controller)
+            .map(|s| s.choose_targets(state, ObjId(0), &all_targets, &ctx.target_spec))
+            .unwrap_or_else(|| pick_targets(&ctx.target_spec, &all_targets, state));
         let ab_id = state.alloc_id();
         let ab_owner = state.player_id(ctx.controller);
         let ab = StackAbility {
