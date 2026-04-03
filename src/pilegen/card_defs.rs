@@ -181,13 +181,11 @@ fn color_to_mana_char(c: Color) -> &'static str {
 fn tap_produces(s: &str) -> ManaAbility {
     let s_owned = s.to_string();
     ManaAbility {
-        source_zone: SourceZone::Battlefield,
         costs: vec![CostComponent::TapSelf],
         produces: produces_colors(s),
         produces_count: 1,
         make_effect: std::sync::Arc::new(move |who, _color| eff_mana(who, s_owned.clone())),
-        condition: None,
-        activatable: true,
+        ..Default::default()
     }
 }
 
@@ -474,15 +472,12 @@ fn karakas() -> CardDef {
 fn ancient_tomb() -> CardDef {
     simple("Ancient Tomb", CardKind::Land(LandData {
         mana_abilities: vec![ManaAbility {
-            source_zone: SourceZone::Battlefield,
             costs: vec![CostComponent::TapSelf],
-            produces: vec![],      // colorless
             produces_count: 2,
             make_effect: std::sync::Arc::new(|who, _| {
                 eff_mana(who, "CC").then(eff_life_loss(who, 2))
             }),
-            condition: None,
-            activatable: true,
+            ..Default::default()
         }],
         ..Default::default()
     }), vec![], None)
@@ -493,13 +488,10 @@ fn city_of_traitors() -> CardDef {
         "City of Traitors",
         CardKind::Land(LandData {
             mana_abilities: vec![ManaAbility {
-                source_zone: SourceZone::Battlefield,
                 costs: vec![CostComponent::TapSelf],
-                produces: vec![],      // colorless
                 produces_count: 2,
                 make_effect: Arc::new(|who, _| eff_mana(who, "CC")),
-                condition: None,
-                activatable: true,
+                ..Default::default()
             }],
             ..Default::default()
         }),
@@ -651,24 +643,17 @@ fn cavern_of_souls() -> CardDef {
             // {T}: Add one mana of any color (type restriction and uncounterable not yet modeled)
             mana_abilities: vec![
                 ManaAbility {
-                    source_zone: SourceZone::Battlefield,
                     costs: vec![CostComponent::TapSelf],
-                    produces: vec![],
-                    produces_count: 1,
                     make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "C")),
-                    condition: None,
-                    activatable: true,
+                    ..Default::default()
                 },
                 ManaAbility {
-                    source_zone: SourceZone::Battlefield,
                     costs: vec![CostComponent::TapSelf],
                     produces: produces_colors("WUBRG"),
-                    produces_count: 1,
                     make_effect: std::sync::Arc::new(|who, color| {
                         eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
                     }),
-                    condition: None,
-                    activatable: true,
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -690,25 +675,33 @@ fn lotus_petal() -> CardDef {
     simple("Lotus Petal", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
         mana_abilities: vec![ManaAbility {
-            source_zone: SourceZone::Battlefield,
             costs: vec![CostComponent::SacSelf],
             produces: produces_colors("WUBRG"),
-            produces_count: 1,
             make_effect: std::sync::Arc::new(|who, color| {
                 eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
             }),
-            condition: None,
-            activatable: true,
+            ..Default::default()
         }],
         ..Default::default()
     }), vec![], Some(25))
 }
 
-/// Mana cost {0}. Produces BBB when sacrificed with a spell on the stack.
-/// The sacrifice-to-activate mechanic is handled by strategy; not modeled as an ability here.
+/// Discard your hand, Sacrifice Lion's Eye Diamond: Add three mana of any one color.
+/// Activate only as an instant. CR 605.3, CR 601.2g (excluded from mana sub-loop).
 fn lions_eye_diamond() -> CardDef {
     simple("Lion's Eye Diamond", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
+        mana_abilities: vec![ManaAbility {
+            costs: vec![CostComponent::DiscardHand, CostComponent::SacSelf],
+            produces: produces_colors("WUBRG"),
+            produces_count: 3,
+            make_effect: std::sync::Arc::new(|who, color| {
+                let c = color.map(color_to_mana_char).unwrap_or("C");
+                eff_mana(who, &format!("{}{}{}", c, c, c))
+            }),
+            timing: ActivationTiming::Instant,
+            ..Default::default()
+        }],
         ..Default::default()
     }), vec![], Some(10))
 }
@@ -725,15 +718,13 @@ fn mox_opal() -> CardDef {
     let mut def = simple("Mox Opal", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
         mana_abilities: vec![ManaAbility {
-            source_zone: SourceZone::Battlefield,
             costs: vec![CostComponent::TapSelf],
             produces: produces_colors("WUBRG"),
-            produces_count: 1,
             make_effect: std::sync::Arc::new(|who, color| {
                 eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
             }),
             condition: Some(metalcraft),
-            activatable: true,
+            ..Default::default()
         }],
         ..Default::default()
     }), vec![], Some(20));
@@ -1386,36 +1377,30 @@ fn counter_or_destroy_if_color(who: PlayerId, c: Color) -> Effect {
 }
 
 /// Choose one — Counter target blue spell; or destroy target blue permanent. CR 701.5, 701.7.
-/// Choose one: deal 3 damage to target creature; or destroy target artifact.
+/// Choose one — Deal 3 damage to target creature; or destroy target artifact. CR 700.2, 701.7.
 fn abrade() -> CardDef {
     simple("Abrade", CardKind::Instant(SpellData {
         mana_cost: "1R".to_string(),
-        modes: single_mode(
-            TargetSpec::Union(vec![
-                TargetSpec::ObjectInZone {
+        modes: Some(SpellModes::modal(vec![
+            // Mode 0: deal 3 damage to target creature
+            SpellMode {
+                target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Opp,
                     zone: ZoneId::Battlefield,
                     filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
                 },
-                TargetSpec::ObjectInZone {
+                factory: Arc::new(|who, source_id, _x| eff_damage_target(who, 3, source_id)),
+            },
+            // Mode 1: destroy target artifact
+            SpellMode {
+                target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Opp,
                     zone: ZoneId::Battlefield,
                     filter: obj_pred_from_card(pred_type_eq(CardType::Artifact)),
                 },
-            ]),
-            |who, source_id, _x| {
-                Effect(Arc::new(move |state, t, targets| {
-                    if let Some(&id) = targets.first() {
-                        let is_creature = state.def_of(id).map_or(false, |d| d.is_creature());
-                        if is_creature {
-                            eff_damage_target(who, 3, source_id).call(state, t, targets);
-                        } else {
-                            eff_destroy_target(who).call(state, t, targets);
-                        }
-                    }
-                }))
+                factory: Arc::new(|who, _source_id, _x| eff_destroy_target(who)),
             },
-        ),
+        ])),
         ..Default::default()
     }), parse_colors("1R", false, false), None)
 }
@@ -1931,6 +1916,7 @@ fn dauthi_voidwalker() -> CardDef {
             }))
         })),
         activatable: true,
+        timing: ActivationTiming::Default,
     }];
 
     CardDef::new(
@@ -2144,6 +2130,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
             abilities: vec![AbilityDef {
                 costs: vec![CostComponent::LoyaltyAdjust(2)],
                 ability_factory: Some(Arc::new(build_tamiyo_plus_two)),
+                timing: ActivationTiming::Sorcery,
                 ..Default::default()
             }],
         }),
@@ -2581,10 +2568,8 @@ fn simian_spirit_guide() -> CardDef {
         source_zone: SourceZone::Hand,
         costs: vec![CostComponent::ExileSelf],
         produces: produces_colors("R"),
-        produces_count: 1,
         make_effect: std::sync::Arc::new(|who, _color| eff_mana(who, "R")),
-        condition: None,
-        activatable: true,
+        ..Default::default()
     }];
     simple("Simian Spirit Guide", CardKind::Creature(data), parse_colors("R", false, false), None)
 }

@@ -53,7 +53,13 @@ If the card has costs or effects not covered by existing tests, add a test in
 `src/pilegen/tests.rs` following the existing section numbering. The test should verify
 the card's most important property (effect fires, cost gate is enforced, etc.).
 
-### 7. Update todo files
+### 7. Update CARD_INDEX.md
+
+Update `src/pilegen/CARD_INDEX.md` — add the new card to every relevant section
+(mana production, ETB triggers, keyword abilities, etc.). If the card uses a
+mechanic not yet listed, add a new section for it.
+
+### 8. Update todo files
 
 **`~/org/projects/mtgctl/cards-todo.org`** — if the card appears here (cards shared across
 ≥2 decks), mark it DONE with a CLOSED timestamp and update the count if present.

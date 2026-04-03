@@ -1226,13 +1226,10 @@
         let borrower_def = catalog_card("Brazen Borrower");
         let island2_def = CardDef::new("Island2", CardKind::Land(LandData {
             mana_abilities: vec![ManaAbility {
-                source_zone: SourceZone::Battlefield,
                 costs: vec![CostComponent::TapSelf],
                 produces: produces_colors("U"),
-                produces_count: 1,
                 make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "U")),
-                condition: None,
-                activatable: true,
+                ..Default::default()
             }],
             ..Default::default()
         }), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);

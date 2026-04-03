@@ -122,6 +122,26 @@ pub(crate) enum SourceZone {
     Hand,
 }
 
+/// When an ability can be activated (CR 602.5b, 605.3a).
+///
+/// Each ability type has a natural default speed:
+/// - `ManaAbility`: usable in the mana sub-loop of spell casting (CR 601.2g)
+/// - `AbilityDef`: instant speed (any time you have priority)
+///
+/// `ActivationTiming` overrides that default:
+/// - `Default` — use the natural speed for this ability type.
+/// - `Instant` — only during priority windows (any stack state). For `ManaAbility` this
+///    excludes it from the CR 601.2g mana sub-loop (e.g. Lion's Eye Diamond).
+/// - `Sorcery` — only during priority when the stack is empty and it's the controller's
+///    main phase (e.g. loyalty abilities, "activate only as a sorcery").
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ActivationTiming {
+    #[default]
+    Default,
+    Instant,
+    Sorcery,
+}
+
 /// A single component of an activation or spell cost.
 ///
 /// `CostAnd` / `CostOr` are combinators that mirror CR 118 semantics:
@@ -137,6 +157,7 @@ pub(crate) enum CostComponent {
     SacSelf,                              // sacrifice the source from battlefield
     DiscardSelf,                          // discard the source from hand
     ExileSelf,                            // exile the source (hand → exile; e.g. Simian Spirit Guide)
+    DiscardHand,                          // discard entire hand (Lion's Eye Diamond)
     Life(i32),
     SacPermanent(ObjPredicate),          // sacrifice another permanent from battlefield
     DiscardCard(ObjPredicate),           // discard another card from hand
@@ -246,6 +267,8 @@ pub(crate) struct AbilityDef {
     /// False when a CE prevents activation (e.g. Disruptor Flute, Karn).
     /// Reset to true each recompute. Checked by ability_available / collect_legal_actions.
     pub(crate) activatable: bool,
+    /// Timing override. Default = instant speed. Sorcery = empty stack + main phase only.
+    pub(crate) timing: ActivationTiming,
 }
 
 impl Default for AbilityDef {
@@ -257,6 +280,7 @@ impl Default for AbilityDef {
             choice_spec: None,
             ability_factory: None,
             activatable: true,
+            timing: ActivationTiming::Default,
         }
     }
 }
@@ -310,6 +334,10 @@ pub(crate) struct ManaAbility {
     /// False when a CE prevents activation (e.g. Karn, Null Rod).
     /// Reset to true each recompute. Checked by collect_legal_actions and mana sub-loop.
     pub(crate) activatable: bool,
+    /// Timing override. Default = usable in mana sub-loop (CR 601.2g).
+    /// Instant = excluded from sub-loop, available during priority (LED).
+    /// Sorcery = priority only, empty stack + main phase.
+    pub(crate) timing: ActivationTiming,
 }
 
 impl Default for ManaAbility {
@@ -322,6 +350,7 @@ impl Default for ManaAbility {
             make_effect: std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_, _, _| {}))),
             condition: None,
             activatable: true,
+            timing: ActivationTiming::Default,
         }
     }
 }

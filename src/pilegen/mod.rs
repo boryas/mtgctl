@@ -791,6 +791,9 @@ enum LegalAction {
     CastSpell { card_id: ObjId, face: SpellFace },
     /// Activate a non-mana ability on a permanent.
     ActivateAbility { source_id: ObjId, ability_index: usize },
+    /// Activate a mana ability with non-default timing (e.g. LED: instant-only).
+    /// These are excluded from the CR 601.2g mana sub-loop but available during priority.
+    ActivateManaAbility { source_id: ObjId, ability_index: usize },
 }
 
 /// Options presented to strategy at the Announce step (CR 601.2b).
@@ -955,6 +958,7 @@ pub(super) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
         let bf = match &card.bf { Some(bf) => bf, None => continue };
         for (idx, ma) in mas.iter().enumerate() {
             if !ma.activatable { continue; }
+            if ma.timing != ActivationTiming::Default { continue; } // non-default timing excluded from mana sub-loop
             if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
             if ma_requires_tap(ma) && bf.tapped { continue; }
             if ma.condition.as_ref().map_or(false, |cond| !cond(card.id, state)) { continue; }
@@ -2322,6 +2326,7 @@ fn can_pay_single_cost(
         CostComponent::SacSelf => state.permanent_bf(source_id).is_some(),
         CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
         CostComponent::ExileSelf => state.hand_of(who).any(|c| c.id == source_id),
+        CostComponent::DiscardHand => true, // discarding 0 cards is valid
         CostComponent::Life(n) => state.player(who).life > *n,
         CostComponent::XLife => state.player(who).life >= chosen_x as i32,
         CostComponent::XMana => state.potential_mana(who).total >= chosen_x as i32,
@@ -2394,6 +2399,13 @@ fn pay_single_cost(
         }
         CostComponent::ExileSelf => {
             state.set_card_zone(source_id, CardZone::Exile { on_adventure: false });
+        }
+        CostComponent::DiscardHand => {
+            let hand_ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
+            for id in hand_ids {
+                state.set_card_zone(id, CardZone::Graveyard);
+                ctx.objects_moved.push(id);
+            }
         }
         CostComponent::Life(n) => {
             state.lose_life(who, *n);
@@ -2559,6 +2571,7 @@ fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
         CostComponent::SacSelf => "sac self".to_string(),
         CostComponent::DiscardSelf => "discard self".to_string(),
         CostComponent::ExileSelf => "exile self".to_string(),
+        CostComponent::DiscardHand => "discard hand".to_string(),
         CostComponent::Life(n) => format!("-{} life", n),
         CostComponent::SacPermanent(_) => "sac permanent".to_string(),
         CostComponent::DiscardCard(_) => "discard card".to_string(),
@@ -3310,15 +3323,29 @@ fn handle_priority_round(
                 let ab = state.def_of(source_id)
                     .and_then(|d| d.abilities().get(ability_index).cloned())
                     .unwrap_or_default();
-                if ab.is_loyalty_ability() && !state.stack.is_empty() {
-                    last_passer = Some(who);
-                    priority_holder = if who == ap { nap } else { ap };
-                } else {
-                    let strategy = strategies.get_mut(&who).unwrap();
-                    run_activate_submachine(state, t, who, source_id, &ab,
-                                           strategy.as_mut());
+                let strategy = strategies.get_mut(&who).unwrap();
+                run_activate_submachine(state, t, who, source_id, &ab,
+                                       strategy.as_mut());
+                priority_holder = if who == ap { nap } else { ap };
+                last_passer = None;
+            }
+            LegalAction::ActivateManaAbility { source_id, ability_index } => {
+                let ma = state.def_of(source_id)
+                    .and_then(|d| d.mana_abilities().get(ability_index).cloned());
+                if let Some(ma) = ma {
+                    let name = state.objects.get(&source_id)
+                        .map(|c| c.catalog_key.clone()).unwrap_or_default();
+                    // Pay all costs via the general cost payment path.
+                    let _ctx = pay_costs(&ma.costs, state, t, who, source_id, 0);
+                    // Produce mana (pick first available color).
+                    let color = ma.produces.first().copied();
+                    ma.make_effect.clone()(who, color).call(state, t, &[]);
+                    state.log(t, who, format!("→ activate {} (mana)", name));
                     priority_holder = if who == ap { nap } else { ap };
                     last_passer = None;
+                } else {
+                    last_passer = Some(who);
+                    priority_holder = if who == ap { nap } else { ap };
                 }
             }
         }
