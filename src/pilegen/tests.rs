@@ -6117,3 +6117,217 @@
         assert!(matches!(state.objects[&opp_id].zone, CardZone::Exile { .. }),
             "non-cast creature should be exiled by Containment Priest");
     }
+
+    // ── Delver of Secrets ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_delver_transforms_on_upkeep_with_instant_on_top() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let def = catalog_card("Delver of Secrets");
+        let delver_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        // Put an instant on top of library.
+        add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        recompute(&mut state);
+
+        // Fire upkeep trigger.
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::Upkeep, active_player: PlayerId::Us },
+            &mut state, 1, PlayerId::Us,
+        );
+        assert_eq!(state.pending_triggers.len(), 1, "should produce a transform trigger");
+        let ctx = state.pending_triggers.remove(0);
+        ctx.effect.call(&mut state, 1, &[]);
+
+        assert_eq!(state.objects[&delver_id].bf.as_ref().unwrap().active_face, 1,
+            "Delver should be on back face after transform");
+
+        // Recompute should give 3/2 flying.
+        recompute(&mut state);
+        let mat = state.def_of(delver_id).unwrap();
+        assert_eq!(mat.name, "Insectile Aberration");
+        if let CardKind::Creature(c) = &mat.kind {
+            assert_eq!(c.power(), 3);
+            assert_eq!(c.toughness(), 2);
+            assert!(c.keywords.contains(Keyword::Flying));
+        } else {
+            panic!("back face should be a creature");
+        }
+    }
+
+    #[test]
+    fn test_delver_no_transform_without_instant_on_top() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let def = catalog_card("Delver of Secrets");
+        let delver_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        // Put a land on top (not instant/sorcery).
+        add_library_card(&mut state, PlayerId::Us, "Island");
+        recompute(&mut state);
+
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::Upkeep, active_player: PlayerId::Us },
+            &mut state, 1, PlayerId::Us,
+        );
+        assert!(state.pending_triggers.is_empty(), "no transform trigger for non-instant top card");
+        assert_eq!(state.objects[&delver_id].bf.as_ref().unwrap().active_face, 0,
+            "Delver should remain on front face");
+    }
+
+    // ── Unholy Heat ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unholy_heat_2_damage_without_delirium() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let target_id = add_default_perm(&mut state, PlayerId::Opp, "Murktide Regent");
+        recompute(&mut state);
+
+        let def = catalog_card("Unholy Heat");
+        let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
+        eff.call(&mut state, 1, &[target_id]);
+
+        assert_eq!(state.permanent_bf(target_id).unwrap().damage, 2,
+            "without delirium, Unholy Heat should deal 2 damage");
+    }
+
+    #[test]
+    fn test_unholy_heat_6_damage_with_delirium() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Seed 4+ card types in graveyard.
+        add_graveyard_card(&mut state, PlayerId::Us, "Island");       // Land
+        add_graveyard_card(&mut state, PlayerId::Us, "Brainstorm");   // Instant
+        add_graveyard_card(&mut state, PlayerId::Us, "Ponder");       // Sorcery
+        add_graveyard_card(&mut state, PlayerId::Us, "Murktide Regent"); // Creature
+
+        let target_id = add_default_perm(&mut state, PlayerId::Opp, "Murktide Regent");
+        recompute(&mut state);
+
+        let def = catalog_card("Unholy Heat");
+        let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
+        eff.call(&mut state, 1, &[target_id]);
+
+        assert_eq!(state.permanent_bf(target_id).unwrap().damage, 6,
+            "with delirium, Unholy Heat should deal 6 damage");
+    }
+
+    // ── Price of Progress ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_price_of_progress_deals_damage_per_nonbasic() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Opp controls 3 nonbasic lands.
+        add_default_perm(&mut state, PlayerId::Opp, "Volcanic Island");
+        add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        add_default_perm(&mut state, PlayerId::Opp, "Wasteland");
+        // Opp controls 1 basic land (should not count).
+        add_default_perm(&mut state, PlayerId::Opp, "Island");
+        // Us controls 1 nonbasic.
+        add_default_perm(&mut state, PlayerId::Us, "Volcanic Island");
+        recompute(&mut state);
+
+        let opp_life_before = state.player(PlayerId::Opp).life;
+        let us_life_before = state.player(PlayerId::Us).life;
+
+        let def = catalog_card("Price of Progress");
+        let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
+        eff.call(&mut state, 1, &[]);
+
+        assert_eq!(state.player(PlayerId::Opp).life, opp_life_before - 6,
+            "opp should take 6 damage (3 nonbasics * 2)");
+        assert_eq!(state.player(PlayerId::Us).life, us_life_before - 2,
+            "us should take 2 damage (1 nonbasic * 2)");
+    }
+
+    // ── Null Rod ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_null_rod_suppresses_artifact_abilities() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _null_rod = add_default_perm(&mut state, PlayerId::Us, "Null Rod");
+        let petal_id = add_default_perm(&mut state, PlayerId::Opp, "Lotus Petal");
+        recompute(&mut state);
+
+        let def = state.def_of(petal_id).expect("Lotus Petal should have materialized def");
+        let ma = def.mana_abilities();
+        assert!(!ma.is_empty(), "Lotus Petal should still have mana abilities listed");
+        assert!(!ma[0].activatable, "Lotus Petal mana ability should not be activatable under Null Rod");
+    }
+
+    // ── Meltdown ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_meltdown_destroys_artifacts_at_or_below_x() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // MV 0 artifact (Lotus Petal), MV 2 artifact (Null Rod), and a non-artifact creature.
+        let petal_id = add_default_perm(&mut state, PlayerId::Opp, "Lotus Petal");
+        let rod_id = add_default_perm(&mut state, PlayerId::Opp, "Null Rod");
+        let creature_id = add_default_perm(&mut state, PlayerId::Opp, "Murktide Regent");
+        recompute(&mut state);
+
+        // Meltdown with X=1: should destroy Lotus Petal (MV 0) but not Null Rod (MV 2).
+        let def = catalog_card("Meltdown");
+        let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 1, 0).1;
+        eff.call(&mut state, 1, &[]);
+
+        assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
+            "Lotus Petal (MV 0) should be destroyed by Meltdown X=1");
+        assert_eq!(state.objects[&rod_id].zone, CardZone::Battlefield,
+            "Null Rod (MV 2) should survive Meltdown X=1");
+        assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield,
+            "non-artifact creature should be unaffected by Meltdown");
+    }
+
+    // ── Rough // Tumble ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rough_deals_2_to_non_flyers_spares_flyers() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Non-flyer and flyer on opponent's board.
+        let ground_id = add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
+        let flyer_id = add_default_perm(&mut state, PlayerId::Opp, "Emrakul, the Aeons Torn");
+        recompute(&mut state);
+
+        let def = catalog_card("Rough // Tumble");
+        let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
+        eff.call(&mut state, 1, &[]);
+
+        assert_eq!(state.permanent_bf(ground_id).unwrap().damage, 2,
+            "Rough should deal 2 damage to non-flyer");
+        assert_eq!(state.permanent_bf(flyer_id).unwrap().damage, 0,
+            "Rough should not damage flyer");
+    }
+
+    #[test]
+    fn test_tumble_deals_6_to_flyers_spares_non_flyers() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let ground_id = add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
+        let flyer_id = add_default_perm(&mut state, PlayerId::Opp, "Emrakul, the Aeons Torn");
+        recompute(&mut state);
+
+        // Cast back face (Tumble).
+        let def = catalog_card("Rough // Tumble");
+        let back = def.adventure().expect("should have back face");
+        let eff = build_spell_effect(back, PlayerId::Us, ObjId::UNSET, 0, 0).1;
+        eff.call(&mut state, 1, &[]);
+
+        assert_eq!(state.permanent_bf(ground_id).unwrap().damage, 0,
+            "Tumble should not damage non-flyer");
+        assert_eq!(state.permanent_bf(flyer_id).unwrap().damage, 6,
+            "Tumble should deal 6 damage to flyer");
+    }

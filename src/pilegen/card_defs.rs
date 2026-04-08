@@ -137,7 +137,14 @@ fn all_cards() -> Vec<CardDef> {
         tamiyo_inquisitive_student(),
         brazen_borrower(),
         containment_priest(),
+        delver_of_secrets(),
+        // Spells — Izzet Delver
+        unholy_heat(),
+        price_of_progress(),
+        meltdown(),
+        rough_tumble(),
         // Opponent archetypes / hate cards
+        null_rod(),
         karn_the_great_creator(),
         painters_servant(),
         leyline_of_the_void(),
@@ -151,6 +158,20 @@ fn all_cards() -> Vec<CardDef> {
 }
 
 // ── Local helpers ─────────────────────────────────────────────────────────────
+
+/// Count distinct card types among cards in `who`'s graveyard (delirium check).
+fn gy_card_type_count(who: PlayerId, state: &SimState) -> usize {
+    use std::collections::HashSet;
+    let mut types = HashSet::new();
+    for obj in state.graveyard_of(who) {
+        if let Some(d) = state.catalog.get(&obj.catalog_key) {
+            for t in &d.types {
+                types.insert(*t);
+            }
+        }
+    }
+    types.len()
+}
 
 /// `CardDef` with no supertypes, normal layout, no back, no triggers/replacements/statics.
 fn simple(name: &str, kind: CardKind, colors: Vec<Color>, play_weight: Option<u32>) -> CardDef {
@@ -2586,21 +2607,7 @@ fn clue_token() -> CardDef {
 /// "Delirium — As long as there are four or more card types among cards in your graveyard,
 ///  this creature gets +2/+2, has flying, and attacks each combat if able."
 fn dragons_rage_channeler() -> CardDef {
-    use std::collections::HashSet;
     let data = CreatureData::new("R", 1, 1);
-
-    /// Count distinct card types among cards in `who`'s graveyard.
-    fn gy_card_type_count(who: PlayerId, state: &SimState) -> usize {
-        let mut types = HashSet::new();
-        for obj in state.graveyard_of(who) {
-            if let Some(d) = state.catalog.get(&obj.catalog_key) {
-                for t in &d.types {
-                    types.insert(*t);
-                }
-            }
-        }
-        types.len()
-    }
 
     CardDef::new(
         "Dragon's Rage Channeler",
@@ -2926,5 +2933,212 @@ fn containment_priest() -> CardDef {
         }],
         vec![],  // no prohibitions
         vec![],  // no static abilities
+    )
+}
+
+// ── Delver of Secrets ────────────────────────────────────────────────────────
+
+/// Delver of Secrets — {U} Creature — Human Wizard 1/1. DFC.
+/// "At the beginning of your upkeep, look at the top card of your library.
+///  You may reveal that card. If an instant or sorcery card is revealed this way,
+///  transform this creature."
+/// Back face: Insectile Aberration — 3/2 Flying.
+fn delver_of_secrets() -> CardDef {
+    let back = CardDef::new(
+        "Insectile Aberration",
+        CardKind::Creature({
+            let mut c = CreatureData::new("", 3, 2);
+            c.keywords = Keywords::from_slice(&[Keyword::Flying]);
+            c
+        }),
+        parse_colors("U", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![], vec![], vec![],
+    );
+
+    CardDef::new(
+        "Delver of Secrets",
+        CardKind::Creature(CreatureData::new("U", 1, 1)),
+        parse_colors("U", false, false),
+        Some(50),
+        vec![], CardLayout::DoubleFaced, Some(Box::new(back)),
+        // Upkeep trigger: look at top card, if instant/sorcery, transform.
+        vec![TriggerDef {
+            check: Arc::new(move |event, source_id, controller, state, pending| {
+                if let GameEvent::EnteredStep { step: StepKind::Upkeep, active_player } = event {
+                    if *active_player != controller { return; }
+                    // Only flip from front face.
+                    if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
+                    // Check top card of library.
+                    let is_instant_or_sorcery = state.library_of(controller).next()
+                        .and_then(|obj| state.catalog.get(&obj.catalog_key))
+                        .map_or(false, |d| d.is_instant() || d.is_sorcery());
+                    if !is_instant_or_sorcery { return; }
+                    pending.push(TriggerContext {
+                        source_name: "Delver of Secrets".into(),
+                        controller,
+                        target_spec: TargetSpec::None,
+                        effect: Effect(Arc::new(move |state, t, _| {
+                            if let Some(bf) = state.objects.get_mut(&source_id).and_then(|c| c.bf.as_mut()) {
+                                bf.active_face = 1;
+                            }
+                            state.log(t, controller, "Delver of Secrets transforms → Insectile Aberration".to_string());
+                        })),
+                    });
+                }
+            }),
+            active_when: tp_on_battlefield(),
+        }],
+        vec![], vec![], vec![],
+    )
+}
+
+// ── Unholy Heat ──────────────────────────────────────────────────────────────
+
+/// Unholy Heat — {R} Instant. Deals 2 damage to target creature or planeswalker.
+/// Delirium — deals 6 damage instead if ≥4 card types in graveyard.
+fn unholy_heat() -> CardDef {
+    simple("Unholy Heat", CardKind::Instant(SpellData {
+        mana_cost: "R".to_string(),
+        modes: single_mode(
+            TargetSpec::Union(vec![
+                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) },
+                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Planeswalker)) },
+            ]),
+            |who, source_id, _x| {
+                Effect(Arc::new(move |state, t, targets| {
+                    let dmg = if gy_card_type_count(who, state) >= 4 { 6 } else { 2 };
+                    eff_damage_target(who, dmg, source_id).call(state, t, targets);
+                }))
+            },
+        ),
+        ..Default::default()
+    }), parse_colors("R", false, false), None)
+}
+
+// ── Price of Progress ────────────────────────────────────────────────────────
+
+/// Price of Progress — {1}{R} Instant. Deals damage to each player equal to
+/// twice the number of nonbasic lands that player controls.
+fn price_of_progress() -> CardDef {
+    simple("Price of Progress", CardKind::Instant(SpellData {
+        mana_cost: "1R".to_string(),
+        modes: single_mode(
+            TargetSpec::None,
+            |who, source_id, _x| {
+                Effect(Arc::new(move |state, t, _targets| {
+                    for &pid in &[PlayerId::Us, PlayerId::Opp] {
+                        let nonbasics = state.permanents_of(pid)
+                            .filter(|obj| {
+                                state.def_of(obj.id)
+                                    .map_or(false, |d| d.types.contains(&CardType::Land) && !d.supertypes.contains(&Supertype::Basic))
+                            })
+                            .count();
+                        let dmg = (nonbasics * 2) as i32;
+                        if dmg > 0 {
+                            // Player damage (same path as eff_damage_target for players).
+                            eff_damage_target(who, dmg, source_id).call(state, t, &[state.player_id(pid)]);
+                        }
+                    }
+                }))
+            },
+        ),
+        ..Default::default()
+    }), parse_colors("R", false, false), None)
+}
+
+// ── Meltdown ─────────────────────────────────────────────────────────────────
+
+/// Meltdown — {X}{R} Sorcery. "Destroy each artifact with mana value X or less."
+fn meltdown() -> CardDef {
+    let mut def = simple("Meltdown", CardKind::Sorcery(SpellData {
+        mana_cost: "R".to_string(),
+        modes: single_mode(
+            TargetSpec::None,
+            |who, _source_id, chosen_x| {
+                let x = chosen_x as i32;
+                let filter = obj_pred_from_card(
+                    pred_and(pred_type_eq(CardType::Artifact), pred_mana_value_le(x)),
+                );
+                Effect(Arc::new(move |state, t, _targets| {
+                    state.log(t, who, format!("Meltdown (X={}): destroy all artifacts MV ≤ {}", x, x));
+                    eff_destroy_all(who, filter.clone()).call(state, t, &[]);
+                }))
+            },
+        ),
+        ..Default::default()
+    }), parse_colors("R", false, false), None);
+    def.additional_costs = vec![CostComponent::XMana];
+    def
+}
+
+// ── Rough // Tumble ──────────────────────────────────────────────────────────
+
+/// Rough // Tumble — split card (first true split, not adventure).
+/// Rough: {1}{R} Sorcery — "Rough deals 2 damage to each creature without flying."
+/// Tumble: {5}{R} Sorcery — "Tumble deals 6 damage to each creature with flying."
+fn rough_tumble() -> CardDef {
+    let tumble = simple("Tumble", CardKind::Sorcery(SpellData {
+        mana_cost: "5R".to_string(),
+        modes: untargeted_mode(|who, source_id, _x| {
+            let filter = obj_pred_from_card(pred_has_keyword(Keyword::Flying));
+            eff_damage_all(who, 6, source_id, filter)
+        }),
+        ..Default::default()
+    }), parse_colors("R", false, false), None);
+
+    CardDef::new(
+        "Rough // Tumble",
+        CardKind::Sorcery(SpellData {
+            mana_cost: "1R".to_string(),
+            modes: untargeted_mode(|who, source_id, _x| {
+                let filter = obj_pred_from_card(pred_not(pred_has_keyword(Keyword::Flying)));
+                eff_damage_all(who, 2, source_id, filter)
+            }),
+            ..Default::default()
+        }),
+        parse_colors("R", false, false),
+        None,
+        vec![], CardLayout::Split, Some(Box::new(tumble)),
+        vec![], vec![], vec![], vec![],
+    )
+}
+
+// ── Null Rod ─────────────────────────────────────────────────────────────────
+
+/// Null Rod — {2} Artifact. "Activated abilities of artifacts can't be activated."
+/// Static L6 CE that sets activatable = false on all artifact abilities (both players').
+fn null_rod() -> CardDef {
+    CardDef::new(
+        "Null Rod",
+        CardKind::Artifact(ArtifactData {
+            mana_cost: "2".to_string(),
+            ..Default::default()
+        }),
+        vec![],
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![], vec![], vec![],
+        // Static: suppress all activated abilities on all artifacts.
+        vec![Arc::new(move |source_id, controller| ContinuousInstance {
+            source_id,
+            controller,
+            layer: ContinuousLayer::L6AbilityEffects,
+            reads: vec![],
+            writes: vec![CeWrites::Abilities],
+            timestamp: 0,
+            filter: Arc::new(|_, _, _| true),
+            modifier: Arc::new(|def, _state| {
+                if !def.types.contains(&CardType::Artifact) { return; }
+                for ab in def.abilities_mut() {
+                    ab.activatable = false;
+                }
+                for ma in def.mana_abilities_mut() {
+                    ma.activatable = false;
+                }
+            }),
+            expiry: Expiry::WhileSourceOnBattlefield,
+        })],
     )
 }

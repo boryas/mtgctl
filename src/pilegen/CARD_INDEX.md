@@ -142,6 +142,12 @@ Modify the ZoneChange event itself rather than triggering after it.
 |------|-----------|--------|
 | City of Traitors | Controller plays another land | Sacrifice self |
 
+#### Upkeep triggers
+
+| Card | Condition | Effect |
+|------|-----------|--------|
+| Delver of Secrets | Controller upkeep, instant/sorcery on top | Transform → Insectile Aberration |
+
 #### Delayed triggers
 
 | Card | When | Effect |
@@ -225,6 +231,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Card | Effect |
 |------|--------|
 | Karn, the Great Creator | Suppress all abilities on opponent artifacts |
+| Null Rod | Suppress all activated abilities on all artifacts (both players) |
 | Lavinia | `castable = false` on opponent noncreature spells |
 | Hexing Squelcher | Grants Ward trigger to other creatures via `granted_trigger_defs` |
 | Sneak Attack | Grants Haste to sneaked creature |
@@ -314,7 +321,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 
 | Keyword | Cards |
 |---------|-------|
-| Flying | Emrakul, Griselbrand, Atraxa, Dragon's Rage Channeler (delirium) |
+| Flying | Emrakul, Griselbrand, Atraxa, Dragon's Rage Channeler (delirium), Insectile Aberration |
 | Shadow | Dauthi Voidwalker |
 | Double Strike | Fury |
 | Haste | Granted by Sneak Attack via L6 CE |
@@ -361,6 +368,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | REB/Pyroblast/BEB/Hydroblast | Color-restricted | `counter_or_destroy` / `counter_or_destroy_if_color` |
 | Brotherhood's End | Artifacts MV≤3 (mode) | `eff_destroy_all` |
 | Engineered Explosives | Nonland MV=charges | `eff_destroy_all` |
+| Meltdown | Artifacts MV≤X | `eff_destroy_all`; `XMana` additional cost |
 
 #### Exile (CR 701.10)
 
@@ -426,6 +434,10 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Fury | 4 | Creature/PW (ETB) |
 | Brotherhood's End | 3 | All creatures + PWs (mode) |
 | Abrade | 3 | Creature (mode) |
+| Unholy Heat | 2/6 | Creature/PW (delirium: 6) |
+| Price of Progress | 2×nonbasics | Each player |
+| Rough | 2 | All creatures without flying |
+| Tumble | 6 | All creatures with flying |
 | Ancient Tomb | 2 | Controller (life loss, not damage) |
 
 #### Surveil (CR 701.43)
@@ -449,7 +461,9 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Card | Layout | Notes |
 |------|--------|-------|
 | Tamiyo | `DoubleFaced` | Front: creature; back: planeswalker |
+| Delver of Secrets | `DoubleFaced` | Front: 1/1; back: 3/2 flying (Insectile Aberration) |
 | Brazen Borrower | `Split` | Front: creature; back: adventure instant |
+| Rough // Tumble | `Split` | True split card; Rough: 2 to non-flyers; Tumble: 6 to flyers |
 
 ---
 

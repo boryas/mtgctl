@@ -56,6 +56,11 @@ pub(crate) fn pred_toughness_le(n: i32) -> CardPredicate {
     std::sync::Arc::new(move |d| d.as_creature().map_or(false, |c| c.toughness() <= n))
 }
 
+/// True iff the card is a creature with the given keyword.
+pub(crate) fn pred_has_keyword(kw: Keyword) -> CardPredicate {
+    std::sync::Arc::new(move |d| d.as_creature().map_or(false, |c| c.keywords.contains(kw)))
+}
+
 /// True iff the card's mana cost has no colored pips (generic/colorless only).
 #[allow(dead_code)] // used by Urza's Saga search (search plan, not yet implemented)
 pub(crate) fn pred_no_colored_pips() -> CardPredicate {
