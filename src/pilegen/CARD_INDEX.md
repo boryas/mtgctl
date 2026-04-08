@@ -133,6 +133,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Card | Condition | Effect |
 |------|-----------|--------|
 | Lavinia | Opponent spell, no mana spent | Counter it |
+| Dragon's Rage Channeler | Controller noncreature spell | Surveil 1 |
 | Flusterstorm (Storm) | Self cast | Copy N times |
 
 #### Land-played trigger
@@ -145,8 +146,9 @@ Modify the ZoneChange event itself rather than triggering after it.
 
 | Card | When | Effect |
 |------|------|--------|
-| Sneak Attack | Next end step | Sacrifice creature; dynamically created `TriggerInstance` |
+| Sneak Attack | Next end step | Sacrifice creature; `OneShot` `TriggerInstance` |
 | Fury (evoke) | Self ETB with `alt_cost_index` set | Sacrifice self |
+| Mishra's Bauble | Next upkeep | Draw 1; `OneShot` delayed `TriggerInstance` |
 
 #### Ward (CR 702.21)
 
@@ -163,6 +165,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Leyline of the Void | Any card → GY | → Exile |
 | Dauthi Voidwalker | Opponent's cards → GY | → Exile + Void counter |
 | Murktide Regent | Self → BF | Self → BF with counters |
+| Containment Priest | Nontoken creature → BF (non-cast) | → Exile; `active_when: on_battlefield` |
 
 ---
 
@@ -175,7 +178,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Emrakul | Self only | `ProhibitionDef` on `SpellBeingCountered` |
 | Long Goodbye | Self only | Same |
 | Hexing Squelcher | Self (stack) + all controller's spells (BF) | Two `ProhibitionDef` entries |
-| Mistrise Village | Next spell this turn | Dormant L6 CE grants `ProhibitionDef` |
+| Mistrise Village | Next spell this turn | `LatentSpellMod` grants `ProhibitionDef` |
 
 #### "Can't enter the battlefield"
 
@@ -225,13 +228,15 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Lavinia | `castable = false` on opponent noncreature spells |
 | Hexing Squelcher | Grants Ward trigger to other creatures via `granted_trigger_defs` |
 | Sneak Attack | Grants Haste to sneaked creature |
-| Mistrise Village | Dormant CE with `activate_on` + `one_shot`; grants "can't be countered" |
+| Mistrise Village | `LatentSpellMod` applies CE granting "can't be countered" on next spell |
+| Dragon's Rage Channeler | Delirium: grants Flying when ≥4 card types in GY |
 
 #### L7 — Power/Toughness
 
 | Card | Effect |
 |------|--------|
 | Toxic Deluge | All creatures get -X/-X (EndOfTurn); SBA handles death at 0 toughness |
+| Dragon's Rage Channeler | Delirium: +2/+2 when ≥4 card types in GY |
 
 ---
 
@@ -309,7 +314,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 
 | Keyword | Cards |
 |---------|-------|
-| Flying | Emrakul, Griselbrand, Atraxa |
+| Flying | Emrakul, Griselbrand, Atraxa, Dragon's Rage Channeler (delirium) |
 | Shadow | Dauthi Voidwalker |
 | Double Strike | Fury |
 | Haste | Granted by Sneak Attack via L6 CE |
@@ -406,9 +411,11 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Griselbrand | 7 | Pay 7 life ability |
 | Street Wraith | 1 | Cycling |
 | Stock Up | 2 | Simplified from "look at 5, pick 2" |
+| Preordain | 1 | Simplified from "scry 2, draw 1" |
 | Ponder | 1 | Simplified from "look at 3, pick 1" |
 | Consider | 1 | Simplified from "surveil 1, draw 1" |
 | Clue Token | 1 | {2}, tap, sac |
+| Mishra's Bauble | 1 | Delayed (next upkeep); tap + sac |
 
 #### Damage (CR 120)
 
@@ -426,6 +433,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Card | Amount |
 |------|--------|
 | MKM surveil duals (10) | 1 (ETB trigger) |
+| Dragon's Rage Channeler | 1 (noncreature spell-cast trigger) |
 | Tamiyo | Strategy-driven |
 
 #### Amass (CR 701.44)
@@ -468,7 +476,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Tamiyo (back) | Only +2 loyalty ability modeled |
 | Brazen Borrower | Front face missing Flying keyword |
 | Edge of Autumn | No cycling AbilityDef; strategy handles manually |
-| Consider/Stock Up/Ponder | Selection simplified to draw N |
+| Consider/Stock Up/Ponder/Preordain | Selection simplified to draw N |
 
 #### Non-standard patterns
 
@@ -476,7 +484,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 |------|---------|-------------|
 | Urza's Saga | Artifact not Enchantment Land Saga | Saga system absent |
 | Hexing Squelcher | Ward grant via `granted_trigger_defs` in L6 modifier | Verbose but correct |
-| Mistrise Village | Dormant CE + `activate_on` + `one_shot` + Mutex | Most complex single card |
+| Mistrise Village | `LatentSpellMod` with predicate + CI factory | Complex: spell-mod pattern instead of dormant CE |
 | Painter's Servant | CE registered in replacement, not `static_ability_defs` | Needs `etb_choice` to know the color |
 
 #### Intentional simplifications

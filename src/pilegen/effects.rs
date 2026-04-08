@@ -275,10 +275,6 @@ pub(crate) fn eff_enter_permanent(
         // Pre-register and immediately activate instances before the event fires,
         // so ETB replacement checks (e.g. Murktide self-ETB) can intercept the event.
         let card_def = state.catalog.get(card_name.as_str()).cloned();
-        if let Some(ref def) = card_def {
-            preregister_instances(def, new_id, owner, state);
-        }
-        activate_instances(new_id, owner, card_def.as_ref(), state);
         state.objects.insert(new_id, GameObject {
             id: new_id,
             catalog_key: card_name.clone(),
@@ -292,7 +288,7 @@ pub(crate) fn eff_enter_permanent(
                 ..BattlefieldState::new()
             }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         fire_event(
             GameEvent::ZoneChange {
@@ -389,16 +385,13 @@ pub(crate) fn eff_counter_target(caster: PlayerId) -> Effect {
 pub(crate) fn eff_counter_and_exile(caster: PlayerId, source_id: ObjId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         let Some(&target_id) = targets.first() else { return; };
-        let re_id = state.alloc_id();
         let re = ReplacementInstance {
-            id: re_id,
             source_id,
             controller: caster,
-            active: true,
-            check: Arc::new(move |event, _, _| {
+            check: Arc::new(move |event, _, _, _state| {
                 match event {
                     GameEvent::ZoneChange { id, to, .. }
-                        if *id == target_id && matches!(to, ZoneId::Graveyard) => Some(vec![]),
+                        if id == &target_id && matches!(to, ZoneId::Graveyard) => Some(vec![]),
                     _ => None,
                 }
             }),

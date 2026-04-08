@@ -438,7 +438,7 @@ pub(super) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
                         ..BattlefieldState::new()
                     }),
                     materialized: None,
-                    counters: HashMap::new(), cast_generation: 0,
+                    counters: HashMap::new(), ci_timestamp: 0,
                 });
                 state.combat_attackers.push(new_id);
                 state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
@@ -587,14 +587,19 @@ pub(crate) enum CardLayout {
 /// Wrapper struct preserving direct `.catalog_key` access and stable HashMap keys while
 /// holding a typed `kind` that enforces card-category invariants.
 /// A replacement effect definition stored directly on a `CardDef`.
-/// `check` returns `Some(targets)` if the replacement applies to an event; `build_effect` builds
+/// `check` returns `Some(targets)` if the replacement applies to an event; `make_effect` builds
 /// the closure that runs instead of the original event.
 #[derive(Clone)]
 pub(crate) struct ReplacementDef {
     pub(crate) check: ReplacementCheckFn,
-    /// Factory: called at instance-registration time with `(source_id, controller)`.
+    /// Factory: called at evaluation time with `(source_id, controller)`.
     /// CardDef-specific data is captured inside the factory at card-load time.
     pub(crate) make_effect: std::sync::Arc<dyn Fn(ObjId, PlayerId) -> Effect + Send + Sync>,
+    /// Predicate controlling when this replacement is active.
+    /// Default: source is on the battlefield (static ability replacements).
+    /// ETB-self replacements (CR 614.1c/d): always active regardless of zone —
+    /// the check fn guards specificity (id == source_id && to == Battlefield).
+    pub(crate) active_when: TriggerPredicate,
 }
 
 /// A "can't happen" prohibition stored on a `CardDef` (CR 614.17).
@@ -603,6 +608,10 @@ pub(crate) struct ReplacementDef {
 #[derive(Clone)]
 pub(crate) struct ProhibitionDef {
     pub(crate) check: ProhibitionCheckFn,
+    /// Predicate controlling when this prohibition is active.
+    /// Default: source is on the battlefield (static ability prohibitions).
+    /// "This spell can't be countered": tp_on_stack (active while on the stack).
+    pub(crate) active_when: TriggerPredicate,
 }
 
 #[derive(Clone)]
@@ -911,6 +920,8 @@ where
                 extra(source_id, id, controller, state, t);
             }))
         }),
+        // CR 614.1c/d: intrinsic entry replacements are always active.
+        active_when: tp_always(),
     }
 }
 
@@ -943,7 +954,7 @@ where
                 }
             }
         }),
-        always_active: true,
+        active_when: tp_on_battlefield(),
     }
 }
 
@@ -1120,16 +1131,41 @@ pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: Play
 }
 
 
-/// Check every active trigger instance for the given event.
-/// Returns any triggered ability contexts that should be pushed onto the stack.
-pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerContext> {
+/// Check all triggers for the given event.
+/// Part 1: Card-bound triggers — walks all objects, checks trigger_defs from catalog,
+///         filtered by `active_when` predicate. No instances needed.
+/// Part 2: Ephemeral triggers — walks trigger_instances (runtime-created, e.g. delayed sac).
+/// Part 3: CE-granted triggers — walks materialized defs for Layer 6 ability grants.
+/// Returns (pending triggers, indices of OneShot trigger instances that fired).
+/// The caller must remove the OneShot instances from `state.trigger_instances`.
+pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<TriggerContext>, Vec<usize>) {
     let mut pending: Vec<TriggerContext> = Vec::new();
-    for inst in &state.trigger_instances {
-        if !inst.active { continue; }
-        (inst.check)(event, inst.source_id, inst.controller, state, &mut pending);
+
+    // Part 1: Card-bound triggers derived from catalog definitions.
+    for (id, obj) in &state.objects {
+        let card_def = match state.catalog.get(&obj.catalog_key) {
+            Some(d) => d,
+            None => continue,
+        };
+        for tdef in &card_def.trigger_defs {
+            if (tdef.active_when)(*id, state) {
+                (tdef.check)(event, *id, obj.controller, state, &mut pending);
+            }
+        }
     }
-    // Also check CE-granted triggers from materialized CardDefs (Layer 6 ability grants).
-    // These are populated during recompute and reset each cycle.
+
+    // Part 2: Ephemeral trigger instances (runtime-created by abilities).
+    // Track OneShot instances that fire so the caller can remove them.
+    let mut one_shot_fired: Vec<usize> = Vec::new();
+    for (i, inst) in state.trigger_instances.iter().enumerate() {
+        let before = pending.len();
+        (inst.check)(event, inst.source_id, inst.controller, state, &mut pending);
+        if pending.len() > before && inst.expiry == Some(Expiry::OneShot) {
+            one_shot_fired.push(i);
+        }
+    }
+
+    // Part 3: CE-granted triggers from materialized CardDefs (Layer 6 ability grants).
     let bf_ids: Vec<(ObjId, PlayerId)> = state.objects.iter()
         .filter(|(_, o)| matches!(o.zone, CardZone::Battlefield) && o.materialized.is_some())
         .map(|(id, o)| (*id, o.controller))
@@ -1141,7 +1177,8 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> Vec<TriggerC
             }
         }
     }
-    pending
+
+    (pending, one_shot_fired)
 }
 
 /// Push a vec of `TriggerContext`s onto the stack as triggered ability items.
@@ -1205,8 +1242,7 @@ pub(super) fn tamiyo_plus_two_check(
                                     c.adjust_pt(-1, 0);
                                 }
                             }),
-                            expiry: ContinuousExpiry::EndOfTurn,
-                activate_on: None, one_shot: false, active: true,
+                            expiry: Expiry::EndOfTurn,
                         });
                     }
                     state.log(t, controller, format!("Tamiyo +2: {} gets -1/-0 until end of turn", atk_name));
@@ -1225,9 +1261,7 @@ pub(super) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
             source_id,
             controller: who,
             check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
-            active: true,
-            always_active: false,
+            expiry: Some(Expiry::StartOfControllerNextTurn),
         });
         state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
     }))
@@ -1264,103 +1298,7 @@ pub(super) fn build_spell_effect(
 }
 
 
-/// Pre-register trigger and replacement instances for a card object at simulation init.
-/// Reads directly from `card_def.trigger_defs` and `card_def.replacement_defs` — no table lookup.
-/// Instances start with `active: false` unless the TriggerDef is `always_active`.
-pub(super) fn preregister_instances(card_def: &CardDef, source_id: ObjId, controller: PlayerId, state: &mut SimState) {
-    for tdef in &card_def.trigger_defs {
-        state.trigger_instances.push(TriggerInstance {
-            source_id,
-            controller,
-            check: tdef.check.clone(),
-            expiry: None,
-            active: tdef.always_active,
-            always_active: tdef.always_active,
-        });
-    }
-    for repl in &card_def.replacement_defs {
-        let id = state.alloc_id();
-        state.replacement_instances.push(ReplacementInstance {
-            id,
-            source_id,
-            controller,
-            check: repl.check.clone(),
-            effect: (repl.make_effect)(source_id, controller),
-            active: false,
-        });
-    }
-    for prohib in &card_def.prohibition_defs {
-        state.prohibition_instances.push(ProhibitionInstance {
-            source_id,
-            controller,
-            check: prohib.check.clone(),
-            active: false,
-        });
-    }
-}
-
-/// Activate all trigger and replacement instances for a card entering the battlefield.
-/// Also registers any static-ability `ContinuousInstance`s from `def.static_ability_defs`.
-/// `def` is `None` only in test helpers that bypass the catalog — static ability CIs won't fire.
-pub(super) fn activate_instances(
-    source_id: ObjId,
-    controller: PlayerId,
-    def: Option<&CardDef>,
-    state: &mut SimState,
-) {
-    for inst in &mut state.trigger_instances {
-        if inst.source_id == source_id { inst.active = true; }
-    }
-    for inst in &mut state.replacement_instances {
-        if inst.source_id == source_id { inst.active = true; }
-    }
-    for inst in &mut state.prohibition_instances {
-        if inst.source_id == source_id { inst.active = true; }
-    }
-    if let Some(card_def) = def {
-        for factory in &card_def.static_ability_defs {
-            let mut ci = factory(source_id, controller);
-            ci.timestamp = state.next_ci_timestamp();
-            state.continuous_instances.push(ci);
-        }
-    }
-}
-
-/// Deactivate all trigger, replacement, and prohibition instances for a card leaving the
-/// battlefield. Also removes static-ability ContinuousInstances (WhileSourceOnBattlefield).
-pub(super) fn deactivate_instances(source_id: ObjId, state: &mut SimState) {
-    for inst in &mut state.trigger_instances {
-        if inst.source_id == source_id && !inst.always_active { inst.active = false; }
-    }
-    for inst in &mut state.replacement_instances {
-        if inst.source_id == source_id { inst.active = false; }
-    }
-    for inst in &mut state.prohibition_instances {
-        if inst.source_id == source_id { inst.active = false; }
-    }
-    state.continuous_instances.retain(|ci| {
-        !(ci.source_id == source_id && ci.expiry == ContinuousExpiry::WhileSourceOnBattlefield)
-    });
-}
-
-/// Activate prohibition instances for a spell entering the stack (CR 614.17).
-/// Unlike `activate_instances` (ETB only), this only activates prohibitions — not
-/// triggers or replacements, which don't meaningfully apply to stack objects.
-/// Used to implement "This spell can't be countered" via `ProhibitionDef`.
-pub(super) fn activate_stack_prohibitions(source_id: ObjId, controller: PlayerId, state: &mut SimState) {
-    for inst in state.prohibition_instances.iter_mut().filter(|i| i.source_id == source_id) {
-        inst.active = true;
-        inst.controller = controller;
-    }
-}
-
-/// Deactivate prohibition instances when a spell leaves the stack.
-pub(super) fn deactivate_stack_prohibitions(source_id: ObjId, state: &mut SimState) {
-    for inst in state.prohibition_instances.iter_mut().filter(|i| i.source_id == source_id) {
-        inst.active = false;
-    }
-}
-
+/// Pre-register instances for a card object at simulation init.
 // ── Grafdigger's Cage creature-entry check ───────────────────────────────────
 
 /// Matches any ZoneChange where a card moves from a graveyard or library to the battlefield.
@@ -1377,7 +1315,7 @@ pub(super) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _c
 
 // ── Leyline of the Void ───────────────────────────────────────────────────────
 
-pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
+pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, .. } = event {
         Some(vec![*id])
     } else {
@@ -1388,7 +1326,7 @@ pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: P
 // ── Shared ETB-self check ─────────────────────────────────────────────────────
 
 /// Matches any ZoneChange where this permanent is the object entering the battlefield.
-pub(super) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
+pub(super) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
         if *id == source_id {
             return Some(vec![*id]);
@@ -1405,7 +1343,7 @@ pub(super) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
 
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────
 
-pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId) -> Option<Vec<ObjId>> {
+pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && *ctlr == controller {
             return Some(vec![*id]);
@@ -1418,7 +1356,7 @@ pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller
 
 /// Replacement check for Dauthi Voidwalker: fires when any card controlled by
 /// the opponent (not DV's controller) would be put into the graveyard from anywhere.
-pub(super) fn dv_replacement_check(event: &GameEvent, _source_id: ObjId, controller: PlayerId) -> Option<Vec<ObjId>> {
+pub(super) fn dv_replacement_check(event: &GameEvent, _source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, controller: card_controller, .. } = event {
         if *card_controller != controller {
             return Some(vec![*id]);

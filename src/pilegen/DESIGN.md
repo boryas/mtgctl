@@ -108,14 +108,23 @@ writes; the topo sort uses same-category overlap to detect dependencies.
 
 ### Instance lifecycle
 
-All three instance types are pre-registered for every card at simulation init
-(`preregister_instances`), starting with `active: false`.
+Two categories: **card-bound** and **ephemeral**.
 
-`activate_instances(source_id, ...)` — called on ETB; marks trigger and replacement
-instances active and registers any `StaticAbilityDef` ContinuousInstances.
+**Card-bound** — triggers, replacements, prohibitions, and static abilities defined in
+`CardDef`. Evaluated from the catalog at event/recompute time; never stored as instances.
+`active_when` predicates (e.g. `tp_on_battlefield()`) gate whether they apply.
 
-`deactivate_instances(source_id, ...)` — called on LTB; marks instances inactive
-and removes `WhileSourceOnBattlefield` ContinuousInstances.
+**Ephemeral** — runtime-created `TriggerInstance`, `ReplacementInstance`, and
+`ContinuousInstance`. Created by ability effects (e.g. Sneak Attack's delayed trigger).
+Principle: **existence = active** — no `active` flag; presence in the vec means active.
+
+`Expiry::WhileSourceOnBattlefield` — CIs removed in `change_zone` when source leaves BF.
+`Expiry::OneShot` — triggers removed after firing once (e.g. delayed triggers).
+`Expiry::EndOfTurn` — CIs removed at cleanup step.
+
+`LatentSpellMod` — pre-cast hook (CR 611.2f). When a spell is cast, `consume_latent_spell_mod`
+checks if any latent mod's predicate matches; if so, materializes a CI for that spell.
+Used by Mistrise Village ("next spell can't be countered").
 
 ### Effects and factories
 
@@ -128,8 +137,8 @@ use predicates and `ObjId`s captured at factory time.
 The `u32` is `chosen_x` (strategy-chosen X value; 0 for non-X spells). `SpellData.has_x_cost: bool`
 marks X spells; the engine pays `Life(chosen_x)` and `Strategy::choose_x_for_spell` (default: 3) picks X.
 `AbilityFactory = Arc<dyn Fn(PlayerId, ObjId) -> Effect>` — same pattern.
-`StaticAbilityDef = Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance>` — called on ETB.
-`ReplacementDef.make_effect = Arc<dyn Fn(ObjId, PlayerId) -> Effect>` — called at pre-registration.
+`StaticAbilityDef = Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance>` — called during recompute for BF sources.
+`ReplacementDef.check` receives `(&GameEvent, ObjId, PlayerId, &SimState)` — state access enables checks like `is_token` or `is_creature`.
 
 ### Card definitions
 

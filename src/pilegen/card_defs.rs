@@ -74,6 +74,7 @@ fn all_cards() -> Vec<CardDef> {
         ursas_saga(),
         engineered_explosives(),
         grafdiggers_cage(),
+        mishras_bauble(),
         // Spells — instants
         brainstorm(),
         consider(),
@@ -103,6 +104,7 @@ fn all_cards() -> Vec<CardDef> {
         toxic_deluge(),
         doomsday(),
         stock_up(),
+        preordain(),
         ponder(),
         thoughtseize(),
         unearth(),
@@ -125,6 +127,7 @@ fn all_cards() -> Vec<CardDef> {
         dauthi_voidwalker(),
         lavinia_azorius_renegade(),
         hexing_squelcher(),
+        dragons_rage_channeler(),
         simian_spirit_guide(),
         fury(),
         griselbrand(),
@@ -133,6 +136,7 @@ fn all_cards() -> Vec<CardDef> {
         // DFCs / split
         tamiyo_inquisitive_student(),
         brazen_borrower(),
+        containment_priest(),
         // Opponent archetypes / hate cards
         karn_the_great_creator(),
         painters_servant(),
@@ -517,7 +521,7 @@ fn city_of_traitors() -> CardDef {
                     }
                 }
             }),
-            always_active: false,
+            active_when: tp_on_battlefield(),
         }],
         vec![], vec![], vec![],
     )
@@ -814,6 +818,7 @@ fn engineered_explosives() -> CardDef {
                     );
                 }))
             }),
+            active_when: tp_always(),
         }],
         vec![],
         vec![],
@@ -846,6 +851,7 @@ fn grafdiggers_cage() -> CardDef {
                     false
                 }
             }),
+            active_when: tp_on_battlefield(),
         }],
         // (b): static CE: "Players can't cast spells from graveyards or libraries."
         // Sets castable = false on all cards in graveyard/library zones.
@@ -862,8 +868,8 @@ fn grafdiggers_cage() -> CardDef {
                 })
             }),
             modifier: Arc::new(|def, _state| { def.castable = false; }),
-            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-            activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::WhileSourceOnBattlefield,
+
         })],
     )
 }
@@ -1066,6 +1072,7 @@ fn long_goodbye() -> CardDef {
             check: Arc::new(|event, source_id, _controller, _state| {
                 matches!(event, GameEvent::SpellBeingCountered { card_id, .. } if *card_id == source_id)
             }),
+            active_when: tp_on_stack(),
         }],
         vec![],
     )
@@ -1213,7 +1220,7 @@ fn flusterstorm() -> CardDef {
                     });
                 }
             }),
-            always_active: true,
+            active_when: tp_on_stack(),
         }],
         vec![], vec![], vec![],
     )
@@ -1485,8 +1492,8 @@ fn toxic_deluge() -> CardDef {
                             c.adjust_pt(-xi, -xi);
                         }
                     }),
-                    expiry: ContinuousExpiry::EndOfTurn,
-                activate_on: None, one_shot: false, active: true,
+                    expiry: Expiry::EndOfTurn,
+
                 });
                 state.log(t, caster, format!("→ all creatures get -{xi}/-{xi} until end of turn"));
             }))
@@ -1545,6 +1552,15 @@ fn stock_up() -> CardDef {
     simple("Stock Up", CardKind::Sorcery(SpellData {
         mana_cost: "2U".to_string(),
         modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 2)),
+        ..Default::default()
+    }), parse_colors("U", false, false), None)
+}
+
+/// Scry 2, then draw a card. Scry not modeled; treated as draw:1. CR 701.43, CR 701.9.
+fn preordain() -> CardDef {
+    simple("Preordain", CardKind::Sorcery(SpellData {
+        mana_cost: "U".to_string(),
+        modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 1)),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
@@ -1668,15 +1684,15 @@ fn omniscience() -> CardDef {
             layer: ContinuousLayer::L3TextEffects,
             reads: vec![],
             writes: vec![],
-            timestamp: 0, // assigned by activate_instances
+            timestamp: 0, // assigned at ETB via ci_timestamp
             filter: Arc::new(move |_id, ctr, _| ctr == controller),
             modifier: Arc::new(|def, _state| {
                 if !def.is_land() {
                     def.alternate_costs.push(AlternateCost::default());
                 }
             }),
-            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::WhileSourceOnBattlefield,
+
         })],
     )
 }
@@ -1719,8 +1735,8 @@ fn sneak_attack() -> CardDef {
                                     c.keywords.insert(Keyword::Haste);
                                 }
                             }),
-                            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+                            expiry: Expiry::WhileSourceOnBattlefield,
+
                         });
 
                         // Delayed trigger: at the beginning of the next end step, sacrifice this creature.
@@ -1739,9 +1755,7 @@ fn sneak_attack() -> CardDef {
                                     });
                                 }
                             }),
-                            expiry: None,
-                            active: true,
-                            always_active: false,
+                            expiry: Some(Expiry::OneShot),
                         });
                     }))
                 })),
@@ -1820,7 +1834,7 @@ fn recruiter_of_the_guard() -> CardDef {
         parse_colors("2W", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![TriggerDef { check: Arc::new(recruiter_check), always_active: true }],
+        vec![TriggerDef { check: Arc::new(recruiter_check), active_when: tp_on_battlefield() }],
         vec![],
         vec![],
         vec![],
@@ -1838,7 +1852,7 @@ fn orcish_bowmasters() -> CardDef {
         parse_colors("1B", false, true),
         None,
         vec![], CardLayout::Normal, None,
-        vec![TriggerDef { check: Arc::new(bowmasters_check), always_active: false }],
+        vec![TriggerDef { check: Arc::new(bowmasters_check), active_when: tp_on_battlefield() }],
         vec![],
         vec![],
         vec![],
@@ -1856,7 +1870,7 @@ fn murktide_regent() -> CardDef {
         parse_colors("5UU", true, false),
         Some(25),
         vec![], CardLayout::Normal, None,
-        vec![TriggerDef { check: Arc::new(murktide_check), always_active: false }],
+        vec![TriggerDef { check: Arc::new(murktide_check), active_when: tp_on_battlefield() }],
         vec![ReplacementDef {
             check: Arc::new(murktide_etb_check),
             make_effect: Arc::new(|_source_id, controller: PlayerId| {
@@ -1887,6 +1901,7 @@ fn murktide_regent() -> CardDef {
                     );
                 }))
             }),
+            active_when: tp_always(),
         }],
         vec![],
         vec![],
@@ -1926,8 +1941,8 @@ fn dauthi_voidwalker() -> CardDef {
                             def.castable = true;
                             def.alternate_costs.push(AlternateCost::default());
                         }),
-                        expiry: ContinuousExpiry::EndOfTurn,
-                        activate_on: None, one_shot: false, active: true,
+                        expiry: Expiry::EndOfTurn,
+    
                     });
                 }
             }))
@@ -1955,6 +1970,7 @@ fn dauthi_voidwalker() -> CardDef {
                     }
                 }))
             }),
+            active_when: tp_on_battlefield(),
         }],
         vec![],
         vec![],
@@ -1987,7 +2003,7 @@ fn lavinia_azorius_renegade() -> CardDef {
                     });
                 }
             }
-        }), always_active: false }],
+        }), active_when: tp_on_battlefield() }],
         vec![],
         vec![],  // no prohibition_defs — casting restriction is now a CE via static_ability_defs
         // Static ability: "Each opponent can't cast noncreature spells with mana value greater
@@ -2017,8 +2033,8 @@ fn lavinia_azorius_renegade() -> CardDef {
                         def.castable = false;
                     }
                 }),
-                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+                expiry: Expiry::WhileSourceOnBattlefield,
+
             }
         })],
     )
@@ -2066,7 +2082,7 @@ fn hexing_squelcher() -> CardDef {
                     });
                 }
             }
-        }), always_active: true }],
+        }), active_when: tp_on_battlefield() }],
         vec![],
         vec![
             // "Spells you control can't be countered." (while on battlefield)
@@ -2074,12 +2090,14 @@ fn hexing_squelcher() -> CardDef {
                 check: Arc::new(|event, _source_id, controller, _state| {
                     matches!(event, GameEvent::SpellBeingCountered { caster, .. } if *caster == controller)
                 }),
+                active_when: tp_on_battlefield(),
             },
             // "This spell can't be countered." (while on stack)
             ProhibitionDef {
                 check: Arc::new(|event, source_id, _controller, _state| {
                     matches!(event, GameEvent::SpellBeingCountered { card_id, .. } if *card_id == source_id)
                 }),
+                active_when: tp_on_stack(),
             },
         ],
         // "Other creatures you control have Ward—Pay 2 life."
@@ -2091,7 +2109,7 @@ fn hexing_squelcher() -> CardDef {
             layer: ContinuousLayer::L6AbilityEffects,
             reads: vec![],
             writes: vec![CeWrites::Abilities],
-            timestamp: 0, // assigned by activate_instances
+            timestamp: 0, // assigned at ETB via ci_timestamp
             filter: Arc::new(move |id, ctr, _| ctr == controller && id != source_id),
             modifier: Arc::new(|def, _state| {
                 if matches!(def.kind, CardKind::Creature(_)) {
@@ -2127,8 +2145,8 @@ fn hexing_squelcher() -> CardDef {
                     ));
                 }
             }),
-            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::WhileSourceOnBattlefield,
+
         })],
     )
 }
@@ -2169,7 +2187,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
         parse_colors("U", false, false),
         None,
         vec![Supertype::Legendary], CardLayout::DoubleFaced, Some(Box::new(back)),
-        vec![TriggerDef { check: Arc::new(tamiyo_check), always_active: false }],
+        vec![TriggerDef { check: Arc::new(tamiyo_check), active_when: tp_on_battlefield() }],
         vec![],
         vec![],
         vec![],
@@ -2200,8 +2218,8 @@ fn painters_servant() -> CardDef {
             modifier: Arc::new(move |def, _| {
                 if !def.colors.contains(&chosen) { def.colors.push(chosen); }
             }),
-            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::WhileSourceOnBattlefield,
+
         });
     });
     let mut def = CardDef::new(
@@ -2232,6 +2250,7 @@ fn leyline_of_the_void() -> CardDef {
                 }
             }))
         }),
+        active_when: tp_on_battlefield(),
     };
     CardDef::new(
         "Leyline of the Void",
@@ -2282,8 +2301,8 @@ fn disruptor_flute() -> CardDef {
                         }
                     }
                 }),
-                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+                expiry: Expiry::WhileSourceOnBattlefield,
+
             });
         })],
         vec![],  // no prohibition_defs
@@ -2329,8 +2348,8 @@ fn karn_the_great_creator() -> CardDef {
                         ma.activatable = false;
                     }
                 }),
-                expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+                expiry: Expiry::WhileSourceOnBattlefield,
+
             }
         })],
     )
@@ -2346,7 +2365,7 @@ fn nonbasic_lands_are_mountains() -> StaticAbilityDef {
         layer: ContinuousLayer::L4TypeEffects,
         reads: vec![CeReads::Supertypes],  // checks "is basic?"
         writes: vec![CeWrites::LandTypes, CeWrites::Abilities],
-        timestamp: 0, // assigned by activate_instances
+        timestamp: 0, // assigned at ETB via ci_timestamp
         filter: Arc::new(|_id, _ctr, _| true),
         modifier: Arc::new(|def, _state| {
             if !matches!(def.kind, CardKind::Land(_)) { return; }
@@ -2359,8 +2378,8 @@ fn nonbasic_lands_are_mountains() -> StaticAbilityDef {
             // CR 305.7: land loses all abilities — including static abilities.
             def.static_ability_defs.clear();
         }),
-        expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+        expiry: Expiry::WhileSourceOnBattlefield,
+
     })
 }
 
@@ -2405,7 +2424,7 @@ fn each_land_gains_subtype(
         layer: ContinuousLayer::L4TypeEffects,
         reads: vec![CeReads::LandTypes],  // checks "already has this type?"
         writes: vec![CeWrites::LandTypes],
-        timestamp: 0, // assigned by activate_instances
+        timestamp: 0, // assigned at ETB via ci_timestamp
         filter: Arc::new(|_id, _ctr, _| true),
         modifier: Arc::new(move |def, _state| {
             if let CardKind::Land(ref mut land) = def.kind {
@@ -2415,8 +2434,8 @@ fn each_land_gains_subtype(
                 }
             }
         }),
-        expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+        expiry: Expiry::WhileSourceOnBattlefield,
+
     })
 }
 
@@ -2481,48 +2500,33 @@ fn mistrise_village() -> CardDef {
                 costs: vec![CostComponent::Mana(parse_mana_cost("U")), CostComponent::TapSelf],
                 ability_factory: Some(Arc::new(|who, source_id| {
                     Effect(Arc::new(move |state, t, _targets| {
-                        // Shared capture slot for the activation event callback and the filter.
-                        let captured: Arc<std::sync::Mutex<Option<(ObjId, u32)>>> =
-                            Arc::new(std::sync::Mutex::new(None));
-                        let cap_activate = captured.clone();
-                        let cap_filter = captured.clone();
                         let ts = state.next_ci_timestamp();
-                        state.continuous_instances.push(ContinuousInstance {
-                            source_id,
+                        state.latent_spell_mods.push(LatentSpellMod {
                             controller: who,
-                            layer: ContinuousLayer::L6AbilityEffects,
-                            reads: vec![],
-                            writes: vec![CeWrites::Abilities],
-                            timestamp: ts,
-                            filter: Arc::new(move |id, _ctr, state: &SimState| {
-                                cap_filter.lock().unwrap()
-                                    .map_or(false, |(cid, gen)| {
-                                        id == cid && state.objects.get(&id)
-                                            .map_or(false, |o| o.cast_generation == gen)
-                                    })
-                            }),
-                            modifier: Arc::new(|def, _state| {
-                                def.prohibition_defs.push(ProhibitionDef {
-                                    check: Arc::new(|event, source_id, _controller, _state| {
-                                        matches!(event, GameEvent::SpellBeingCountered { card_id, .. }
-                                                 if *card_id == source_id)
+                            predicate: Arc::new(|_spell_id, _caster, _state| true),
+                            make_ci: Arc::new(move |spell_id, controller| {
+                                ContinuousInstance {
+                                    source_id,
+                                    controller,
+                                    layer: ContinuousLayer::L6AbilityEffects,
+                                    reads: vec![],
+                                    writes: vec![CeWrites::Abilities],
+                                    timestamp: ts,
+                                    filter: Arc::new(move |id, _ctr, _state: &SimState| id == spell_id),
+                                    modifier: Arc::new(|def, _state| {
+                                        def.prohibition_defs.push(ProhibitionDef {
+                                            check: Arc::new(|event, source_id, _controller, _state| {
+                                                matches!(event, GameEvent::SpellBeingCountered { card_id, .. }
+                                                         if *card_id == source_id)
+                                            }),
+                                            active_when: tp_on_stack(),
+                                        });
                                     }),
-                                });
-                            }),
-                            expiry: ContinuousExpiry::EndOfTurn,
-                            activate_on: Some(Arc::new(move |event, _source_id, controller, state| {
-                                if let GameEvent::SpellCast { caster, card_id, .. } = event {
-                                    if *caster == controller {
-                                        let gen = state.objects.get(card_id)
-                                            .map(|o| o.cast_generation).unwrap_or(0);
-                                        *cap_activate.lock().unwrap() = Some((*card_id, gen));
-                                        return true;
-                                    }
+                                    expiry: Expiry::EndOfTurn,
+                
                                 }
-                                false
-                            })),
-                            one_shot: true,
-                            active: false,
+                            }),
+                            expiry: Expiry::EndOfTurn,
                         });
                         state.log(t, who, "Mistrise Village → next spell can't be countered".to_string());
                     }))
@@ -2575,6 +2579,97 @@ fn clue_token() -> CardDef {
         }],
         ..Default::default()
     }), vec![], None)
+}
+
+/// Dragon's Rage Channeler — {R} 1/1 Human Shaman.
+/// "Whenever you cast a noncreature spell, surveil 1."
+/// "Delirium — As long as there are four or more card types among cards in your graveyard,
+///  this creature gets +2/+2, has flying, and attacks each combat if able."
+fn dragons_rage_channeler() -> CardDef {
+    use std::collections::HashSet;
+    let data = CreatureData::new("R", 1, 1);
+
+    /// Count distinct card types among cards in `who`'s graveyard.
+    fn gy_card_type_count(who: PlayerId, state: &SimState) -> usize {
+        let mut types = HashSet::new();
+        for obj in state.graveyard_of(who) {
+            if let Some(d) = state.catalog.get(&obj.catalog_key) {
+                for t in &d.types {
+                    types.insert(*t);
+                }
+            }
+        }
+        types.len()
+    }
+
+    CardDef::new(
+        "Dragon's Rage Channeler",
+        CardKind::Creature(data),
+        parse_colors("R", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        // Trigger: "Whenever you cast a noncreature spell, surveil 1."
+        vec![TriggerDef { check: Arc::new(|event, _source_id, controller, state, pending| {
+            if let GameEvent::SpellCast { caster, card_id, .. } = event {
+                if *caster != controller { return; }
+                let is_creature = state.objects.get(card_id)
+                    .and_then(|o| state.catalog.get(&o.catalog_key))
+                    .map_or(false, |d| d.types.contains(&CardType::Creature));
+                if !is_creature {
+                    pending.push(TriggerContext {
+                        source_name: "Dragon's Rage Channeler".into(),
+                        controller,
+                        target_spec: TargetSpec::None,
+                        effect: eff_surveil(controller, 1),
+                    });
+                }
+            }
+        }), active_when: tp_on_battlefield() }],
+        vec![],  // no replacements
+        vec![],  // no prohibitions
+        // Delirium: +2/+2 and flying while ≥4 card types in graveyard.
+        // Two CEs: L6 for flying, L7 for +2/+2. Both share the delirium condition.
+        vec![
+            // L6: grant flying
+            Arc::new(move |source_id, controller| ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                timestamp: 0,
+                filter: Arc::new(move |id, _, _| id == source_id),
+                modifier: Arc::new(move |def, state| {
+                    if gy_card_type_count(controller, state) >= 4 {
+                        if let CardKind::Creature(c) = &mut def.kind {
+                            c.keywords.insert(Keyword::Flying);
+                        }
+                    }
+                }),
+                expiry: Expiry::WhileSourceOnBattlefield,
+
+            }),
+            // L7: +2/+2
+            Arc::new(move |source_id, controller| ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L7PowerToughness,
+                reads: vec![],
+                writes: vec![CeWrites::PowerToughness],
+                timestamp: 0,
+                filter: Arc::new(move |id, _, _| id == source_id),
+                modifier: Arc::new(move |def, state| {
+                    if gy_card_type_count(controller, state) >= 4 {
+                        if let CardKind::Creature(c) = &mut def.kind {
+                            c.adjust_pt(2, 2);
+                        }
+                    }
+                }),
+                expiry: Expiry::WhileSourceOnBattlefield,
+
+            }),
+        ],
+    )
 }
 
 /// Creature — Ape Spirit, 2/2. {2}{R}.
@@ -2630,7 +2725,7 @@ fn fury() -> CardDef {
                         }
                     }
                 }),
-                always_active: true,
+                active_when: tp_on_battlefield(),
             },
         ],
         vec![],  // no replacements
@@ -2683,7 +2778,7 @@ fn emrakul_the_aeons_torn() -> CardDef {
         // "This spell can't be countered."
         vec![ProhibitionDef { check: Arc::new(|event, source_id, _, _| {
             matches!(event, GameEvent::SpellBeingCountered { card_id, .. } if *card_id == source_id)
-        }) }],
+        }), active_when: tp_on_stack() }],
         vec![],
     );
     def.counterable = false;
@@ -2708,7 +2803,7 @@ fn atraxa_grand_unifier() -> CardDef {
         parse_colors("3GWUB", false, false),
         None,
         vec![], CardLayout::Normal, None,
-        vec![TriggerDef { check: Arc::new(atraxa_etb_check), always_active: true }],
+        vec![TriggerDef { check: Arc::new(atraxa_etb_check), active_when: tp_on_battlefield() }],
         vec![],
         vec![],
         vec![],
@@ -2751,5 +2846,85 @@ fn brazen_borrower() -> CardDef {
         None,
         vec![], CardLayout::Split, Some(Box::new(back)),
         vec![], vec![], vec![], vec![],
+    )
+}
+
+/// Mishra's Bauble — {0} Artifact.
+/// {T}, Sacrifice: Look at the top card of target player's library.
+/// Draw a card at the beginning of the next turn's upkeep.
+fn mishras_bauble() -> CardDef {
+    simple("Mishra's Bauble", CardKind::Artifact(ArtifactData {
+        mana_cost: "0".to_string(),
+        abilities: vec![AbilityDef {
+            costs: vec![CostComponent::TapSelf, CostComponent::SacSelf],
+            ability_factory: Some(Arc::new(|who, _source_id| {
+                Effect(Arc::new(move |state, t, _targets| {
+                    // "Look at the top card" — informational only in the sim.
+                    // Delayed trigger: draw a card at the beginning of the next upkeep.
+                    state.trigger_instances.push(TriggerInstance {
+                        source_id: ObjId::UNSET,
+                        controller: who,
+                        check: Arc::new(move |event, _source_id, controller, _state, pending| {
+                            if let GameEvent::EnteredStep { step: StepKind::Upkeep, .. } = event {
+                                pending.push(TriggerContext {
+                                    source_name: "Mishra's Bauble (delayed draw)".into(),
+                                    controller,
+                                    target_spec: TargetSpec::None,
+                                    effect: eff_draw(controller, 1),
+                                });
+                            }
+                        }),
+                        expiry: Some(Expiry::OneShot),
+                    });
+                    state.log(t, who, "Mishra's Bauble → draw at next upkeep".to_string());
+                }))
+            })),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }), vec![], Some(25))
+}
+
+/// Containment Priest — {1}{W} Creature — Human Cleric 2/2. Flash.
+/// If a nontoken creature would enter the battlefield and it wasn't cast,
+/// exile it instead.
+fn containment_priest() -> CardDef {
+    CardDef::new(
+        "Containment Priest",
+        CardKind::Creature(CreatureData::new("1W", 2, 2)),
+        parse_colors("1W", true, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![],  // no triggers
+        // Replacement: nontoken creature entering BF from non-Stack → exile instead.
+        vec![ReplacementDef {
+            check: Arc::new(|event, source_id, _controller, state| {
+                if let GameEvent::ZoneChange { id, from, to: ZoneId::Battlefield, .. } = event {
+                    // "wasn't cast" = not entering from the stack
+                    if *from == ZoneId::Stack { return None; }
+                    // nontoken
+                    let obj = state.objects.get(id)?;
+                    if obj.is_token { return None; }
+                    // creature
+                    let def = state.catalog.get(&obj.catalog_key)?;
+                    if !def.is_creature() { return None; }
+                    // don't exile itself entering via non-cast
+                    if *id == source_id { return None; }
+                    Some(vec![*id])
+                } else {
+                    None
+                }
+            }),
+            make_effect: Arc::new(|_source_id, controller: PlayerId| {
+                Effect(Arc::new(move |state, t, targets| {
+                    if let Some(&id) = targets.first() {
+                        change_zone(id, ZoneId::Exile, state, t, controller);
+                    }
+                }))
+            }),
+            active_when: tp_on_battlefield(),
+        }],
+        vec![],  // no prohibitions
+        vec![],  // no static abilities
     )
 }

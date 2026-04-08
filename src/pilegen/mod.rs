@@ -173,9 +173,10 @@ struct GameObject {
     /// Zone-independent counters (e.g. void counters from Dauthi Voidwalker).
     /// Persists across zone changes.
     pub(super) counters: HashMap<CounterType, u32>,
-    /// Incremented each time this card enters the stack. Used by CR 611.2f delayed CEs
-    /// (e.g. "next spell can't be countered") to distinguish separate casts of the same card.
-    pub(super) cast_generation: u32,
+    /// CI timestamp assigned when this object enters the battlefield.
+    /// Used by `recompute` to give static-ability CIs stable timestamps across recompute cycles
+    /// (CR 613.6: simultaneous effects from the same source share a timestamp).
+    pub(super) ci_timestamp: u32,
 }
 
 impl GameObject {
@@ -183,7 +184,7 @@ impl GameObject {
         GameObject {
             id, catalog_key: catalog_key.into(), controller: owner, owner,
             zone: CardZone::Library, is_token: false, bf: None, spell: None,
-            materialized: None, counters: HashMap::new(), cast_generation: 0,
+            materialized: None, counters: HashMap::new(), ci_timestamp: 0,
         }
     }
 }
@@ -321,7 +322,7 @@ pub(super) type TriggerCheckFn =
 /// Signature for a per-card replacement check function.
 /// Returns Some(targets) if this replacement applies to the event; None otherwise.
 /// `source_id` is passed so self-ETB checks work without string dispatch.
-pub(super) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId) -> Option<Vec<ObjId>> + Send + Sync>;
+pub(super) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> Option<Vec<ObjId>> + Send + Sync>;
 
 /// Signature for a "can't happen" prohibition check (CR 614.17).
 /// Returns true if the event is prohibited. Takes `&SimState` so checks can inspect card types,
@@ -330,56 +331,81 @@ pub(super) type ReplacementCheckFn = std::sync::Arc<dyn Fn(&GameEvent, ObjId, Pl
 pub(super) type ProhibitionCheckFn =
     std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
 
-/// Predicate over game events, used for event-based CE activation (CR 611.2f).
-/// Same shape as `ProhibitionCheckFn`: receives the event, source_id, controller, and state.
-pub(super) type EventPredicate =
-    std::sync::Arc<dyn Fn(&GameEvent, ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
+/// Predicate controlling when a card-bound trigger is armed.
+/// Receives (source_id, &SimState) and returns true if the trigger should fire.
+pub(super) type TriggerPredicate =
+    std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>;
 
-/// A trigger definition on a CardDef.  Pairs the check function with metadata
-/// that controls instance lifecycle (e.g. self-referential triggers are always active).
+/// Default trigger predicate: source is on the battlefield.
+/// Also correct for ETB-self triggers — fire_triggers runs at Stage 5, after
+/// do_effect has already moved the card to the battlefield.
+pub(super) fn tp_on_battlefield() -> TriggerPredicate {
+    Arc::new(|src, state| {
+        state.objects.get(&src).map_or(false, |o| matches!(o.zone, CardZone::Battlefield))
+    })
+}
+
+/// Trigger predicate: source is on the stack (e.g. Storm).
+pub(super) fn tp_on_stack() -> TriggerPredicate {
+    Arc::new(|src, state| {
+        state.objects.get(&src).map_or(false, |o| matches!(o.zone, CardZone::Stack))
+    })
+}
+
+/// Trigger predicate: always active regardless of zone.
+/// Used for intrinsic entry replacements (CR 614.1c/d: "As this permanent enters...")
+/// where the check fn itself guards on (id == source_id && to == Battlefield).
+pub(super) fn tp_always() -> TriggerPredicate {
+    Arc::new(|_, _| true)
+}
+
+/// Predicate for LatentSpellMod: given (spell ObjId, caster, &SimState), returns
+/// true if the spell qualifies for the latent modification.
+pub(super) type SpellPredicate =
+    Arc<dyn Fn(ObjId, PlayerId, &SimState) -> bool + Send + Sync>;
+
+/// A latent continuous effect that modifies the next qualifying spell cast
+/// (CR 611.2f). Pushed by an ability resolution; consumed during 601.2a when
+/// a qualifying spell is announced.
+pub(super) struct LatentSpellMod {
+    pub(super) controller: PlayerId,
+    /// Does this spell qualify? (e.g. "the next instant or sorcery spell")
+    pub(super) predicate: SpellPredicate,
+    /// Given the qualifying spell's ObjId and controller, produce a CI to apply.
+    pub(super) make_ci: Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance + Send + Sync>,
+    /// Fallback expiry if no qualifying spell is cast.
+    pub(super) expiry: Expiry,
+}
+
+/// A trigger definition on a CardDef.  Pairs the check function with a predicate
+/// that determines when the trigger is armed based on the source's game state.
 #[derive(Clone)]
 pub(super) struct TriggerDef {
     pub(super) check: TriggerCheckFn,
-    /// If true, the trigger fires regardless of what zone the source is in.
-    /// The `TriggerCheckFn` itself guards on `source_id` appearing in the event
-    /// (self-referential triggers: ETB-self, Ward-self, Storm-self-cast).
-    pub(super) always_active: bool,
+    /// In which state is this trigger armed?
+    /// Default (tp_on_battlefield): source is on the battlefield.
+    /// Storm: tp_on_stack (source is on the stack, fires on self-cast).
+    pub(super) active_when: TriggerPredicate,
 }
 
-/// One trigger registration per card object in the simulation.
-/// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
-/// Dynamically-created triggers (e.g. Tamiyo +2 watcher) start with `active: true`.
+/// Ephemeral trigger instance created at runtime by ability effects (e.g. Sneak Attack
+/// end-step sacrifice, Tamiyo +2 watcher). Card-bound triggers are derived from catalog
+/// at fire time via `fire_triggers`.
 pub(super) struct TriggerInstance {
     pub(super) source_id: ObjId,
     pub(super) controller: PlayerId,
     pub(super) check: TriggerCheckFn,
     /// None for permanent (card-based) triggers; Some for floating triggers created by abilities.
-    pub(super) expiry: Option<ContinuousExpiry>,
-    pub(super) active: bool,
-    /// If true, `deactivate_instances` skips this trigger — it stays active across zone changes.
-    pub(super) always_active: bool,
+    pub(super) expiry: Option<Expiry>,
 }
 
-/// One replacement registration per card object in the simulation.
-/// Created at sim init (`active: false`); flipped to `true` when the card enters the battlefield.
-/// `id` is stable across the whole simulation — used for loop prevention in `repl_applied`.
+/// Ephemeral replacement instance created at runtime by ability effects (e.g. Force of Negation
+/// "exile instead of graveyard"). Card-bound replacements are derived from catalog at fire time.
 pub(super) struct ReplacementInstance {
-    pub(super) id: ObjId,
     pub(super) source_id: ObjId,
     pub(super) controller: PlayerId,
     pub(super) check: ReplacementCheckFn,
     pub(super) effect: Effect,
-    pub(super) active: bool,
-}
-
-/// One "can't happen" prohibition per card object (CR 614.17).
-/// Shape mirrors `ReplacementInstance` but has no effect — a matching prohibition suppresses
-/// the event outright. Checked before replacements in `fire_event`.
-pub(super) struct ProhibitionInstance {
-    pub(super) source_id: ObjId,
-    pub(super) controller: PlayerId,
-    pub(super) check: ProhibitionCheckFn,
-    pub(super) active: bool,
 }
 
 // ── Continuous effects (new model) ───────────────────────────────────────────
@@ -480,14 +506,17 @@ pub(super) enum CeWrites {
 
 /// When a `ContinuousInstance` expires and should be removed.
 #[derive(Clone, PartialEq, Debug)]
-pub(super) enum ContinuousExpiry {
+pub(super) enum Expiry {
     /// Removed during the Cleanup step of the current turn.
     EndOfTurn,
     /// Removed at the start of the controlling player's next Untap step.
     StartOfControllerNextTurn,
     /// Tied to a permanent being on the battlefield; removed when it leaves play.
-    /// Used for static abilities (intrinsic CEs that a card grants to itself).
+    /// Used for ephemeral CEs created by abilities (e.g. Sneak Attack haste grant).
     WhileSourceOnBattlefield,
+    /// Fires once, then self-removes. Used for delayed triggers (e.g. Sneak Attack
+    /// "sacrifice at the beginning of the next end step").
+    OneShot,
 }
 
 /// A single registered continuous-effect instance.
@@ -512,16 +541,7 @@ pub(super) struct ContinuousInstance {
     /// Mutates the target object's cloned `CardDef`.
     pub(super) modifier: ContinuousModFn,
     /// When this instance should be removed.
-    pub(super) expiry: ContinuousExpiry,
-    /// Dormant until this event fires (CR 611.2f). None = always active from creation.
-    /// When the predicate matches, `active` is set to true. If `one_shot`, the
-    /// predicate is cleared so it never re-matches.
-    pub(super) activate_on: Option<EventPredicate>,
-    /// If true, `activate_on` matches at most once (cleared after first match).
-    pub(super) one_shot: bool,
-    /// Whether this CI is currently applying during recompute. Dormant CIs
-    /// (those with an unmatched `activate_on`) start as false.
-    pub(super) active: bool,
+    pub(super) expiry: Expiry,
 }
 
 
@@ -553,13 +573,22 @@ fn ce_categories_match(r: CeReads, w: CeWrites) -> bool {
 
 /// Topological sort of CIs within a single layer using Kahn's algorithm.
 /// Ties broken by timestamp (CR 613.6). Cycles fall back to timestamp order.
+/// Topological sort within a single layer.
+/// `static_cis` and `ephemeral_cis` form a combined index space:
+/// indices 0..static_cis.len() refer to static_cis, the rest to ephemeral_cis.
 fn topo_sort_layer(
     layer_slice: &[usize],
-    cis: &[ContinuousInstance],
+    static_cis: &[ContinuousInstance],
+    ephemeral_cis: &[ContinuousInstance],
     out: &mut Vec<usize>,
 ) {
     use std::collections::BinaryHeap;
     use std::cmp::Reverse;
+
+    let sc = static_cis.len();
+    let get = |idx: usize| -> &ContinuousInstance {
+        if idx < sc { &static_cis[idx] } else { &ephemeral_cis[idx - sc] }
+    };
 
     let n = layer_slice.len();
     // Build dependency edges: in_degree[i] = count of CIs that i depends on.
@@ -568,9 +597,8 @@ fn topo_sort_layer(
     for i in 0..n {
         for j in 0..n {
             if i == j { continue; }
-            // i depends on j if j writes something i reads
-            let ci_i = &cis[layer_slice[i]];
-            let ci_j = &cis[layer_slice[j]];
+            let ci_i = get(layer_slice[i]);
+            let ci_j = get(layer_slice[j]);
             if ci_i.reads.iter().any(|r| ci_j.writes.iter().any(|w| ce_categories_match(*r, *w))) {
                 in_degree[i] += 1;
                 dependents[j].push(i);
@@ -581,7 +609,7 @@ fn topo_sort_layer(
     let mut ready: BinaryHeap<Reverse<(u32, usize)>> = BinaryHeap::new();
     for i in 0..n {
         if in_degree[i] == 0 {
-            ready.push(Reverse((cis[layer_slice[i]].timestamp, i)));
+            ready.push(Reverse((get(layer_slice[i]).timestamp, i)));
         }
     }
     let start = out.len();
@@ -590,7 +618,7 @@ fn topo_sort_layer(
         for &dep in &dependents[idx] {
             in_degree[dep] -= 1;
             if in_degree[dep] == 0 {
-                ready.push(Reverse((cis[layer_slice[dep]].timestamp, dep)));
+                ready.push(Reverse((get(layer_slice[dep]).timestamp, dep)));
             }
         }
     }
@@ -657,17 +685,43 @@ pub(super) fn recompute(state: &mut SimState) {
         state.objects.get_mut(&id).unwrap().materialized = Some(def);
     }
 
+    // Phase 1b: Generate static-ability CIs from catalog for all BF permanents.
+    // These are produced fresh each recompute cycle with stable timestamps from
+    // GameObject.ci_timestamp (assigned at ETB). They are NOT stored in
+    // continuous_instances — only ephemeral CIs live there.
+    let mut static_cis: Vec<ContinuousInstance> = Vec::new();
+    for (&id, obj) in &state.objects {
+        if !matches!(obj.zone, CardZone::Battlefield) { continue; }
+        let Some(card_def) = state.catalog.get(&obj.catalog_key) else { continue };
+        for factory in &card_def.static_ability_defs {
+            let mut ci = factory(id, obj.controller);
+            ci.timestamp = obj.ci_timestamp;
+            static_cis.push(ci);
+        }
+    }
+
+    // Build combined CI list: static-ability CIs + ephemeral CIs from state.
+    // We index into this combined list for sorting and application.
+    let static_count = static_cis.len();
+    let total = static_count + state.continuous_instances.len();
+
+    // Helper: access CI by combined index (0..static_count → static_cis, rest → ephemeral).
+    let get_ci = |idx: usize| -> &ContinuousInstance {
+        if idx < static_count { &static_cis[idx] }
+        else { &state.continuous_instances[idx - static_count] }
+    };
+
     // Phase 2: within each layer, compute dependency DAG and topological sort (CR 613.7).
     // A depends on B if B.writes overlaps A.reads. Ties broken by timestamp (CR 613.6).
-    let mut ci_order: Vec<usize> = (0..state.continuous_instances.len()).collect();
-    ci_order.sort_by_key(|&i| (state.continuous_instances[i].layer, state.continuous_instances[i].timestamp));
+    let mut ci_order: Vec<usize> = (0..total).collect();
+    ci_order.sort_by_key(|&i| (get_ci(i).layer, get_ci(i).timestamp));
     let mut final_order: Vec<usize> = Vec::with_capacity(ci_order.len());
     let mut layer_start = 0;
     while layer_start < ci_order.len() {
-        let current_layer = state.continuous_instances[ci_order[layer_start]].layer;
+        let current_layer = get_ci(ci_order[layer_start]).layer;
         let mut layer_end = layer_start;
         while layer_end < ci_order.len()
-            && state.continuous_instances[ci_order[layer_end]].layer == current_layer
+            && get_ci(ci_order[layer_end]).layer == current_layer
         {
             layer_end += 1;
         }
@@ -675,7 +729,7 @@ pub(super) fn recompute(state: &mut SimState) {
         if layer_slice.len() <= 1 {
             final_order.extend_from_slice(layer_slice);
         } else {
-            topo_sort_layer(layer_slice, &state.continuous_instances, &mut final_order);
+            topo_sort_layer(layer_slice, &static_cis, &state.continuous_instances, &mut final_order);
         }
         layer_start = layer_end;
     }
@@ -683,17 +737,13 @@ pub(super) fn recompute(state: &mut SimState) {
 
     // Phase 3: apply CIs one at a time across all objects.
     for ci_idx in ci_order {
-        // Skip dormant CIs (CR 611.2f: waiting for activation event).
-        if !state.continuous_instances[ci_idx].active { continue; }
+        let ci = get_ci(ci_idx);
 
-        // CR 613.7: for WhileSourceOnBattlefield CIs, check whether the source's
-        // in-progress materialized state still has static abilities. If an earlier CI
-        // (e.g. Blood Moon) stripped them, this CI's generating ability no longer exists.
-        if state.continuous_instances[ci_idx].expiry == ContinuousExpiry::WhileSourceOnBattlefield {
-            let src = state.continuous_instances[ci_idx].source_id;
-            // Only check suppression if the source's base def has static abilities.
-            // CIs registered via ETB replacements (Painter, Flute, etc.) have no
-            // static_ability_defs in the catalog and should never be suppressed.
+        // CR 613.7: for static-ability CIs (idx < static_count), check whether the
+        // source's in-progress materialized state still has static abilities.
+        // If an earlier CI (e.g. Blood Moon) stripped them, this CI is suppressed.
+        if ci_idx < static_count {
+            let src = ci.source_id;
             let base_has_statics = state.objects.get(&src)
                 .and_then(|o| state.catalog.get(&o.catalog_key))
                 .map(|d| !d.static_ability_defs.is_empty())
@@ -707,8 +757,8 @@ pub(super) fn recompute(state: &mut SimState) {
             }
         }
 
-        let modifier = std::sync::Arc::clone(&state.continuous_instances[ci_idx].modifier);
-        let filter = std::sync::Arc::clone(&state.continuous_instances[ci_idx].filter);
+        let modifier = std::sync::Arc::clone(&ci.modifier);
+        let filter = std::sync::Arc::clone(&ci.filter);
 
         for &id in &ids {
             let controller = match state.objects.get(&id) {
@@ -1280,14 +1330,16 @@ pub(crate) struct SimState {
     /// `active` is false until the card enters the battlefield.
     pub(super) replacement_instances: Vec<ReplacementInstance>,
     /// All prohibition instances (CR 614.17 "can't" effects). Checked before replacements.
-    pub(super) prohibition_instances: Vec<ProhibitionInstance>,
     /// Replacements already applied in the current fire_event call chain (prevents loops).
-    repl_applied: HashSet<ObjId>,
+    repl_applied: HashSet<(ObjId, usize)>,
     /// Recursion depth for fire_event (used to clear repl_applied at the top level).
     repl_depth: u32,
     /// All active continuous-effect instances. Checked at `recompute` time; expired entries
     /// are removed at Cleanup / start-of-turn as appropriate.
     pub(super) continuous_instances: Vec<ContinuousInstance>,
+    /// Latent spell mods (CR 611.2f): consumed during 601.2a when a qualifying spell is cast.
+    /// Entries expire at EndOfTurn cleanup if not consumed.
+    pub(super) latent_spell_mods: Vec<LatentSpellMod>,
     /// Monotonic counter for assigning timestamps to CIs (CR 613.6).
     pub(super) ci_timestamp_counter: u32,
     /// Owned card catalog — populated once at sim init, never mutated.
@@ -1352,10 +1404,10 @@ impl SimState {
             graveyard_order: Vec::new(),
             trigger_instances: Vec::new(),
             replacement_instances: Vec::new(),
-            prohibition_instances: Vec::new(),
             repl_applied: HashSet::new(),
             repl_depth: 0,
             continuous_instances: Vec::new(),
+            latent_spell_mods: Vec::new(),
             ci_timestamp_counter: 0,
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
@@ -2105,31 +2157,61 @@ pub(super) fn fire_event(
 
     // Stage 1: Prohibition check (CR 614.17).
     // "Can't" effects are not replacements — they suppress the event outright and
-    // take precedence over replacements. Checked before the replacement pipeline.
-    let prohibited = state.prohibition_instances.iter()
-        .any(|p| p.active && (p.check)(&event, p.source_id, p.controller, state));
+    // take precedence over replacements. Walk all objects and check prohibition_defs
+    // from catalog, filtered by active_when predicate.
+    let prohibited = state.objects.iter().any(|(id, obj)| {
+        state.catalog.get(&obj.catalog_key).map_or(false, |card_def| {
+            card_def.prohibition_defs.iter().any(|pdef| {
+                (pdef.active_when)(*id, state) && (pdef.check)(&event, *id, obj.controller, state)
+            })
+        })
+    });
     if prohibited {
         state.log(t, actor, "→ event prohibited (\"can't\" effect)".to_string());
         state.repl_depth -= 1;
         return true;
     }
 
-    // Stage 2: Replacement check — first active, non-applied replacement that matches.
+    // Stage 2: Replacement check.
+    // Part A: Card-bound replacements — walk all objects, check replacement_defs from catalog.
+    // Part B: Ephemeral replacements — check replacement_instances (runtime-created, e.g. FoN exile).
+    // First active, non-applied replacement that matches wins (CR 614.5 loop prevention).
     let repl_match = {
         let mut found = None;
-        for inst in &state.replacement_instances {
-            if !inst.active { continue; }
-            if state.repl_applied.contains(&inst.id) { continue; }
-            if let Some(targets) = (inst.check)(&event, inst.source_id, inst.controller) {
-                found = Some((inst.id, targets, inst.effect.clone()));
-                break;
+        // Part A: card-bound replacements from catalog.
+        for (id, obj) in &state.objects {
+            let card_def = match state.catalog.get(&obj.catalog_key) {
+                Some(d) => d,
+                None => continue,
+            };
+            for (def_idx, rdef) in card_def.replacement_defs.iter().enumerate() {
+                let key = (*id, def_idx);
+                if !(rdef.active_when)(*id, state) { continue; }
+                if state.repl_applied.contains(&key) { continue; }
+                if let Some(targets) = (rdef.check)(&event, *id, obj.controller, state) {
+                    let effect = (rdef.make_effect)(*id, obj.controller);
+                    found = Some((key, targets, effect));
+                    break;
+                }
+            }
+            if found.is_some() { break; }
+        }
+        // Part B: ephemeral replacement instances (runtime-created by abilities).
+        if found.is_none() {
+            for (idx, inst) in state.replacement_instances.iter().enumerate() {
+                let key = (inst.source_id, idx);
+                if state.repl_applied.contains(&key) { continue; }
+                if let Some(targets) = (inst.check)(&event, inst.source_id, inst.controller, state) {
+                    found = Some((key, targets, inst.effect.clone()));
+                    break;
+                }
             }
         }
         found
     };
 
-    if let Some((repl_id, targets, effect)) = repl_match {
-        state.repl_applied.insert(repl_id);
+    if let Some((repl_key, targets, effect)) = repl_match {
+        state.repl_applied.insert(repl_key);
         effect.call(state, t, &targets);
         state.repl_depth -= 1;
         return false; // original effect suppressed by replacement (not a prohibition)
@@ -2142,25 +2224,13 @@ pub(super) fn fire_event(
     log_event(&event, state, t, actor);
 
     // Stage 5: Trigger dispatch.
-    let triggers = fire_triggers(&event, state);
+    let (triggers, one_shot_fired) = fire_triggers(&event, state);
     state.pending_triggers.extend(triggers);
-
-    // Stage 6: CE activation check (CR 611.2f).
-    // Dormant CIs with a matching activate_on predicate become active.
-    // Two-pass to avoid borrow conflict (predicate needs &SimState).
-    let activations: Vec<usize> = state.continuous_instances.iter().enumerate()
-        .filter(|(_, ci)| !ci.active)
-        .filter(|(_, ci)| ci.activate_on.as_ref().map_or(false, |pred| {
-            (pred)(&event, ci.source_id, ci.controller, state)
-        }))
-        .map(|(i, _)| i)
-        .collect();
-    for i in activations {
-        state.continuous_instances[i].active = true;
-        if state.continuous_instances[i].one_shot {
-            state.continuous_instances[i].activate_on = None;
-        }
+    // Remove OneShot trigger instances that just fired (reverse order to keep indices valid).
+    for &i in one_shot_fired.iter().rev() {
+        state.trigger_instances.remove(i);
     }
+
 
     state.repl_depth -= 1;
     if state.repl_depth == 0 {
@@ -2275,22 +2345,20 @@ pub(super) fn change_zone(
         };
         (card.catalog_key.clone(), card.controller, card_zone_to_id(&card.zone))
     };
-    // Activate/deactivate instances BEFORE firing the event so replacement checks see the right state.
-    if from == ZoneId::Battlefield { deactivate_instances(id, state); }
+    // LTB: remove ephemeral CIs tied to this source.
+    if from == ZoneId::Battlefield {
+        state.continuous_instances.retain(|ci| {
+            !(ci.source_id == id && ci.expiry == Expiry::WhileSourceOnBattlefield)
+        });
+    }
+    // ETB: assign stable CI timestamp for static-ability CIs generated by recompute.
     if to == ZoneId::Battlefield {
-        // catalog: activate_instances needs the static ability list to register triggered
-        // and replacement instances. The ObjId exists but materialized isn't updated until
-        // after this event resolves — bootstrapping from state.catalog is required here.
-        let def = state.catalog.get(catalog_key.as_str()).cloned();
-        activate_instances(id, controller, def.as_ref(), state);
+        let ts = state.next_ci_timestamp();
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.ci_timestamp = ts;
+        }
     }
-    // Spells on the stack activate their prohibition instances so "can't be countered"
-    // ProhibitionDefs fire correctly via SpellBeingCountered (CR 614.17).
-    if from == ZoneId::Stack { deactivate_stack_prohibitions(id, state); }
-    if to   == ZoneId::Stack {
-        if let Some(card) = state.objects.get_mut(&id) { card.cast_generation += 1; }
-        activate_stack_prohibitions(id, controller, state);
-    }
+    // Prohibitions are derived at fire time via active_when predicates.
     fire_event(
         GameEvent::ZoneChange { id, actor, from, to, controller },
         state, t, actor,
@@ -2602,6 +2670,21 @@ fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
 ///
 /// Permanent targets (from `CardDef.target`) are chosen randomly at cast time and
 /// locked into the SpellState on the card; resolution uses the stored target directly.
+/// CR 611.2f: consume the first matching latent spell mod for this caster.
+/// Called during 601.2a after the spell is on the stack. If a match is found,
+/// the mod's factory produces a CI that is pushed to continuous_instances and
+/// the LatentSpellMod is removed (consumed).
+fn consume_latent_spell_mod(state: &mut SimState, caster: PlayerId, spell_id: ObjId) {
+    let pos = state.latent_spell_mods.iter().position(|lsm| {
+        lsm.controller == caster && (lsm.predicate)(spell_id, caster, state)
+    });
+    if let Some(i) = pos {
+        let lsm = state.latent_spell_mods.remove(i);
+        let ci = (lsm.make_ci)(spell_id, caster);
+        state.continuous_instances.push(ci);
+    }
+}
+
 /// Cast a spell identified by `card_id`, using the specified `face` (Main or Adventure).
 /// Pays cost, builds effect, sets SpellState on the card object.
 /// Returns `None` if the cast fails (cost unpayable, card missing).
@@ -2649,6 +2732,7 @@ fn cast_spell(
                 costs_paid_ctx: CostsPaidCtx::default(),
             });
         }
+        consume_latent_spell_mod(state, who, card_id);
         let back_mana_spent = mana_value(adv.mana_cost()) > 0;
         fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent: back_mana_spent }, state, t, who);
         return Some(card_id);
@@ -2710,7 +2794,6 @@ fn cast_spell(
     // Move to Stack zone.
     if let Some(card) = state.objects.get_mut(&card_id) {
         card.zone = CardZone::Stack;
-        card.cast_generation += 1;
     }
 
     // Pay cost and build a log label.
@@ -2802,6 +2885,9 @@ fn cast_spell(
             }
         }
     }
+
+    // Latent spell mods (CR 611.2f): consume the first matching mod for this caster.
+    consume_latent_spell_mod(state, who, card_id);
 
     // SpellCast fires after all costs paid and spell is on the stack.
     let mana_spent = match &alt_cost {
@@ -2961,12 +3047,10 @@ pub(super) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mu
                 ..BattlefieldState::new()
             }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        if let Some(def) = &def {
-            preregister_instances(def, new_id, controller, state);
-            activate_instances(new_id, controller, Some(def), state);
-        }
+        let ts = state.next_ci_timestamp();
+        if let Some(obj) = state.objects.get_mut(&new_id) { obj.ci_timestamp = ts; }
         state.log(t, controller, format!("{token_key} token created {n}/{n}"));
     }
 }
@@ -2984,11 +3068,11 @@ pub(super) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         spell: None,
         bf: Some(BattlefieldState::new()),
         materialized: None,
-        counters: HashMap::new(), cast_generation: 0,
+        counters: HashMap::new(), ci_timestamp: 0,
     });
-    if let Some(def) = &def {
-        preregister_instances(def, new_id, controller, state);
-        activate_instances(new_id, controller, Some(def), state);
+    {
+        let ts = state.next_ci_timestamp();
+        if let Some(obj) = state.objects.get_mut(&new_id) { obj.ci_timestamp = ts; }
     }
     state.log(t, controller, format!("{token_key} created"));
 }
@@ -3386,10 +3470,10 @@ fn do_step(
             state.player_mut(ap).draws_this_turn = 0;
             // Expire "until your next turn" trigger and continuous instances for the active player.
             state.trigger_instances.retain(|ti| {
-                !(ti.expiry == Some(ContinuousExpiry::StartOfControllerNextTurn) && ti.controller == ap)
+                !(ti.expiry == Some(Expiry::StartOfControllerNextTurn) && ti.controller == ap)
             });
             state.continuous_instances.retain(|ci| {
-                !(ci.expiry == ContinuousExpiry::StartOfControllerNextTurn && ci.controller == ap)
+                !(ci.expiry == Expiry::StartOfControllerNextTurn && ci.controller == ap)
             });
         }
         StepKind::Draw => {
@@ -3410,8 +3494,10 @@ fn do_step(
                 }
             }
             // Expire EndOfTurn continuous and trigger instances.
-            state.continuous_instances.retain(|ci| ci.expiry != ContinuousExpiry::EndOfTurn);
-            state.trigger_instances.retain(|ti| ti.expiry != Some(ContinuousExpiry::EndOfTurn));
+            state.continuous_instances.retain(|ci| ci.expiry != Expiry::EndOfTurn);
+            state.trigger_instances.retain(|ti| ti.expiry != Some(Expiry::EndOfTurn));
+            // Expire unconsumed latent spell mods with EndOfTurn expiry.
+            state.latent_spell_mods.retain(|lsm| lsm.expiry != Expiry::EndOfTurn);
         }
         StepKind::DeclareAttackers => {
             // Strategy decides who attacks and what each attacker targets.
@@ -3662,7 +3748,7 @@ fn simulate_game(
             state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Us));
             if let Some(def) = state.catalog.get(name.as_str()) {
                 let def = def.clone();
-                preregister_instances(&def, id, PlayerId::Us, &mut state);
+
             }
         }
     }
@@ -3674,7 +3760,7 @@ fn simulate_game(
             state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Opp));
             if let Some(def) = state.catalog.get(name.as_str()) {
                 let def = def.clone();
-                preregister_instances(&def, id, PlayerId::Opp, &mut state);
+
             }
         }
     }

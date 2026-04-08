@@ -51,7 +51,7 @@
             spell: None,
             bf: Some(bf),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         // Look up the real CardDef (including triggers/replacements) from the catalog; fall back
         // to a minimal 1/1 stub for anonymous test creatures that have no special behaviour.
@@ -59,8 +59,9 @@
             CardDef::new(name, CardKind::Creature(CreatureData::new("", 1, 1)),
                          vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
         });
-        preregister_instances(&def, id, who, state);
-        activate_instances(id, who, Some(&def), state);
+
+        let ts = state.next_ci_timestamp();
+        state.objects.get_mut(&id).unwrap().ci_timestamp = ts;
         // Seed state.catalog so recompute() can find this object's base def.
         state.catalog.entry(name.to_string()).or_insert(def);
         id
@@ -85,10 +86,10 @@
             spell: None,
             bf: Some(bf),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(def, id, who, state);
-        activate_instances(id, who, Some(def), state);
+        let ts = state.next_ci_timestamp();
+        state.objects.get_mut(&id).unwrap().ci_timestamp = ts;
         state.objects.get_mut(&id).unwrap().materialized = Some(def.clone());
         // Seed state.catalog so recompute() can find this object's base def.
         state.catalog.entry(def.name.clone()).or_insert_with(|| def.clone());
@@ -114,7 +115,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         id
     }
@@ -137,7 +138,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         id
     }
@@ -155,7 +156,7 @@
             spell: None,
             bf: None,
             materialized: Some(def.clone()),
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.catalog.entry(def.name.clone()).or_insert_with(|| def.clone());
         id
@@ -173,7 +174,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         id
     }
@@ -1357,7 +1358,7 @@
             to: ZoneId::Battlefield,
             controller: PlayerId::Opp,
         };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].source_name, "Orcish Bowmasters");
     }
@@ -1372,7 +1373,7 @@
             to: ZoneId::Battlefield,
             controller: PlayerId::Opp,
         };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert!(result.is_empty());
     }
 
@@ -1474,7 +1475,7 @@
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
 
         let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 1, is_natural: true };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert!(result.is_empty(), "no trigger on first natural draw");
     }
 
@@ -1484,7 +1485,7 @@
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
 
         let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 1, is_natural: false };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1, "cantrip draw triggers Bowmasters");
     }
 
@@ -1503,7 +1504,7 @@
             to: ZoneId::Exile,
             controller: PlayerId::Us,
         };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].source_name, "Murktide Regent");
 
@@ -1527,7 +1528,7 @@
             to: ZoneId::Exile,
             controller: PlayerId::Us,
         };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert!(result.is_empty(), "land exile does not trigger Murktide");
     }
 
@@ -1540,7 +1541,7 @@
             step: StepKind::DeclareAttackers,
             active_player: PlayerId::Us,
         };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].source_name, "Tamiyo, Inquisitive Student");
 
@@ -1559,7 +1560,7 @@
             step: StepKind::DeclareAttackers,
             active_player: PlayerId::Us,
         };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         // Trigger queues (Tamiyo is in play), but resolves to nothing (not attacking).
         if let Some(ctx) = result.first() {
             let mut state2 = state;
@@ -1575,7 +1576,7 @@
         add_default_perm(&mut state, PlayerId::Us, "Tamiyo, Inquisitive Student");
 
         let ev = GameEvent::Draw { controller: PlayerId::Us, draw_index: 3, is_natural: false };
-        let result = fire_triggers(&ev, &state);
+        let (result, _) = fire_triggers(&ev, &state);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].source_name, "Tamiyo, Inquisitive Student");
 
@@ -1598,9 +1599,8 @@
             source_id: ObjId::UNSET,
             controller: PlayerId::Us,
             check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
-            active: true,
-            always_active: false,
+            expiry: Some(Expiry::StartOfControllerNextTurn),
+
         });
         // Opp has a 3/3 attacker.
         let atk_def = creature("Dragon", 3, 3);
@@ -1628,9 +1628,8 @@
             source_id: ObjId::UNSET,
             controller: PlayerId::Us,
             check: std::sync::Arc::new(tamiyo_plus_two_check),
-            expiry: Some(ContinuousExpiry::StartOfControllerNextTurn),
-            active: true,
-            always_active: false,
+            expiry: Some(Expiry::StartOfControllerNextTurn),
+
         });
         assert_eq!(state.trigger_instances.len(), 1);
 
@@ -1663,8 +1662,8 @@
             modifier: std::sync::Arc::new(|def, _state| {
                 if let CardKind::Creature(c) = &mut def.kind { c.adjust_pt(-1, 0); }
             }),
-            expiry: ContinuousExpiry::EndOfTurn,
-                activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::EndOfTurn,
+
         });
 
         // Before Cleanup: effective power = 2.
@@ -1714,10 +1713,9 @@
                         }
                     }
                 }),
-                expiry: Some(ContinuousExpiry::EndOfTurn),
-                active: true,
-                always_active: false,
-            });
+                expiry: Some(Expiry::EndOfTurn),
+    
+                });
             let ev = GameEvent::EnteredStep { step: step_kind, active_player: PlayerId::Us };
             fire_event(ev, &mut state, 1, PlayerId::Us);
             assert!(
@@ -1747,10 +1745,9 @@
                         }
                     }
                 }),
-                expiry: Some(ContinuousExpiry::EndOfTurn),
-                active: true,
-                always_active: false,
-            });
+                expiry: Some(Expiry::EndOfTurn),
+    
+                });
             let ev = GameEvent::EnteredPhase { phase: phase_kind };
             fire_event(ev, &mut state, 1, PlayerId::Us);
             assert!(
@@ -1800,7 +1797,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(id);
         let mut no_strats: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::new();
@@ -1858,7 +1855,7 @@
         let mut state = make_state();
         // add_perm pre-registers and activates Leyline's replacement
         let leyline_id = add_default_perm(&mut state, PlayerId::Opp, "Leyline of the Void");
-        // Destroy Leyline (deactivates its replacement via change_zone → deactivate_instances)
+        // Destroy Leyline (change_zone removes its ephemeral CIs)
         change_zone(leyline_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
         // Now move a card to GY — should stay in GY
         let hand_id = add_hand_card(&mut state, PlayerId::Us, "Ponder");
@@ -1880,7 +1877,7 @@
             spell: None,
             bf: Some(BattlefieldState::new()),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         id
     }
@@ -2029,8 +2026,8 @@
                     c.adjust_pt(2, 1);
                 }
             }),
-            expiry: ContinuousExpiry::EndOfTurn,
-                activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::EndOfTurn,
+
         });
 
         // Recompute: effective P/T should now be 4/3.
@@ -2075,8 +2072,8 @@
                     c.keywords.insert(Keyword::Flying);
                 }
             }),
-            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::WhileSourceOnBattlefield,
+
         })
     }
 
@@ -2098,7 +2095,7 @@
     }
 
     /// A creature with a flying static ability should lose the keyword CI when it
-    /// leaves the battlefield (deactivate_instances removes WhileSourceOnBattlefield CIs).
+    /// leaves the battlefield (change_zone removes WhileSourceOnBattlefield CIs).
     #[test]
     fn test_static_ability_def_removed_at_ltb() {
         let mut state = make_state();
@@ -2107,18 +2104,20 @@
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
         let id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
-        assert_eq!(state.continuous_instances.len(), 1, "CI registered at ETB");
+        // Static-ability CIs are no longer registered in continuous_instances at ETB —
+        // they are derived fresh each recompute cycle from the catalog.
+        assert_eq!(state.continuous_instances.len(), 0, "no ephemeral CIs registered");
 
-        // Simulate leaving the battlefield.
-        deactivate_instances(id, &mut state);
-        assert!(state.continuous_instances.is_empty(), "CI removed at LTB");
-
-        // Materialized view no longer has flying.
+        // Recompute generates the static CI and applies flying.
         recompute(&mut state);
-        // After deactivate_instances, the object may still be on the battlefield
-        // in state.objects (we didn't change_zone), but the CI is gone.
+        assert!(state.def_of(id).unwrap().has_keyword(Keyword::Flying), "flying applied by recompute");
+
+        // Move the permanent off the battlefield.
+        state.objects.get_mut(&id).unwrap().zone = CardZone::Graveyard;
+        recompute(&mut state);
+        // Static CI is not generated for non-BF objects, so flying should be gone.
         if let Some(d) = state.def_of(id) {
-            assert!(!d.has_keyword(Keyword::Flying), "flying removed when CI deactivated");
+            assert!(!d.has_keyword(Keyword::Flying), "flying removed when off battlefield");
         }
     }
 
@@ -2149,8 +2148,8 @@
                     c.adjust_pt(delta, 0);
                 }
             }),
-            expiry: ContinuousExpiry::WhileSourceOnBattlefield,
-                activate_on: None, one_shot: false, active: true,
+            expiry: Expiry::WhileSourceOnBattlefield,
+
         });
 
         // No cards in GY → power = 0.
@@ -2624,7 +2623,7 @@
             }),
             bf: None,
             materialized: Some(def),
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
         spell_id
@@ -2747,7 +2746,7 @@
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
         // Set counterable=false by inserting the card's def (with the flag) into the catalog.
@@ -2811,7 +2810,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
 
@@ -2848,7 +2847,7 @@
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(y_id);
 
@@ -2869,7 +2868,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(fon_id);
 
@@ -2904,7 +2903,7 @@
                 bf: None,
                 spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
                 materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
         }
 
@@ -2925,7 +2924,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // FoW targeting X.
@@ -2945,7 +2944,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // Stack order bottom→top: X, Y, FoN, FoW.
@@ -2979,8 +2978,8 @@
         let dv_def = catalog_card("Dauthi Voidwalker");
         state.catalog.insert(dv_def.name.clone(), dv_def.clone());
         let dv_id = state.alloc_id();
-        preregister_instances(&dv_def, dv_id, PlayerId::Opp, &mut state);
-        activate_instances(dv_id, PlayerId::Opp, Some(&dv_def), &mut state);
+
+
         state.objects.insert(dv_id, GameObject {
             id: dv_id,
             catalog_key: "Dauthi Voidwalker".to_string(),
@@ -2991,7 +2990,7 @@
             spell: None,
             bf: Some(BattlefieldState::new()),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // Put a Us-owned card in graveyard-bound position (hand card moved to GY).
@@ -3006,7 +3005,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // Trigger zone change to graveyard — DV's replacement should intercept.
@@ -3035,8 +3034,8 @@
         let dv_def = catalog_card("Dauthi Voidwalker");
         state.catalog.insert(dv_def.name.clone(), dv_def.clone());
         let dv_id = state.alloc_id();
-        preregister_instances(&dv_def, dv_id, PlayerId::Opp, &mut state);
-        activate_instances(dv_id, PlayerId::Opp, Some(&dv_def), &mut state);
+
+
         state.objects.insert(dv_id, GameObject {
             id: dv_id,
             catalog_key: "Dauthi Voidwalker".to_string(),
@@ -3047,7 +3046,7 @@
             spell: None,
             bf: Some(BattlefieldState::new()),
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // Opp's own card going to graveyard — should NOT be intercepted.
@@ -3062,7 +3061,7 @@
             spell: None,
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         change_zone(opp_card_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Opp);
@@ -3096,7 +3095,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Graveyard,
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         let hand_id = state.alloc_id();
         state.objects.insert(hand_id, GameObject {
@@ -3106,7 +3105,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         let lib_id = state.alloc_id();
         state.objects.insert(lib_id, GameObject {
@@ -3116,7 +3115,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Library,
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         // A different card in opp's hand — must not be exiled.
         let other_id = state.alloc_id();
@@ -3127,7 +3126,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
             is_token: false, spell: None, bf: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // Build and call the Surgical Extraction effect targeting gy_id.
@@ -3235,7 +3234,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             materialized: def,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(id);
         id
@@ -3347,9 +3346,9 @@
             bf: None,
             spell: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(&def, id, who, state);
+
         state.catalog.entry("Painter's Servant".to_string()).or_insert(def);
         change_zone(id, ZoneId::Battlefield, state, 1, who);
         recompute(state);
@@ -3458,9 +3457,9 @@
             bf: None,
             spell: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(&def, id, who, state);
+
         state.catalog.entry("Disruptor Flute".to_string()).or_insert(def);
         change_zone(id, ZoneId::Battlefield, state, 1, who);
         recompute(state);
@@ -3484,7 +3483,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         recompute(&mut state);
 
@@ -3530,7 +3529,7 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         recompute(&mut state);
 
@@ -3561,7 +3560,7 @@
                 zone: CardZone::Library,
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
@@ -3579,9 +3578,9 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
-            preregister_instances(&def, id, PlayerId::Us, &mut state);
+
             state.catalog.entry("Undercity Sewers".to_string()).or_insert(def);
             id
         };
@@ -3612,7 +3611,7 @@
                 zone: CardZone::Library,
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
@@ -3629,9 +3628,9 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
-            preregister_instances(&def, id, PlayerId::Us, &mut state);
+
             state.catalog.entry("Undercity Sewers".to_string()).or_insert(def);
             id
         };
@@ -3661,13 +3660,13 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
-            preregister_instances(&def, id, PlayerId::Us, &mut state);
+
             state.catalog.entry("Ancient Tomb".to_string()).or_insert(def);
             id
         };
-        // ETB via change_zone, which calls activate_instances and recompute (sets materialized)
+        // ETB via change_zone, which assigns ci_timestamp and recompute (sets materialized)
         change_zone(tomb_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
         let cost = ManaCost { generic: 2, ..Default::default() };
@@ -3707,9 +3706,9 @@
                 zone: CardZone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
-            preregister_instances(&legendary_def, id, PlayerId::Opp, &mut state);
+
             id
         };
         change_zone(creature_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
@@ -3793,9 +3792,9 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(&cage_def, cage_id, PlayerId::Opp, &mut state);
+
         state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
         change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
 
@@ -3809,7 +3808,7 @@
             zone: CardZone::Graveyard,
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         recompute(&mut state);
@@ -3830,7 +3829,7 @@
             zone: CardZone::Exile { on_adventure: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         recompute(&mut state);
 
@@ -3859,9 +3858,9 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(&cage_def, cage_id, PlayerId::Us, &mut state);
+
         state.catalog.entry("Grafdigger's Cage".to_string()).or_insert(cage_def);
         change_zone(cage_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         recompute(&mut state);
@@ -3888,9 +3887,9 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(&cage_def, cage_id, who, state);
+
         change_zone(cage_id, ZoneId::Battlefield, state, 1, who);
         cage_id
     }
@@ -3912,7 +3911,7 @@
             zone: CardZone::Graveyard,
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // Attempt to reanimate: fire a ZoneChange GY→BF.
@@ -3942,7 +3941,7 @@
             zone: CardZone::Graveyard,
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         // Remove Cage.
@@ -3975,7 +3974,7 @@
             zone: CardZone::Graveyard,
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         eff_reanimate(PlayerId::Us).call(&mut state, 2, &[artifact_id]);
@@ -4027,7 +4026,7 @@
             bf: Some(BattlefieldState::new()),
             spell: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         // Mode 1: sacrifice a token
         let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
@@ -4059,9 +4058,9 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(&ee_def, ee_id, PlayerId::Us, &mut state);
+
         change_zone(ee_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         assert_eq!(
             state.objects[&ee_id].counters.get(&CounterType::Charge).copied().unwrap_or(0),
@@ -4297,7 +4296,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         fire_event(
@@ -4339,7 +4338,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         fire_event(
@@ -4393,7 +4392,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
 
         fire_event(
@@ -4416,7 +4415,7 @@
         // Pre-register Long Goodbye's prohibition instances before casting.
         let def = catalog_card("Long Goodbye");
         let lg_id = add_hand_card(&mut state, PlayerId::Us, "Long Goodbye");
-        preregister_instances(&def, lg_id, PlayerId::Us, &mut state);
+
         state.catalog.insert("Long Goodbye".to_string(), def);
 
         // Move to stack — activates Long Goodbye's own stack prohibition.
@@ -4505,7 +4504,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
 
@@ -4551,7 +4550,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
 
@@ -4584,7 +4583,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
 
@@ -4603,12 +4602,8 @@
         let mut state = make_state();
         state.catalog = test_catalog();
 
-        // Register Flusterstorm's trigger instance (always_active).
-        let fluster_def = catalog_card("Flusterstorm");
+        // Card-bound triggers are derived from catalog at fire time — no preregistration.
         let fluster_id = state.alloc_id();
-        preregister_instances(&fluster_def, fluster_id, PlayerId::Us, &mut state);
-        assert!(state.trigger_instances.last().unwrap().active,
-            "storm trigger should start active (always_active)");
 
         // Put two opponent instants on the stack as targets.
         let spell_a = state.alloc_id();
@@ -4629,7 +4624,7 @@
                 }),
                 bf: None,
                 materialized: None,
-                counters: HashMap::new(), cast_generation: 0,
+                counters: HashMap::new(), ci_timestamp: 0,
             });
             state.stack.push(id);
         }
@@ -4653,13 +4648,13 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(fluster_id);
 
         // Fire the SpellCast event — storm trigger should fire.
         let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
-        let triggers = fire_triggers(&event, &state);
+        let (triggers, _) = fire_triggers(&event, &state);
         assert_eq!(triggers.len(), 1, "storm should produce exactly one trigger context");
         assert_eq!(triggers[0].source_name, "Flusterstorm (storm trigger)");
 
@@ -4685,13 +4680,13 @@
 
         let fluster_def = catalog_card("Flusterstorm");
         let fluster_id = state.alloc_id();
-        preregister_instances(&fluster_def, fluster_id, PlayerId::Us, &mut state);
+
 
         // No spells cast before this one.
         state.us.spells_cast_this_turn = 0;
 
         let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
-        let triggers = fire_triggers(&event, &state);
+        let (triggers, _) = fire_triggers(&event, &state);
         assert!(triggers.is_empty(), "no storm copies when first spell of the turn");
     }
 
@@ -4717,7 +4712,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
 
@@ -4753,7 +4748,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_a);
 
@@ -4773,7 +4768,7 @@
             }),
             bf: None,
             materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_b);
 
@@ -5020,6 +5015,9 @@
         eff.call(&mut state, 1, &[creature_id]);
         recompute(&mut state);
         assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield);
+
+        // Drain any pending triggers from the ETB (e.g. Bowmasters draw-trigger setup).
+        state.pending_triggers.clear();
 
         // Fire end step event — should produce a delayed sacrifice trigger.
         fire_event(
@@ -5578,9 +5576,9 @@
             zone: CardZone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, materialized: None,
-            counters: HashMap::new(), cast_generation: 0,
+            counters: HashMap::new(), ci_timestamp: 0,
         });
-        preregister_instances(&def, id, who, state);
+
         state.catalog.entry("Mistrise Village".to_string()).or_insert(def);
         change_zone(id, ZoneId::Battlefield, state, 1, who);
         id
@@ -5652,21 +5650,23 @@
         let eff = build_ability_effect(ability, PlayerId::Us, mv_id);
         eff.call(&mut state, 1, &[]);
 
-        // Should have registered a dormant CI.
-        assert_eq!(state.continuous_instances.len(), 1, "ability should register one CI");
-        assert!(!state.continuous_instances[0].active, "CI should start dormant");
+        // Should have registered a latent spell mod (not a dormant CI).
+        assert_eq!(state.latent_spell_mods.len(), 1, "ability should register one LatentSpellMod");
+        assert!(state.continuous_instances.is_empty(), "no CI yet — consumed at cast time");
 
-        // Simulate casting a spell — fire SpellCast event to activate the CI.
+        // Simulate casting a spell — consume_latent_spell_mod + fire SpellCast.
         let spell_def = catalog_card("Brainstorm");
         let spell_id = add_stack_spell(&mut state, PlayerId::Us, &spell_def);
         state.stack.push(spell_id);
+        consume_latent_spell_mod(&mut state, PlayerId::Us, spell_id);
         fire_event(
             GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
             &mut state, 1, PlayerId::Us,
         );
 
-        // CI should now be active and the spell should be uncounterable.
-        assert!(state.continuous_instances[0].active, "CI should activate on SpellCast");
+        // LatentSpellMod consumed → CI now exists and is active.
+        assert!(state.latent_spell_mods.is_empty(), "LatentSpellMod consumed");
+        assert_eq!(state.continuous_instances.len(), 1, "CI created from LatentSpellMod");
 
         // Try to counter it — should fizzle.
         eff_counter_target(PlayerId::Opp).call(&mut state, 1, &[spell_id]);
@@ -5674,7 +5674,7 @@
             "spell should remain on stack — can't be countered");
     }
 
-    /// The CI is one-shot: only the first spell gets uncounterable, not the second.
+    /// The LatentSpellMod is consumed on the first spell — the second is not protected.
     #[test]
     fn test_mistrise_village_ability_one_shot() {
         let mut state = make_state();
@@ -5689,19 +5689,22 @@
         let eff = build_ability_effect(ability, PlayerId::Us, mv_id);
         eff.call(&mut state, 1, &[]);
 
-        // Cast first spell — activates CI.
+        // Cast first spell — consumes the LatentSpellMod.
         let spell1_def = catalog_card("Brainstorm");
         let spell1_id = add_stack_spell(&mut state, PlayerId::Us, &spell1_def);
         state.stack.push(spell1_id);
+        consume_latent_spell_mod(&mut state, PlayerId::Us, spell1_id);
         fire_event(
             GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell1_id, mana_spent: true },
             &mut state, 1, PlayerId::Us,
         );
+        assert!(state.latent_spell_mods.is_empty(), "LatentSpellMod consumed by first spell");
 
-        // Cast second spell — CI is one_shot, so activate_on is None; won't activate again.
+        // Cast second spell — no LatentSpellMod left, so no CI produced.
         let spell2_def = catalog_card("Ponder");
         let spell2_id = add_stack_spell(&mut state, PlayerId::Us, &spell2_def);
         state.stack.push(spell2_id);
+        consume_latent_spell_mod(&mut state, PlayerId::Us, spell2_id);
         fire_event(
             GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell2_id, mana_spent: true },
             &mut state, 1, PlayerId::Us,
@@ -5710,10 +5713,10 @@
         // The second spell should be counterable.
         eff_counter_target(PlayerId::Opp).call(&mut state, 1, &[spell2_id]);
         assert!(!state.stack.contains(&spell2_id),
-            "second spell should be counterable — one-shot CI only protects the first");
+            "second spell should be counterable — LatentSpellMod already consumed");
     }
 
-    /// The CI expires at end of turn — if no spell is cast, it's gone after cleanup.
+    /// The LatentSpellMod expires at end of turn if no spell is cast.
     #[test]
     fn test_mistrise_village_ability_expires_eot() {
         let mut state = make_state();
@@ -5727,14 +5730,14 @@
         let eff = build_ability_effect(ability, PlayerId::Us, mv_id);
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.continuous_instances.len(), 1);
+        assert_eq!(state.latent_spell_mods.len(), 1, "LatentSpellMod registered");
 
-        // Run cleanup step — should remove the EndOfTurn CI.
+        // Run cleanup step — should remove the EndOfTurn LatentSpellMod.
         let step = Step { kind: StepKind::Cleanup, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
 
-        assert!(state.continuous_instances.is_empty(),
-            "Mistrise Village CI should expire at end of turn");
+        assert!(state.latent_spell_mods.is_empty(),
+            "Mistrise Village LatentSpellMod should expire at end of turn");
     }
 
     // ── Section 47: Brotherhood's End ───────────────────────────────────────────
@@ -5879,4 +5882,238 @@
             land_def.mana_abilities().iter().all(|ma| ma.activatable),
             "Karn should not suppress mana abilities on non-artifact permanents"
         );
+    }
+
+    // ── 44. Dragon's Rage Channeler ──────────────────────────────────────────
+
+    #[test]
+    fn test_drc_surveil_on_noncreature_cast() {
+        // DRC on battlefield; cast a noncreature spell → surveil 1 trigger fires.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.surveil_choice = std::sync::Arc::new(|_, _| true); // always mill
+
+        // Put a known card on top of library.
+        let top_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Brainstorm".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Library,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Brainstorm".to_string()).or_insert_with(|| catalog_card("Brainstorm"));
+            id
+        };
+
+        // DRC on battlefield.
+        let _drc_id = add_default_perm(&mut state, PlayerId::Us, "Dragon's Rage Channeler");
+
+        // A noncreature spell on the stack (simulate casting Ponder).
+        let spell_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Ponder".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Stack,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
+            id
+        };
+
+        // Fire SpellCast event.
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        assert_eq!(state.objects[&top_id].zone, CardZone::Graveyard,
+            "DRC surveil should mill top library card when surveil_choice returns true");
+    }
+
+    #[test]
+    fn test_drc_no_surveil_on_creature_cast() {
+        // DRC on battlefield; cast a creature spell → no surveil trigger.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.surveil_choice = std::sync::Arc::new(|_, _| true);
+
+        let top_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Brainstorm".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Library,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Brainstorm".to_string()).or_insert_with(|| catalog_card("Brainstorm"));
+            id
+        };
+
+        let _drc_id = add_default_perm(&mut state, PlayerId::Us, "Dragon's Rage Channeler");
+
+        // Cast a creature spell.
+        let spell_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Barrowgoyf".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Stack,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Barrowgoyf".to_string()).or_insert_with(|| catalog_card("Barrowgoyf"));
+            id
+        };
+
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+
+        assert!(state.pending_triggers.is_empty(),
+            "DRC should not trigger on creature spell cast");
+        assert_eq!(state.objects[&top_id].zone, CardZone::Library,
+            "library card should remain untouched when no surveil fires");
+    }
+
+    #[test]
+    fn test_drc_delirium_grants_flying_and_pt() {
+        // With ≥4 card types in graveyard, DRC should be 3/3 with flying.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Put 4 different card types in graveyard.
+        add_graveyard_card(&mut state, PlayerId::Us, "Island");       // Land
+        add_graveyard_card(&mut state, PlayerId::Us, "Brainstorm");   // Instant
+        add_graveyard_card(&mut state, PlayerId::Us, "Ponder");       // Sorcery (need catalog)
+        add_graveyard_card(&mut state, PlayerId::Us, "Barrowgoyf");   // Creature
+
+        let drc_id = add_default_perm(&mut state, PlayerId::Us, "Dragon's Rage Channeler");
+
+        recompute(&mut state);
+
+        let def = state.def_of(drc_id).expect("DRC should have materialized def");
+        if let CardKind::Creature(c) = &def.kind {
+            assert_eq!(c.power(), 3, "delirium DRC should have 3 power (1+2)");
+            assert_eq!(c.toughness(), 3, "delirium DRC should have 3 toughness (1+2)");
+            assert!(c.keywords.contains(Keyword::Flying), "delirium DRC should have flying");
+        } else {
+            panic!("DRC should be a creature");
+        }
+    }
+
+    #[test]
+    fn test_drc_no_delirium_without_enough_types() {
+        // With <4 card types in graveyard, DRC should remain 1/1 without flying.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Only 2 card types in graveyard.
+        add_graveyard_card(&mut state, PlayerId::Us, "Island");       // Land
+        add_graveyard_card(&mut state, PlayerId::Us, "Brainstorm");   // Instant
+
+        let drc_id = add_default_perm(&mut state, PlayerId::Us, "Dragon's Rage Channeler");
+
+        recompute(&mut state);
+
+        let def = state.def_of(drc_id).expect("DRC should have materialized def");
+        if let CardKind::Creature(c) = &def.kind {
+            assert_eq!(c.power(), 1, "non-delirium DRC should have 1 power");
+            assert_eq!(c.toughness(), 1, "non-delirium DRC should have 1 toughness");
+            assert!(!c.keywords.contains(Keyword::Flying), "non-delirium DRC should not have flying");
+        } else {
+            panic!("DRC should be a creature");
+        }
+    }
+
+    // ── Mishra's Bauble ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mishras_bauble_delayed_draw_at_next_upkeep() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let def = catalog_card("Mishra's Bauble");
+        let _bauble_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // Activate the ability (tap + sac → create delayed trigger).
+        let ability = &def.abilities()[0];
+        let eff = build_ability_effect(ability, PlayerId::Us, ObjId::UNSET);
+        eff.call(&mut state, 1, &[]);
+
+        assert_eq!(state.trigger_instances.len(), 1,
+            "activating Bauble should register a delayed trigger");
+        assert_eq!(state.trigger_instances[0].expiry, Some(Expiry::OneShot),
+            "delayed trigger should be OneShot");
+
+        // Fire upkeep — should produce a draw trigger and remove the OneShot.
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::Upkeep, active_player: PlayerId::Us },
+            &mut state, 2, PlayerId::Us,
+        );
+        assert_eq!(state.pending_triggers.len(), 1,
+            "upkeep should produce one draw trigger");
+        assert_eq!(state.pending_triggers[0].source_name, "Mishra's Bauble (delayed draw)");
+        assert!(state.trigger_instances.is_empty(),
+            "OneShot trigger should be removed after firing");
+
+        // Resolve the draw trigger.
+        let hand_before = state.hand_size(PlayerId::Us);
+        // Add a card in library so the draw has something to pick up.
+        add_library_card(&mut state, PlayerId::Us, "Island");
+        let ctx = state.pending_triggers.remove(0);
+        ctx.effect.call(&mut state, 2, &[]);
+        assert_eq!(state.hand_size(PlayerId::Us), hand_before + 1,
+            "resolving Bauble trigger should draw a card");
+    }
+
+    // ── Containment Priest ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_containment_priest_does_not_exile_itself() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Put Containment Priest in hand, then move it to BF via non-cast
+        // (e.g. Aether Vial). Its own replacement is active_when = on_battlefield,
+        // so it can't fire against itself since it's not on BF yet.
+        let def = catalog_card("Containment Priest");
+        let cp_id = add_hand_card_with_def(&mut state, PlayerId::Us, &def);
+        recompute(&mut state);
+
+        change_zone(cp_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
+
+        assert_eq!(state.objects[&cp_id].zone, CardZone::Battlefield,
+            "Containment Priest should not exile itself when entering via non-cast");
+    }
+
+    #[test]
+    fn test_containment_priest_exiles_non_cast_creature() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Put Containment Priest on the battlefield for us.
+        let def = catalog_card("Containment Priest");
+        add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // Put an opponent creature in hand, then move it to BF via non-cast.
+        let opp_def = catalog_card("Orcish Bowmasters");
+        let opp_id = add_hand_card_with_def(&mut state, PlayerId::Opp, &opp_def);
+
+        change_zone(opp_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
+
+        assert!(matches!(state.objects[&opp_id].zone, CardZone::Exile { .. }),
+            "non-cast creature should be exiled by Containment Priest");
     }
