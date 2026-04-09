@@ -21,7 +21,41 @@ use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy};
 #[cfg(test)]
 mod tests;
 
+// ── WASM entry point ─────────────────────────────────────────────────────────
 
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn run_scenario() -> String {
+    let catalog = build_catalog();
+
+    // Hardcoded Doomsday 60 for the feasibility test
+    let dd_cards: Vec<(String, i32, String)> = vec![
+        ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 2),
+        ("Misty Rainforest", 1), ("Island", 1), ("Swamp", 1),
+        ("Lotus Petal", 4), ("Lion's Eye Diamond", 4),
+        ("Dark Ritual", 4), ("Doomsday", 4), ("Brainstorm", 4),
+        ("Ponder", 4), ("Preordain", 2), ("Consider", 2),
+        ("Force of Will", 4), ("Daze", 2), ("Thoughtseize", 4),
+        ("Street Wraith", 2), ("Thassa's Oracle", 1), ("Cavern of Souls", 1),
+    ].into_iter().map(|(n, q)| (n.to_string(), q, "main".to_string())).collect();
+
+    let opp_cards: Vec<(String, i32, String)> = vec![
+        ("Volcanic Island", 3), ("Scalding Tarn", 4), ("Wasteland", 3),
+        ("Island", 1), ("Mountain", 1),
+        ("Delver of Secrets", 4), ("Dragon's Rage Channeler", 4),
+        ("Murktide Regent", 3),
+        ("Lightning Bolt", 4), ("Force of Will", 4), ("Daze", 4),
+        ("Brainstorm", 4), ("Ponder", 4), ("Unholy Heat", 2),
+        ("Price of Progress", 2), ("Spell Pierce", 2),
+        ("Mishra's Bauble", 4),
+    ].into_iter().map(|(n, q)| (n.to_string(), q, "main".to_string())).collect();
+
+    let state = generate_scenario("doomsday", "Izzet Delver", &catalog, &dd_cards, &opp_cards);
+    format!("{}", state)
+}
 
 // ── Game state ────────────────────────────────────────────────────────────────
 
