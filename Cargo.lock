@@ -843,6 +843,7 @@ dependencies = [
  "comfy-table",
  "dialoguer",
  "diesel",
+ "pilegen",
  "rand",
  "serde",
  "skim",
@@ -929,6 +930,13 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "pilegen"
+version = "0.1.0"
+dependencies = [
+ "rand",
 ]
 
 [[package]]

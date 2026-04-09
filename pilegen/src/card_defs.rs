@@ -5,7 +5,7 @@ use super::*;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Build the full card catalog used by the simulation engine.
-pub(crate) fn build_catalog() -> HashMap<String, CardDef> {
+pub fn build_catalog() -> HashMap<String, CardDef> {
     all_cards().into_iter().map(|c| (c.name.clone(), c)).collect()
 }
 

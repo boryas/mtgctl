@@ -185,10 +185,10 @@ pub(crate) enum CostComponent {
 
 /// Factory for a spell effect: takes (controller, source_id, chosen_x) and returns the resolved `Effect`.
 /// `chosen_x` is the strategy-chosen X value; 0 for spells without an X cost.
-pub(super) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync>;
+pub(crate) type SpellFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId, u32) -> Effect + Send + Sync>;
 
 /// Factory for an activated ability effect: takes (controller, source_id), returns `Effect`.
-pub(super) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
+pub(crate) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effect + Send + Sync>;
 
 /// One way to pay for a spell instead of (or in addition to) its mana cost.
 /// Options are tried in order; the first affordable one is taken.
@@ -223,7 +223,7 @@ pub(crate) struct ChoiceSpec {
 }
 
 /// Enumerate valid choices for a `ChoiceSpec` from the perspective of `controller`.
-pub(super) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: &SimState) -> Vec<ObjId> {
+pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: &SimState) -> Vec<ObjId> {
     let target_who = spec.controller.resolve(controller);
     state.objects.values()
         .filter(|o| {
@@ -405,7 +405,7 @@ pub(crate) struct EnchantmentData {
 ///
 /// Costs: mana + return an unblocked attacker. Source zone: Hand.
 /// Effect: put this card onto the battlefield tapped and attacking the same target.
-pub(super) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
+pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
     let mc = parse_mana_cost(mana_cost);
     AbilityDef {
         source_zone: SourceZone::Hand,
@@ -459,7 +459,7 @@ impl CreatureData {
 
     /// Apply a power/toughness delta. Used exclusively by `fold_game_state_into_def`
     /// (counters + temporary mods) and `ContinuousModFn` closures in CE machinery.
-    pub(super) fn adjust_pt(&mut self, delta_power: i32, delta_toughness: i32) {
+    pub(crate) fn adjust_pt(&mut self, delta_power: i32, delta_toughness: i32) {
         self.power     += delta_power;
         self.toughness += delta_toughness;
     }
@@ -467,7 +467,7 @@ impl CreatureData {
     /// Construct a `CreatureData` with the mandatory fields.
     /// All optional fields (legendary, delve, abilities, keywords)
     /// default to false/empty and can be set on the returned value.
-    pub(super) fn new(mana_cost: impl Into<String>, power: i32, toughness: i32) -> Self {
+    pub(crate) fn new(mana_cost: impl Into<String>, power: i32, toughness: i32) -> Self {
         CreatureData {
             mana_cost: mana_cost.into(),
             power,
@@ -616,12 +616,12 @@ pub(crate) struct ProhibitionDef {
 }
 
 #[derive(Clone)]
-pub(crate) struct CardDef {
+pub struct CardDef {
     pub(crate) name: String,
     /// Relative likelihood of appearing as a permanent in play (default 100).
     #[allow(dead_code)]
     pub(crate) play_weight: Option<u32>,
-    pub(super) kind: CardKind,
+    pub(crate) kind: CardKind,
     /// Colors of this card, derived from mana cost and explicit color flags at load time.
     pub(crate) colors: Vec<Color>,
     /// Card types (Land, Creature, Instant, etc.) — mirrors the `kind` discriminant but
@@ -636,20 +636,20 @@ pub(crate) struct CardDef {
     /// For Split cards (including adventures), this is the second castable half.
     pub(crate) back: Option<Box<CardDef>>,
     /// Trigger check functions for this card (set at card definition time).
-    pub(super) trigger_defs: Vec<TriggerDef>,
+    pub(crate) trigger_defs: Vec<TriggerDef>,
     /// Replacement effect definitions for this card (set at card definition time).
-    pub(super) replacement_defs: Vec<ReplacementDef>,
+    pub(crate) replacement_defs: Vec<ReplacementDef>,
     /// Prohibition definitions for this card (CR 614.17 — "can't" effects).
     /// Checked before replacements in `fire_event`; if any match, the event is suppressed.
-    pub(super) prohibition_defs: Vec<ProhibitionDef>,
+    pub(crate) prohibition_defs: Vec<ProhibitionDef>,
     /// Static ability factories. Called at ETB to register a `ContinuousInstance` for this
     /// object. The CI has `expiry: WhileSourceOnBattlefield` and is removed on LTB.
-    pub(super) static_ability_defs: Vec<StaticAbilityDef>,
+    pub(crate) static_ability_defs: Vec<StaticAbilityDef>,
     /// Trigger check functions granted to this object by continuous effects (Layer 6).
     /// Reset to empty at the start of each `recompute` cycle (since recompute clones from the
     /// catalog where this is always empty). CE modifiers push to this during recompute.
     /// Checked by `fire_triggers` for each active battlefield object.
-    pub(super) granted_trigger_defs: Vec<TriggerCheckFn>,
+    pub(crate) granted_trigger_defs: Vec<TriggerCheckFn>,
     /// Costs that must always be paid in addition to the chosen base/alternative cost.
     /// Per CR 118.9d these apply regardless of which cost path is taken.
     pub(crate) additional_costs: Vec<CostComponent>,
@@ -679,7 +679,7 @@ pub(crate) struct CardDef {
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
 /// Called when the object enters the battlefield; `source_id` and `controller` are bound then.
-pub(super) type StaticAbilityDef =
+pub(crate) type StaticAbilityDef =
     std::sync::Arc<dyn Fn(ObjId, PlayerId) -> ContinuousInstance + Send + Sync>;
 
 impl CardDef {
@@ -902,7 +902,7 @@ impl CardDef {
 ///
 /// Cards that need pre-fire mutation (e.g. Murktide setting counters before entering) keep their
 /// replacement inline with a custom check fn.
-pub(super) fn etb_self_replacement<F>(extra: F) -> ReplacementDef
+pub(crate) fn etb_self_replacement<F>(extra: F) -> ReplacementDef
 where
     F: Fn(ObjId, ObjId, PlayerId, &mut SimState, u8) + Send + Sync + 'static,
 {
@@ -934,7 +934,7 @@ where
 ///
 /// Cards with combined ETB+other triggers (e.g. Orcish Bowmasters) or effects that read state
 /// at trigger-push time keep their trigger inline.
-pub(super) fn etb_self_trigger<F>(
+pub(crate) fn etb_self_trigger<F>(
     source_name: &'static str,
     target_spec: TargetSpec,
     make_effect: F,
@@ -960,14 +960,14 @@ where
 }
 
 /// Build a `ReplacementDef` for permanents that enter the battlefield tapped.
-pub(super) fn replacement_enters_tapped() -> ReplacementDef {
+pub(crate) fn replacement_enters_tapped() -> ReplacementDef {
     etb_self_replacement(|_, id, _, state, _| {
         if let Some(bf) = state.permanent_bf_mut(id) { bf.tapped = true; }
     })
 }
 
 /// Build a `ReplacementDef` that sets a planeswalker's loyalty on ETB.
-pub(super) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
+pub(crate) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
     etb_self_replacement(move |_, id, _, state, _| {
         if let Some(bf) = state.permanent_bf_mut(id) { bf.loyalty = base_loyalty; }
     })
@@ -1022,7 +1022,7 @@ fn bowmasters_trigger_ctx(source_id: ObjId, controller: PlayerId, log_msg: &'sta
     }
 }
 
-pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(crate) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     match event {
         // ETB: only fires for the entering Bowmasters itself.
         GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. }
@@ -1042,7 +1042,7 @@ pub(super) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: 
 
 /// ETB trigger for Recruiter of the Guard: search library for a creature with toughness ≤ 2,
 /// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
-pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(crate) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && *ctlr == controller {
             let pred = pred_and(pred_type_eq(CardType::Creature), pred_toughness_le(2));
@@ -1058,7 +1058,7 @@ pub(super) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: P
 
 /// ETB trigger for Atraxa, Grand Unifier: placeholder — adds 4 cards to hand.
 /// TODO: replace with real reveal-top-10-by-card-type once hands are fully tracked.
-pub(super) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(crate) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && *ctlr == controller {
             pending.push(TriggerContext {
@@ -1071,7 +1071,7 @@ pub(super) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: 
     }
 }
 
-pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(crate) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange {
         id, from: ZoneId::Graveyard, to: ZoneId::Exile,
         controller: exiler, ..
@@ -1095,7 +1095,7 @@ pub(super) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: Pl
     }
 }
 
-pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
+pub(crate) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     match event {
         // EnteredStep DeclareAttackers fires after attackers are marked, so p.attacking is set.
         GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player }
@@ -1139,7 +1139,7 @@ pub(super) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: Play
 /// Part 3: CE-granted triggers — walks materialized defs for Layer 6 ability grants.
 /// Returns (pending triggers, indices of OneShot trigger instances that fired).
 /// The caller must remove the OneShot instances from `state.trigger_instances`.
-pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<TriggerContext>, Vec<usize>) {
+pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<TriggerContext>, Vec<usize>) {
     let mut pending: Vec<TriggerContext> = Vec::new();
 
     // Part 1: Card-bound triggers derived from catalog definitions.
@@ -1184,7 +1184,7 @@ pub(super) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
 
 /// Push a vec of `TriggerContext`s onto the stack as triggered ability items.
 /// Target selection goes through the controller's strategy (CR 601.2c).
-pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
+pub(crate) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
                             strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>) {
     for ctx in triggers {
         let all_targets = legal_targets(&ctx.target_spec, ctx.controller, ObjId(0), state);
@@ -1211,7 +1211,7 @@ pub(super) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
 
 /// Trigger check for Tamiyo +2: fires for each opposing creature that attacks.
 /// Produces a trigger whose effect registers a -1/0 ContinuousInstance (L7) for that attacker.
-pub(super) fn tamiyo_plus_two_check(
+pub(crate) fn tamiyo_plus_two_check(
     event: &GameEvent,
     source_id: ObjId,
     controller: PlayerId,
@@ -1253,7 +1253,7 @@ pub(super) fn tamiyo_plus_two_check(
     }
 }
 
-pub(super) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
+pub(crate) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
     Effect(std::sync::Arc::new(move |state, t, _targets| {
         let source_name = state.permanent_name(source_id).unwrap_or_default();
         // Register a floating trigger watcher that fires for each opposing attacker.
@@ -1269,7 +1269,7 @@ pub(super) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
 }
 
 /// Build an `Effect` closure for an activated ability at push time.
-pub(super) fn build_ability_effect(
+pub(crate) fn build_ability_effect(
     ability: &AbilityDef,
     who: PlayerId,
     source_id: ObjId,
@@ -1285,7 +1285,7 @@ pub(super) fn build_ability_effect(
 ///
 /// For spells with modes: uses the chosen mode's factory and target spec.
 /// For non-spell cards (permanents): returns `eff_enter_permanent`.
-pub(super) fn build_spell_effect(
+pub(crate) fn build_spell_effect(
     def: &CardDef,
     who: PlayerId,
     source_id: ObjId,
@@ -1306,7 +1306,7 @@ pub(super) fn build_spell_effect(
 /// Zone-direction predicate (no creature-type check); useful as a building block for cards
 /// that restrict or replace all GY/library → BF transitions.
 #[allow(dead_code)]
-pub(super) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
+pub(crate) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, from: ZoneId::Graveyard | ZoneId::Library, to: ZoneId::Battlefield, .. } = event {
         Some(vec![*id])
     } else {
@@ -1316,7 +1316,7 @@ pub(super) fn cage_creature_entry_check(event: &GameEvent, _source_id: ObjId, _c
 
 // ── Leyline of the Void ───────────────────────────────────────────────────────
 
-pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
+pub(crate) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, .. } = event {
         Some(vec![*id])
     } else {
@@ -1327,7 +1327,7 @@ pub(super) fn leyline_check(event: &GameEvent, _source_id: ObjId, _controller: P
 // ── Shared ETB-self check ─────────────────────────────────────────────────────
 
 /// Matches any ZoneChange where this permanent is the object entering the battlefield.
-pub(super) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
+pub(crate) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, .. } = event {
         if *id == source_id {
             return Some(vec![*id]);
@@ -1338,13 +1338,13 @@ pub(super) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: P
 
 /// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
 /// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
-pub(super) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
+pub(crate) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
     state.objects.get(&id).map(|c| card_zone_to_id(&c.zone)).unwrap_or(ZoneId::Hand)
 }
 
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────
 
-pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
+pub(crate) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && *ctlr == controller {
             return Some(vec![*id]);
@@ -1357,7 +1357,7 @@ pub(super) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller
 
 /// Replacement check for Dauthi Voidwalker: fires when any card controlled by
 /// the opponent (not DV's controller) would be put into the graveyard from anywhere.
-pub(super) fn dv_replacement_check(event: &GameEvent, _source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
+pub(crate) fn dv_replacement_check(event: &GameEvent, _source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
     if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, controller: card_controller, .. } = event {
         if *card_controller != controller {
             return Some(vec![*id]);

@@ -5,7 +5,7 @@ use super::*;
 
 // ── Strategy trait ────────────────────────────────────────────────────────────
 
-pub(super) trait Strategy {
+pub(crate) trait Strategy {
     fn declare_attackers(&mut self, state: &SimState) -> Vec<(ObjId, Option<ObjId>)>;
     fn declare_blockers(&mut self, state: &SimState) -> Vec<(ObjId, ObjId)>;
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool;
@@ -57,7 +57,7 @@ pub(super) trait Strategy {
 
 // ── DoomsdayStrategy ─────────────────────────────────────────────────────────
 
-pub(super) struct DoomsdayStrategy {
+pub(crate) struct DoomsdayStrategy {
     player_id: PlayerId,
     rng: SmallRng,
     dd_turn: u8,
@@ -68,7 +68,7 @@ pub(super) struct DoomsdayStrategy {
 }
 
 impl DoomsdayStrategy {
-    pub(super) fn new(dd_turn: u8) -> Self {
+    pub(crate) fn new(dd_turn: u8) -> Self {
         Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), dd_turn, must_land_drop: false, dd_cast: false }
     }
 }
@@ -136,13 +136,13 @@ impl Strategy for DoomsdayStrategy {
 
 // ── GenericOppStrategy ────────────────────────────────────────────────────────
 
-pub(super) struct GenericOppStrategy {
+pub(crate) struct GenericOppStrategy {
     player_id: PlayerId,
     rng: SmallRng,
 }
 
 impl GenericOppStrategy {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { player_id: PlayerId::Opp, rng: SmallRng::from_entropy() }
     }
 }
@@ -756,7 +756,7 @@ fn spell_is_affordable(
 
 /// Build the complete list of legal actions for a player (new-protocol).
 /// Used by the engine to present choices to `choose_action`.
-pub(super) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<LegalAction> {
+pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<LegalAction> {
     let mut actions: Vec<LegalAction> = vec![LegalAction::Pass];
 
     // ── Castable spells from hand ────────────────────────────────────────────
@@ -894,7 +894,7 @@ fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
 ///
 /// Requires: unblocked attacker, ninjutsu card in hand, and enough mana.
 /// Returns an `ActivateAbility` action or `None` if conditions aren't met.
-pub(super) fn try_ninjutsu(
+pub(crate) fn try_ninjutsu(
     state: &SimState,
     who: PlayerId,
     rng: &mut impl Rng,

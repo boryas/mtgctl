@@ -165,7 +165,7 @@ pub(crate) fn eff_sacrifice(caster: PlayerId, who: Who, filter: ObjPredicate) ->
 
 /// Core "destroy" action for a single permanent. The future home for indestructibility checks.
 /// Use this (not `change_zone`) wherever the rules say a permanent is "destroyed".
-pub(super) fn destroy_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerId) {
+pub(crate) fn destroy_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerId) {
     change_zone(id, ZoneId::Graveyard, state, t, actor);
 }
 
@@ -307,7 +307,7 @@ pub(crate) fn eff_enter_permanent(
 /// Counter a single spell or ability by id. Called by `eff_counter_target` and
 /// Lavinia-style triggers that capture the spell id at trigger time.
 /// Fizzles gracefully if the id is no longer on the stack.
-pub(super) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerId) {
+pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerId) {
     let pos = state.stack.iter().position(|&sid| sid == id);
     if let Some(pos) = pos {
         // Prohibition gate: "can't be countered" CE effects (CR 614.17).
@@ -522,7 +522,7 @@ pub(crate) fn eff_hand_boost(who: PlayerId, n: usize) -> Effect {
 /// Ward pay-or-counter effect (CR 702.20).
 /// Offers `targeting_caster` the chance to pay `cost`; if they decline (or can't pay),
 /// `targeting_spell` is countered. Called from Ward `TriggerContext` effects.
-pub(super) fn ward_pay_or_counter(
+pub(crate) fn ward_pay_or_counter(
     ward_source: ObjId,
     cost: &[CostComponent],
     targeting_spell: ObjId,
