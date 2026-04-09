@@ -75,6 +75,7 @@ fn all_cards() -> Vec<CardDef> {
         engineered_explosives(),
         grafdiggers_cage(),
         mishras_bauble(),
+        cori_steel_cutter(),
         // Spells — instants
         brainstorm(),
         consider(),
@@ -154,6 +155,7 @@ fn all_cards() -> Vec<CardDef> {
         // Tokens
         orc_army_token(),
         clue_token(),
+        monk_token(),
     ]
 }
 
@@ -2600,6 +2602,172 @@ fn clue_token() -> CardDef {
         }],
         ..Default::default()
     }), vec![], None)
+}
+
+/// 1/1 white Monk creature token with prowess.
+/// Prowess: "Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn."
+fn monk_token() -> CardDef {
+    CardDef::new(
+        "Monk Token",
+        CardKind::Creature(CreatureData::new("", 1, 1)),
+        vec![Color::White],
+        None,
+        vec![], CardLayout::Normal, None,
+        // Prowess: whenever controller casts a noncreature spell, +1/+1 until EOT.
+        vec![TriggerDef {
+            check: Arc::new(|event, source_id, controller, state, pending| {
+                if let GameEvent::SpellCast { caster, card_id, .. } = event {
+                    if *caster != controller { return; }
+                    let is_creature = state.objects.get(card_id)
+                        .and_then(|o| state.catalog.get(&o.catalog_key))
+                        .map_or(false, |d| d.types.contains(&CardType::Creature));
+                    if !is_creature {
+                        pending.push(TriggerContext {
+                            source_name: "Monk Token (prowess)".into(),
+                            controller,
+                            target_spec: TargetSpec::None,
+                            effect: Effect(Arc::new(move |state, _t, _targets| {
+                                let ts = state.next_ci_timestamp();
+                                state.continuous_instances.push(ContinuousInstance {
+                                    source_id,
+                                    controller,
+                                    layer: ContinuousLayer::L7PowerToughness,
+                                    reads: vec![],
+                                    writes: vec![CeWrites::PowerToughness],
+                                    timestamp: ts,
+                                    filter: Arc::new(move |id, _, _| id == source_id),
+                                    modifier: Arc::new(|def, _state| {
+                                        if let CardKind::Creature(c) = &mut def.kind {
+                                            c.adjust_pt(1, 1);
+                                        }
+                                    }),
+                                    expiry: Expiry::EndOfTurn,
+                                });
+                            })),
+                        });
+                    }
+                }
+            }),
+            active_when: tp_on_battlefield(),
+        }],
+        vec![], vec![], vec![],
+    )
+}
+
+/// Cori-Steel Cutter — {1}{R} Artifact — Equipment.
+/// "Equipped creature gets +1/+1 and has trample and haste."
+/// "Flurry — Whenever you cast your second spell each turn, create a 1/1 white Monk
+///  creature token with prowess. You may attach this Equipment to it."
+/// "Equip {1}{R}"
+fn cori_steel_cutter() -> CardDef {
+    CardDef::new(
+        "Cori-Steel Cutter",
+        CardKind::Artifact(ArtifactData {
+            mana_cost: "1R".to_string(),
+            abilities: vec![AbilityDef {
+                // Equip {1}{R} — sorcery-speed, targets a creature you control.
+                costs: vec![CostComponent::Mana(parse_mana_cost("1R"))],
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Actor,
+                    zone: ZoneId::Battlefield,
+                    filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                },
+                ability_factory: Some(Arc::new(|who, source_id| {
+                    Effect(Arc::new(move |state, t, targets| {
+                        let Some(&creature_id) = targets.first() else { return };
+                        if let Some(bf) = state.permanent_bf_mut(source_id) {
+                            bf.attached_to = Some(creature_id);
+                        }
+                        let name = state.permanent_name(creature_id).unwrap_or_default();
+                        state.log(t, who, format!("Equip Cori-Steel Cutter → {}", name));
+                    }))
+                })),
+                timing: ActivationTiming::Sorcery,
+                ..Default::default()
+            }],
+            mana_abilities: vec![],
+        }),
+        parse_colors("R", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        // Flurry: whenever controller casts their second spell each turn, create Monk + may attach.
+        vec![TriggerDef {
+            check: Arc::new(|event, source_id, controller, state, pending| {
+                if let GameEvent::SpellCast { caster, .. } = event {
+                    if *caster != controller { return; }
+                    // spells_cast_this_turn is incremented AFTER SpellCast fires,
+                    // so == 1 means the first spell was counted and this is the second.
+                    if state.player(controller).spells_cast_this_turn != 1 { return; }
+                    pending.push(TriggerContext {
+                        source_name: "Cori-Steel Cutter (flurry)".into(),
+                        controller,
+                        target_spec: TargetSpec::None,
+                        effect: Effect(Arc::new(move |state, t, _targets| {
+                            let token_id = do_create_token("Monk Token", controller, state, t);
+                            // "You may attach this Equipment to it."
+                            let f = Arc::clone(&state.resolve_choice);
+                            let choice = f(source_id, &ChoiceRequest::MayAttach, state);
+                            if matches!(choice, ChoiceResult::Bool(true)) {
+                                if let Some(bf) = state.permanent_bf_mut(source_id) {
+                                    bf.attached_to = Some(token_id);
+                                }
+                                state.log(t, controller,
+                                    "Cori-Steel Cutter attached to Monk Token".to_string());
+                            }
+                        })),
+                    });
+                }
+            }),
+            active_when: tp_on_battlefield(),
+        }],
+        vec![], vec![],
+        // Static abilities: equipped creature gets +1/+1, trample, haste.
+        vec![
+            // L6: grant trample and haste
+            Arc::new(move |source_id, controller| ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                timestamp: 0,
+                filter: Arc::new(move |id, _, state| {
+                    state.objects.get(&source_id)
+                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|bf| bf.attached_to)
+                        .map_or(false, |attached| attached == id)
+                }),
+                modifier: Arc::new(|def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.keywords.insert(Keyword::Trample);
+                        c.keywords.insert(Keyword::Haste);
+                    }
+                }),
+                expiry: Expiry::WhileSourceOnBattlefield,
+            }),
+            // L7: +1/+1
+            Arc::new(move |source_id, controller| ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L7PowerToughness,
+                reads: vec![],
+                writes: vec![CeWrites::PowerToughness],
+                timestamp: 0,
+                filter: Arc::new(move |id, _, state| {
+                    state.objects.get(&source_id)
+                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|bf| bf.attached_to)
+                        .map_or(false, |attached| attached == id)
+                }),
+                modifier: Arc::new(|def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.adjust_pt(1, 1);
+                    }
+                }),
+                expiry: Expiry::WhileSourceOnBattlefield,
+            }),
+        ],
+    )
 }
 
 /// Dragon's Rage Channeler — {R} 1/1 Human Shaman.

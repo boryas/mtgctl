@@ -134,6 +134,8 @@ Modify the ZoneChange event itself rather than triggering after it.
 |------|-----------|--------|
 | Lavinia | Opponent spell, no mana spent | Counter it |
 | Dragon's Rage Channeler | Controller noncreature spell | Surveil 1 |
+| Cori-Steel Cutter (flurry) | Controller's second spell this turn | Create Monk Token, may attach |
+| Monk Token (prowess) | Controller noncreature spell | +1/+1 until EOT (L7 CE) |
 | Flusterstorm (Storm) | Self cast | Copy N times |
 
 #### Land-played trigger
@@ -235,6 +237,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Lavinia | `castable = false` on opponent noncreature spells |
 | Hexing Squelcher | Grants Ward trigger to other creatures via `granted_trigger_defs` |
 | Sneak Attack | Grants Haste to sneaked creature |
+| Cori-Steel Cutter | Grants Trample + Haste to equipped creature via `bf.attached_to` filter |
 | Mistrise Village | `LatentSpellMod` applies CE granting "can't be countered" on next spell |
 | Dragon's Rage Channeler | Delirium: grants Flying when ≥4 card types in GY |
 
@@ -244,6 +247,8 @@ Modify the ZoneChange event itself rather than triggering after it.
 |------|--------|
 | Toxic Deluge | All creatures get -X/-X (EndOfTurn); SBA handles death at 0 toughness |
 | Dragon's Rage Channeler | Delirium: +2/+2 when ≥4 card types in GY |
+| Cori-Steel Cutter | +1/+1 to equipped creature via `bf.attached_to` filter |
+| Monk Token (prowess) | +1/+1 until EOT per noncreature spell (stacking CIs) |
 
 ---
 
@@ -324,7 +329,8 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Flying | Emrakul, Griselbrand, Atraxa, Dragon's Rage Channeler (delirium), Insectile Aberration |
 | Shadow | Dauthi Voidwalker |
 | Double Strike | Fury |
-| Haste | Granted by Sneak Attack via L6 CE |
+| Trample | Granted by Cori-Steel Cutter via L6 CE; stored as keyword, not functionally modeled |
+| Haste | Granted by Sneak Attack via L6 CE; also by Cori-Steel Cutter |
 
 #### Other
 
@@ -337,6 +343,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Protection | Emrakul | `protection_from: vec![obj_pred_colored_spell()]` |
 | Annihilator 6 | Emrakul | Stored as keyword; **not functionally modeled** |
 | Cycling | Street Wraith, Edge of Autumn | Street Wraith: hand `AbilityDef`; Edge: **strategy-only** |
+| Prowess | Monk Token (from Cori-Steel Cutter) | Triggered ability: +1/+1 EOT per noncreature spell |
 | Ninjutsu | Ingenious Infiltrator, Kaito | `ninjutsu_ability()` helper |
 
 ---
@@ -453,6 +460,22 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Card | Type | Amount |
 |------|------|--------|
 | Orcish Bowmasters | Orc | 1 |
+
+#### Token creation
+
+| Card | Token | Notes |
+|------|-------|-------|
+| Orcish Bowmasters | Orc Army 0/0 | Amass; grown by counters |
+| Tamiyo | Clue Token | Artifact with {2}, tap, sac: draw 1 |
+| Cori-Steel Cutter | Monk Token 1/1 | White creature with prowess; flurry trigger |
+
+---
+
+### Equipment / Attach (CR 301.5)
+
+| Card | Equip cost | Grants | Notes |
+|------|-----------|--------|-------|
+| Cori-Steel Cutter | {1}{R} | +1/+1, trample, haste | `BattlefieldState.attached_to`; sorcery-speed equip; flurry auto-attaches |
 
 ---
 

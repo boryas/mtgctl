@@ -3333,6 +3333,7 @@
             ChoiceRequest::Mode(_)           => ChoiceResult::Mode(0),
             ChoiceRequest::WardPayment {..}  => ChoiceResult::Bool(true),
             ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
+            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
         });
         let id = state.alloc_id();
         let def = catalog_card("Painter's Servant");
@@ -3444,6 +3445,7 @@
             ChoiceRequest::Mode(_)           => ChoiceResult::Mode(0),
             ChoiceRequest::WardPayment {..}  => ChoiceResult::Bool(true),
             ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
+            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
         });
         let id = state.alloc_id();
         let def = catalog_card("Disruptor Flute");
@@ -4452,6 +4454,7 @@
             ChoiceRequest::CardName        => ChoiceResult::CardName(String::new()),
             ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
             ChoiceRequest::WardPayment {..} => ChoiceResult::Bool(true),
+            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
         });
 
         eff_each_may_put(
@@ -4532,6 +4535,7 @@
             ChoiceRequest::CardName        => ChoiceResult::CardName(String::new()),
             ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
             ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
+            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
         });
         // Opponent spell on the stack.
         let spell_id = state.alloc_id();
@@ -6330,4 +6334,209 @@
             "Tumble should not damage non-flyer");
         assert_eq!(state.permanent_bf(flyer_id).unwrap().damage, 6,
             "Tumble should deal 6 damage to flyer");
+    }
+
+    // ── Cori-Steel Cutter ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cori_equip_grants_keywords_and_pt() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let creature_id = add_default_perm(&mut state, PlayerId::Us, "Barrowgoyf");
+        let cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+
+        // Attach equipment to creature.
+        state.permanent_bf_mut(cori_id).unwrap().attached_to = Some(creature_id);
+        recompute(&mut state);
+
+        let def = state.def_of(creature_id).expect("creature should have materialized def");
+        if let CardKind::Creature(c) = &def.kind {
+            assert!(c.keywords.contains(Keyword::Trample), "equipped creature should have trample");
+            assert!(c.keywords.contains(Keyword::Haste), "equipped creature should have haste");
+            // Barrowgoyf base is 0/1; equipment adds +1/+1 → at least 1/2.
+            assert!(c.power() >= 1, "equipped creature should get +1 power");
+            assert!(c.toughness() >= 2, "equipped creature should get +1 toughness");
+        } else {
+            panic!("should be a creature");
+        }
+    }
+
+    #[test]
+    fn test_cori_no_buff_when_unattached() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let creature_id = add_default_perm(&mut state, PlayerId::Us, "Barrowgoyf");
+        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+
+        recompute(&mut state);
+
+        let def = state.def_of(creature_id).expect("creature should have materialized def");
+        if let CardKind::Creature(c) = &def.kind {
+            assert!(!c.keywords.contains(Keyword::Trample), "unequipped creature should not have trample");
+            assert!(!c.keywords.contains(Keyword::Haste), "unequipped creature should not have haste");
+        } else {
+            panic!("should be a creature");
+        }
+    }
+
+    #[test]
+    fn test_cori_flurry_second_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+
+        // Simulate second spell: first spell already counted.
+        state.us.spells_cast_this_turn = 1;
+
+        let spell_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Ponder".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Stack,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
+            id
+        };
+
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        // A Monk Token should now exist on the battlefield.
+        let monk_count = state.permanents_of(PlayerId::Us)
+            .filter(|c| c.catalog_key == "Monk Token")
+            .count();
+        assert_eq!(monk_count, 1, "flurry should create exactly one Monk Token");
+    }
+
+    #[test]
+    fn test_cori_flurry_not_first_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+        state.us.spells_cast_this_turn = 0;
+
+        let spell_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Ponder".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Stack,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
+            id
+        };
+
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        let monk_count = state.permanents_of(PlayerId::Us)
+            .filter(|c| c.catalog_key == "Monk Token")
+            .count();
+        assert_eq!(monk_count, 0, "flurry should NOT trigger on first spell");
+    }
+
+    #[test]
+    fn test_cori_flurry_not_third_spell() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+        state.us.spells_cast_this_turn = 2;
+
+        let spell_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Ponder".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Stack,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
+            id
+        };
+
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+
+        let monk_count = state.permanents_of(PlayerId::Us)
+            .filter(|c| c.catalog_key == "Monk Token")
+            .count();
+        assert_eq!(monk_count, 0, "flurry should NOT trigger on third spell");
+    }
+
+    #[test]
+    fn test_monk_prowess_noncreature() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let monk_id = add_default_perm(&mut state, PlayerId::Us, "Monk Token");
+        recompute(&mut state);
+
+        // Fire a noncreature SpellCast.
+        let spell_id = {
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id,
+                catalog_key: "Ponder".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Stack,
+                is_token: false, bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
+            id
+        };
+
+        fire_event(
+            GameEvent::SpellCast { caster: PlayerId::Us, card_id: spell_id, mana_spent: true },
+            &mut state, 1, PlayerId::Us,
+        );
+        for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
+        recompute(&mut state);
+
+        let def = state.def_of(monk_id).expect("Monk should have materialized def");
+        if let CardKind::Creature(c) = &def.kind {
+            assert_eq!(c.power(), 2, "Monk should be 2/2 after one prowess trigger");
+            assert_eq!(c.toughness(), 2, "Monk should be 2/2 after one prowess trigger");
+        } else {
+            panic!("Monk should be a creature");
+        }
+    }
+
+    #[test]
+    fn test_detach_on_creature_leaves() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let creature_id = add_default_perm(&mut state, PlayerId::Us, "Barrowgoyf");
+        let cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+        state.permanent_bf_mut(cori_id).unwrap().attached_to = Some(creature_id);
+
+        // Creature leaves the battlefield.
+        change_zone(creature_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
+
+        assert_eq!(state.permanent_bf(cori_id).unwrap().attached_to, None,
+            "equipment should detach when creature leaves");
     }

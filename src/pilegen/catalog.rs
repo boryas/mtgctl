@@ -13,6 +13,7 @@ pub(crate) enum Keyword {
     Deathtouch,
     Annihilator6,
     DoubleStrike,
+    Trample,
 }
 
 /// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.

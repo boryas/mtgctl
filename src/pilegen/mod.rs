@@ -142,6 +142,8 @@ struct BattlefieldState {
     /// the primary storage); `etb_choice` is the side-channel for abilities that need to inspect
     /// "what was named" without holding a captured copy.
     pub(super) etb_choice: Option<ChoiceResult>,
+    /// Equipment: the creature this Equipment is attached to (CR 301.5).
+    pub(super) attached_to: Option<ObjId>,
 }
 
 impl BattlefieldState {
@@ -150,7 +152,7 @@ impl BattlefieldState {
             tapped: false, damage: 0, entered_this_turn: true, counters: 0,
             power_mod: 0, toughness_mod: 0, loyalty: 0, pw_activated_this_turn: false,
             attacking: false, unblocked: false, attack_target: None,
-            active_face: 0, etb_choice: None,
+            active_face: 0, etb_choice: None, attached_to: None,
         }
     }
 }
@@ -436,6 +438,9 @@ pub(super) enum ChoiceRequest {
     /// "You may put one of these onto the battlefield" (CR 101.4, e.g. Show and Tell).
     /// Returns `ChoiceResult::OptionalObject(Some(id))` to place, or `None` to decline.
     MayPutOnBattlefield { candidates: Vec<ObjId> },
+    /// "You may attach this Equipment to it" (CR 701.3).
+    /// Returns `ChoiceResult::Bool(true)` to attach, `false` to decline.
+    MayAttach,
 }
 
 /// The value returned by `SimState.resolve_choice` for a given `ChoiceRequest`.
@@ -1418,6 +1423,7 @@ impl SimState {
                 ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
                 ChoiceRequest::WardPayment {..} => ChoiceResult::Bool(true),
                 ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
+                ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
             }),
             surveil_choice: std::sync::Arc::new(|_, _| rand::thread_rng().gen_bool(0.5)),
             sacrifice_choice: std::sync::Arc::new(|_, candidates, _| candidates.first().copied()),
@@ -2273,6 +2279,17 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
                 }
             }
 
+            // Detach any equipment that was attached to the departing permanent (CR 301.5c).
+            if from == ZoneId::Battlefield {
+                for obj in state.objects.values_mut() {
+                    if let Some(ref mut bf) = obj.bf {
+                        if bf.attached_to == Some(id) {
+                            bf.attached_to = None;
+                        }
+                    }
+                }
+            }
+
         }
         GameEvent::Draw { controller, .. } => {
             let controller = *controller;
@@ -3055,7 +3072,7 @@ pub(super) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mu
     }
 }
 
-pub(super) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut SimState, t: u8) {
+pub(super) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut SimState, t: u8) -> ObjId {
     let def = state.catalog.get(token_key).cloned();
     let new_id = state.alloc_id();
     state.objects.insert(new_id, GameObject {
@@ -3075,6 +3092,7 @@ pub(super) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         if let Some(obj) = state.objects.get_mut(&new_id) { obj.ci_timestamp = ts; }
     }
     state.log(t, controller, format!("{token_key} created"));
+    new_id
 }
 
 fn do_flip_tamiyo(source_id: ObjId, controller: PlayerId, state: &mut SimState, t: u8) {
