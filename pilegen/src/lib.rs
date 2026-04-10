@@ -27,33 +27,78 @@ mod tests;
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-pub fn run_scenario() -> String {
-    let catalog = build_catalog();
+fn cards(list: &[(&str, i32)]) -> Vec<(String, i32, String)> {
+    list.iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect()
+}
 
-    // Hardcoded Doomsday 60 for the feasibility test
-    let dd_cards: Vec<(String, i32, String)> = vec![
-        ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 2),
-        ("Misty Rainforest", 1), ("Island", 1), ("Swamp", 1),
-        ("Lotus Petal", 4), ("Lion's Eye Diamond", 4),
+#[cfg(target_arch = "wasm32")]
+fn dd_deck() -> Vec<(String, i32, String)> {
+    // tempo-doomsday-wasteland-1.4
+    cards(&[
+        ("Underground Sea", 3), ("Polluted Delta", 4), ("Flooded Strand", 1),
+        ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Marsh Flats", 1),
+        ("Island", 1), ("Swamp", 1), ("Undercity Sewers", 2), ("Wasteland", 3),
+        ("Cavern of Souls", 1),
+        ("Lotus Petal", 2), ("Lion's Eye Diamond", 1),
         ("Dark Ritual", 4), ("Doomsday", 4), ("Brainstorm", 4),
-        ("Ponder", 4), ("Preordain", 2), ("Consider", 2),
-        ("Force of Will", 4), ("Daze", 2), ("Thoughtseize", 4),
-        ("Street Wraith", 2), ("Thassa's Oracle", 1), ("Cavern of Souls", 1),
-    ].into_iter().map(|(n, q)| (n.to_string(), q, "main".to_string())).collect();
+        ("Ponder", 4), ("Consider", 1), ("Edge of Autumn", 1),
+        ("Force of Will", 4), ("Daze", 3), ("Thoughtseize", 2),
+        ("Street Wraith", 1), ("Thassa's Oracle", 1), ("Unearth", 1),
+        ("Tamiyo, Inquisitive Student", 4), ("Orcish Bowmasters", 2),
+        ("Murktide Regent", 2),
+    ])
+}
 
-    let opp_cards: Vec<(String, i32, String)> = vec![
-        ("Volcanic Island", 3), ("Scalding Tarn", 4), ("Wasteland", 3),
-        ("Island", 1), ("Mountain", 1),
-        ("Delver of Secrets", 4), ("Dragon's Rage Channeler", 4),
-        ("Murktide Regent", 3),
-        ("Lightning Bolt", 4), ("Force of Will", 4), ("Daze", 4),
-        ("Brainstorm", 4), ("Ponder", 4), ("Unholy Heat", 2),
-        ("Price of Progress", 2), ("Spell Pierce", 2),
-        ("Mishra's Bauble", 4),
-    ].into_iter().map(|(n, q)| (n.to_string(), q, "main".to_string())).collect();
+#[cfg(target_arch = "wasm32")]
+fn izzet_delver_deck() -> Vec<(String, i32, String)> {
+    // izzet-delver-ethanr-mar26
+    cards(&[
+        ("Volcanic Island", 4), ("Scalding Tarn", 2), ("Flooded Strand", 2),
+        ("Misty Rainforest", 2), ("Polluted Delta", 3), ("Wasteland", 4),
+        ("Island", 1), ("Thundering Falls", 1),
+        ("Delver of Secrets", 3), ("Dragon's Rage Channeler", 4),
+        ("Murktide Regent", 2), ("Brazen Borrower", 1),
+        ("Cori-Steel Cutter", 3), ("Mishra's Bauble", 4),
+        ("Lightning Bolt", 4), ("Unholy Heat", 1),
+        ("Force of Will", 4), ("Force of Negation", 1), ("Daze", 4),
+        ("Brainstorm", 4), ("Ponder", 4), ("Preordain", 2),
+    ])
+}
 
-    let state = generate_scenario("doomsday", "Izzet Delver", &catalog, &dd_cards, &opp_cards);
+#[cfg(target_arch = "wasm32")]
+fn ub_tempo_deck() -> Vec<(String, i32, String)> {
+    // dimir-tempo-1.0
+    cards(&[
+        ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 2),
+        ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Bloodstained Mire", 1),
+        ("Island", 1), ("Swamp", 1), ("Wasteland", 4), ("Undercity Sewers", 1),
+        ("Tamiyo, Inquisitive Student", 4), ("Orcish Bowmasters", 4),
+        ("Murktide Regent", 3), ("Barrowgoyf", 2), ("Brazen Borrower", 1),
+        ("Kaito, Bane of Nightmares", 2),
+        ("Brainstorm", 4), ("Ponder", 4), ("Force of Will", 4), ("Daze", 3),
+        ("Fatal Push", 4), ("Snuff Out", 1), ("Thoughtseize", 4),
+    ])
+}
+
+/// Returns JSON list of available matchup names.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn list_matchups() -> String {
+    serde_json::to_string(&["Izzet Delver", "UB Tempo"]).unwrap()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn run_scenario(matchup: &str) -> String {
+    let catalog = build_catalog();
+    let dd_cards = dd_deck();
+
+    let (opp_name, opp_cards) = match matchup {
+        "UB Tempo" => ("UB Tempo", ub_tempo_deck()),
+        _ => ("Izzet Delver", izzet_delver_deck()),
+    };
+
+    let state = generate_scenario("doomsday", opp_name, &catalog, &dd_cards, &opp_cards);
     serde_json::to_string(&state.to_result()).unwrap()
 }
 
