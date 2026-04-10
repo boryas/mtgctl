@@ -109,6 +109,21 @@ impl Strategy for DoomsdayStrategy {
         action
     }
 
+    fn choose_mana_ability(&mut self, state: &SimState, who: PlayerId,
+                           available: &[ManaAbilityOption],
+                           mana_cost: &ManaCost) -> Option<ManaActivation> {
+        // Never auto-crack LED — discarding your hand is a pile-building decision.
+        let filtered: Vec<_> = available.iter()
+            .filter(|a| state.objects.get(&a.source_id)
+                .map_or(true, |c| c.catalog_key != "Lion's Eye Diamond"))
+            .cloned()
+            .collect();
+        let plan = auto_tap_plan(state, who, mana_cost);
+        plan.into_iter().find(|act| {
+            filtered.iter().any(|a| a.source_id == act.source_id && a.ability_index == act.ability_index)
+        })
+    }
+
     fn announce(&mut self, state: &SimState, card_id: ObjId,
                 options: &AnnounceOptions) -> AnnounceChoice {
         // For reactive casts (instants on non-empty stack), try alt costs deterministically.

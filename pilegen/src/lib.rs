@@ -2046,6 +2046,7 @@ pub struct PermanentResult {
     pub tapped: bool,
     pub counters: i32,
     pub loyalty: i32,
+    pub flipped: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -2086,6 +2087,7 @@ impl SimState {
                 tapped: bf.tapped,
                 counters: bf.counters,
                 loyalty: bf.loyalty,
+                flipped: bf.active_face == 1,
             }
         };
 
