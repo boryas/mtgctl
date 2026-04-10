@@ -54,7 +54,7 @@ pub fn run_scenario() -> String {
     ].into_iter().map(|(n, q)| (n.to_string(), q, "main".to_string())).collect();
 
     let state = generate_scenario("doomsday", "Izzet Delver", &catalog, &dd_cards, &opp_cards);
-    format!("{}", state)
+    serde_json::to_string(&state.to_result()).unwrap()
 }
 
 // ── Game state ────────────────────────────────────────────────────────────────
@@ -1962,6 +1962,117 @@ impl std::fmt::Display for SimState {
         Ok(())
     }
 }
+// ── Structured output ────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ScenarioResult {
+    pub turn: u8,
+    pub stage: String,
+    pub on_play: bool,
+    pub us: PlayerResult,
+    pub opp: PlayerResult,
+    pub log: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PlayerResult {
+    pub deck_name: String,
+    pub life: i32,
+    pub lands: Vec<PermanentResult>,
+    pub permanents: Vec<PermanentResult>,
+    pub hand: Vec<CardResult>,
+    pub hand_hidden: usize,
+    pub graveyard: Vec<String>,
+    pub exile: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct PermanentResult {
+    pub name: String,
+    pub tapped: bool,
+    pub counters: i32,
+    pub loyalty: i32,
+}
+
+#[derive(serde::Serialize)]
+pub struct CardResult {
+    pub name: String,
+}
+
+impl SimState {
+    pub fn to_result(&self) -> ScenarioResult {
+        ScenarioResult {
+            turn: self.turn,
+            stage: stage_label(self.turn).to_string(),
+            on_play: self.on_play,
+            us: self.player_result(PlayerId::Us),
+            opp: self.player_result(PlayerId::Opp),
+            log: self.log.clone(),
+        }
+    }
+
+    fn player_result(&self, who: PlayerId) -> PlayerResult {
+        let is_land = |c: &&GameObject| -> bool {
+            c.bf.is_some()
+                && !self.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
+        };
+
+        let to_perm = |c: &GameObject| -> PermanentResult {
+            let bf = c.bf.as_ref().unwrap();
+            PermanentResult {
+                name: c.catalog_key.clone(),
+                tapped: bf.tapped,
+                counters: bf.counters,
+                loyalty: bf.loyalty,
+            }
+        };
+
+        let lands: Vec<PermanentResult> = self.permanents_of(who)
+            .filter(is_land)
+            .map(|c| to_perm(c))
+            .collect();
+
+        let permanents: Vec<PermanentResult> = self.permanents_of(who)
+            .filter(|c| !is_land(c))
+            .map(|c| to_perm(c))
+            .collect();
+
+        let hand: Vec<CardResult> = self.hand_of(who)
+            .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
+            .map(|c| CardResult { name: c.catalog_key.clone() })
+            .collect();
+
+        let hand_hidden = self.hand_of(who)
+            .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
+            .count();
+
+        let graveyard: Vec<String> = self.graveyard_order.iter()
+            .filter_map(|id| self.objects.get(id))
+            .filter(|c| c.owner == who)
+            .map(|c| c.catalog_key.clone())
+            .collect();
+
+        let exile: Vec<String> = self.exile_of(who)
+            .map(|c| if matches!(c.zone, CardZone::Exile { on_adventure: true }) {
+                format!("{} (adv)", c.catalog_key)
+            } else {
+                c.catalog_key.clone()
+            })
+            .collect();
+
+        PlayerResult {
+            deck_name: self.player(who).deck_name.clone(),
+            life: self.player(who).life,
+            lands,
+            permanents,
+            hand,
+            hand_hidden,
+            graveyard,
+            exile,
+        }
+    }
+}
+
 // ── Turn simulation ───────────────────────────────────────────────────────────
 
 
