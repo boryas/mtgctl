@@ -1375,6 +1375,8 @@ pub struct SimState {
     winner: Option<PlayerId>,
     /// Set when Doomsday resolved — simulation ends successfully.
     success: bool,
+    /// Life total before Doomsday halved it (for display as "X → Y").
+    pub(crate) life_before_dd: Option<i32>,
     /// Active player this phase/step (for log context).
     current_ap: ObjId,
     /// Current phase/step label (for log context).
@@ -1467,6 +1469,7 @@ impl SimState {
             log: Vec::new(),
             winner: None,
             success: false,
+            life_before_dd: None,
             current_ap: ObjId::UNSET,
             current_phase: None,
             combat_attackers: Vec::new(),
@@ -1992,7 +1995,7 @@ impl std::fmt::Display for SimState {
         writeln!(f)?;
         writeln!(f, "{}", sec("MY BOARD"))?;
         writeln!(f)?;
-        writeln!(f, "  Life       : {} -> {}", self.us.life, self.us.life / 2)?;
+        writeln!(f, "  Life       : {}", self.us.life)?;
         self.fmt_permanents(f, PlayerId::Us)?;
         self.fmt_player_zones(f, PlayerId::Us)?;
         writeln!(f)?;
@@ -2017,6 +2020,10 @@ pub struct ScenarioResult {
     pub us: PlayerResult,
     pub opp: PlayerResult,
     pub log: Vec<String>,
+    /// Cards on the stack (e.g. Doomsday mid-resolution).
+    pub stack: Vec<String>,
+    /// Life before Doomsday halved it (for "X → Y" display).
+    pub life_before_dd: Option<i32>,
 }
 
 #[derive(serde::Serialize)]
@@ -2027,6 +2034,8 @@ pub struct PlayerResult {
     pub permanents: Vec<PermanentResult>,
     pub hand: Vec<CardResult>,
     pub hand_hidden: usize,
+    pub land_drop_available: bool,
+    pub library: Vec<String>,
     pub graveyard: Vec<String>,
     pub exile: Vec<String>,
 }
@@ -2046,6 +2055,12 @@ pub struct CardResult {
 
 impl SimState {
     pub fn to_result(&self) -> ScenarioResult {
+        let stack = if self.success {
+            vec!["Doomsday".to_string()]
+        } else {
+            vec![]
+        };
+
         ScenarioResult {
             turn: self.turn,
             stage: stage_label(self.turn).to_string(),
@@ -2053,6 +2068,8 @@ impl SimState {
             us: self.player_result(PlayerId::Us),
             opp: self.player_result(PlayerId::Opp),
             log: self.log.clone(),
+            stack,
+            life_before_dd: self.life_before_dd,
         }
     }
 
@@ -2082,20 +2099,57 @@ impl SimState {
             .map(|c| to_perm(c))
             .collect();
 
-        let hand: Vec<CardResult> = self.hand_of(who)
-            .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
-            .map(|c| CardResult { name: c.catalog_key.clone() })
+        // Our hand is fully known to us; opponent's uses the known/hidden split.
+        let (hand, hand_hidden) = if who == PlayerId::Us {
+            let all: Vec<CardResult> = self.hand_of(who)
+                .map(|c| CardResult { name: c.catalog_key.clone() })
+                .collect();
+            (all, 0)
+        } else {
+            let known: Vec<CardResult> = self.hand_of(who)
+                .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
+                .map(|c| CardResult { name: c.catalog_key.clone() })
+                .collect();
+            let hidden = self.hand_of(who)
+                .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
+                .count();
+            (known, hidden)
+        };
+
+        // Only reveal our library (opponent's is hidden).
+        let library: Vec<String> = if who == PlayerId::Us {
+            let mut lib: Vec<String> = self.library_of(who)
+                .map(|c| c.catalog_key.clone())
+                .collect();
+            lib.sort();
+            lib
+        } else {
+            vec![]
+        };
+
+        // Use graveyard_order for cards that went through change_zone, then append
+        // any cards in the Graveyard zone that were moved via set_card_zone (e.g. SacSelf costs).
+        let ordered_ids: Vec<ObjId> = self.graveyard_order.iter()
+            .copied()
+            .filter(|id| self.objects.get(id).map_or(false, |c| c.owner == who && c.zone == CardZone::Graveyard))
             .collect();
-
-        let hand_hidden = self.hand_of(who)
-            .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
-            .count();
-
-        let graveyard: Vec<String> = self.graveyard_order.iter()
+        let mut extra: Vec<(ObjId, String)> = self.objects.iter()
+            .filter(|(_, c)| c.owner == who && c.zone == CardZone::Graveyard && !ordered_ids.contains(&c.id))
+            .map(|(_, c)| (c.id, c.catalog_key.clone()))
+            .collect();
+        extra.sort_by(|a, b| a.1.cmp(&b.1));
+        let mut graveyard: Vec<String> = ordered_ids.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who)
             .map(|c| c.catalog_key.clone())
+            .chain(extra.into_iter().map(|(_, name)| name))
             .collect();
+
+        // If DD just resolved, it's in the GY but we display it on the stack instead.
+        if who == PlayerId::Us && self.success {
+            if let Some(pos) = graveyard.iter().rposition(|n| n == "Doomsday") {
+                graveyard.remove(pos);
+            }
+        }
 
         let exile: Vec<String> = self.exile_of(who)
             .map(|c| if matches!(c.zone, CardZone::Exile { on_adventure: true }) {
@@ -2105,6 +2159,8 @@ impl SimState {
             })
             .collect();
 
+        let land_drop_available = self.player(who).lands_played_this_turn == 0;
+
         PlayerResult {
             deck_name: self.player(who).deck_name.clone(),
             life: self.player(who).life,
@@ -2112,6 +2168,8 @@ impl SimState {
             permanents,
             hand,
             hand_hidden,
+            land_drop_available,
+            library,
             graveyard,
             exile,
         }

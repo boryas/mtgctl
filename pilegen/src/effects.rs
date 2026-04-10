@@ -239,9 +239,14 @@ pub(crate) fn eff_bounce_target(caster: PlayerId) -> Effect {
     }))
 }
 
-/// Set `state.success = true` (Doomsday resolved).
+/// Doomsday resolution: halve life (rounded up), then set success.
+/// Library + graveyard contents remain in place as the "pool" for pile selection;
+/// the simulation stops here so the viewer can see what's available.
 pub(crate) fn eff_doomsday() -> Effect {
     Effect(Arc::new(|state, _t, _targets| {
+        let life = state.player(PlayerId::Us).life;
+        state.life_before_dd = Some(life);
+        state.player_mut(PlayerId::Us).life = life / 2;
         state.success = true;
     }))
 }
