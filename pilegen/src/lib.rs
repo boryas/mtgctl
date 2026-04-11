@@ -1284,30 +1284,6 @@ fn ma_requires_sac(ma: &ManaAbility) -> bool {
     ma.costs.iter().any(|c| matches!(c, CostComponent::SacSelf))
 }
 
-/// Find a hand card with a hand-zone mana ability that produces the requested color
-/// (or any mana if `color` is None for generic). Returns (id, name, make_effect).
-fn find_hand_mana_source(
-    state: &SimState,
-    who: PlayerId,
-    color: Option<Color>,
-) -> Option<(ObjId, String, ManaEffectFactory)> {
-    let hand_ids: Vec<_> = state.hand_of(who).map(|c| (c.id, c.catalog_key.clone())).collect();
-    for (id, key) in hand_ids {
-        let mas = state.catalog.get(&key).map(|d| d.mana_abilities()).unwrap_or(&[]);
-        for ma in mas {
-            if !matches!(ma.source_zone, SourceZone::Hand) { continue; }
-            let color_ok = match color {
-                Some(c) => ma.produces.contains(&c),
-                None => true, // any mana for generic
-            };
-            if color_ok {
-                return Some((id, key, std::sync::Arc::clone(&ma.make_effect)));
-            }
-        }
-    }
-    None
-}
-
 fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
     let avail: Vec<_> = abilities.iter()
         .filter(|ma| !ma_requires_tap(ma) || !tapped)
@@ -1381,6 +1357,9 @@ pub struct SimState {
     success: bool,
     /// Life total before Doomsday halved it (for display as "X → Y").
     pub(crate) life_before_dd: Option<i32>,
+    /// Card being cast during the mana sub-loop (CR 601.2g). Set before mana loop,
+    /// cleared after cast_spell. Used by Cavern of Souls to restrict colored mana.
+    pub(crate) casting_spell: Option<ObjId>,
     /// Active player this phase/step (for log context).
     current_ap: ObjId,
     /// Current phase/step label (for log context).
@@ -1481,6 +1460,7 @@ impl SimState {
             winner: None,
             success: false,
             life_before_dd: None,
+            casting_spell: None,
             current_ap: ObjId::UNSET,
             current_phase: None,
             combat_attackers: Vec::new(),
@@ -1670,150 +1650,6 @@ impl SimState {
             accumulate_source_potential(&hand_mas, false, &mut p);
         }
         p
-    }
-
-    /// Tap/sac permanents to produce mana for `who` for the given cost.
-    /// Returns a log of activations.
-    fn produce_mana(&mut self, who: PlayerId, cost: &ManaCost, _t: u8) -> Vec<String> {
-        let mut log: Vec<String> = Vec::new();
-        let color_specs: [(i32, Color); 5] = [
-            (cost.b, Color::Black),
-            (cost.u, Color::Blue),
-            (cost.w, Color::White),
-            (cost.r, Color::Red),
-            (cost.g, Color::Green),
-        ];
-
-        for (need, color) in color_specs {
-            let mut remaining = need;
-            while remaining > 0 {
-                // Find a battlefield permanent controlled by `who` with the right ability.
-                let found = self.objects.iter()
-                    .find(|(id, c)| {
-                        c.controller == who && c.zone == CardZone::Battlefield &&
-                        c.bf.as_ref().map_or(false, |bf| {
-                            self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[])
-                                .iter().any(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color)
-                                    && ma.condition.as_ref().map_or(true, |cond| cond(**id, self)))
-                        })
-                    })
-                    .map(|(id, c)| {
-                        let bf = c.bf.as_ref().unwrap();
-                        let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
-                            .iter()
-                            .find(|ma| (!ma_requires_tap(ma) || !bf.tapped) && ma.produces.contains(&color)
-                                && ma.condition.as_ref().map_or(true, |cond| cond(*id, self)))
-                            .map(|ma| ma_requires_sac(ma))
-                            .unwrap_or(false);
-                        (*id, c.catalog_key.clone(), sac)
-                    });
-                if let Some((id, name, sac)) = found {
-                    let color_ch = match color { Color::White=>'W', Color::Blue=>'U', Color::Black=>'B', Color::Red=>'R', Color::Green=>'G' };
-                    let make = self.def_of(id)
-                        .and_then(|d| d.mana_abilities().iter()
-                            .find(|ma| {
-                                let tapped = self.objects.get(&id)
-                                    .and_then(|o| o.bf.as_ref()).map_or(false, |bf| bf.tapped);
-                                (!ma_requires_tap(ma) || !tapped) && ma.produces.contains(&color)
-                                    && ma.condition.as_ref().map_or(true, |cond| cond(id, self))
-                            })
-                            .map(|ma| std::sync::Arc::clone(&ma.make_effect)));
-                    if sac {
-                        log.push(format!("sac {} → {}", name, color_ch));
-                        if let Some(card) = self.objects.get_mut(&id) {
-                            card.zone = CardZone::Graveyard;
-                            card.bf = None;
-                        }
-                    } else {
-                        log.push(format!("tap {} → {}", name, color_ch));
-                        if let Some(bf) = self.permanent_bf_mut(id) {
-                            bf.tapped = true;
-                        }
-                    }
-                    if let Some(f) = make { f(who, Some(color)).call(self, _t, &[]); }
-                    remaining -= 1;
-                    continue;
-                }
-                // Fallback: hand-zone mana source (e.g. Simian Spirit Guide).
-                if let Some((id, name, make)) = find_hand_mana_source(self, who, Some(color)) {
-                    let color_ch = match color { Color::White=>'W', Color::Blue=>'U', Color::Black=>'B', Color::Red=>'R', Color::Green=>'G' };
-                    log.push(format!("exile {} → {}", name, color_ch));
-                    self.set_card_zone(id, CardZone::Exile { on_adventure: false });
-                    make(who, Some(color)).call(self, _t, &[]);
-                    remaining -= 1;
-                    continue;
-                }
-                break;
-            }
-        }
-
-        // Generic: tap any remaining untapped source.
-        let mut remaining_generic = cost.generic;
-        while remaining_generic > 0 {
-            let found = self.objects.iter()
-                .find(|(id, c)| {
-                    c.controller == who && c.zone == CardZone::Battlefield &&
-                    c.bf.as_ref().map_or(false, |bf| {
-                        let mas = self.def_of(**id).map(|d| d.mana_abilities()).unwrap_or(&[]);
-                        !mas.is_empty() && mas.iter().any(|ma| (!ma_requires_tap(ma) || !bf.tapped)
-                            && ma.condition.as_ref().map_or(true, |cond| cond(**id, self)))
-                    })
-                })
-                .map(|(id, c)| {
-                    let bf = c.bf.as_ref().unwrap();
-                    let sac = self.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[])
-                        .iter()
-                        .find(|ma| (!ma_requires_tap(ma) || !bf.tapped)
-                            && ma.condition.as_ref().map_or(true, |cond| cond(*id, self)))
-                        .map(|ma| ma_requires_sac(ma))
-                        .unwrap_or(false);
-                    (*id, c.catalog_key.clone(), sac)
-                });
-            if let Some((id, name, sac)) = found {
-                let (make, count) = {
-                    let tapped = self.objects.get(&id)
-                        .and_then(|o| o.bf.as_ref()).map_or(false, |bf| bf.tapped);
-                    self.def_of(id)
-                        .and_then(|d| d.mana_abilities().iter()
-                            .find(|ma| (!ma_requires_tap(ma) || !tapped)
-                                && ma.condition.as_ref().map_or(true, |cond| cond(id, self)))
-                            .map(|ma| (std::sync::Arc::clone(&ma.make_effect), ma.produces_count)))
-                        .unwrap_or_else(|| (std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_,_,_| {}))), 1))
-                };
-                if sac {
-                    log.push(format!("sac {} → {}", name, count));
-                    if let Some(card) = self.objects.get_mut(&id) {
-                        card.zone = CardZone::Graveyard;
-                        card.bf = None;
-                    }
-                } else {
-                    log.push(format!("tap {} → {}", name, count));
-                    if let Some(bf) = self.permanent_bf_mut(id) {
-                        bf.tapped = true;
-                    }
-                }
-                make(who, None).call(self, _t, &[]);
-                remaining_generic -= count as i32;
-                continue;
-            }
-            // Fallback: hand-zone mana source for generic mana.
-            if let Some((id, name, make)) = find_hand_mana_source(self, who, None) {
-                log.push(format!("exile {} → 1", name));
-                self.set_card_zone(id, CardZone::Exile { on_adventure: false });
-                make(who, None).call(self, _t, &[]);
-                remaining_generic -= 1;
-                continue;
-            }
-            break;
-        }
-        log
-    }
-
-    /// Produce mana and immediately spend it.
-    fn pay_mana(&mut self, who: PlayerId, cost: &ManaCost, t: u8) -> Vec<String> {
-        let log = self.produce_mana(who, cost, t);
-        self.player_mut(who).pool.spend(cost);
-        log
     }
 
     /// True if `who` can currently produce at least one black mana.
@@ -2612,8 +2448,7 @@ fn pay_single_cost(
 ) {
     match cost {
         CostComponent::Mana(mc) => {
-            let mana_log = state.pay_mana(who, mc, t);
-            state.log_mana_activations(t, who, mana_log);
+            state.player_mut(who).pool.spend(mc);
         }
         CostComponent::TapSelf => {
             if let Some(bf) = state.permanent_bf_mut(source_id) {
@@ -2724,8 +2559,7 @@ fn pay_single_cost(
         }
         CostComponent::XMana => {
             let mc = ManaCost { generic: chosen_x as i32, ..ManaCost::default() };
-            let mana_log = state.pay_mana(who, &mc, t);
-            state.log_mana_activations(t, who, mana_log);
+            state.player_mut(who).pool.spend(&mc);
             ctx.chosen_x = chosen_x;
         }
         CostComponent::Replicate(_) => {
@@ -2860,6 +2694,7 @@ fn cast_spell(
     chosen_targets: &[ObjId],
     chosen_x: u32,
     chosen_mode: usize,
+    mut strategy: Option<&mut dyn Strategy>,
 ) -> Option<ObjId> {
     let name = state.objects.get(&card_id)?.catalog_key.clone();
     // Prefer the post-CE materialized def (current in normal game flow where recompute
@@ -2879,8 +2714,7 @@ fn cast_spell(
         // Casting legality is pre-checked via CardDef.castable (set by CEs in recompute).
         // Strategy only offers castable cards, so no prohibition gate needed here.
         let cost = parse_mana_cost(adv.mana_cost());
-        let mana_log = state.pay_mana(who, &cost, t);
-        state.log_mana_activations(t, who, mana_log);
+        state.player_mut(who).pool.spend(&cost);
         let (_adv_spec, adv_eff) = build_spell_effect(&adv, who, card_id, 0, 0);
         let adv_targets = chosen_targets.to_vec();
         state.log(t, who, format!("Cast {} ({}, {}) [hand: {}]", adv.name, adv.mana_cost(), name, state.hand_size(who)));
@@ -2962,8 +2796,7 @@ fn cast_spell(
         let ctx = pay_costs(&cost.costs, state, t, who, card_id, 0);
         (describe_costs(&cost.costs).join(", "), ctx)
     } else {
-        let mana_log = state.pay_mana(who, &cost, t);
-        state.log_mana_activations(t, who, mana_log);
+        state.player_mut(who).pool.spend(&cost);
         (def.mana_cost().to_string(), CostsPaidCtx::default())
     };
 
@@ -3018,8 +2851,11 @@ fn cast_spell(
         let mut rep_count = 0u32;
         for &tgt in &extra_targets {
             if !state.potential_mana(who).can_pay(&rep_mc) { break; }
-            let mana_log = state.pay_mana(who, &rep_mc, t);
-            state.log_mana_activations(t, who, mana_log);
+            if let Some(ref mut strat) = strategy {
+                let mana_log = run_mana_loop(state, t, who, &rep_mc, &mut **strat);
+                state.log_mana_activations(t, who, mana_log);
+            }
+            state.player_mut(who).pool.spend(&rep_mc);
             let (_, copy_eff) = build_spell_effect(&def, who, card_id, chosen_x, chosen_mode);
             let copy_id = state.alloc_id();
             state.abilities.insert(copy_id, StackAbility {
@@ -3428,14 +3264,19 @@ fn run_cast_submachine(
         mc.generic += def.map(|d| d.casting_cost_modifier).unwrap_or(0);
         mc
     };
-    let mana_log = run_mana_loop(state, t, who, &mana_cost, strategy);
-    state.log_mana_activations(t, who, mana_log);
+    state.casting_spell = Some(card_id);
+    let mana_log = run_mana_loop(state, t, who, &mana_cost, &mut *strategy);
 
     // ── PayCosts + Complete (CR 601.2h-i) ───────────────────────────────
     // cast_spell handles remaining payment (pool already filled by mana loop),
     // zone move, effect building, and event firing.
-    cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(),
-               announced_alt_index, &chosen_targets, chosen_x, chosen_mode)
+    let result = cast_spell(state, t, who, card_id, face, preferred_cost.as_ref(),
+               announced_alt_index, &chosen_targets, chosen_x, chosen_mode,
+               Some(strategy));
+    state.casting_spell = None;
+    // Log mana activations AFTER the "Cast ..." line for readable output.
+    state.log_mana_activations(t, who, mana_log);
+    result
 }
 
 /// Activate sub-machine (CR 602.2b).
@@ -3465,8 +3306,17 @@ fn run_activate_submachine(
         .unwrap_or_default();
     let is_hand_source = matches!(ability.source_zone, SourceZone::Hand);
 
+    // ── Mana loop (CR 602.2b) ──────────────────────────────────────────
+    // Fill pool via strategy-driven mana loop before paying costs.
+    let mana_log: Vec<String> = ability.costs.iter().find_map(|c| {
+        if let CostComponent::Mana(mc) = c { Some(mc.clone()) } else { None }
+    }).map(|mc| run_mana_loop(state, t, who, &mc, &mut *strategy))
+      .unwrap_or_default();
+
     // ── Pay costs ───────────────────────────────────────────────────────
     let ctx = pay_ability_cost(state, t, who, source_id, ability, is_hand_source);
+    // Log mana activations after the "Activate ..." line.
+    state.log_mana_activations(t, who, mana_log);
 
     // ── Build effect ────────────────────────────────────────────────────
     let eff = build_ability_effect(ability, who, source_id);

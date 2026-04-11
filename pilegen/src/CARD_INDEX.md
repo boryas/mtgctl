@@ -87,7 +87,7 @@ All basic lands, ABU duals, Great Furnace use `tap_produces(mana_string)`.
 
 | Card | Choice type | Stored in | Drives |
 |------|-------------|-----------|--------|
-| Cavern of Souls | CreatureType | `bf.etb_choice` | Uncounterable (TODO: not enforced) |
+| Cavern of Souls | CreatureType | `bf.etb_choice` | Colored mana restricted to creature spells (coarsened — ignores named type). Uncounterable (TODO: not enforced). **TODO**: proper fix requires tagging mana with conditions/effects so the engine can track "this mana was produced by Cavern for creature type X" and enforce uncounterable + type restriction at spend time. |
 | Painter's Servant | Color | `bf.etb_choice` | L5 CE adding chosen color globally |
 | Disruptor Flute | CardName | `bf.etb_choice` | L3 CE: +3 cost & suppress abilities |
 | Engineered Explosives | (sunburst) | `obj.counters[Charge]` | Reads `resolving_costs_ctx.chosen_x` |

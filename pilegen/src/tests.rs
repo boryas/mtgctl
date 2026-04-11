@@ -533,7 +533,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, dark_ritual_id, SpellFace::Main, None, None, &[], 0, 0);
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, dark_ritual_id, SpellFace::Main, None, None, &[], 0, 0, None);
 
         assert!(card_id.is_some(), "spell should be cast");
         let card_id = card_id.unwrap();
@@ -553,7 +553,7 @@
 
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        let item = cast_spell(&mut state, 1, PlayerId::Us, doomsday_id, SpellFace::Main, None, None, &[], 0, 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, doomsday_id, SpellFace::Main, None, None, &[], 0, 0, None);
 
         assert!(item.is_none(), "can't cast with no mana");
     }
@@ -573,7 +573,7 @@
         let alt_cost = &fow_def.alternate_costs()[0];
         let initial_life = state.us.life;
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), Some(0), &[], 0, 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), Some(0), &[], 0, 0, None);
 
         assert!(item.is_some(), "FoW should be cast via pitch");
         assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
@@ -805,7 +805,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, tc_id, SpellFace::Main, None, None, &[], 0, 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, tc_id, SpellFace::Main, None, None, &[], 0, 0, None);
 
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "all 7 graveyard cards exiled");
@@ -827,7 +827,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, None, &[], 0, 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, None, &[], 0, 0, None);
 
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "both graveyard cards exiled");
@@ -857,7 +857,7 @@
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, None, &[], 0, 0).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, None, &[], 0, 0, None).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -896,7 +896,7 @@
         let catalog = vec![murktide_def.clone(), ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, None, &[], 0, 0).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, murktide_id, SpellFace::Main, None, None, &[], 0, 0, None).unwrap();
         let spell = state.objects[&card_id].spell.as_ref().expect("spell state populated").clone();
         let effect = &spell.effect;
         let chosen_targets = spell.chosen_targets.clone();
@@ -951,7 +951,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
 
-        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, None, &[], 0, 0);
+        let item = cast_spell(&mut state, 1, PlayerId::Us, dead_drop_id, SpellFace::Main, None, None, &[], 0, 0, None);
 
         assert!(item.is_none(), "can't cast — 1 generic still unpaid");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 2, "graveyard unchanged on failed cast");
@@ -2357,7 +2357,7 @@
         let bs_id  = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
         let alt_cost = &fow_def.alternate_costs()[0];
 
-        let card_id = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), Some(0), &[], 0, 0).unwrap();
+        let card_id = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), Some(0), &[], 0, 0, None).unwrap();
         let ctx = &state.objects[&card_id].spell.as_ref().unwrap().costs_paid_ctx;
 
         assert_eq!(ctx.objects_moved, vec![bs_id], "pitched Brainstorm id recorded in objects_moved");
@@ -2371,7 +2371,7 @@
         state.catalog.insert(fow_def.name.clone(), fow_def.clone());
         let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
         // No other cards — pitch cost requires another blue non-land card; also no mana for 3UU.
-        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, None, &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_none(), "FoW can't be cast with only itself in hand and no mana");
     }
 
@@ -2385,7 +2385,7 @@
         state.us.pool.u     = 2;
         state.us.pool.total = 5; // 3 generic + 2 blue
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, None, &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "FoW should cast for 3UU when pool is full");
         assert_eq!(state.us.pool.total, 0, "all mana spent");
     }
@@ -2405,7 +2405,7 @@
         let initial_life = state.us.life;
         let alt = &def.alternate_costs()[0];
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), Some(0), &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), Some(0), &[], 0, 0, None);
         assert!(result.is_some(), "Snuff Out should cast for 4 life");
         assert_eq!(state.us.life, initial_life - 4, "paid 4 life");
         let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
@@ -2470,7 +2470,7 @@
         let daze_id = add_hand_card(&mut state, PlayerId::Us, "Daze");
         let alt = &daze_def.alternate_costs()[0]; // ReturnFromBattlefield(Island subtype)
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), Some(0), &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, daze_id, SpellFace::Main, Some(alt), Some(0), &[], 0, 0, None);
         assert!(result.is_some(), "Daze should cast by bouncing the Island");
         let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
         assert_eq!(ctx.objects_moved, vec![island_id], "bounced Island id in objects_moved");
@@ -2519,7 +2519,7 @@
         state.us.pool.b = 1; state.us.pool.total = 1;
         state.us.life = 3; // can't pay Life(3) — would reach 0
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_none(), "additional Life(3) cost blocks cast at 3 life");
     }
 
@@ -2534,7 +2534,7 @@
         state.us.pool.b = 1; state.us.pool.total = 1;
         let initial_life = state.us.life; // 20
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "Dark Ritual + Life(3) additional cost is payable at 20 life");
         assert_eq!(state.us.life, initial_life - 3, "additional Life(3) was paid");
     }
@@ -2559,7 +2559,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         let initial_life = state.us.life;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "Bitter Triumph should be castable");
         let extra_zone = state.objects.get(&extra_id).map(|o| &o.zone);
         assert!(
@@ -2578,7 +2578,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         let initial_life = state.us.life;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "Bitter Triumph should be castable via life branch");
         assert_eq!(state.us.life, initial_life - 3, "3 life paid as fallback cost");
     }
@@ -2592,7 +2592,7 @@
         state.us.pool.b = 2; state.us.pool.total = 2;
         state.us.life = 3; // can't pay Life(3) — life > n is strict
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_none(), "Bitter Triumph should be blocked when life ≤ 3 and no spare card");
     }
 
@@ -2658,7 +2658,7 @@
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
         state.us.pool.u = 1; state.us.pool.total = 1;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[spell_id], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[spell_id], 0, 0, None);
         assert!(result.is_some(), "Consign to Memory should be castable");
 
         // Resolve — pop from stack and execute effect.
@@ -2683,7 +2683,7 @@
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
         state.us.pool.u = 1; state.us.pool.total = 1;
 
-        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[ab_id], 0, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[ab_id], 0, 0, None);
         assert!(result.is_some(), "Consign to Memory should be castable targeting a triggered ability");
 
         // Resolve.
@@ -3209,7 +3209,7 @@
         state.us.pool.total = 3;
         state.us.life = 20;
         let td_id = add_hand_card(&mut state, PlayerId::Us, "Toxic Deluge");
-        let result = cast_spell(&mut state, 1, PlayerId::Us, td_id, SpellFace::Main, None, None, &[], 3, 0);
+        let result = cast_spell(&mut state, 1, PlayerId::Us, td_id, SpellFace::Main, None, None, &[], 3, 0, None);
         assert!(result.is_some(), "Toxic Deluge should cast successfully");
         assert_eq!(state.us.life, 17, "caster pays X=3 life");
     }
@@ -3675,8 +3675,8 @@
         // ETB via change_zone, which assigns ci_timestamp and recompute (sets materialized)
         change_zone(tomb_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
-        let cost = ManaCost { generic: 2, ..Default::default() };
-        state.produce_mana(PlayerId::Us, &cost, 1);
+        let act = ManaActivation { source_id: tomb_id, ability_index: 0, color_choice: None };
+        execute_mana_activation(&mut state, 1, PlayerId::Us, &act);
 
         assert_eq!(state.us.pool.total, 2, "Ancient Tomb should produce 2 mana");
         assert_eq!(state.us.pool.c, 2, "both mana pips should be colorless");
@@ -4176,7 +4176,7 @@
         add_hand_card(&mut state, PlayerId::Opp, "Brainstorm"); // pitch target
         let alt_cost = fow_def.alternate_costs()[0].clone();
 
-        cast_spell(&mut state, 1, PlayerId::Opp, fow_id, SpellFace::Main, Some(&alt_cost), Some(0), &[], 0, 0)
+        cast_spell(&mut state, 1, PlayerId::Opp, fow_id, SpellFace::Main, Some(&alt_cost), Some(0), &[], 0, 0, None)
             .expect("FoW should cast via pitch cost");
         // Lavinia trigger queued at SpellCast; push spell onto stack so counter_one can find it.
         state.stack.push(fow_id);
@@ -4207,7 +4207,7 @@
 
         let petal_id = add_hand_card(&mut state, PlayerId::Opp, "Lotus Petal");
 
-        cast_spell(&mut state, 1, PlayerId::Opp, petal_id, SpellFace::Main, None, None, &[], 0, 0)
+        cast_spell(&mut state, 1, PlayerId::Opp, petal_id, SpellFace::Main, None, None, &[], 0, 0, None)
             .expect("Lotus Petal should not be prohibited (MV 0 ≤ any land count)");
         state.stack.push(petal_id);
 
@@ -4827,10 +4827,10 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let ssg_id = add_hand_card(&mut state, PlayerId::Us, "Simian Spirit Guide");
-        // Pay {R} — should exile SSG from hand.
-        let log = state.pay_mana(PlayerId::Us, &parse_mana_cost("R"), 1);
-        assert!(!log.is_empty(), "should have logged the exile");
-        assert!(log[0].contains("exile"), "log should mention exile: {:?}", log);
+        // Activate SSG's hand-zone mana ability — should exile from hand.
+        let act = ManaActivation { source_id: ssg_id, ability_index: 0, color_choice: Some(Color::Red) };
+        let log_entry = execute_mana_activation(&mut state, 1, PlayerId::Us, &act);
+        assert!(log_entry.contains("exile"), "log should mention exile: {:?}", log_entry);
         assert_eq!(state.objects[&ssg_id].zone, CardZone::Exile { on_adventure: false },
             "SSG should be exiled after paying mana");
     }
@@ -7395,6 +7395,104 @@
         add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
         add_hand_card(&mut state, PlayerId::Opp, "Fatal Push");
         assert!(!opp_should_mulligan(&state, PlayerId::Opp, 3), "always keep at 4 cards");
+    }
+
+    // ── Section 55: Mana Ability Fixes ──────────────────────────────────────
+
+    #[test]
+    fn test_led_excluded_from_mana_sub_loop() {
+        // LED has ActivationTiming::Instant, so enumerate_mana_abilities must skip it.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let led_def = catalog_card("Lion's Eye Diamond");
+        add_perm_with_def(&mut state, PlayerId::Us, &led_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let options = enumerate_mana_abilities(&state, PlayerId::Us);
+        assert!(options.is_empty(),
+            "LED should be excluded from mana sub-loop (timing != Default), got {} options", options.len());
+    }
+
+    #[test]
+    fn test_led_visible_in_potential_mana() {
+        // LED is excluded from the sub-loop but potential_mana should still count it
+        // (for can_pay checks that consider all sources including priority-window ones).
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let led_def = catalog_card("Lion's Eye Diamond");
+        add_perm_with_def(&mut state, PlayerId::Us, &led_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        let pool = state.potential_mana(PlayerId::Us);
+        assert!(pool.total >= 3, "potential_mana should count LED's 3 mana production");
+    }
+
+    #[test]
+    fn test_cavern_colored_mana_blocked_for_non_creature() {
+        // Cavern of Souls' colored mana ability requires casting_spell to be a creature.
+        // With no spell being cast (or a non-creature spell), the condition should fail.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let cavern_def = catalog_card("Cavern of Souls");
+        let cavern_id = add_perm_with_def(&mut state, PlayerId::Us, &cavern_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // No spell being cast — colored ability should be unavailable.
+        state.casting_spell = None;
+        let options = enumerate_mana_abilities(&state, PlayerId::Us);
+        // Should only see the colorless ability (index 0), not the colored one (index 1).
+        assert!(options.iter().all(|o| o.ability_index == 0),
+            "Cavern colored mana should be blocked when no spell is being cast");
+
+        // Casting a non-creature spell — colored ability still unavailable.
+        let ts_id = add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
+        state.casting_spell = Some(ts_id);
+        let options = enumerate_mana_abilities(&state, PlayerId::Us);
+        assert!(options.iter().all(|o| o.source_id != cavern_id || o.ability_index == 0),
+            "Cavern colored mana should be blocked for non-creature spells");
+    }
+
+    #[test]
+    fn test_cavern_colored_mana_allowed_for_creature() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let cavern_def = catalog_card("Cavern of Souls");
+        let cavern_id = add_perm_with_def(&mut state, PlayerId::Us, &cavern_def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // Casting a creature spell — colored ability should be available.
+        let creature_id = add_hand_card(&mut state, PlayerId::Us, "Murktide Regent");
+        state.casting_spell = Some(creature_id);
+        let options = enumerate_mana_abilities(&state, PlayerId::Us);
+        let has_colored = options.iter().any(|o| o.source_id == cavern_id && o.ability_index == 1);
+        assert!(has_colored,
+            "Cavern colored mana should be available when casting a creature spell");
+    }
+
+    #[test]
+    fn test_mana_log_after_cast_line() {
+        // The mana activation log should appear AFTER the "Cast ..." line.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        // Set up: Underground Sea on battlefield, Dark Ritual in hand, pool empty.
+        let sea_def = catalog_card("Underground Sea");
+        add_perm_with_def(&mut state, PlayerId::Us, &sea_def, BattlefieldState::new());
+        let dr_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        recompute(&mut state);
+
+        // Cast via run_cast_submachine which handles mana loop + cast_spell.
+        let mut strat = strategy::DoomsdayStrategy::new(3, strategy::MatchupInfo::default());
+        run_cast_submachine(&mut state, 1, PlayerId::Us, dr_id, SpellFace::Main, &mut strat);
+
+        // Find the "Cast Dark Ritual" line and the mana activation line.
+        let cast_idx = state.log.iter().position(|l| l.contains("Cast Dark Ritual"));
+        let mana_idx = state.log.iter().position(|l| l.contains("tap") && l.contains("Underground Sea"));
+        assert!(cast_idx.is_some(), "should have a Cast log line");
+        assert!(mana_idx.is_some(), "should have a mana activation log line");
+        assert!(cast_idx.unwrap() < mana_idx.unwrap(),
+            "Cast line (idx {}) should appear before mana activation (idx {})\nlog: {:?}",
+            cast_idx.unwrap(), mana_idx.unwrap(), state.log);
     }
 
     // ── Section 54: Validation (Phase 8) ─────────────────────────────────────

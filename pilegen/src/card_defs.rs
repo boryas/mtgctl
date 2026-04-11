@@ -681,6 +681,17 @@ fn cavern_of_souls() -> CardDef {
                     make_effect: std::sync::Arc::new(|who, color| {
                         eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
                     }),
+                    // Colored mana only for creature spells of the named type (CR 106).
+                    // Creature-type matching is coarsened to "is creature" since
+                    // the sim doesn't track per-card creature subtypes.
+                    condition: Some(Arc::new(|_source_id, state| {
+                        state.casting_spell
+                            .and_then(|id| state.def_of(id).or_else(|| {
+                                let key = &state.objects.get(&id)?.catalog_key;
+                                state.catalog.get(key.as_str())
+                            }))
+                            .map_or(false, |d| d.is_creature())
+                    })),
                     ..Default::default()
                 },
             ],
