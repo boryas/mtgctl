@@ -172,14 +172,12 @@ pub(crate) struct DoomsdayStrategy {
     rng: SmallRng,
     /// Set when a black-producing land must be played next main phase.
     must_land_drop: bool,
-    /// Set as soon as we choose to cast Doomsday (intent; may not have resolved yet).
-    dd_cast: bool,
     matchup: MatchupInfo,
 }
 
 impl DoomsdayStrategy {
     pub(crate) fn new(matchup: MatchupInfo) -> Self {
-        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), must_land_drop: false, dd_cast: false, matchup }
+        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), must_land_drop: false, matchup }
     }
 }
 
@@ -369,14 +367,8 @@ impl Strategy for DoomsdayStrategy {
         if let Some(action) = choose_ap_react(state, who, legal_actions, &mut self.rng) {
             return action;
         }
-        let action = choose_ap_proactive(state, t, who, legal_actions,
-            self.dd_cast, &mut self.must_land_drop, &mut self.rng);
-        if let LegalAction::CastSpell { card_id, .. } = &action {
-            if state.objects.get(card_id).map(|c| c.catalog_key == "Doomsday").unwrap_or(false) {
-                self.dd_cast = true;
-            }
-        }
-        action
+        choose_ap_proactive(state, t, who, legal_actions,
+            &mut self.must_land_drop, &mut self.rng)
     }
 
     fn choose_mana_ability(&mut self, state: &SimState, who: PlayerId,
@@ -612,7 +604,7 @@ impl Strategy for GenericOppStrategy {
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
         if !in_main_phase { return LegalAction::Pass; }
         let mut _md = false;
-        choose_ap_proactive(state, t, who, legal_actions, false, &mut _md, &mut self.rng)
+        choose_ap_proactive(state, t, who, legal_actions, &mut _md, &mut self.rng)
     }
 
     fn announce(&mut self, state: &SimState, card_id: ObjId,
@@ -793,11 +785,10 @@ fn choose_ap_proactive(
     t: u8,
     who: PlayerId,
     legal: &[LegalAction],
-    dd_cast: bool,
     must_land_drop: &mut bool,
     rng: &mut impl Rng,
 ) -> LegalAction {
-    let path = if who == PlayerId::Us && !dd_cast { dd_cast_path(state, who) } else { DdPath::None };
+    let path = if who == PlayerId::Us { dd_cast_path(state, who) } else { DdPath::None };
     let dd_ready = path != DdPath::None;
 
     // ── Land drop ────────────────────────────────────────────────────────
@@ -805,7 +796,7 @@ fn choose_ap_proactive(
     if state.stack.is_empty() && state.player(who).lands_played_this_turn == 0 && !dd_ready {
         let force = *must_land_drop;
         // Prefer black-producing lands if we're close to BB but not BBB yet.
-        let want_black = who == PlayerId::Us && !dd_cast && !state.has_black_mana(who)
+        let want_black = who == PlayerId::Us && !state.has_black_mana(who)
             && state.hand_of(who).any(|c| c.catalog_key == "Doomsday");
         let lands: Vec<ObjId> = legal.iter().filter_map(|a| {
             if let LegalAction::LandDrop(id) = a {
