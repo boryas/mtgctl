@@ -3740,14 +3740,12 @@ pub fn simulate_game(
     opp_cards: &[(String, i32, String)],
     rng: &mut impl Rng,
 ) -> Option<SimState> {
-    let turn = gen_turn(rng);
     let on_play = rng.gen_bool(0.5);
     let us = PlayerState::new(deck_name);
     let opp = PlayerState::new(opponent);
     let mut state = SimState::new(us, opp);
     state.catalog = catalog.clone();
     state.on_play = on_play;
-    state.turn = turn;
 
     // Populate state.objects with Library-zone objects for each player's mainboard.
     // catalog: game setup — ObjIds are assigned here for the first time; materialized
@@ -3819,7 +3817,7 @@ pub fn simulate_game(
     });
 
     let mut strategies: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::from([
-        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(turn, dd_matchup)) as Box<dyn Strategy>),
+        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(dd_matchup)) as Box<dyn Strategy>),
         (PlayerId::Opp, Box::new(GenericOppStrategy::new(opp_matchup))    as Box<dyn Strategy>),
     ]);
 
@@ -3859,8 +3857,7 @@ pub fn simulate_game(
         0,
         PlayerId::Us,
         format!(
-            "Turn {} — {} ({}) | us: {} cards (-{} mulligans), opp: {} cards (-{} mulligans)",
-            turn,
+            "{} ({}) | us: {} cards (-{} mulligans), opp: {} cards (-{} mulligans)",
             opponent,
             if on_play { "play" } else { "draw" },
             us_hand,
@@ -3871,8 +3868,10 @@ pub fn simulate_game(
     );
 
     // ── Turn loop ────────────────────────────────────────────────────────────
+    // Run until the game ends (DD resolves, someone wins, etc.) or a hard cap.
+    const MAX_TURNS: u8 = 10;
 
-    for t in 1..=turn {
+    for t in 1..=MAX_TURNS {
         if !on_play {
             do_turn(&mut state, t, PlayerId::Opp, on_play, &mut strategies);
             if state.done() { break; }
@@ -3881,7 +3880,7 @@ pub fn simulate_game(
             do_turn(&mut state, t, PlayerId::Us, on_play, &mut strategies);
             if state.done() { break; }
         }
-        if on_play && t < turn {
+        if on_play {
             do_turn(&mut state, t, PlayerId::Opp, on_play, &mut strategies);
             if state.done() { break; }
         }
@@ -3914,27 +3913,6 @@ pub fn generate_scenario(
             return state;
         }
     }
-}
-
-fn gen_turn(rng: &mut impl Rng) -> u8 {
-    weighted_choice(
-        &[(2u8, 10), (3, 25), (4, 30), (5, 20), (6, 10), (7, 5)],
-        rng,
-    )
-}
-
-
-fn weighted_choice<T: Clone>(options: &[(T, u32)], rng: &mut impl Rng) -> T {
-    let total: u32 = options.iter().map(|(_, w)| w).sum();
-    assert!(total > 0);
-    let mut pick = rng.gen_range(0..total);
-    for (val, weight) in options {
-        if pick < *weight {
-            return val.clone();
-        }
-        pick -= weight;
-    }
-    options.last().unwrap().0.clone()
 }
 
 // ── Implementation checking ───────────────────────────────────────────────────

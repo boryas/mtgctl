@@ -111,13 +111,66 @@ pub(crate) trait Strategy {
     }
 }
 
+// ── Doomsday castability check ───────────────────────────────────────────────
+
+/// How can we cast Doomsday this priority window?
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DdPath {
+    /// Can't cast DD right now (missing DD, or insufficient mana even with enablers).
+    None,
+    /// Cast DD directly — BBB available from lands/pool.
+    Direct,
+    /// Cast Dark Ritual first (B available), then DD off the BBB it produces.
+    ViaRitual,
+    /// Cast Lotus Petal first (free), crack for B, then Ritual → DD.
+    ViaPetalRitual,
+}
+
+/// Check whether we can cast Doomsday this priority window and how.
+/// Prefers Ritual paths over direct — saves mana sources for post-DD.
+fn dd_cast_path(state: &SimState, who: PlayerId) -> DdPath {
+    let dd_in_hand = state.hand_of(who).any(|c| c.catalog_key == "Doomsday");
+    if !dd_in_hand { return DdPath::None; }
+
+    let pool = &state.player(who).pool;
+    let potential = state.potential_mana(who);
+
+    let has_ritual = state.hand_of(who).any(|c| c.catalog_key == "Dark Ritual");
+    let _has_petal_in_hand = state.hand_of(who).any(|c| c.catalog_key == "Lotus Petal");
+    let has_petal_on_board = state.permanents_of(who)
+        .any(|c| c.catalog_key == "Lotus Petal" && c.bf.as_ref().map_or(false, |bf| !bf.tapped));
+
+    // Via Petal (board) + Ritual: sac petal for B → Ritual → BBB → DD.
+    // Needs: petal on board (untapped) + ritual in hand + DD in hand. Zero lands needed.
+    if has_petal_on_board && has_ritual {
+        return DdPath::ViaPetalRitual;
+    }
+
+    // Via Petal (hand) + Ritual: cast petal (free, goes to board) ... but petal cast is a
+    // separate priority round. The strategy will cast petal, then next round sees petal on board.
+    // So we only check board petal above.
+
+    // Via Ritual: need B available (pool or land) + Ritual in hand.
+    // Ritual costs B, produces BBB, leaving BBB for DD.
+    if has_ritual && (pool.b >= 1 || potential.b >= 1) {
+        return DdPath::ViaRitual;
+    }
+
+    // Direct: BBB available from pool + lands.
+    let bbb = ManaCost { b: 3, ..Default::default() };
+    if potential.can_pay(&bbb) {
+        return DdPath::Direct;
+    }
+
+    DdPath::None
+}
+
 // ── DoomsdayStrategy ─────────────────────────────────────────────────────────
 
 pub(crate) struct DoomsdayStrategy {
     player_id: PlayerId,
     rng: SmallRng,
-    dd_turn: u8,
-    /// Set when a black-producing land must be played next main phase (no fetch available on fateful turn).
+    /// Set when a black-producing land must be played next main phase.
     must_land_drop: bool,
     /// Set as soon as we choose to cast Doomsday (intent; may not have resolved yet).
     dd_cast: bool,
@@ -125,8 +178,8 @@ pub(crate) struct DoomsdayStrategy {
 }
 
 impl DoomsdayStrategy {
-    pub(crate) fn new(dd_turn: u8, matchup: MatchupInfo) -> Self {
-        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), dd_turn, must_land_drop: false, dd_cast: false, matchup }
+    pub(crate) fn new(matchup: MatchupInfo) -> Self {
+        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), must_land_drop: false, dd_cast: false, matchup }
     }
 }
 
@@ -317,7 +370,7 @@ impl Strategy for DoomsdayStrategy {
             return action;
         }
         let action = choose_ap_proactive(state, t, who, legal_actions,
-            self.dd_turn, self.dd_cast, &mut self.must_land_drop, &mut self.rng);
+            self.dd_cast, &mut self.must_land_drop, &mut self.rng);
         if let LegalAction::CastSpell { card_id, .. } = &action {
             if state.objects.get(card_id).map(|c| c.catalog_key == "Doomsday").unwrap_or(false) {
                 self.dd_cast = true;
@@ -559,7 +612,7 @@ impl Strategy for GenericOppStrategy {
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
         if !in_main_phase { return LegalAction::Pass; }
         let mut _md = false;
-        choose_ap_proactive(state, t, who, legal_actions, 0, false, &mut _md, &mut self.rng)
+        choose_ap_proactive(state, t, who, legal_actions, false, &mut _md, &mut self.rng)
     }
 
     fn announce(&mut self, state: &SimState, card_id: ObjId,
@@ -740,47 +793,45 @@ fn choose_ap_proactive(
     t: u8,
     who: PlayerId,
     legal: &[LegalAction],
-    dd_turn: u8,
     dd_cast: bool,
     must_land_drop: &mut bool,
     rng: &mut impl Rng,
 ) -> LegalAction {
-    let fateful = who == PlayerId::Us && t == dd_turn;
+    let path = if who == PlayerId::Us && !dd_cast { dd_cast_path(state, who) } else { DdPath::None };
+    let dd_ready = path != DdPath::None;
 
     // ── Land drop ────────────────────────────────────────────────────────
-    if state.stack.is_empty() && state.player(who).lands_played_this_turn == 0 {
-        let dd_already_castable = fateful && !dd_cast
-            && state.potential_mana(PlayerId::Us).can_pay(&ManaCost { b: 3, ..Default::default() })
-            && state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Doomsday");
-        if !dd_already_castable {
-            let force = *must_land_drop;
-            let need_black = fateful && !state.has_black_mana(who);
-            let lands: Vec<ObjId> = legal.iter().filter_map(|a| {
-                if let LegalAction::LandDrop(id) = a {
-                    if need_black {
-                        let def = state.def_of(*id)?;
-                        let land = def.as_land()?;
-                        if !land.mana_abilities.iter().any(|ma| ma.produces.contains(&Color::Black)) {
-                            return None;
-                        }
+    // Skip land drop if DD is already castable (don't waste tempo).
+    if state.stack.is_empty() && state.player(who).lands_played_this_turn == 0 && !dd_ready {
+        let force = *must_land_drop;
+        // Prefer black-producing lands if we're close to BB but not BBB yet.
+        let want_black = who == PlayerId::Us && !dd_cast && !state.has_black_mana(who)
+            && state.hand_of(who).any(|c| c.catalog_key == "Doomsday");
+        let lands: Vec<ObjId> = legal.iter().filter_map(|a| {
+            if let LegalAction::LandDrop(id) = a {
+                if want_black {
+                    let def = state.def_of(*id)?;
+                    let land = def.as_land()?;
+                    if !land.mana_abilities.iter().any(|ma| ma.produces.contains(&Color::Black)) {
+                        return None;
                     }
-                    Some(*id)
-                } else { None }
-            }).collect();
-            if !lands.is_empty() {
-                let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
-                if rng.gen::<f64>() < prob {
-                    *must_land_drop = false;
-                    let id = lands[rng.gen_range(0..lands.len())];
-                    return LegalAction::LandDrop(id);
                 }
+                Some(*id)
+            } else { None }
+        }).collect();
+        if !lands.is_empty() {
+            let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
+            if rng.gen::<f64>() < prob {
+                *must_land_drop = false;
+                let id = lands[rng.gen_range(0..lands.len())];
+                return LegalAction::LandDrop(id);
             }
-            *must_land_drop = false;
         }
+        *must_land_drop = false;
     }
 
     // ── On-board abilities ───────────────────────────────────────────────
-    if let Some(action) = choose_on_board_action(state, who, legal, t, dd_turn, must_land_drop, rng) {
+    if let Some(action) = choose_on_board_action(state, who, legal, dd_ready, must_land_drop, rng) {
         return action;
     }
 
@@ -797,15 +848,6 @@ fn choose_ap_proactive(
     }).collect();
 
     if spell_actions.is_empty() {
-        let pool = &state.player(who).pool;
-        let hand = state.hand_size(who);
-        eprintln!("[decision] {}: no castable spells (pool B={} U={} tot={}, hand={})",
-            who, pool.b, pool.u, pool.total, hand);
-        if who == PlayerId::Us && t == dd_turn && !dd_cast {
-            let dd_in_hand = state.hand_of(PlayerId::Us).filter(|c| c.catalog_key == "Doomsday").count();
-            eprintln!("[decision] fateful turn: Doomsday not cast — hand={}, dd_in_hand={}, potential B={} tot={}",
-                hand, dd_in_hand, pool.b, pool.total);
-        }
         return LegalAction::Pass;
     }
 
@@ -815,31 +857,36 @@ fn choose_ap_proactive(
         } else { None }
     };
 
-    // Fateful turn prioritization: Doomsday > Dark Ritual > anything else.
-    let fateful_now = who == PlayerId::Us && t == dd_turn && !dd_cast;
-    let action = if fateful_now {
-        let priority = ["Doomsday", "Dark Ritual"];
-        priority.iter()
-            .find_map(|&p| spell_actions.iter().find(|a| spell_name(a).as_deref() == Some(p)))
-            .or_else(|| if spell_actions.is_empty() { None } else { Some(&&spell_actions[rng.gen_range(0..spell_actions.len())]) })
-            .map(|a| (*a).clone())
-            .unwrap_or(LegalAction::Pass)
-    } else {
-        // General casting — decaying probability for multi-spell turns.
-        let has_floating = state.player(who).pool.total > 0;
-        let cast_prob = if has_floating { 1.0 } else {
-            match state.player(who).spells_cast_this_turn { 0 => 1.0, 1 => 0.30, _ => 0.10 }
+    // ── DD decision tree: cast DD whenever reachable ─────────────────────
+    // Prefer enabler path (Ritual) over direct — preserves mana sources post-DD.
+    if dd_ready {
+        let priority: &[&str] = match path {
+            DdPath::ViaRitual | DdPath::ViaPetalRitual => &["Dark Ritual", "Doomsday"],
+            DdPath::Direct => &["Doomsday"],
+            DdPath::None => &[],
         };
-        if rng.gen::<f64>() >= cast_prob {
-            return LegalAction::Pass;
+        if let Some(action) = priority.iter()
+            .find_map(|&p| spell_actions.iter().find(|a| spell_name(a).as_deref() == Some(p)))
+            .map(|a| (*a).clone())
+        {
+            let name = spell_name(&&action).unwrap_or_default();
+            eprintln!("[decision] {}: DD path={:?}, casting {}", who, path, name);
+            return action;
         }
-        spell_actions[rng.gen_range(0..spell_actions.len())].clone()
-    };
+    }
 
+    // ── General casting — decaying probability for multi-spell turns ─────
+    let has_floating = state.player(who).pool.total > 0;
+    let cast_prob = if has_floating { 1.0 } else {
+        match state.player(who).spells_cast_this_turn { 0 => 1.0, 1 => 0.30, _ => 0.10 }
+    };
+    if rng.gen::<f64>() >= cast_prob {
+        return LegalAction::Pass;
+    }
+    let action = spell_actions[rng.gen_range(0..spell_actions.len())].clone();
     if let LegalAction::CastSpell { card_id, .. } = &action {
         let name = state.objects.get(card_id).map_or("?".to_string(), |c| c.catalog_key.clone());
-        let options = spell_actions.iter().filter_map(|a| spell_name(a)).collect::<Vec<_>>().join(", ");
-        eprintln!("[decision] {}: proactive cast {} (options: {})", who, name, options);
+        eprintln!("[decision] {}: proactive cast {}", who, name);
     }
     action
 }
@@ -849,8 +896,7 @@ fn choose_on_board_action(
     state: &SimState,
     who: PlayerId,
     legal: &[LegalAction],
-    t: u8,
-    dd_turn: u8,
+    dd_ready: bool,
     must_land_drop: &mut bool,
     rng: &mut impl Rng,
 ) -> Option<LegalAction> {
@@ -889,8 +935,10 @@ fn choose_on_board_action(
         }
     }
 
-    // Fateful turn override: force-include fetch lands.
-    if who == PlayerId::Us && t == dd_turn && !state.has_black_mana(PlayerId::Us) {
+    // If DD is nearly castable but we lack black mana, force-fetch for it.
+    if who == PlayerId::Us && !dd_ready && !state.has_black_mana(PlayerId::Us)
+        && state.hand_of(who).any(|c| c.catalog_key == "Doomsday")
+    {
         let mut has_fetch = false;
         for action in legal {
             let LegalAction::ActivateAbility { source_id, ability_index } = action else { continue };

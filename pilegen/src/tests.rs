@@ -18,7 +18,7 @@
 
     fn make_strategies() -> HashMap<PlayerId, Box<dyn strategy::Strategy>> {
         HashMap::from([
-            (PlayerId::Us,  Box::new(strategy::DoomsdayStrategy::new(99, strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
+            (PlayerId::Us,  Box::new(strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
             (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default()))   as Box<dyn strategy::Strategy>),
         ])
     }
@@ -6685,7 +6685,7 @@
         let _dd_id = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
         let _land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
         let _bs_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        let strat = strategy::DoomsdayStrategy::new(3, strategy::MatchupInfo::default());
+        let strat = strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default());
         let bottom = strat.london_bottom(&state, 1);
         assert_eq!(bottom.len(), 1);
         assert_eq!(bottom[0], oracle_id, "Oracle should be bottomed as lowest-value card");
@@ -7482,7 +7482,7 @@
         recompute(&mut state);
 
         // Cast via run_cast_submachine which handles mana loop + cast_spell.
-        let mut strat = strategy::DoomsdayStrategy::new(3, strategy::MatchupInfo::default());
+        let mut strat = strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default());
         run_cast_submachine(&mut state, 1, PlayerId::Us, dr_id, SpellFace::Main, &mut strat);
 
         // Find the "Cast Dark Ritual" line and the mana activation line.
