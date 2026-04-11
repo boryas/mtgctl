@@ -899,22 +899,27 @@ fn grafdiggers_cage() -> CardDef {
 
 // ── Instants ──────────────────────────────────────────────────────────────────
 
-/// Draw 3, put back 2. CR 420 (draw), CR 701.26 (library manipulation).
+/// Draw 3, put back 2 (evaluator-driven: puts back the two worst cards).
+/// CR 420 (draw), CR 701.26 (library manipulation).
 fn brainstorm() -> CardDef {
     simple("Brainstorm", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
         modes: untargeted_mode(|who, _source_id, _x| {
-            eff_draw(who, 3).then(eff_put_back(who, 2))
+            eff_draw(who, 3)
+                .then(eff_put_back_eval(who))
+                .then(eff_put_back_eval(who))
         }),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
 
-/// Surveil 1, then draw 1. CR 701.43 (surveil — not modeled; treated as draw:1).
+/// Surveil 1, then draw 1. CR 701.43 (surveil).
 fn consider() -> CardDef {
     simple("Consider", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 1)),
+        modes: untargeted_mode(|who, _source_id, _x| {
+            eff_surveil(who, 1).then(eff_draw(who, 1))
+        }),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
@@ -1579,20 +1584,26 @@ fn stock_up() -> CardDef {
     }), parse_colors("U", false, false), None)
 }
 
-/// Scry 2, then draw a card. Scry not modeled; treated as draw:1. CR 701.43, CR 701.9.
+/// Scry 2, then draw a card. CR 701.18 (scry), CR 701.9 (draw).
 fn preordain() -> CardDef {
     simple("Preordain", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 1)),
+        modes: untargeted_mode(|who, _source_id, _x| {
+            eff_scry(who, 2).then(eff_draw(who, 1))
+        }),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }
 
-/// Look at top 3, put one in hand, rest on bottom in any order. Modeled as draw:1. CR 701.26.
+/// Look at top 3, arrange or shuffle, then draw. CR 701.26 (library manipulation).
 fn ponder() -> CardDef {
     simple("Ponder", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 1)),
+        modes: untargeted_mode(|who, _source_id, _x| {
+            eff_order(who, 3)
+                .then(eff_maybe_shuffle(who))
+                .then(eff_draw(who, 1))
+        }),
         ..Default::default()
     }), parse_colors("U", false, false), None)
 }

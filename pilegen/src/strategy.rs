@@ -2,6 +2,40 @@ use rand::Rng;
 use rand::rngs::SmallRng;
 use super::*;
 
+// ── Card evaluation types ────────────────────────────────────────────────────
+
+/// What broad role does this card serve in a player's plan?
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum CardCategory {
+    Mana,        // lands, rituals, petals
+    Threat,      // creatures, PWs, Doomsday (combo is a subset of threat)
+    Interaction, // counters, removal, discard
+    Selection,   // cantrips — digs toward missing pieces
+}
+
+/// Opponent characteristics that shift card evaluation weights.
+#[derive(Clone, Debug)]
+pub(crate) struct MatchupInfo {
+    pub(crate) opp_has_counters: bool,
+    pub(crate) opp_has_wasteland: bool,
+    pub(crate) opp_fast_clock: bool,
+}
+
+impl Default for MatchupInfo {
+    fn default() -> Self {
+        MatchupInfo { opp_has_counters: true, opp_has_wasteland: true, opp_fast_clock: false }
+    }
+}
+
+/// How far the current game state is from the player's target hand shape.
+/// Each field is 0.0 (fully satisfied) to 1.0+ (completely missing).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TargetGap {
+    pub(crate) mana: f64,
+    pub(crate) threat: f64,
+    pub(crate) interaction: f64,
+    pub(crate) selection: f64,
+}
 
 // ── Strategy trait ────────────────────────────────────────────────────────────
 
@@ -53,6 +87,28 @@ pub(crate) trait Strategy {
                            candidates: &[ObjId]) -> Option<ObjId> {
         candidates.first().copied()
     }
+
+    // ── Card evaluation (Phase 3) ──────────────────────────────────────────
+
+    /// The player this strategy controls.
+    fn player_id(&self) -> PlayerId;
+
+    /// What categories does my plan still need? Considers hand + board + game state.
+    fn plan_gap(&self, state: &SimState) -> TargetGap;
+
+    /// How much does this card close the current gap? Higher = more useful.
+    fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64;
+
+    /// London mulligan: pick N cards to put on bottom (lowest-value cards).
+    fn london_bottom(&self, state: &SimState, n: usize) -> Vec<ObjId> {
+        let gap = self.plan_gap(state);
+        let who = self.player_id();
+        let mut scored: Vec<(ObjId, f64)> = state.hand_of(who)
+            .map(|c| (c.id, self.card_fills(c.id, &gap, state)))
+            .collect();
+        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().take(n).map(|(id, _)| id).collect()
+    }
 }
 
 // ── DoomsdayStrategy ─────────────────────────────────────────────────────────
@@ -65,11 +121,172 @@ pub(crate) struct DoomsdayStrategy {
     must_land_drop: bool,
     /// Set as soon as we choose to cast Doomsday (intent; may not have resolved yet).
     dd_cast: bool,
+    matchup: MatchupInfo,
 }
 
 impl DoomsdayStrategy {
-    pub(crate) fn new(dd_turn: u8) -> Self {
-        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), dd_turn, must_land_drop: false, dd_cast: false }
+    pub(crate) fn new(dd_turn: u8, matchup: MatchupInfo) -> Self {
+        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), dd_turn, must_land_drop: false, dd_cast: false, matchup }
+    }
+}
+
+/// Categorize a card for the Doomsday player's pre-DD evaluation.
+/// Returns `None` for cards that are dead weight pre-DD (Oracle, Unearth, LED).
+pub(crate) fn dd_categorize(name: &str, def: Option<&CardDef>) -> Option<CardCategory> {
+    match name {
+        // Mana: rituals and fast mana (not LED — discards hand pre-DD)
+        "Dark Ritual" | "Lotus Petal" => return Some(CardCategory::Mana),
+        // THE combo piece
+        "Doomsday" => return Some(CardCategory::Threat),
+        // Interaction: counterspells and discard
+        "Force of Will" | "Daze" | "Thoughtseize" => return Some(CardCategory::Interaction),
+        // Selection: cantrips and free cyclers
+        "Brainstorm" | "Ponder" | "Preordain" | "Consider"
+        | "Street Wraith" | "Edge of Autumn" => return Some(CardCategory::Selection),
+        // Dead pre-DD: only useful in the pile
+        "Thassa's Oracle" | "Unearth" | "Lion's Eye Diamond" => return None,
+        _ => {}
+    }
+    let def = def?;
+    if def.is_land() { return Some(CardCategory::Mana); }
+    if def.is_creature() || matches!(def.kind, CardKind::Planeswalker(_)) {
+        return Some(CardCategory::Threat);
+    }
+    if def.is_instant() { return Some(CardCategory::Interaction); }
+    if def.is_sorcery() { return Some(CardCategory::Interaction); }
+    None
+}
+
+/// Compute the DD player's plan gap from hand + board state.
+pub(crate) fn dd_plan_gap(state: &SimState, who: PlayerId, matchup: &MatchupInfo) -> TargetGap {
+    // Helper: look up def with catalog fallback.
+    let def_or_catalog = |id: ObjId, key: &str| -> Option<&CardDef> {
+        state.def_of(id).or_else(|| state.catalog.get(key))
+    };
+
+    // ── Mana gap: path to BBB ────────────────────────────────────────────
+    let lands_in_play = state.permanents_of(who)
+        .filter(|c| def_or_catalog(c.id, &c.catalog_key).map_or(false, |d| d.is_land()))
+        .count();
+    let rituals_in_hand = state.hand_of(who)
+        .filter(|c| matches!(c.catalog_key.as_str(), "Dark Ritual" | "Lotus Petal"))
+        .count();
+    let mana_sources = lands_in_play + rituals_in_hand;
+    // Need ~3 mana sources for BBB (land + ritual, or 3 lands, etc.)
+    let mana_gap = ((3.0 - mana_sources as f64) / 3.0).clamp(0.0, 1.0);
+
+    // ── Threat gap: need Doomsday or a creature win-con ─────────────────
+    let dd_in_hand = state.hand_of(who).any(|c| c.catalog_key == "Doomsday");
+    let has_creature_threat = state.permanents_of(who)
+        .any(|c| def_or_catalog(c.id, &c.catalog_key).map_or(false, |d| d.is_creature()));
+    let threat_gap = if dd_in_hand {
+        0.0
+    } else if has_creature_threat {
+        0.3 // have a backup plan, but DD is the real goal
+    } else {
+        1.0
+    };
+
+    // ── Interaction gap: matchup-dependent ───────────────────────────────
+    let interaction_count = state.hand_of(who)
+        .filter(|c| {
+            let def = def_or_catalog(c.id, &c.catalog_key);
+            dd_categorize(&c.catalog_key, def) == Some(CardCategory::Interaction)
+        })
+        .count();
+    let interaction_gap = if matchup.opp_has_counters {
+        // Against blue: want 1-2 interaction pieces to protect DD
+        ((2.0 - interaction_count as f64) / 2.0).clamp(0.0, 1.0)
+    } else {
+        0.1 // non-blue matchup: interaction is low priority
+    };
+
+    // ── Selection: always has residual ───────────────────────────────────
+    let selection_gap = 0.2;
+
+    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap, selection: selection_gap }
+}
+
+/// Score how much `card_id` fills the DD player's current gap.
+pub(crate) fn dd_card_fills(card_id: ObjId, gap: &TargetGap, state: &SimState, who: PlayerId) -> f64 {
+    let name = match state.objects.get(&card_id) {
+        Some(c) => c.catalog_key.as_str(),
+        None => return 0.0,
+    };
+    let def = state.def_of(card_id).or_else(|| state.catalog.get(name));
+    let cat = dd_categorize(name, def);
+
+    match cat {
+        Some(CardCategory::Mana) => {
+            if gap.mana > 0.0 { 0.4 + 0.5 * gap.mana } else { 0.05 }
+        }
+        Some(CardCategory::Threat) => {
+            if name == "Doomsday" {
+                // Second DD in hand is near-worthless
+                let other_dd = state.hand_of(who)
+                    .filter(|c| c.catalog_key == "Doomsday" && c.id != card_id)
+                    .count();
+                if other_dd > 0 { 0.1 } else if gap.threat > 0.0 { 0.9 } else { 0.1 }
+            } else {
+                // Creature threats: valuable but not as critical as DD
+                if gap.threat > 0.0 { 0.4 + 0.2 * gap.threat } else { 0.3 }
+            }
+        }
+        Some(CardCategory::Interaction) => {
+            if gap.interaction > 0.0 { 0.3 + 0.5 * gap.interaction } else { 0.1 }
+        }
+        Some(CardCategory::Selection) => {
+            // Cantrips: always medium — universal lubricant that digs toward anything
+            0.35
+        }
+        None => 0.05, // Uncategorized: dead pre-DD
+    }
+}
+
+/// Hand-aware mulligan for DD player. Checks hand categories to decide keep/mull.
+/// - 7 cards: need ≥1 mana source AND (cantrip OR combo piece OR ritual). Mull 0-land, 5+-land.
+/// - 6 cards: need ≥1 mana source AND ≥1 spell. More lenient.
+/// - 5 cards: keep almost anything with a land.
+/// - 4 or fewer: always keep.
+pub(crate) fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_taken: u32) -> bool {
+    if mulligans_taken >= 3 { return false; } // always keep at 4 cards
+
+    let hand: Vec<(ObjId, Option<CardCategory>)> = state.hand_of(who)
+        .map(|c| {
+            let def = state.def_of(c.id).or_else(|| state.catalog.get(c.catalog_key.as_str()));
+            (c.id, dd_categorize(&c.catalog_key, def))
+        })
+        .collect();
+
+    let hand_size = hand.len();
+    let mana_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Mana)).count();
+    let threat_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Threat)).count();
+    let selection_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Selection)).count();
+    let interaction_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Interaction)).count();
+    let spells = threat_count + selection_count + interaction_count;
+
+    match mulligans_taken {
+        0 => {
+            // 7 cards: mull 0-land, 5+-land, or no path to DD
+            if mana_count == 0 { return true; }
+            if mana_count >= 5 { return true; }
+            // Need at least a cantrip or combo piece to have a plan
+            if threat_count == 0 && selection_count == 0 { return true; }
+            false
+        }
+        1 => {
+            // 6 cards: need ≥1 mana + ≥1 spell
+            if mana_count == 0 { return true; }
+            if mana_count >= 5 { return true; }
+            if spells == 0 { return true; }
+            false
+        }
+        2 => {
+            // 5 cards: keep with ≥1 mana + ≥1 spell
+            if mana_count == 0 && spells == hand_size { return true; }
+            false
+        }
+        _ => false,
     }
 }
 
@@ -138,14 +355,18 @@ impl Strategy for DoomsdayStrategy {
         pick_blockers(self.player_id, state)
     }
 
-    fn take_mulligan(&mut self, _state: &SimState, mulligans_taken: u32) -> bool {
-        let prob = match mulligans_taken {
-            0 => 0.10,
-            1 => 0.10,
-            2 => 0.05,
-            _ => 0.0,
-        };
-        self.rng.gen_bool(prob)
+    fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
+        dd_should_mulligan(state, self.player_id, mulligans_taken)
+    }
+
+    fn player_id(&self) -> PlayerId { self.player_id }
+
+    fn plan_gap(&self, state: &SimState) -> TargetGap {
+        dd_plan_gap(state, self.player_id, &self.matchup)
+    }
+
+    fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64 {
+        dd_card_fills(card_id, gap, state, self.player_id)
     }
 }
 
@@ -154,11 +375,163 @@ impl Strategy for DoomsdayStrategy {
 pub(crate) struct GenericOppStrategy {
     player_id: PlayerId,
     rng: SmallRng,
+    matchup: MatchupInfo,
 }
 
 impl GenericOppStrategy {
-    pub(crate) fn new() -> Self {
-        Self { player_id: PlayerId::Opp, rng: SmallRng::from_entropy() }
+    pub(crate) fn new(matchup: MatchupInfo) -> Self {
+        Self { player_id: PlayerId::Opp, rng: SmallRng::from_entropy(), matchup }
+    }
+}
+
+/// Categorize a card for the tempo/fair opponent's evaluation.
+pub(crate) fn opp_categorize(name: &str, def: Option<&CardDef>) -> Option<CardCategory> {
+    match name {
+        // Interaction: counters, removal, discard
+        "Force of Will" | "Force of Negation" | "Daze" | "Thoughtseize"
+        | "Fatal Push" | "Snuff Out" | "Lightning Bolt" | "Unholy Heat"
+        | "Spell Pierce" | "Flusterstorm" | "Pyroblast" | "Hydroblast"
+        | "Surgical Extraction" | "Consign to Memory" => return Some(CardCategory::Interaction),
+        // Selection: cantrips and free info
+        "Brainstorm" | "Ponder" | "Preordain" | "Consider"
+        | "Mishra's Bauble" => return Some(CardCategory::Selection),
+        _ => {}
+    }
+    let def = def?;
+    if def.is_land() { return Some(CardCategory::Mana); }
+    if def.is_creature() || matches!(def.kind, CardKind::Planeswalker(_)) {
+        return Some(CardCategory::Threat);
+    }
+    if matches!(def.kind, CardKind::Artifact(_) | CardKind::Enchantment(_)) {
+        return Some(CardCategory::Threat); // equipment, baubles with board presence
+    }
+    if def.is_instant() || def.is_sorcery() { return Some(CardCategory::Interaction); }
+    None
+}
+
+/// Compute the opponent's plan gap. Tempo decks want 2-3 lands, threats on board, interaction in hand.
+pub(crate) fn opp_plan_gap(state: &SimState, who: PlayerId, matchup: &MatchupInfo) -> TargetGap {
+    let def_or_catalog = |id: ObjId, key: &str| -> Option<&CardDef> {
+        state.def_of(id).or_else(|| state.catalog.get(key))
+    };
+
+    // ── Mana gap: tempo wants 2-3 lands ─────────────────────────────────
+    let lands = state.permanents_of(who)
+        .filter(|c| def_or_catalog(c.id, &c.catalog_key).map_or(false, |d| d.is_land()))
+        .count();
+    let mana_gap = ((2.0 - lands as f64) / 2.0).clamp(0.0, 1.0);
+
+    // ── Threat gap: need creatures on board ──────────────────────────────
+    let threats = state.permanents_of(who)
+        .filter(|c| {
+            def_or_catalog(c.id, &c.catalog_key)
+                .map_or(false, |d| d.is_creature() || matches!(d.kind, CardKind::Planeswalker(_)))
+        })
+        .count();
+    let threat_gap = match threats {
+        0 => 1.0,
+        1 => 0.4,
+        _ => 0.1,
+    };
+
+    // ── Interaction gap: premium vs combo, medium vs fair ────────────────
+    let interaction_count = state.hand_of(who)
+        .filter(|c| {
+            let def = def_or_catalog(c.id, &c.catalog_key);
+            opp_categorize(&c.catalog_key, def) == Some(CardCategory::Interaction)
+        })
+        .count();
+    let interaction_gap = if !matchup.opp_fast_clock {
+        // Facing combo: interaction is critical to stop the kill
+        ((2.0 - interaction_count as f64) / 2.0).clamp(0.0, 1.0)
+    } else {
+        // Facing aggro/tempo: some interaction is nice but not critical
+        ((1.0 - interaction_count as f64).max(0.0) * 0.5).clamp(0.0, 0.5)
+    };
+
+    // ── Selection: always has residual ───────────────────────────────────
+    let selection_gap = 0.2;
+
+    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap, selection: selection_gap }
+}
+
+/// Score how much `card_id` fills the opponent's current gap.
+pub(crate) fn opp_card_fills(card_id: ObjId, gap: &TargetGap, state: &SimState, who: PlayerId) -> f64 {
+    let name = match state.objects.get(&card_id) {
+        Some(c) => c.catalog_key.as_str(),
+        None => return 0.0,
+    };
+    let def = state.def_of(card_id).or_else(|| state.catalog.get(name));
+    let cat = opp_categorize(name, def);
+
+    match cat {
+        Some(CardCategory::Mana) => {
+            if gap.mana > 0.0 { 0.4 + 0.5 * gap.mana } else { 0.05 }
+        }
+        Some(CardCategory::Threat) => {
+            // Surplus copies of on-board threats are less urgent
+            let on_board = state.permanents_of(who)
+                .filter(|c| c.catalog_key == name)
+                .count();
+            if on_board > 0 && gap.threat < 0.5 {
+                0.2
+            } else if gap.threat > 0.0 {
+                0.5 + 0.4 * gap.threat
+            } else {
+                0.3
+            }
+        }
+        Some(CardCategory::Interaction) => {
+            if gap.interaction > 0.0 { 0.3 + 0.5 * gap.interaction } else { 0.15 }
+        }
+        Some(CardCategory::Selection) => 0.35, // cantrips: always medium
+        None => 0.05,
+    }
+}
+
+/// Hand-aware mulligan for opponent (tempo/fair deck).
+/// - 7 cards: need ≥1 land AND (threat OR cantrip). Mull 0-land, 5+-land, all-interaction.
+/// - 6 cards: need ≥1 land + ≥1 spell. More lenient.
+/// - 5 cards: keep with ≥1 land + ≥1 spell.
+/// - 4 or fewer: always keep.
+pub(crate) fn opp_should_mulligan(state: &SimState, who: PlayerId, mulligans_taken: u32) -> bool {
+    if mulligans_taken >= 3 { return false; }
+
+    let hand: Vec<(ObjId, Option<CardCategory>)> = state.hand_of(who)
+        .map(|c| {
+            let def = state.def_of(c.id).or_else(|| state.catalog.get(c.catalog_key.as_str()));
+            (c.id, opp_categorize(&c.catalog_key, def))
+        })
+        .collect();
+
+    let hand_size = hand.len();
+    let mana_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Mana)).count();
+    let threat_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Threat)).count();
+    let selection_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Selection)).count();
+    let interaction_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Interaction)).count();
+    let spells = threat_count + selection_count + interaction_count;
+
+    match mulligans_taken {
+        0 => {
+            // 7 cards: mull 0-land, 5+-land, or no threats/cantrips (all interaction, no clock)
+            if mana_count == 0 { return true; }
+            if mana_count >= 5 { return true; }
+            if threat_count == 0 && selection_count == 0 { return true; }
+            false
+        }
+        1 => {
+            // 6 cards: need ≥1 land + ≥1 spell
+            if mana_count == 0 { return true; }
+            if mana_count >= 5 { return true; }
+            if spells == 0 { return true; }
+            false
+        }
+        2 => {
+            // 5 cards: keep with ≥1 land + ≥1 spell
+            if mana_count == 0 && spells == hand_size { return true; }
+            false
+        }
+        _ => false,
     }
 }
 
@@ -203,14 +576,18 @@ impl Strategy for GenericOppStrategy {
         pick_blockers(self.player_id, state)
     }
 
-    fn take_mulligan(&mut self, _state: &SimState, mulligans_taken: u32) -> bool {
-        let prob = match mulligans_taken {
-            0 => 0.10,
-            1 => 0.10,
-            2 => 0.05,
-            _ => 0.0,
-        };
-        self.rng.gen_bool(prob)
+    fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
+        opp_should_mulligan(state, self.player_id, mulligans_taken)
+    }
+
+    fn player_id(&self) -> PlayerId { self.player_id }
+
+    fn plan_gap(&self, state: &SimState) -> TargetGap {
+        opp_plan_gap(state, self.player_id, &self.matchup)
+    }
+
+    fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64 {
+        opp_card_fills(card_id, gap, state, self.player_id)
     }
 }
 

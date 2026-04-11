@@ -71,13 +71,142 @@ pub(crate) fn eff_surveil(who: PlayerId, n: usize) -> Effect {
     }))
 }
 
-/// Put `n` cards back from `who`'s hand (Brainstorm put-back).
+/// Put `n` cards back from `who`'s hand (old dumb version — takes first N).
 /// Moves `n` hand cards back to Library zone (unknown — just sets zone).
 pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
         let ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).take(n).collect();
         for id in ids {
             change_zone(id, ZoneId::Library, state, t, who);
+        }
+    }))
+}
+
+/// Evaluator-driven put-back: evaluate all hand cards, put the lowest-scoring one
+/// on top of library. Used by Brainstorm (called twice for "put back 2").
+/// Calls `state.evaluate_card` to score each hand card, picks the worst.
+pub(crate) fn eff_put_back_eval(who: PlayerId) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        let eval = Arc::clone(&state.evaluate_card);
+        let scored: Vec<(ObjId, f64)> = state.hand_of(who)
+            .map(|c| (c.id, eval(who, c.id, state)))
+            .collect();
+        if let Some(&(worst_id, _)) = scored.iter()
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            let name = state.objects.get(&worst_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+            // change_zone pushes to back of library_order; we need top, so fix up after.
+            change_zone(worst_id, ZoneId::Library, state, t, who);
+            let lib = match who {
+                PlayerId::Us  => &mut state.us.library_order,
+                PlayerId::Opp => &mut state.opp.library_order,
+            };
+            // Move from back (where change_zone placed it) to front (top of library).
+            if lib.back() == Some(&worst_id) {
+                lib.pop_back();
+                lib.push_front(worst_id);
+            }
+            state.log(t, who, format!("puts back {}", name));
+        }
+    }))
+}
+
+/// Scry N: look at top N cards of `who`'s library. For each, if the evaluator scores
+/// it above threshold (0.3), keep on top; otherwise put on bottom.
+/// Cards kept on top retain their relative order; bottomed cards go to the bottom.
+pub(crate) fn eff_scry(who: PlayerId, n: usize) -> Effect {
+    Effect(Arc::new(move |state, _t, _targets| {
+        let eval = Arc::clone(&state.evaluate_card);
+        let lib = match who {
+            PlayerId::Us  => &state.us.library_order,
+            PlayerId::Opp => &state.opp.library_order,
+        };
+        let top_ids: Vec<ObjId> = lib.iter().take(n).copied().collect();
+        if top_ids.is_empty() { return; }
+
+        let mut keep_top = Vec::new();
+        let mut send_bottom = Vec::new();
+        for &id in &top_ids {
+            let score = eval(who, id, state);
+            if score >= 0.3 {
+                keep_top.push(id);
+            } else {
+                send_bottom.push(id);
+            }
+        }
+        // Remove the N cards from front of library, then re-insert:
+        // kept cards go back to front (preserving order), bottomed cards go to back.
+        let lib = match who {
+            PlayerId::Us  => &mut state.us.library_order,
+            PlayerId::Opp => &mut state.opp.library_order,
+        };
+        for _ in 0..top_ids.len().min(lib.len()) {
+            lib.pop_front();
+        }
+        // Push kept cards back to front (in reverse to preserve order).
+        for &id in keep_top.iter().rev() {
+            lib.push_front(id);
+        }
+        // Push bottomed cards to back.
+        for &id in &send_bottom {
+            lib.push_back(id);
+        }
+        let kept = keep_top.len();
+        let bottomed = send_bottom.len();
+        state.log(0, who, format!("scry {} → {} top, {} bottom", n, kept, bottomed));
+    }))
+}
+
+/// Order top N: sort top N cards of `who`'s library by evaluator score (best on top).
+/// Used by Ponder: look at top 3 and arrange them.
+pub(crate) fn eff_order(who: PlayerId, n: usize) -> Effect {
+    Effect(Arc::new(move |state, _t, _targets| {
+        let eval = Arc::clone(&state.evaluate_card);
+        let lib = match who {
+            PlayerId::Us  => &state.us.library_order,
+            PlayerId::Opp => &state.opp.library_order,
+        };
+        let mut top: Vec<ObjId> = lib.iter().take(n).copied().collect();
+        if top.len() < 2 { return; }
+
+        // Score each card.
+        let mut scored: Vec<(ObjId, f64)> = top.iter()
+            .map(|&id| (id, eval(who, id, state)))
+            .collect();
+        // Sort best first (highest score on top = front of library).
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        top = scored.into_iter().map(|(id, _)| id).collect();
+
+        // Remove the N cards from front, re-insert in sorted order.
+        let lib = match who {
+            PlayerId::Us  => &mut state.us.library_order,
+            PlayerId::Opp => &mut state.opp.library_order,
+        };
+        for _ in 0..n.min(lib.len()) {
+            lib.pop_front();
+        }
+        for &id in top.iter().rev() {
+            lib.push_front(id);
+        }
+    }))
+}
+
+/// Maybe-shuffle: if the top card of `who`'s library scores below threshold (0.3),
+/// shuffle the whole library. Used by Ponder after ordering top 3 — if even the best
+/// arrangement is bad, shuffle for a fresh random draw instead.
+pub(crate) fn eff_maybe_shuffle(who: PlayerId) -> Effect {
+    Effect(Arc::new(move |state, _t, _targets| {
+        let eval = Arc::clone(&state.evaluate_card);
+        let top_id = match who {
+            PlayerId::Us  => state.us.library_order.front().copied(),
+            PlayerId::Opp => state.opp.library_order.front().copied(),
+        };
+        if let Some(id) = top_id {
+            let score = eval(who, id, state);
+            if score < 0.3 {
+                state.shuffle_library(who);
+                state.log(0, who, "Ponder → shuffles".to_string());
+            }
         }
     }))
 }
@@ -443,6 +572,8 @@ pub(crate) fn eff_fetch_search(
             let name = state.objects.get(&chosen_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
             state.log(t, who, format!("search → {}", name));
             change_zone(chosen_id, dest, state, t, who);
+            // CR 701.19: shuffle library after searching.
+            state.shuffle_library(who);
         }
     }))
 }

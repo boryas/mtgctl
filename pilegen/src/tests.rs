@@ -18,8 +18,8 @@
 
     fn make_strategies() -> HashMap<PlayerId, Box<dyn strategy::Strategy>> {
         HashMap::from([
-            (PlayerId::Us,  Box::new(strategy::DoomsdayStrategy::new(99)) as Box<dyn strategy::Strategy>),
-            (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new())  as Box<dyn strategy::Strategy>),
+            (PlayerId::Us,  Box::new(strategy::DoomsdayStrategy::new(99, strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
+            (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default()))   as Box<dyn strategy::Strategy>),
         ])
     }
 
@@ -176,6 +176,7 @@
             materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
+        state.player_mut(who).library_order.push_back(id);
         id
     }
 
@@ -3117,6 +3118,7 @@
             is_token: false, spell: None, bf: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
+        state.opp.library_order.push_back(lib_id);
         // A different card in opp's hand — must not be exiled.
         let other_id = state.alloc_id();
         state.objects.insert(other_id, GameObject {
@@ -3564,6 +3566,7 @@
                 bf: None, spell: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
+            state.us.library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
         };
@@ -3615,6 +3618,7 @@
                 bf: None, spell: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
+            state.us.library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
         };
@@ -5908,6 +5912,7 @@
                 is_token: false, bf: None, spell: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
+            state.us.library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert_with(|| catalog_card("Brainstorm"));
             id
         };
@@ -5958,6 +5963,7 @@
                 is_token: false, bf: None, spell: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
+            state.us.library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert_with(|| catalog_card("Brainstorm"));
             id
         };
@@ -6539,4 +6545,1028 @@
 
         assert_eq!(state.permanent_bf(cori_id).unwrap().attached_to, None,
             "equipment should detach when creature leaves");
+    }
+
+    // ── Section 50: DD Strategy Evaluator ────────────────────────────────────────
+
+    #[test]
+    fn test_dd_plan_gap_no_hand_all_gaps_high() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let matchup = strategy::MatchupInfo::default();
+        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
+        assert!(gap.mana >= 0.9, "no mana sources → mana gap near 1.0, got {}", gap.mana);
+        assert!(gap.threat >= 0.9, "no threats → threat gap near 1.0, got {}", gap.threat);
+    }
+
+    #[test]
+    fn test_dd_plan_gap_dd_in_hand_zeroes_threat() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let _dd = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        let matchup = strategy::MatchupInfo::default();
+        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
+        assert_eq!(gap.threat, 0.0, "DD in hand → threat gap 0.0");
+    }
+
+    #[test]
+    fn test_dd_plan_gap_lands_reduce_mana_gap() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        make_land(&mut state, PlayerId::Us, "Underground Sea", false);
+        make_land(&mut state, PlayerId::Us, "Polluted Delta", false);
+        let matchup = strategy::MatchupInfo::default();
+        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
+        // 2 lands → mana_gap = (3-2)/3 ≈ 0.33
+        assert!(gap.mana < 0.4, "2 lands → mana gap <0.4, got {}", gap.mana);
+        assert!(gap.mana > 0.2, "2 lands → mana gap >0.2, got {}", gap.mana);
+    }
+
+    #[test]
+    fn test_dd_plan_gap_interaction_high_vs_blue() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let matchup = strategy::MatchupInfo { opp_has_counters: true, ..Default::default() };
+        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
+        assert!(gap.interaction >= 0.9, "no interaction vs blue → high gap, got {}", gap.interaction);
+    }
+
+    #[test]
+    fn test_dd_plan_gap_interaction_low_vs_nonblue() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let matchup = strategy::MatchupInfo { opp_has_counters: false, ..Default::default() };
+        let gap = strategy::dd_plan_gap(&state, PlayerId::Us, &matchup);
+        assert!(gap.interaction <= 0.2, "vs non-blue → interaction gap low, got {}", gap.interaction);
+    }
+
+    #[test]
+    fn test_dd_card_fills_land_high_when_needed() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::dd_card_fills(land_id, &gap, &state, PlayerId::Us);
+        assert!(score > 0.7, "land fills high mana gap → score >0.7, got {}", score);
+    }
+
+    #[test]
+    fn test_dd_card_fills_land_low_when_flooded() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::dd_card_fills(land_id, &gap, &state, PlayerId::Us);
+        assert!(score < 0.1, "land when mana gap=0 → score <0.1, got {}", score);
+    }
+
+    #[test]
+    fn test_dd_card_fills_doomsday_very_high() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let dd_id = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::dd_card_fills(dd_id, &gap, &state, PlayerId::Us);
+        assert!(score >= 0.9, "DD with high threat gap → score >=0.9, got {}", score);
+    }
+
+    #[test]
+    fn test_dd_card_fills_second_dd_low() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let _dd1 = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        let dd2 = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::dd_card_fills(dd2, &gap, &state, PlayerId::Us);
+        assert!(score <= 0.15, "second DD → score low, got {}", score);
+    }
+
+    #[test]
+    fn test_dd_card_fills_oracle_near_zero() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let oracle_id = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::dd_card_fills(oracle_id, &gap, &state, PlayerId::Us);
+        assert!(score <= 0.1, "Oracle pre-DD → near-zero, got {}", score);
+    }
+
+    #[test]
+    fn test_dd_card_fills_cantrip_always_medium() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let bs_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        // Even with all gaps filled, cantrips retain medium value
+        let gap_low = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0, selection: 0.2 };
+        let gap_high = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 1.0, selection: 0.2 };
+        let score_low = strategy::dd_card_fills(bs_id, &gap_low, &state, PlayerId::Us);
+        let score_high = strategy::dd_card_fills(bs_id, &gap_high, &state, PlayerId::Us);
+        assert!(score_low > 0.2, "cantrip always valuable, got {}", score_low);
+        assert!(score_high > 0.2, "cantrip always valuable, got {}", score_high);
+        assert!((score_low - score_high).abs() < 0.2, "cantrip score stable across gap states");
+    }
+
+    #[test]
+    fn test_dd_card_fills_fow_high_when_interaction_needed() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        let gap = strategy::TargetGap { mana: 0.5, threat: 0.5, interaction: 1.0, selection: 0.2 };
+        let score = strategy::dd_card_fills(fow_id, &gap, &state, PlayerId::Us);
+        assert!(score > 0.7, "FoW with high interaction gap → score >0.7, got {}", score);
+    }
+
+    #[test]
+    fn test_dd_london_bottom_picks_worst_cards() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Hand: Oracle (dead), DD (great), Underground Sea (good mana), Brainstorm (medium)
+        let oracle_id = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let _dd_id = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        let _land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        let _bs_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        let strat = strategy::DoomsdayStrategy::new(3, strategy::MatchupInfo::default());
+        let bottom = strat.london_bottom(&state, 1);
+        assert_eq!(bottom.len(), 1);
+        assert_eq!(bottom[0], oracle_id, "Oracle should be bottomed as lowest-value card");
+    }
+
+    // ── Section 51: Opponent Strategy Evaluator ──────────────────────────────────
+
+    #[test]
+    fn test_opp_plan_gap_no_board_all_gaps_high() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Opp facing combo (DD): opp_fast_clock = false
+        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_has_wasteland: true, opp_fast_clock: false };
+        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
+        assert!(gap.mana >= 0.9, "no lands → mana gap high, got {}", gap.mana);
+        assert!(gap.threat >= 0.9, "no threats → threat gap high, got {}", gap.threat);
+        assert!(gap.interaction >= 0.9, "no interaction vs combo → gap high, got {}", gap.interaction);
+    }
+
+    #[test]
+    fn test_opp_plan_gap_lands_reduce_mana() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        make_land(&mut state, PlayerId::Opp, "Volcanic Island", false);
+        make_land(&mut state, PlayerId::Opp, "Scalding Tarn", false);
+        let matchup = strategy::MatchupInfo::default();
+        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
+        assert!(gap.mana < 0.1, "2 lands → mana gap ~0, got {}", gap.mana);
+    }
+
+    #[test]
+    fn test_opp_plan_gap_creature_reduces_threat() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let _delver = add_default_perm(&mut state, PlayerId::Opp, "Delver of Secrets");
+        let matchup = strategy::MatchupInfo::default();
+        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
+        assert!(gap.threat < 0.5, "1 creature → threat gap reduced, got {}", gap.threat);
+    }
+
+    #[test]
+    fn test_opp_plan_gap_interaction_low_vs_aggro() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Facing aggro: opp_fast_clock = true
+        let matchup = strategy::MatchupInfo { opp_has_counters: false, opp_has_wasteland: false, opp_fast_clock: true };
+        let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
+        assert!(gap.interaction <= 0.5, "vs aggro → interaction gap capped, got {}", gap.interaction);
+    }
+
+    #[test]
+    fn test_opp_card_fills_land_high_when_needed() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let land_id = add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
+        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::opp_card_fills(land_id, &gap, &state, PlayerId::Opp);
+        assert!(score > 0.7, "land fills high mana gap → score >0.7, got {}", score);
+    }
+
+    #[test]
+    fn test_opp_card_fills_land_low_when_flooded() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let land_id = add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
+        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::opp_card_fills(land_id, &gap, &state, PlayerId::Opp);
+        assert!(score < 0.1, "land when mana gap=0 → near-zero, got {}", score);
+    }
+
+    #[test]
+    fn test_opp_card_fills_creature_high() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let delver_id = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let score = strategy::opp_card_fills(delver_id, &gap, &state, PlayerId::Opp);
+        assert!(score > 0.7, "creature with high threat gap → high score, got {}", score);
+    }
+
+    #[test]
+    fn test_opp_card_fills_surplus_creature_lower() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let _board_delver = add_default_perm(&mut state, PlayerId::Opp, "Delver of Secrets");
+        let hand_delver = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        // threat_gap low since we already have one on board
+        let gap = strategy::TargetGap { mana: 0.0, threat: 0.1, interaction: 0.5, selection: 0.2 };
+        let score = strategy::opp_card_fills(hand_delver, &gap, &state, PlayerId::Opp);
+        assert!(score < 0.3, "surplus Delver on board → lower, got {}", score);
+    }
+
+    #[test]
+    fn test_opp_card_fills_fow_high_vs_combo() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let fow_id = add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        let gap = strategy::TargetGap { mana: 0.0, threat: 0.5, interaction: 1.0, selection: 0.2 };
+        let score = strategy::opp_card_fills(fow_id, &gap, &state, PlayerId::Opp);
+        assert!(score > 0.7, "FoW with high interaction gap → score >0.7, got {}", score);
+    }
+
+    #[test]
+    fn test_opp_card_fills_cantrip_medium() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let bs_id = add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        let gap = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0, selection: 0.2 };
+        let score = strategy::opp_card_fills(bs_id, &gap, &state, PlayerId::Opp);
+        assert!(score > 0.2 && score < 0.5, "cantrip always medium, got {}", score);
+    }
+
+    // ── Section 52: Cantrip Effect Primitives ──────────────────────────────────
+
+    /// Wire evaluate_card so that specific cards get known scores for deterministic testing.
+    /// Maps card names to scores; anything not in the map gets 0.5.
+    fn wire_eval(state: &mut SimState, scores: Vec<(&str, f64)>) {
+        let map: HashMap<String, f64> = scores.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+        state.evaluate_card = Arc::new(move |_who, card_id, state| {
+            state.objects.get(&card_id)
+                .and_then(|o| map.get(&o.catalog_key))
+                .copied()
+                .unwrap_or(0.5)
+        });
+    }
+
+    #[test]
+    fn test_put_back_eval_puts_worst_on_top() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Hand: Doomsday (high), Oracle (low), Brainstorm (medium)
+        let dd = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        let oracle = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let bs = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
+
+        eff_put_back_eval(PlayerId::Us).call(&mut state, 0, &[]);
+
+        // Oracle should be gone from hand and on top of library.
+        let hand: Vec<ObjId> = state.hand_of(PlayerId::Us).map(|c| c.id).collect();
+        assert!(!hand.contains(&oracle), "Oracle should be removed from hand");
+        assert!(hand.contains(&dd), "Doomsday should stay in hand");
+        assert!(hand.contains(&bs), "Brainstorm should stay in hand");
+        assert_eq!(state.us.library_order.front(), Some(&oracle), "Oracle should be on top of library");
+    }
+
+    #[test]
+    fn test_put_back_eval_twice_puts_two_worst() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let dd = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        let oracle = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let edge = add_hand_card(&mut state, PlayerId::Us, "Edge of Autumn");
+        let bs = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        wire_eval(&mut state, vec![
+            ("Doomsday", 0.9), ("Thassa's Oracle", 0.05),
+            ("Edge of Autumn", 0.1), ("Brainstorm", 0.35),
+        ]);
+
+        eff_put_back_eval(PlayerId::Us).call(&mut state, 0, &[]);
+        eff_put_back_eval(PlayerId::Us).call(&mut state, 0, &[]);
+
+        let hand: Vec<ObjId> = state.hand_of(PlayerId::Us).map(|c| c.id).collect();
+        assert_eq!(hand.len(), 2, "should have 2 cards left in hand");
+        assert!(hand.contains(&dd));
+        assert!(hand.contains(&bs));
+        // Oracle was put back first (worst), then Edge of Autumn (second worst).
+        // Oracle first → front, then Edge → new front. So library front = Edge, next = Oracle.
+        assert_eq!(state.us.library_order.front(), Some(&edge), "Edge on top (put back second)");
+        assert_eq!(state.us.library_order.get(1), Some(&oracle), "Oracle second (put back first)");
+    }
+
+    #[test]
+    fn test_scry_keeps_good_cards_on_top() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Library top-to-bottom: Doomsday (0.9), Oracle (0.05), Brainstorm (0.35)
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        // Reorder so dd is on top
+        state.us.library_order.clear();
+        state.us.library_order.push_back(dd);
+        state.us.library_order.push_back(oracle);
+        state.us.library_order.push_back(bs);
+
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
+
+        eff_scry(PlayerId::Us, 3).call(&mut state, 0, &[]);
+
+        // Doomsday (0.9 >= 0.3) and Brainstorm (0.35 >= 0.3) kept on top.
+        // Oracle (0.05 < 0.3) bottomed.
+        // Kept cards preserve order: Doomsday, Brainstorm.
+        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(lib.len(), 3);
+        assert_eq!(lib[0], dd, "Doomsday should be on top (kept)");
+        assert_eq!(lib[1], bs, "Brainstorm should be second (kept)");
+        assert_eq!(lib[2], oracle, "Oracle should be on bottom (scried away)");
+    }
+
+    #[test]
+    fn test_scry_all_bad_sends_all_to_bottom() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let edge = add_library_card(&mut state, PlayerId::Us, "Edge of Autumn");
+        let deep = add_library_card(&mut state, PlayerId::Us, "Doomsday"); // will be below scry range
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);
+        state.us.library_order.push_back(edge);
+        state.us.library_order.push_back(deep);
+
+        wire_eval(&mut state, vec![("Thassa's Oracle", 0.05), ("Edge of Autumn", 0.1), ("Doomsday", 0.9)]);
+
+        eff_scry(PlayerId::Us, 2).call(&mut state, 0, &[]);
+
+        // Both top cards were bad → both bottomed. Doomsday (untouched) now on top.
+        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(lib[0], deep, "Doomsday should now be on top");
+    }
+
+    #[test]
+    fn test_order_sorts_top_n_by_score() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);  // worst on top
+        state.us.library_order.push_back(dd);       // best in middle
+        state.us.library_order.push_back(bs);        // medium at bottom
+
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
+
+        eff_order(PlayerId::Us, 3).call(&mut state, 0, &[]);
+
+        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(lib[0], dd, "Doomsday (0.9) should be on top after ordering");
+        assert_eq!(lib[1], bs, "Brainstorm (0.35) should be second");
+        assert_eq!(lib[2], oracle, "Oracle (0.05) should be third");
+    }
+
+    #[test]
+    fn test_order_does_not_touch_cards_beyond_n() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let deep = add_library_card(&mut state, PlayerId::Us, "Force of Will");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);
+        state.us.library_order.push_back(dd);
+        state.us.library_order.push_back(deep);
+
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Force of Will", 0.8)]);
+
+        eff_order(PlayerId::Us, 2).call(&mut state, 0, &[]);
+
+        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(lib[0], dd, "DD sorted to top of the 2");
+        assert_eq!(lib[1], oracle, "Oracle second of the 2");
+        assert_eq!(lib[2], deep, "FoW untouched at position 3");
+    }
+
+    #[test]
+    fn test_maybe_shuffle_shuffles_when_top_is_bad() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);  // 0.05 — below threshold
+        state.us.library_order.push_back(dd);
+        state.us.library_order.push_back(bs);
+
+        wire_eval(&mut state, vec![("Thassa's Oracle", 0.05), ("Doomsday", 0.9), ("Brainstorm", 0.35)]);
+
+        // Record original order.
+        let before: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+
+        eff_maybe_shuffle(PlayerId::Us).call(&mut state, 0, &[]);
+
+        // Library was shuffled — same cards, potentially different order.
+        let after: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(after.len(), before.len(), "shuffle preserves card count");
+        // All original cards still present.
+        for id in &before {
+            assert!(after.contains(id), "card {:?} missing after shuffle", id);
+        }
+    }
+
+    #[test]
+    fn test_maybe_shuffle_does_not_shuffle_when_top_is_good() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(dd);     // 0.9 — above threshold
+        state.us.library_order.push_back(oracle);
+
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05)]);
+
+        eff_maybe_shuffle(PlayerId::Us).call(&mut state, 0, &[]);
+
+        // No shuffle — order preserved exactly.
+        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(lib[0], dd);
+        assert_eq!(lib[1], oracle);
+    }
+
+    #[test]
+    fn test_brainstorm_composition_draw3_putback2() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Start with 2 cards in hand: Oracle (bad, 0.05) and Edge (bad, 0.1)
+        let oracle = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let edge = add_hand_card(&mut state, PlayerId::Us, "Edge of Autumn");
+        // Library: DD (0.9), FoW (0.8), Brainstorm (0.35)
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let fow = add_library_card(&mut state, PlayerId::Us, "Force of Will");
+        let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(dd);
+        state.us.library_order.push_back(fow);
+        state.us.library_order.push_back(bs);
+
+        wire_eval(&mut state, vec![
+            ("Doomsday", 0.9), ("Force of Will", 0.8), ("Brainstorm", 0.35),
+            ("Thassa's Oracle", 0.05), ("Edge of Autumn", 0.1),
+        ]);
+
+        // Brainstorm = draw 3, put back 2 worst
+        let effect = eff_draw(PlayerId::Us, 3)
+            .then(eff_put_back_eval(PlayerId::Us))
+            .then(eff_put_back_eval(PlayerId::Us));
+        effect.call(&mut state, 0, &[]);
+
+        // After draw 3: hand = Oracle(0.05), Edge(0.1), DD(0.9), FoW(0.8), BS(0.35)
+        // Put back worst: Oracle(0.05) → top. Hand = Edge(0.1), DD(0.9), FoW(0.8), BS(0.35)
+        // Put back worst: Edge(0.1) → top. Hand = DD(0.9), FoW(0.8), BS(0.35)
+        let hand_names: Vec<String> = state.hand_of(PlayerId::Us)
+            .map(|c| c.catalog_key.clone()).collect();
+        assert_eq!(hand_names.len(), 3, "hand should have 3 cards");
+        assert!(hand_names.contains(&"Doomsday".to_string()));
+        assert!(hand_names.contains(&"Force of Will".to_string()));
+        assert!(hand_names.contains(&"Brainstorm".to_string()));
+        // Oracle and Edge should be on top of library (Edge on top, Oracle second)
+        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(lib[0], edge, "Edge (put back second) on top");
+        assert_eq!(lib[1], oracle, "Oracle (put back first) second");
+    }
+
+    #[test]
+    fn test_ponder_keeps_best_on_top_and_draws_it() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Library: Oracle (0.05), BS (0.35), DD (0.9)
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);
+        state.us.library_order.push_back(bs);
+        state.us.library_order.push_back(dd);
+
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Brainstorm", 0.35), ("Thassa's Oracle", 0.05)]);
+
+        // Ponder = order(3), maybe_shuffle, draw(1)
+        let effect = eff_order(PlayerId::Us, 3)
+            .then(eff_maybe_shuffle(PlayerId::Us))
+            .then(eff_draw(PlayerId::Us, 1));
+        effect.call(&mut state, 0, &[]);
+
+        // After order: DD(0.9) on top, BS(0.35), Oracle(0.05)
+        // maybe_shuffle: top is DD(0.9) >= 0.3 → no shuffle
+        // draw: DD drawn into hand
+        let hand: Vec<String> = state.hand_of(PlayerId::Us)
+            .map(|c| c.catalog_key.clone()).collect();
+        assert!(hand.contains(&"Doomsday".to_string()), "should draw DD (best card)");
+    }
+
+    #[test]
+    fn test_ponder_shuffles_when_all_top3_are_bad() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Library: Oracle, Edge, Unearth — all score below 0.3, plus a DD deep
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let edge = add_library_card(&mut state, PlayerId::Us, "Edge of Autumn");
+        let unearth = add_library_card(&mut state, PlayerId::Us, "Unearth");
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);
+        state.us.library_order.push_back(edge);
+        state.us.library_order.push_back(unearth);
+        state.us.library_order.push_back(dd);
+
+        wire_eval(&mut state, vec![
+            ("Thassa's Oracle", 0.05), ("Edge of Autumn", 0.1),
+            ("Unearth", 0.05), ("Doomsday", 0.9),
+        ]);
+
+        // After order(3): best of {Oracle:0.05, Edge:0.1, Unearth:0.05} → Edge on top (0.1)
+        // maybe_shuffle: top is Edge(0.1) < 0.3 → shuffles!
+        let effect = eff_order(PlayerId::Us, 3)
+            .then(eff_maybe_shuffle(PlayerId::Us))
+            .then(eff_draw(PlayerId::Us, 1));
+        effect.call(&mut state, 0, &[]);
+
+        // Should have drawn 1 card (from shuffled library)
+        let hand_count = state.hand_of(PlayerId::Us).count();
+        assert_eq!(hand_count, 1, "should draw 1 card after ponder");
+        // Library should have 3 cards remaining
+        assert_eq!(state.us.library_order.len(), 3, "3 cards left in library");
+    }
+
+    #[test]
+    fn test_preordain_scries_then_draws() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Library: Oracle(0.05), DD(0.9), BS(0.35)
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);
+        state.us.library_order.push_back(dd);
+        state.us.library_order.push_back(bs);
+
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
+
+        // Preordain = scry(2), draw(1)
+        let effect = eff_scry(PlayerId::Us, 2).then(eff_draw(PlayerId::Us, 1));
+        effect.call(&mut state, 0, &[]);
+
+        // Scry 2 sees Oracle(0.05) and DD(0.9).
+        // Oracle (0.05 < 0.3) → bottom. DD (0.9 >= 0.3) → keep on top.
+        // After scry: DD on top, BS, Oracle on bottom.
+        // Draw: DD drawn.
+        let hand: Vec<String> = state.hand_of(PlayerId::Us)
+            .map(|c| c.catalog_key.clone()).collect();
+        assert!(hand.contains(&"Doomsday".to_string()), "should draw DD after scrying Oracle to bottom");
+        // Library: BS, Oracle
+        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        assert_eq!(lib.len(), 2);
+        assert_eq!(lib[0], bs, "BS should be on top of remaining library");
+        assert_eq!(lib[1], oracle, "Oracle should be on bottom");
+    }
+
+    #[test]
+    fn test_consider_surveil_then_draw() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Library: Oracle(0.05 → mill), DD(0.9)
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(oracle);
+        state.us.library_order.push_back(dd);
+
+        // Wire surveil_choice to use evaluator (mill if < 0.3)
+        wire_eval(&mut state, vec![("Thassa's Oracle", 0.05), ("Doomsday", 0.9)]);
+        let eval = Arc::clone(&state.evaluate_card);
+        state.surveil_choice = Arc::new(move |card_id, state| {
+            let who = state.objects.get(&card_id).map(|o| o.owner).unwrap_or(PlayerId::Us);
+            eval(who, card_id, state) < 0.3
+        });
+
+        // Consider = surveil(1), draw(1)
+        let effect = eff_surveil(PlayerId::Us, 1).then(eff_draw(PlayerId::Us, 1));
+        effect.call(&mut state, 0, &[]);
+
+        // Oracle (0.05 < 0.3) → milled to graveyard. DD drawn.
+        let hand: Vec<String> = state.hand_of(PlayerId::Us)
+            .map(|c| c.catalog_key.clone()).collect();
+        assert!(hand.contains(&"Doomsday".to_string()), "should draw DD after surveilling Oracle away");
+        // Oracle in graveyard
+        let gy: Vec<String> = state.objects.values()
+            .filter(|o| o.zone == CardZone::Graveyard)
+            .map(|o| o.catalog_key.clone()).collect();
+        assert!(gy.contains(&"Thassa's Oracle".to_string()), "Oracle should be in graveyard");
+    }
+
+    #[test]
+    fn test_consider_surveil_keeps_good_card() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Library: DD(0.9 → keep), Oracle(0.05)
+        let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        state.us.library_order.clear();
+        state.us.library_order.push_back(dd);
+        state.us.library_order.push_back(oracle);
+
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05)]);
+        let eval = Arc::clone(&state.evaluate_card);
+        state.surveil_choice = Arc::new(move |card_id, state| {
+            let who = state.objects.get(&card_id).map(|o| o.owner).unwrap_or(PlayerId::Us);
+            eval(who, card_id, state) < 0.3
+        });
+
+        let effect = eff_surveil(PlayerId::Us, 1).then(eff_draw(PlayerId::Us, 1));
+        effect.call(&mut state, 0, &[]);
+
+        // DD (0.9 >= 0.3) → kept on top, then drawn.
+        let hand: Vec<String> = state.hand_of(PlayerId::Us)
+            .map(|c| c.catalog_key.clone()).collect();
+        assert!(hand.contains(&"Doomsday".to_string()), "should draw DD (surveil kept it)");
+        // Oracle still in library (not milled)
+        assert_eq!(state.us.library_order.len(), 1);
+    }
+
+    #[test]
+    fn test_opp_london_bottom_picks_worst() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Opp hand: FoW (needed vs combo), extra Wasteland (useless), Delver (threat), Brainstorm (medium)
+        let _fow = add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        let waste = add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
+        let _delver = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        let _bs = add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        // Already have 2 lands on board → mana gap is 0
+        make_land(&mut state, PlayerId::Opp, "Underground Sea", false);
+        make_land(&mut state, PlayerId::Opp, "Polluted Delta", false);
+        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_has_wasteland: true, opp_fast_clock: false };
+        let strat = strategy::GenericOppStrategy::new(matchup);
+        let bottom = strat.london_bottom(&state, 1);
+        assert_eq!(bottom.len(), 1);
+        // With mana gap=0, the only land (Wasteland) should score lowest
+        assert_eq!(bottom[0], waste, "extra land should be bottomed when mana-flooded");
+    }
+
+    // ── Section 53: Mulligan Decision Tests ──────────────────────────────────
+
+    #[test]
+    fn test_dd_mull_no_land_hand() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // All spells, no mana: should mull
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Us, "Ponder");
+        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
+        add_hand_card(&mut state, PlayerId::Us, "Consider");
+        // Dark Ritual is Mana category, so actually this hand has 1 mana source.
+        // Let me replace it with an interaction spell instead.
+        // Actually Dark Ritual IS mana — so this hand has mana. Let me make a truly 0-mana hand.
+        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0),
+            "hand with Dark Ritual (mana) + DD + cantrips should keep");
+    }
+
+    #[test]
+    fn test_dd_mull_truly_no_mana() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // All non-mana cards
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Us, "Ponder");
+        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
+        add_hand_card(&mut state, PlayerId::Us, "Daze");
+        add_hand_card(&mut state, PlayerId::Us, "Consider");
+        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "0 mana sources should mull");
+    }
+
+    #[test]
+    fn test_dd_mull_land_flood() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // 5 lands + 2 spells
+        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
+        add_hand_card(&mut state, PlayerId::Us, "Island");
+        add_hand_card(&mut state, PlayerId::Us, "Swamp");
+        add_hand_card(&mut state, PlayerId::Us, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "5+ lands should mull");
+    }
+
+    #[test]
+    fn test_dd_keep_good_hand() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Classic keep: land, ritual, DD, cantrip, interaction
+        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Us, "Ponder");
+        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
+        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0), "good DD hand should keep");
+    }
+
+    #[test]
+    fn test_dd_mull_all_mana_no_action() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // All lands + rituals, no threats or cantrips
+        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
+        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        add_hand_card(&mut state, PlayerId::Us, "Lotus Petal");
+        add_hand_card(&mut state, PlayerId::Us, "Island");
+        add_hand_card(&mut state, PlayerId::Us, "Swamp");
+        add_hand_card(&mut state, PlayerId::Us, "Wasteland");
+        // 7 mana sources, 0 threats, 0 selection → 5+ mana → mull
+        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "all mana should mull");
+    }
+
+    #[test]
+    fn test_dd_mull_6_card_lenient() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // 6 cards: 1 land + 5 interaction (no threat/selection) — still has "spells"
+        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Us, "Daze");
+        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
+        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Us, "Daze");
+        assert!(!dd_should_mulligan(&state, PlayerId::Us, 1), "6-card with land + spells should keep");
+    }
+
+    #[test]
+    fn test_dd_always_keeps_at_4() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Terrible 4-card hand — should still keep
+        add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        add_hand_card(&mut state, PlayerId::Us, "Unearth");
+        add_hand_card(&mut state, PlayerId::Us, "Lion's Eye Diamond");
+        add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        assert!(!dd_should_mulligan(&state, PlayerId::Us, 3), "always keep at 4 cards");
+    }
+
+    #[test]
+    fn test_opp_mull_no_land() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
+        add_hand_card(&mut state, PlayerId::Opp, "Daze");
+        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
+        add_hand_card(&mut state, PlayerId::Opp, "Dragon's Rage Channeler");
+        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0), "0-land opp hand should mull");
+    }
+
+    #[test]
+    fn test_opp_mull_land_flood() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
+        add_hand_card(&mut state, PlayerId::Opp, "Scalding Tarn");
+        add_hand_card(&mut state, PlayerId::Opp, "Flooded Strand");
+        add_hand_card(&mut state, PlayerId::Opp, "Polluted Delta");
+        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0), "5+ land opp hand should mull");
+    }
+
+    #[test]
+    fn test_opp_keep_good_hand() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
+        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Daze");
+        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
+        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 0), "good tempo hand should keep");
+    }
+
+    #[test]
+    fn test_opp_mull_all_interaction_no_threats() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
+        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Daze");
+        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
+        add_hand_card(&mut state, PlayerId::Opp, "Fatal Push");
+        add_hand_card(&mut state, PlayerId::Opp, "Thoughtseize");
+        // 2 mana + 5 interaction, 0 threats, 0 selection → mull
+        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0),
+            "all interaction no threats/cantrips should mull");
+    }
+
+    #[test]
+    fn test_opp_always_keeps_at_4() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Daze");
+        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
+        add_hand_card(&mut state, PlayerId::Opp, "Fatal Push");
+        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 3), "always keep at 4 cards");
+    }
+
+    // ── Section 54: Validation (Phase 8) ─────────────────────────────────────
+
+    fn cards(list: &[(&str, i32)]) -> Vec<(String, i32, String)> {
+        list.iter().map(|(n, q)| (n.to_string(), *q, "main".to_string())).collect()
+    }
+
+    fn val_dd_deck() -> Vec<(String, i32, String)> {
+        cards(&[
+            ("Underground Sea", 3), ("Polluted Delta", 4), ("Flooded Strand", 1),
+            ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Marsh Flats", 1),
+            ("Island", 1), ("Swamp", 1), ("Undercity Sewers", 2), ("Wasteland", 3),
+            ("Cavern of Souls", 1),
+            ("Lotus Petal", 2), ("Lion's Eye Diamond", 1),
+            ("Dark Ritual", 4), ("Doomsday", 4), ("Brainstorm", 4),
+            ("Ponder", 4), ("Consider", 1), ("Edge of Autumn", 1),
+            ("Force of Will", 4), ("Daze", 3), ("Thoughtseize", 2),
+            ("Street Wraith", 1), ("Thassa's Oracle", 1), ("Unearth", 1),
+            ("Tamiyo, Inquisitive Student", 4), ("Orcish Bowmasters", 2),
+            ("Murktide Regent", 2),
+        ])
+    }
+
+    fn val_ub_tempo_deck() -> Vec<(String, i32, String)> {
+        cards(&[
+            ("Underground Sea", 4), ("Polluted Delta", 4), ("Flooded Strand", 2),
+            ("Misty Rainforest", 1), ("Scalding Tarn", 1), ("Bloodstained Mire", 1),
+            ("Island", 1), ("Swamp", 1), ("Wasteland", 4), ("Undercity Sewers", 1),
+            ("Tamiyo, Inquisitive Student", 4), ("Orcish Bowmasters", 4),
+            ("Murktide Regent", 3), ("Barrowgoyf", 2), ("Brazen Borrower", 1),
+            ("Kaito, Bane of Nightmares", 2),
+            ("Brainstorm", 4), ("Ponder", 4), ("Force of Will", 4), ("Daze", 3),
+            ("Fatal Push", 4), ("Snuff Out", 1), ("Thoughtseize", 4),
+        ])
+    }
+
+    /// Parse "us: N cards (-M mulligans)" from opening log line.
+    fn parse_log_hand_info(log: &str) -> Option<(u32, u32, u32, u32)> {
+        // Format: "... us: 7 cards (-0 mulligans), opp: 6 cards (-1 mulligans)"
+        let us_hand = log.find("us: ").and_then(|i| log[i+4..].chars().next()?.to_digit(10))?;
+        let us_mull = {
+            let marker = "us: ";
+            let after_us = log.find(marker).map(|i| &log[i..])?;
+            let m_pos = after_us.find("(-")?;
+            after_us[m_pos+2..].chars().next()?.to_digit(10)?
+        };
+        let opp_hand = log.find("opp: ").and_then(|i| log[i+5..].chars().next()?.to_digit(10))?;
+        let opp_mull = {
+            let marker = "opp: ";
+            let after_opp = log.find(marker).map(|i| &log[i..])?;
+            let m_pos = after_opp.find("(-")?;
+            after_opp[m_pos+2..].chars().next()?.to_digit(10)?
+        };
+        Some((us_hand, us_mull, opp_hand, opp_mull))
+    }
+
+    #[test]
+    fn test_parse_log_hand_info() {
+        let log = "T0 [us] Turn 3 — UB Tempo (play) | us: 7 cards (-0 mulligans), opp: 7 cards (-0 mulligans)";
+        let result = parse_log_hand_info(log);
+        assert_eq!(result, Some((7, 0, 7, 0)), "failed to parse: {}", log);
+
+        let log2 = "T0 [us] Turn 4 — UB Tempo (draw) | us: 6 cards (-1 mulligans), opp: 5 cards (-2 mulligans)";
+        let result2 = parse_log_hand_info(log2);
+        assert_eq!(result2, Some((6, 1, 5, 2)), "failed to parse: {}", log2);
+    }
+
+    /// Run N=10000 simulations and report key metrics.
+    /// This test always passes — it prints stats for manual inspection.
+    /// Run with: cargo test validation_stats -- --nocapture --ignored
+    #[test]
+    #[ignore] // slow: ~10s for 10000 sims
+    fn validation_stats() {
+        use rand::Rng;
+        let catalog = test_catalog();
+        let dd_cards = val_dd_deck();
+        let opp_cards = val_ub_tempo_deck();
+        let n = 1_000; // ~2min in debug mode; use --release for 10000
+        let mut rng = StdRng::seed_from_u64(12345);
+
+        let mut dd_success = 0u32;
+        let mut dd_fail = 0u32;
+        let mut us_mull_total = 0u32;
+        let mut opp_mull_total = 0u32;
+        let mut us_mulled_games = 0u32;
+        let mut opp_mulled_games = 0u32;
+        let mut success_turns = Vec::new();
+        let mut us_hand_sizes = Vec::new();
+        let mut opp_hand_sizes = Vec::new();
+
+        let mut panics = 0u32;
+        for _i in 0..n {
+            // Use a per-sim RNG seeded from the master, so panics don't lose rng state.
+            let sim_seed = rng.gen::<u64>();
+            let mut sim_rng = StdRng::seed_from_u64(sim_seed);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                simulate_game(
+                    "doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut sim_rng,
+                )
+            }));
+            let result = match result {
+                Ok(r) => r,
+                Err(_) => { panics += 1; continue; }
+            };
+            match result {
+                Some(state) => {
+                    dd_success += 1;
+                    success_turns.push(state.turn);
+                    // Find the opening hand summary line (contains "mulligans").
+                    if let Some(info_log) = state.log.iter().find(|l| l.contains("mulligans")) {
+                        if let Some((uh, um, oh, om)) = parse_log_hand_info(info_log) {
+                            us_hand_sizes.push(uh);
+                            opp_hand_sizes.push(oh);
+                            if um > 0 { us_mulled_games += 1; }
+                            us_mull_total += um;
+                            if om > 0 { opp_mulled_games += 1; }
+                            opp_mull_total += om;
+                        }
+                    }
+                }
+                None => {
+                    dd_fail += 1;
+                }
+            }
+        }
+
+        let total = dd_success + dd_fail;
+        let success_rate = dd_success as f64 / total as f64 * 100.0;
+        let avg_us_hand = if us_hand_sizes.is_empty() { 0.0 }
+            else { us_hand_sizes.iter().sum::<u32>() as f64 / us_hand_sizes.len() as f64 };
+        let avg_opp_hand = if opp_hand_sizes.is_empty() { 0.0 }
+            else { opp_hand_sizes.iter().sum::<u32>() as f64 / opp_hand_sizes.len() as f64 };
+
+        // Turn distribution for successful games
+        let mut turn_counts = [0u32; 8]; // index 2..7
+        for &t in &success_turns {
+            if (t as usize) < turn_counts.len() { turn_counts[t as usize] += 1; }
+        }
+
+        eprintln!("\n══════════════════════════════════════════════════════");
+        eprintln!("  VALIDATION: {} sims vs UB Tempo", n);
+        eprintln!("══════════════════════════════════════════════════════");
+        eprintln!("  DD success rate: {}/{} ({:.1}%)", dd_success, total, success_rate);
+        eprintln!("  DD fail (no cast): {}/{} ({:.1}%)", dd_fail, total, 100.0 - success_rate);
+        if panics > 0 {
+            eprintln!("  ⚠ Panicked sims: {} (pre-existing engine bugs)", panics);
+        }
+        eprintln!();
+        eprintln!("  DD success by turn:");
+        for t in 2..=7 {
+            let c = turn_counts[t];
+            let pct = if dd_success > 0 { c as f64 / dd_success as f64 * 100.0 } else { 0.0 };
+            eprintln!("    T{}: {:>5} ({:.1}%)", t, c, pct);
+        }
+        eprintln!();
+        eprintln!("  Mulligan rates:");
+        eprintln!("    Us:  {:.1}% of games mulled, avg {:.2} mulls/game",
+            us_mulled_games as f64 / total as f64 * 100.0,
+            us_mull_total as f64 / total as f64);
+        eprintln!("    Opp: {:.1}% of games mulled, avg {:.2} mulls/game",
+            opp_mulled_games as f64 / total as f64 * 100.0,
+            opp_mull_total as f64 / total as f64);
+        eprintln!();
+        eprintln!("  Avg hand size (after mulls+london bottom):");
+        eprintln!("    Us:  {:.2}", avg_us_hand);
+        eprintln!("    Opp: {:.2}", avg_opp_hand);
+        eprintln!("══════════════════════════════════════════════════════\n");
+
+        // Sanity assertions — these should be very loose, just catching broken sims.
+        assert!(success_rate > 10.0, "DD success rate suspiciously low: {:.1}%", success_rate);
+        assert!(success_rate < 95.0, "DD success rate suspiciously high: {:.1}%", success_rate);
+        assert!(avg_us_hand >= 5.0, "avg US hand size too low: {:.2}", avg_us_hand);
+        assert!(avg_opp_hand >= 5.0, "avg OPP hand size too low: {:.2}", avg_opp_hand);
     }

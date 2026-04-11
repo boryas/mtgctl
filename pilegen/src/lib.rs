@@ -15,8 +15,9 @@ mod predicates;
 pub(crate) use predicates::*;
 
 mod strategy;
-use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy};
-#[cfg(test)] use strategy::try_ninjutsu;
+use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
+               dd_plan_gap, dd_card_fills, opp_plan_gap, opp_card_fills};
+#[cfg(test)] use strategy::{try_ninjutsu, dd_should_mulligan, opp_should_mulligan};
 
 #[cfg(test)]
 mod tests;
@@ -1346,6 +1347,8 @@ struct PlayerState {
     pool: ManaPool,
     /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
     draws_this_turn: u8,
+    /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
+    library_order: std::collections::VecDeque<ObjId>,
 }
 
 impl PlayerState {
@@ -1358,6 +1361,7 @@ impl PlayerState {
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
             draws_this_turn: 0,
+            library_order: std::collections::VecDeque::new(),
         }
     }
 
@@ -1448,6 +1452,13 @@ pub struct SimState {
     /// Default: first candidate. Override in tests or per-strategy for smarter selection.
     pub(crate) sacrifice_choice:
         std::sync::Arc<dyn Fn(PlayerId, &[ObjId], &SimState) -> Option<ObjId> + Send + Sync>,
+    /// Universal card evaluator: scores a card's value for `who` given current game state.
+    /// Used by generic effect primitives (put_back, scry, order) to make strategy-driven
+    /// card selection decisions. Higher = more valuable to keep.
+    /// Wired at game init from matchup-parameterized strategy logic.
+    /// Default: 0.5 (flat, no preference). Override per-game in simulate_game.
+    pub(crate) evaluate_card:
+        std::sync::Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync>,
 }
 
 impl SimState {
@@ -1501,6 +1512,7 @@ impl SimState {
             }),
             surveil_choice: std::sync::Arc::new(|_, _| rand::thread_rng().gen_bool(0.5)),
             sacrifice_choice: std::sync::Arc::new(|_, candidates, _| candidates.first().copied()),
+            evaluate_card: std::sync::Arc::new(|_, _, _| 0.5),
         };
         s.us.id = s.alloc_id();
         s.opp.id = s.alloc_id();
@@ -1551,8 +1563,10 @@ impl SimState {
         self.objects.values().filter(move |c| c.owner == who && c.zone == (CardZone::Exile { on_adventure: true }))
     }
 
+    /// Iterate library in deck order (front = top). Yields `&GameObject` for each ObjId.
     fn library_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && c.zone == CardZone::Library)
+        let order = &self.player(who).library_order;
+        order.iter().filter_map(move |id| self.objects.get(id))
     }
 
     fn hand_size(&self, who: PlayerId) -> i32 {
@@ -1560,11 +1574,22 @@ impl SimState {
     }
 
     fn library_size(&self, who: PlayerId) -> usize {
-        self.library_of(who).count()
+        self.player(who).library_order.len()
     }
 
     /// Mutate zone field only — no triggers, no logging. Use `change_zone` for that.
+    /// Maintains `library_order` when entering or leaving Library zone.
     fn set_card_zone(&mut self, id: ObjId, zone: CardZone) {
+        let (old_zone, owner) = match self.objects.get(&id) {
+            Some(c) => (c.zone, c.owner),
+            None => return,
+        };
+        if old_zone == CardZone::Library && zone != CardZone::Library {
+            self.player_mut(owner).library_order.retain(|&x| x != id);
+        }
+        if zone == CardZone::Library && old_zone != CardZone::Library {
+            self.player_mut(owner).library_order.push_back(id);
+        }
         if let Some(card) = self.objects.get_mut(&id) {
             card.zone = zone;
             if !matches!(zone, CardZone::Battlefield) {
@@ -1574,6 +1599,17 @@ impl SimState {
     }
 
 
+
+    /// Shuffle a player's library using the simulation RNG.
+    fn shuffle_library(&mut self, who: PlayerId) {
+        use rand::seq::SliceRandom;
+        // Split borrow: access library_order and rng through separate fields.
+        let lib = match who {
+            PlayerId::Us  => &mut self.us.library_order,
+            PlayerId::Opp => &mut self.opp.library_order,
+        };
+        lib.make_contiguous().shuffle(&mut *self.rng);
+    }
 
     /// True when the simulation should stop (game ended or objective reached).
     fn done(&self) -> bool {
@@ -2357,11 +2393,25 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
                 ZoneId::Battlefield => CardZone::Battlefield,
             };
 
+            // Read owner and old zone before mutating, to maintain library_order.
+            let (owner, old_zone) = match state.objects.get(&id) {
+                Some(c) => (c.owner, c.zone),
+                None => return,
+            };
+            let zone_changed = old_zone != new_zone;
+            if zone_changed {
+                if new_zone == CardZone::Graveyard { state.graveyard_order.push(id); }
+                else { state.graveyard_order.retain(|&x| x != id); }
+                // Maintain library_order: remove from old library, add to new library.
+                if old_zone == CardZone::Library {
+                    state.player_mut(owner).library_order.retain(|&x| x != id);
+                }
+                if new_zone == CardZone::Library {
+                    state.player_mut(owner).library_order.push_back(id);
+                }
+            }
             if let Some(card) = state.objects.get_mut(&id) {
-                // Only update if zone actually changed (idempotent guard for re-fired ETB events)
-                if card.zone != new_zone {
-                    if new_zone == CardZone::Graveyard { state.graveyard_order.push(id); }
-                    else { state.graveyard_order.retain(|&x| x != id); }
+                if zone_changed {
                     card.zone = new_zone;
                     if from == ZoneId::Battlefield { card.bf = None; }
                 }
@@ -2387,7 +2437,7 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
         }
         GameEvent::Draw { controller, .. } => {
             let controller = *controller;
-            let top_id = state.library_of(controller).next().map(|c| c.id);
+            let top_id = state.player_mut(controller).library_order.pop_front();
             if let Some(card_id) = top_id {
                 state.set_card_zone(card_id, CardZone::Hand { known: false });
             }
@@ -3858,10 +3908,7 @@ pub fn simulate_game(
         for _ in 0..*qty {
             let id = state.alloc_id();
             state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Us));
-            if let Some(def) = state.catalog.get(name.as_str()) {
-                let def = def.clone();
-
-            }
+            state.us.library_order.push_back(id);
         }
     }
     for (name, qty, board) in opp_cards {
@@ -3870,23 +3917,63 @@ pub fn simulate_game(
         for _ in 0..*qty {
             let id = state.alloc_id();
             state.objects.insert(id, GameObject::new(id, name.clone(), PlayerId::Opp));
-            if let Some(def) = state.catalog.get(name.as_str()) {
-                let def = def.clone();
-
-            }
+            state.opp.library_order.push_back(id);
         }
     }
 
+    // Shuffle both libraries.
+    state.shuffle_library(PlayerId::Us);
+    state.shuffle_library(PlayerId::Opp);
+
     // ── Strategies and opening hands ─────────────────────────────────────────
 
+    // Derive matchup info from opponent identity.
+    let opp_is_blue = matches!(opponent, "Izzet Delver" | "UB Tempo" | "UR Delver");
+    let dd_matchup = MatchupInfo {
+        opp_has_counters: opp_is_blue,
+        opp_has_wasteland: true,
+        opp_fast_clock: opp_is_blue,
+    };
+    let opp_matchup = MatchupInfo {
+        opp_has_counters: true,  // DD plays FoW/Daze
+        opp_has_wasteland: true, // DD plays Wasteland
+        opp_fast_clock: false,   // DD is combo, not aggro
+    };
+
+    // Wire the universal card evaluator callback (captures matchup info).
+    let eval_dd_matchup = dd_matchup.clone();
+    let eval_opp_matchup = opp_matchup.clone();
+    state.evaluate_card = Arc::new(move |who, card_id, state| {
+        match who {
+            PlayerId::Us => {
+                let gap = dd_plan_gap(state, who, &eval_dd_matchup);
+                dd_card_fills(card_id, &gap, state, who)
+            }
+            PlayerId::Opp => {
+                let gap = opp_plan_gap(state, who, &eval_opp_matchup);
+                opp_card_fills(card_id, &gap, state, who)
+            }
+        }
+    });
+
+    // Wire surveil_choice to use the evaluator: mill low-value cards, keep high-value.
+    let surveil_eval = Arc::clone(&state.evaluate_card);
+    state.surveil_choice = Arc::new(move |card_id, state| {
+        // Determine who owns this card to evaluate from their perspective.
+        let who = state.objects.get(&card_id)
+            .map(|o| o.owner)
+            .unwrap_or(PlayerId::Us);
+        let score = surveil_eval(who, card_id, state);
+        // true = graveyard (mill), false = keep on top. Mill if below threshold.
+        score < 0.3
+    });
+
     let mut strategies: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::from([
-        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(turn)) as Box<dyn Strategy>),
-        (PlayerId::Opp, Box::new(GenericOppStrategy::new())   as Box<dyn Strategy>),
+        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(turn, dd_matchup)) as Box<dyn Strategy>),
+        (PlayerId::Opp, Box::new(GenericOppStrategy::new(opp_matchup))    as Box<dyn Strategy>),
     ]);
 
-    // Deal opening hands with mulligan decisions.
-    // The library is a HashMap so iteration order is already effectively random;
-    // moving cards back and redrawing is sufficient — no explicit shuffle needed.
+    // Deal opening hands with mulligan decisions (London mulligan).
     let mut mulligans = [0u32; 2];
     for (i, who) in [PlayerId::Us, PlayerId::Opp].into_iter().enumerate() {
         for _ in 0..7 { sim_draw(&mut state, who, 0, false); }
@@ -3894,13 +3981,24 @@ pub fn simulate_game(
             let taken = mulligans[i];
             if !strategies.get_mut(&who).unwrap().take_mulligan(&state, taken) { break; }
             mulligans[i] += 1;
-            // Return hand to library.
+            // Return hand to library via set_card_zone (maintains library_order).
             let hand_ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
-            for id in hand_ids { state.objects.get_mut(&id).unwrap().zone = CardZone::Library; }
+            for id in hand_ids { state.set_card_zone(id, CardZone::Library); }
+            // Shuffle library after returning cards.
+            state.shuffle_library(who);
             state.player_mut(who).draws_this_turn = 0;
-            // Draw new hand.
-            let new_size = 7u32.saturating_sub(mulligans[i]) as usize;
-            for _ in 0..new_size { sim_draw(&mut state, who, 0, false); }
+            // Draw 7 again (London mulligan: always see 7, then put N on bottom).
+            for _ in 0..7 { sim_draw(&mut state, who, 0, false); }
+        }
+        // London bottom: put N cards from hand to bottom of library (N = mulligans taken).
+        let n = mulligans[i] as usize;
+        if n > 0 {
+            let strat = strategies.get(&who).unwrap();
+            let to_bottom = strat.london_bottom(&state, n);
+            for id in to_bottom {
+                state.set_card_zone(id, CardZone::Library);
+                // set_card_zone pushes to back of library_order — that's already "bottom". Good.
+            }
         }
         state.player_mut(who).draws_this_turn = 0;
     }
