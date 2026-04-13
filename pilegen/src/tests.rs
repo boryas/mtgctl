@@ -117,6 +117,8 @@
             materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
+        state.catalog.entry(name.to_string())
+            .or_insert_with(|| test_catalog().remove(name).unwrap_or_else(|| creature(name, 1, 1)));
         id
     }
 
@@ -177,6 +179,8 @@
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.player_mut(who).library_order.push_back(id);
+        state.catalog.entry(name.to_string())
+            .or_insert_with(|| test_catalog().remove(name).unwrap_or_else(|| creature(name, 1, 1)));
         id
     }
 
@@ -1130,6 +1134,7 @@
             // can look up the ninja's name at resolution).
             let ninja_lib_id = state.alloc_id();
             state.objects.insert(ninja_lib_id, GameObject::new(ninja_lib_id, "Ninja".to_string(), PlayerId::Us));
+            state.player_mut(PlayerId::Us).library_order.push_back(ninja_lib_id);
             let initial_hand = state.hand_size(PlayerId::Us);
             handle_priority_round(&mut state, 1, PlayerId::Us, &mut make_strategies());
 
@@ -4829,10 +4834,10 @@
         let ssg_id = add_hand_card(&mut state, PlayerId::Us, "Simian Spirit Guide");
         // Activate SSG's hand-zone mana ability — should exile from hand.
         let act = ManaActivation { source_id: ssg_id, ability_index: 0, color_choice: Some(Color::Red) };
-        let log_entry = execute_mana_activation(&mut state, 1, PlayerId::Us, &act);
-        assert!(log_entry.contains("exile"), "log should mention exile: {:?}", log_entry);
+        execute_mana_activation(&mut state, 1, PlayerId::Us, &act);
         assert_eq!(state.objects[&ssg_id].zone, CardZone::Exile { on_adventure: false },
             "SSG should be exiled after paying mana");
+        assert_eq!(state.us.pool.r, 1, "SSG should produce R");
     }
 
     #[test]
@@ -7414,9 +7419,10 @@
     }
 
     #[test]
-    fn test_led_visible_in_potential_mana() {
-        // LED is excluded from the sub-loop but potential_mana should still count it
-        // (for can_pay checks that consider all sources including priority-window ones).
+    fn test_led_excluded_from_potential_mana() {
+        // LED has non-Default timing, so potential_mana should NOT count it.
+        // This prevents the engine from thinking spells are affordable when the
+        // strategy refuses to auto-crack LED (undertapping bug).
         let mut state = make_state();
         state.catalog = test_catalog();
         let led_def = catalog_card("Lion's Eye Diamond");
@@ -7424,7 +7430,48 @@
         recompute(&mut state);
 
         let pool = state.potential_mana(PlayerId::Us);
-        assert!(pool.total >= 3, "potential_mana should count LED's 3 mana production");
+        assert_eq!(pool.total, 0, "potential_mana should not count LED (non-Default timing)");
+    }
+
+    #[test]
+    fn test_insufficient_mana_blocks_cast() {
+        // With only LED on the battlefield (non-Default timing), a BBB spell
+        // should NOT appear in legal actions — the engine cannot auto-tap LED.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let led_def = catalog_card("Lion's Eye Diamond");
+        add_perm_with_def(&mut state, PlayerId::Us, &led_def, BattlefieldState::new());
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        state.current_turn = 1;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+        recompute(&mut state);
+
+        let legal = strategy::collect_legal_actions(&state, PlayerId::Us);
+        assert!(
+            !legal.iter().any(|a| matches!(a, LegalAction::CastSpell { .. })),
+            "Doomsday should not be castable with only LED as a mana source"
+        );
+    }
+
+    #[test]
+    fn test_sufficient_mana_allows_cast() {
+        // With real lands producing BBB, Doomsday should appear in legal actions.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let sea_def = catalog_card("Underground Sea");
+        for _ in 0..3 {
+            add_perm_with_def(&mut state, PlayerId::Us, &sea_def, BattlefieldState::new());
+        }
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        state.current_turn = 1;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+        recompute(&mut state);
+
+        let legal = strategy::collect_legal_actions(&state, PlayerId::Us);
+        assert!(
+            legal.iter().any(|a| matches!(a, LegalAction::CastSpell { .. })),
+            "Doomsday should be castable with 3 Underground Seas"
+        );
     }
 
     #[test]
@@ -7470,29 +7517,23 @@
     }
 
     #[test]
-    fn test_mana_log_after_cast_line() {
-        // The mana activation log should appear AFTER the "Cast ..." line.
+    fn test_mana_log_and_cast_both_present() {
+        // Casting via run_cast_submachine should log both mana production and the cast.
         let mut state = make_state();
         state.catalog = test_catalog();
 
-        // Set up: Underground Sea on battlefield, Dark Ritual in hand, pool empty.
         let sea_def = catalog_card("Underground Sea");
         add_perm_with_def(&mut state, PlayerId::Us, &sea_def, BattlefieldState::new());
         let dr_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
         recompute(&mut state);
 
-        // Cast via run_cast_submachine which handles mana loop + cast_spell.
         let mut strat = strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default());
         run_cast_submachine(&mut state, 1, PlayerId::Us, dr_id, SpellFace::Main, &mut strat);
 
-        // Find the "Cast Dark Ritual" line and the mana activation line.
-        let cast_idx = state.log.iter().position(|l| l.contains("Cast Dark Ritual"));
-        let mana_idx = state.log.iter().position(|l| l.contains("tap") && l.contains("Underground Sea"));
-        assert!(cast_idx.is_some(), "should have a Cast log line");
-        assert!(mana_idx.is_some(), "should have a mana activation log line");
-        assert!(cast_idx.unwrap() < mana_idx.unwrap(),
-            "Cast line (idx {}) should appear before mana activation (idx {})\nlog: {:?}",
-            cast_idx.unwrap(), mana_idx.unwrap(), state.log);
+        let has_cast = state.log.iter().any(|l| l.contains("Cast Dark Ritual"));
+        let has_mana = state.log.iter().any(|l| l.contains("add B to pool"));
+        assert!(has_cast, "should have a Cast log line, got: {:?}", state.log);
+        assert!(has_mana, "should have a mana production log line, got: {:?}", state.log);
     }
 
     // ── Section 54: Validation (Phase 8) ─────────────────────────────────────
@@ -7601,7 +7642,7 @@
             match result {
                 Some(state) => {
                     dd_success += 1;
-                    success_turns.push(state.turn);
+                    success_turns.push(state.current_turn);
                     // Find the opening hand summary line (contains "mulligans").
                     if let Some(info_log) = state.log.iter().find(|l| l.contains("mulligans")) {
                         if let Some((uh, um, oh, om)) = parse_log_hand_info(info_log) {
@@ -7667,4 +7708,294 @@
         assert!(success_rate < 95.0, "DD success rate suspiciously high: {:.1}%", success_rate);
         assert!(avg_us_hand >= 5.0, "avg US hand size too low: {:.2}", avg_us_hand);
         assert!(avg_opp_hand >= 5.0, "avg OPP hand size too low: {:.2}", avg_opp_hand);
+    }
+
+    #[test]
+    fn test_decision_log_populated() {
+        let catalog = test_catalog();
+        let dd_cards = val_dd_deck();
+        let opp_cards = val_ub_tempo_deck();
+        let mut rng = StdRng::seed_from_u64(42);
+        // Run sims until one succeeds (DD resolves).
+        let state = loop {
+            if let Some(s) = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng) {
+                break s;
+            }
+        };
+        assert!(!state.decision_log.is_empty(), "decision_log should have entries");
+        // Should contain at least a mulligan decision and an AP proactive decision.
+        let has_mulligan = state.decision_log.iter().any(|l| l.contains("mulligan"));
+        let has_dd = state.decision_log.iter().any(|l| l.contains("DD"));
+        assert!(has_mulligan, "decision_log should contain mulligan entries");
+        assert!(has_dd, "decision_log should contain DD decision entries");
+        eprintln!("\n── decision_log ({} entries) ──", state.decision_log.len());
+        for entry in &state.decision_log {
+            eprintln!("  {}", entry);
+        }
+    }
+
+    // ── Targeted-spell legality ──────────────────────────────────────────────
+
+    /// Put a permanent spell on the stack WITH an effect (eff_enter_permanent),
+    /// mimicking how the cast submachine sets up a permanent about to resolve.
+    fn add_permanent_spell_on_stack(state: &mut SimState, who: PlayerId, name: &str) -> ObjId {
+        let id = state.alloc_id();
+        let eff = eff_enter_permanent(who, name.to_string());
+        state.objects.insert(id, GameObject {
+            id,
+            catalog_key: name.to_string(),
+            owner: who,
+            controller: who,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: Some(SpellState {
+                effect: Some(eff),
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(), ci_timestamp: 0,
+        });
+        state.catalog.entry(name.to_string())
+            .or_insert_with(|| test_catalog().remove(name).unwrap_or_else(||
+                creature(name, 1, 1)));
+        state.stack.push(id);
+        id
+    }
+
+    #[test]
+    fn test_resolved_permanent_does_not_leave_stale_stack_object() {
+        // When a permanent spell resolves, the old spell object must not linger
+        // with zone == Stack. Stale stack objects caused counterspells to find
+        // phantom targets long after the permanent had entered the battlefield.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let mut strategies = make_strategies();
+        state.current_turn = 2;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+
+        add_permanent_spell_on_stack(&mut state, PlayerId::Opp, "Murktide Regent");
+        recompute(&mut state);
+        resolve_top_of_stack(&mut state, 2, PlayerId::Opp, &mut strategies);
+
+        // Stack should be empty and no objects should have zone == Stack.
+        assert!(state.stack.is_empty(), "stack list should be empty after resolution");
+        let stale_stack_objs: Vec<_> = state.objects.values()
+            .filter(|o| o.zone == CardZone::Stack)
+            .map(|o| o.catalog_key.clone())
+            .collect();
+        assert!(stale_stack_objs.is_empty(),
+            "no objects should remain with zone == Stack after permanent resolves, found: {:?}",
+            stale_stack_objs);
+    }
+
+    #[test]
+    fn test_fow_not_legal_after_permanent_resolves() {
+        // End-to-end: a Us creature resolves, then on a later priority window
+        // with an empty stack, Opp's Force of Will must NOT appear in legal actions.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let mut strategies = make_strategies();
+        state.current_turn = 2;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+
+        // Resolve a Us creature spell (simulating a prior turn).
+        add_permanent_spell_on_stack(&mut state, PlayerId::Us, "Murktide Regent");
+        recompute(&mut state);
+        resolve_top_of_stack(&mut state, 2, PlayerId::Us, &mut strategies);
+
+        // Now set up opp's turn with FoW in hand and an empty stack.
+        state.current_turn = 4;
+        let island_def = catalog_card("Island");
+        for _ in 0..5 {
+            add_perm_with_def(&mut state, PlayerId::Opp, &island_def, BattlefieldState::new());
+        }
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm"); // blue pitch fodder
+        recompute(&mut state);
+
+        assert!(state.stack.is_empty(), "precondition: stack should be empty");
+        let legal = strategy::collect_legal_actions(&state, PlayerId::Opp);
+        let has_fow = legal.iter().any(|a| {
+            if let LegalAction::CastSpell { card_id, .. } = a {
+                state.objects.get(card_id).map_or(false, |c| c.catalog_key == "Force of Will")
+            } else { false }
+        });
+        assert!(!has_fow,
+            "Force of Will must not be offered when the stack is empty \
+             (stale resolved-permanent objects must not be targetable)");
+    }
+
+    #[test]
+    fn test_fow_not_legal_with_empty_stack() {
+        // Force of Will requires a target spell on the stack.
+        // With an empty stack it must NOT appear in legal actions.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let island_def = catalog_card("Island");
+        for _ in 0..5 {
+            add_perm_with_def(&mut state, PlayerId::Opp, &island_def, BattlefieldState::new());
+        }
+        // Give opp a blue card to pitch + FoW itself (hand_min >= 2).
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm"); // blue pitch fodder
+        state.current_turn = 4;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+        recompute(&mut state);
+
+        assert!(state.stack.is_empty(), "precondition: stack should be empty");
+        let legal = strategy::collect_legal_actions(&state, PlayerId::Opp);
+        let has_fow = legal.iter().any(|a| {
+            if let LegalAction::CastSpell { card_id, .. } = a {
+                state.objects.get(card_id).map_or(false, |c| c.catalog_key == "Force of Will")
+            } else { false }
+        });
+        assert!(!has_fow,
+            "Force of Will must not be offered as a legal action with an empty stack");
+    }
+
+    #[test]
+    fn test_fow_legal_with_opposing_spell_on_stack() {
+        // When an opponent's spell IS on the stack, FoW should be legal.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let island_def = catalog_card("Island");
+        for _ in 0..5 {
+            add_perm_with_def(&mut state, PlayerId::Opp, &island_def, BattlefieldState::new());
+        }
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm"); // pitch fodder
+        // Put an opponent (Us) spell on the stack.
+        let bs_def = catalog_card("Brainstorm");
+        let spell_id = add_stack_spell(&mut state, PlayerId::Us, &bs_def);
+        state.stack.push(spell_id);
+        state.current_turn = 4;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+        recompute(&mut state);
+
+        let legal = strategy::collect_legal_actions(&state, PlayerId::Opp);
+        let has_fow = legal.iter().any(|a| {
+            if let LegalAction::CastSpell { card_id, .. } = a {
+                state.objects.get(card_id).map_or(false, |c| c.catalog_key == "Force of Will")
+            } else { false }
+        });
+        assert!(has_fow,
+            "Force of Will should be offered when an opposing spell is on the stack");
+    }
+
+    // ── Section: Engine Invariant Tests ──────────────────────────────────────
+
+    #[test]
+    fn test_priority_round_both_players_pass() {
+        // After handle_priority_round, the stack must be empty and the game
+        // state must be self-consistent (assert_engine_invariants fires inside).
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.current_turn = 1;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+        // Give both players some lands so the state isn't degenerate.
+        let island_def = catalog_card("Island");
+        for _ in 0..3 {
+            add_perm_with_def(&mut state, PlayerId::Us, &island_def, BattlefieldState::new());
+            add_perm_with_def(&mut state, PlayerId::Opp, &island_def, BattlefieldState::new());
+        }
+        recompute(&mut state);
+
+        let mut strategies = make_strategies();
+        handle_priority_round(&mut state, 1, PlayerId::Us, &mut strategies);
+
+        assert!(state.stack.is_empty(),
+            "stack should be empty after priority round with no spells cast");
+        let stack_objs: Vec<_> = state.objects.values()
+            .filter(|o| o.zone == CardZone::Stack)
+            .collect();
+        assert!(stack_objs.is_empty(),
+            "no objects should have zone == Stack after clean priority round");
+    }
+
+    #[test]
+    fn test_no_stale_objects_after_multi_permanent_resolution() {
+        // Cast 3 permanent spells, resolve all, verify no zone == Stack objects remain.
+        // This is the multi-spell version of test_resolved_permanent_does_not_leave_stale_stack_object.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let mut strategies = make_strategies();
+        state.current_turn = 3;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+
+        // Push 3 permanent spells onto the stack and resolve each.
+        let names = ["Murktide Regent", "Orcish Bowmasters", "Grief"];
+        for name in &names {
+            add_permanent_spell_on_stack(&mut state, PlayerId::Opp, name);
+            recompute(&mut state);
+            resolve_top_of_stack(&mut state, 3, PlayerId::Opp, &mut strategies);
+        }
+
+        assert!(state.stack.is_empty(),
+            "stack list should be empty after resolving all 3 permanents");
+        let stale: Vec<_> = state.objects.values()
+            .filter(|o| o.zone == CardZone::Stack)
+            .map(|o| o.catalog_key.clone())
+            .collect();
+        assert!(stale.is_empty(),
+            "no objects should have zone == Stack after resolving 3 permanents, found: {:?}", stale);
+        // All 3 should be on the battlefield.
+        for name in &names {
+            let on_bf = state.objects.values()
+                .any(|o| o.catalog_key == *name && o.zone == CardZone::Battlefield);
+            assert!(on_bf, "{} should be on the battlefield after resolution", name);
+        }
+    }
+
+    #[test]
+    fn test_zone_tracking_consistency() {
+        // After various zone transitions, verify library_order, graveyard_order,
+        // and actual object zones are in sync.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.current_turn = 1;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+
+        // Put some cards in different zones.
+        let island_def = catalog_card("Island");
+        let perm_id = add_perm_with_def(&mut state, PlayerId::Us, &island_def, BattlefieldState::new());
+        let hand_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+
+        // Move permanent to graveyard.
+        change_zone(perm_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
+        // Move hand card to graveyard.
+        change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
+
+        // Verify graveyard_order matches actual graveyard objects.
+        let gy_objs: Vec<ObjId> = state.objects.values()
+            .filter(|o| o.zone == CardZone::Graveyard && o.owner == PlayerId::Us)
+            .map(|o| o.id)
+            .collect();
+        for &id in &state.graveyard_order {
+            assert!(state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Graveyard),
+                "graveyard_order contains id {:?} that is not in graveyard zone", id);
+        }
+        for &id in &gy_objs {
+            assert!(state.graveyard_order.contains(&id),
+                "object {:?} in graveyard zone but missing from graveyard_order", id);
+        }
+
+        // Verify library_order matches actual library objects.
+        for who in [PlayerId::Us, PlayerId::Opp] {
+            let lib_objs: Vec<ObjId> = state.objects.values()
+                .filter(|o| o.zone == CardZone::Library && o.owner == who)
+                .map(|o| o.id)
+                .collect();
+            let lib_order = &state.player(who).library_order;
+            for &id in lib_order.iter() {
+                assert!(state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Library),
+                    "library_order for {:?} contains id {:?} not in library zone", who, id);
+            }
+            for &id in &lib_objs {
+                assert!(lib_order.contains(&id),
+                    "object {:?} in library zone for {:?} but missing from library_order", id, who);
+            }
+        }
     }

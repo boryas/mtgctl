@@ -99,6 +99,10 @@ pub(crate) trait Strategy {
     /// How much does this card close the current gap? Higher = more useful.
     fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64;
 
+    /// Drain accumulated decision-log entries. Called by the engine after each
+    /// strategy invocation; entries are appended to `SimState::decision_log`.
+    fn drain_decisions(&mut self) -> Vec<String> { Vec::new() }
+
     /// London mulligan: pick N cards to put on bottom (lowest-value cards).
     fn london_bottom(&self, state: &SimState, n: usize) -> Vec<ObjId> {
         let gap = self.plan_gap(state);
@@ -109,6 +113,28 @@ pub(crate) trait Strategy {
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.into_iter().take(n).map(|(id, _)| id).collect()
     }
+}
+
+// ── Decision logging helpers ─────────────────────────────────────────────────
+
+/// Summarize a hand's category composition for logging. Returns e.g. "(M=2 T=1 I=1 S=2 ?=1)".
+fn hand_category_summary(
+    state: &SimState,
+    who: PlayerId,
+    categorize: fn(&str, Option<&CardDef>) -> Option<CardCategory>,
+) -> String {
+    let (mut m, mut t, mut i, mut s, mut dead) = (0, 0, 0, 0, 0);
+    for c in state.hand_of(who) {
+        let def = state.def_of(c.id).or_else(|| state.catalog.get(c.catalog_key.as_str()));
+        match categorize(&c.catalog_key, def) {
+            Some(CardCategory::Mana)        => m += 1,
+            Some(CardCategory::Threat)      => t += 1,
+            Some(CardCategory::Interaction)  => i += 1,
+            Some(CardCategory::Selection)    => s += 1,
+            None                             => dead += 1,
+        }
+    }
+    format!("(M={} T={} I={} S={} ?={})", m, t, i, s, dead)
 }
 
 // ── Doomsday castability check ───────────────────────────────────────────────
@@ -173,12 +199,16 @@ pub(crate) struct DoomsdayStrategy {
     /// Set when a black-producing land must be played next main phase.
     must_land_drop: bool,
     matchup: MatchupInfo,
+    /// Accumulated decision-log entries, drained by the engine after each call.
+    decisions: Vec<String>,
 }
 
 impl DoomsdayStrategy {
     pub(crate) fn new(matchup: MatchupInfo) -> Self {
-        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(), must_land_drop: false, matchup }
+        Self { player_id: PlayerId::Us, rng: SmallRng::from_entropy(),
+               must_land_drop: false, matchup, decisions: Vec::new() }
     }
+    fn dlog(&mut self, msg: impl Into<String>) { self.decisions.push(msg.into()); }
 }
 
 /// Categorize a card for the Doomsday player's pre-DD evaluation.
@@ -342,13 +372,15 @@ pub(crate) fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_take
 }
 
 impl Strategy for DoomsdayStrategy {
+    fn drain_decisions(&mut self) -> Vec<String> { std::mem::take(&mut self.decisions) }
+
     fn choose_action(&mut self, state: &SimState, ap: PlayerId,
                      legal_actions: &[LegalAction]) -> LegalAction {
         let who = self.player_id;
         let t = state.current_turn;
         if who != ap {
             if state.stack.is_empty() { return LegalAction::Pass; }
-            return choose_nap_action(state, who, legal_actions, &mut self.rng);
+            return choose_nap_action(state, who, legal_actions, &mut self.rng, &mut self.decisions);
         }
         let in_ninjutsu_step = matches!(state.current_phase,
             Some(TurnPosition::Step(StepKind::DeclareBlockers))
@@ -364,11 +396,11 @@ impl Strategy for DoomsdayStrategy {
             Some(TurnPosition::Phase(PhaseKind::PreCombatMain))
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
         if !in_main_phase { return LegalAction::Pass; }
-        if let Some(action) = choose_ap_react(state, who, legal_actions, &mut self.rng) {
+        if let Some(action) = choose_ap_react(state, who, legal_actions, &mut self.rng, &mut self.decisions) {
             return action;
         }
         choose_ap_proactive(state, t, who, legal_actions,
-            &mut self.must_land_drop, &mut self.rng)
+            &mut self.must_land_drop, &mut self.rng, &mut self.decisions)
     }
 
     fn choose_mana_ability(&mut self, state: &SimState, who: PlayerId,
@@ -401,7 +433,14 @@ impl Strategy for DoomsdayStrategy {
     }
 
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
-        dd_should_mulligan(state, self.player_id, mulligans_taken)
+        let who = self.player_id;
+        let mull = dd_should_mulligan(state, who, mulligans_taken);
+        let hand: Vec<String> = state.hand_of(who).map(|c| c.catalog_key.clone()).collect();
+        let cats = hand_category_summary(state, who, dd_categorize);
+        self.dlog(format!("T0 {}: mulligan#{} hand=[{}] {} → {}",
+            who, mulligans_taken, hand.join(", "), cats,
+            if mull { "MULL" } else { "KEEP" }));
+        mull
     }
 
     fn player_id(&self) -> PlayerId { self.player_id }
@@ -421,12 +460,15 @@ pub(crate) struct GenericOppStrategy {
     player_id: PlayerId,
     rng: SmallRng,
     matchup: MatchupInfo,
+    /// Accumulated decision-log entries, drained by the engine after each call.
+    decisions: Vec<String>,
 }
 
 impl GenericOppStrategy {
     pub(crate) fn new(matchup: MatchupInfo) -> Self {
-        Self { player_id: PlayerId::Opp, rng: SmallRng::from_entropy(), matchup }
+        Self { player_id: PlayerId::Opp, rng: SmallRng::from_entropy(), matchup, decisions: Vec::new() }
     }
+    fn dlog(&mut self, msg: impl Into<String>) { self.decisions.push(msg.into()); }
 }
 
 /// Categorize a card for the tempo/fair opponent's evaluation.
@@ -581,13 +623,15 @@ pub(crate) fn opp_should_mulligan(state: &SimState, who: PlayerId, mulligans_tak
 }
 
 impl Strategy for GenericOppStrategy {
+    fn drain_decisions(&mut self) -> Vec<String> { std::mem::take(&mut self.decisions) }
+
     fn choose_action(&mut self, state: &SimState, ap: PlayerId,
                      legal_actions: &[LegalAction]) -> LegalAction {
         let who = self.player_id;
         let t = state.current_turn;
         if who != ap {
             if state.stack.is_empty() { return LegalAction::Pass; }
-            return choose_nap_action(state, who, legal_actions, &mut self.rng);
+            return choose_nap_action(state, who, legal_actions, &mut self.rng, &mut self.decisions);
         }
         let in_ninjutsu_step = matches!(state.current_phase,
             Some(TurnPosition::Step(StepKind::DeclareBlockers))
@@ -604,7 +648,7 @@ impl Strategy for GenericOppStrategy {
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
         if !in_main_phase { return LegalAction::Pass; }
         let mut _md = false;
-        choose_ap_proactive(state, t, who, legal_actions, &mut _md, &mut self.rng)
+        choose_ap_proactive(state, t, who, legal_actions, &mut _md, &mut self.rng, &mut self.decisions)
     }
 
     fn announce(&mut self, state: &SimState, card_id: ObjId,
@@ -622,7 +666,13 @@ impl Strategy for GenericOppStrategy {
     }
 
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
-        opp_should_mulligan(state, self.player_id, mulligans_taken)
+        let who = self.player_id;
+        let mull = opp_should_mulligan(state, who, mulligans_taken);
+        let cats = hand_category_summary(state, who, opp_categorize);
+        self.dlog(format!("T0 {}: mulligan#{} {} → {}",
+            who, mulligans_taken, cats,
+            if mull { "MULL" } else { "KEEP" }));
+        mull
     }
 
     fn player_id(&self) -> PlayerId { self.player_id }
@@ -686,7 +736,9 @@ fn choose_nap_action(
     who: PlayerId,
     legal: &[LegalAction],
     rng: &mut impl Rng,
+    dlog: &mut Vec<String>,
 ) -> LegalAction {
+    let t = state.current_turn;
     // Find topmost opposing counterable spell on stack.
     for idx in (0..state.stack.len()).rev() {
         let item_id = state.stack[idx];
@@ -695,17 +747,16 @@ fn choose_nap_action(
         let item_name = state.stack_item_display_name(item_id).to_string();
         if item_owner != state.player_id(who) && item_is_counterable {
             if !worth_countering(item_id, &item_name, state) {
-                eprintln!("[decision] {}: NAP ignores {} (not worth countering)", who, item_name);
                 break;
             }
             if let Some(action) = find_counter_in_legal(state, who, item_id, legal, rng, true) {
                 if let LegalAction::CastSpell { card_id, .. } = &action {
                     let spell_name = state.objects.get(card_id).map_or("?", |c| c.catalog_key.as_str());
-                    eprintln!("[decision] {}: NAP counter {} targeting {}", who, spell_name, item_name);
+                    dlog.push(format!("T{} {}: NAP counter {} targeting {}", t, who, spell_name, item_name));
                 }
                 return action;
             }
-            eprintln!("[decision] {}: NAP passes (no counter available for {})", who, item_name);
+            dlog.push(format!("T{} {}: NAP passes (no counter available for {})", t, who, item_name));
             break;
         }
     }
@@ -718,8 +769,10 @@ fn choose_ap_react(
     who: PlayerId,
     legal: &[LegalAction],
     rng: &mut impl Rng,
+    dlog: &mut Vec<String>,
 ) -> Option<LegalAction> {
     if who != PlayerId::Us || state.stack.is_empty() { return None; }
+    let t = state.current_turn;
     let top_id = *state.stack.last()?;
     let top_is_counterable = state.stack_item_is_counterable(top_id);
     let top_owner = state.stack_item_owner(top_id);
@@ -739,11 +792,13 @@ fn choose_ap_react(
             });
     if !dd_countered { return None; }
     if let Some(action) = find_counter_in_legal(state, who, top_id, legal, rng, false) {
+        let counter_name = if let LegalAction::CastSpell { card_id, .. } = &action {
+            state.objects.get(card_id).map_or("?", |c| c.catalog_key.as_str()).to_string()
+        } else { "?".to_string() };
+        dlog.push(format!("T{} {}: AP protect DD with {}", t, who, counter_name));
         Some(action)
     } else {
-        let t = state.current_turn;
-        // Can't just call state.log — it takes &mut. Log via eprintln instead.
-        eprintln!("[t{}] Us: ⚠ Doomsday countered — could not protect", t);
+        dlog.push(format!("T{} {}: DD countered — no protection available", t, who));
         Some(LegalAction::Pass)
     }
 }
@@ -787,9 +842,17 @@ fn choose_ap_proactive(
     legal: &[LegalAction],
     must_land_drop: &mut bool,
     rng: &mut impl Rng,
+    dlog: &mut Vec<String>,
 ) -> LegalAction {
     let path = if who == PlayerId::Us { dd_cast_path(state, who) } else { DdPath::None };
     let dd_ready = path != DdPath::None;
+    if who == PlayerId::Us && dd_ready {
+        let pool = &state.player(who).pool;
+        let pot = state.potential_mana(who);
+        dlog.push(format!("T{} {}: DD castable — path={:?} pool=B{}U{}({}), potential=B{}U{}({}), hand={}",
+            t, who, path, pool.b, pool.u, pool.total,
+            pot.b, pot.u, pot.total, state.hand_size(who)));
+    }
 
     // ── Land drop ────────────────────────────────────────────────────────
     // Skip land drop if DD is already castable (don't waste tempo).
@@ -815,6 +878,8 @@ fn choose_ap_proactive(
             if rng.gen::<f64>() < prob {
                 *must_land_drop = false;
                 let id = lands[rng.gen_range(0..lands.len())];
+                let land_name = state.objects.get(&id).map_or("?", |c| c.catalog_key.as_str());
+                dlog.push(format!("T{} {}: land drop {} (want_black={})", t, who, land_name, want_black));
                 return LegalAction::LandDrop(id);
             }
         }
@@ -830,11 +895,9 @@ fn choose_ap_proactive(
     if !state.stack.is_empty() { return LegalAction::Pass; }
 
     let spell_actions: Vec<&LegalAction> = legal.iter().filter(|a| {
-        matches!(a, LegalAction::CastSpell { .. })
-    }).filter(|a| {
         if let LegalAction::CastSpell { card_id, .. } = a {
             let Some(def) = state.def_of(*card_id) else { return false };
-            !def.is_land() && !def.is_instant()
+            !def.is_land()
         } else { false }
     }).collect();
 
@@ -861,7 +924,7 @@ fn choose_ap_proactive(
             .map(|a| (*a).clone())
         {
             let name = spell_name(&&action).unwrap_or_default();
-            eprintln!("[decision] {}: DD path={:?}, casting {}", who, path, name);
+            dlog.push(format!("T{} {}: DD path={:?}, casting {}", t, who, path, name));
             return action;
         }
     }
@@ -877,7 +940,7 @@ fn choose_ap_proactive(
     let action = spell_actions[rng.gen_range(0..spell_actions.len())].clone();
     if let LegalAction::CastSpell { card_id, .. } = &action {
         let name = state.objects.get(card_id).map_or("?".to_string(), |c| c.catalog_key.clone());
-        eprintln!("[decision] {}: proactive cast {}", who, name);
+        dlog.push(format!("T{} {}: proactive cast {}", t, who, name));
     }
     action
 }
