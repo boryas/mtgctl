@@ -14,6 +14,7 @@ pub(crate) enum Keyword {
     Annihilator6,
     DoubleStrike,
     Trample,
+    Flash,
 }
 
 /// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.
@@ -421,27 +422,16 @@ pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
                     .map(|c| c.catalog_key.clone())
                     .unwrap_or_default();
                 if ninja_name.is_empty() { return; }
-                let new_id = state.alloc_id();
-                state.objects.insert(new_id, GameObject {
-                    id: new_id,
-                    catalog_key: ninja_name.clone(),
-                    owner: who,
-                    controller: who,
-                    zone: CardZone::Battlefield,
-                    is_token: false,
-                    spell: None,
-                    bf: Some(BattlefieldState {
-                        tapped: true,
-                        entered_this_turn: true,
-                        attacking: true,
-                        unblocked: true,
-                        attack_target,
-                        ..BattlefieldState::new()
-                    }),
-                    materialized: None,
-                    counters: HashMap::new(), ci_timestamp: 0,
-                });
-                state.combat_attackers.push(new_id);
+                // Move the source card from Stack to Battlefield (not a new object).
+                change_zone(source_id, ZoneId::Battlefield, state, t, who);
+                if let Some(bf) = state.permanent_bf_mut(source_id) {
+                    bf.tapped = true;
+                    bf.entered_this_turn = true;
+                    bf.attacking = true;
+                    bf.unblocked = true;
+                    bf.attack_target = attack_target;
+                }
+                state.combat_attackers.push(source_id);
                 state.log(t, who, format!("{} enters play tapped and attacking (ninjutsu)", ninja_name));
             }))
         })),

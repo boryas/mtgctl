@@ -917,8 +917,7 @@ fn brainstorm() -> CardDef {
         mana_cost: "U".to_string(),
         modes: untargeted_mode(|who, _source_id, _x| {
             eff_draw(who, 3)
-                .then(eff_put_back_eval(who))
-                .then(eff_put_back_eval(who))
+                .then(eff_put_back(who, 2))
         }),
         ..Default::default()
     }), parse_colors("U", false, false), None)
@@ -3028,17 +3027,12 @@ fn brazen_borrower() -> CardDef {
     );
 
     let mut data = CreatureData::new("1UU", 3, 1);
-    data.legendary = false;
-    simple(
-        "Brazen Borrower",
-        CardKind::Creature(data),
-        parse_colors("1UU", true, false),
-        None,
-    );
+    data.keywords.insert(Keyword::Flash);
+    data.keywords.insert(Keyword::Flying);
 
     CardDef::new(
         "Brazen Borrower",
-        CardKind::Creature(CreatureData::new("1UU", 3, 1)),
+        CardKind::Creature(data),
         parse_colors("1UU", true, false),
         None,
         vec![], CardLayout::Split, Some(Box::new(back)),
@@ -3086,9 +3080,11 @@ fn mishras_bauble() -> CardDef {
 /// If a nontoken creature would enter the battlefield and it wasn't cast,
 /// exile it instead.
 fn containment_priest() -> CardDef {
+    let mut data = CreatureData::new("1W", 2, 2);
+    data.keywords.insert(Keyword::Flash);
     CardDef::new(
         "Containment Priest",
-        CardKind::Creature(CreatureData::new("1W", 2, 2)),
+        CardKind::Creature(data),
         parse_colors("1W", true, false),
         None,
         vec![], CardLayout::Normal, None,

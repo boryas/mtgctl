@@ -17,7 +17,7 @@ pub(crate) use predicates::*;
 mod strategy;
 use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
                dd_plan_gap, dd_card_fills, opp_plan_gap, opp_card_fills};
-#[cfg(test)] use strategy::{try_ninjutsu, dd_should_mulligan, opp_should_mulligan};
+#[cfg(test)] use strategy::{dd_should_mulligan, opp_should_mulligan};
 
 #[cfg(test)]
 mod tests;
@@ -1264,10 +1264,6 @@ fn ma_requires_tap(ma: &ManaAbility) -> bool {
     ma.costs.iter().any(|c| matches!(c, CostComponent::TapSelf))
 }
 
-fn ma_requires_sac(ma: &ManaAbility) -> bool {
-    ma.costs.iter().any(|c| matches!(c, CostComponent::SacSelf))
-}
-
 fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
     let avail: Vec<_> = abilities.iter()
         .filter(|ma| !ma_requires_tap(ma) || !tapped)
@@ -1727,15 +1723,17 @@ fn sec(label: &str) -> String {
 
 impl SimState {
     /// Write hand/graveyard/exile zones for `who` to the formatter — one line per zone.
-    fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: PlayerId) -> std::fmt::Result {
+    fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: PlayerId, reveal_hand: bool) -> std::fmt::Result {
         let mut visible: Vec<&str> = self.hand_of(who)
-            .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
+            .filter(|c| reveal_hand || matches!(c.zone, CardZone::Hand { known: true }))
             .map(|c| c.catalog_key.as_str())
             .collect();
         visible.sort();
-        let hidden = self.hand_of(who)
-            .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
-            .count();
+        let hidden = if reveal_hand { 0 } else {
+            self.hand_of(who)
+                .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
+                .count()
+        };
         if visible.len() + hidden > 0 {
             let mut parts = Self::collapse_counts(visible.iter().map(|s| s.to_string()).collect());
             if hidden > 0 { parts.push(format!("({} hidden)", hidden)); }
@@ -1836,6 +1834,15 @@ impl std::fmt::Display for SimState {
             if self.on_play { "on the play" } else { "on the draw" }
         )?;
 
+        if !self.decision_log.is_empty() {
+            writeln!(f)?;
+            writeln!(f, "{}", sec("STRATEGY DECISIONS"))?;
+            writeln!(f)?;
+            for entry in &self.decision_log {
+                writeln!(f, "  {}", entry)?;
+            }
+        }
+
         if !self.log.is_empty() {
             writeln!(f)?;
             writeln!(f, "{}", sec("TURN LOG"))?;
@@ -1850,7 +1857,7 @@ impl std::fmt::Display for SimState {
         writeln!(f)?;
         writeln!(f, "  Life       : {}", self.us.life)?;
         self.fmt_permanents(f, PlayerId::Us)?;
-        self.fmt_player_zones(f, PlayerId::Us)?;
+        self.fmt_player_zones(f, PlayerId::Us, true)?;
         writeln!(f)?;
 
         let opp_label = format!("OPPONENT: {}", self.opp.deck_name);
@@ -1858,7 +1865,7 @@ impl std::fmt::Display for SimState {
         writeln!(f)?;
         writeln!(f, "  Life       : {}", self.opp.life)?;
         self.fmt_permanents(f, PlayerId::Opp)?;
-        self.fmt_player_zones(f, PlayerId::Opp)?;
+        self.fmt_player_zones(f, PlayerId::Opp, false)?;
 
         Ok(())
     }
@@ -2322,7 +2329,7 @@ pub(crate) fn change_zone(
     t: u8,
     actor: PlayerId,
 ) {
-    let (catalog_key, controller, from) = {
+    let (_catalog_key, controller, from) = {
         let card = match state.objects.get(&id) {
             Some(c) => c,
             None => return,
@@ -2748,7 +2755,6 @@ fn cast_spell(
 
     // Empty mana_cost means the card has no castable mana cost (alt-cost-only, or truly uncostable).
     // Use mana_cost = "0" in the catalog for genuinely free spells (Lotus Petal, LED).
-    let has_alt_costs = !def.alternate_costs().is_empty();
     let mana_is_usable = !def.mana_cost().is_empty() && state.potential_mana(who).can_pay(&cost);
 
     // Select cost. Track the index into def.alternate_costs() for evoke/similar triggers.
@@ -2919,8 +2925,22 @@ pub(crate) fn creature_has_keyword(id: ObjId, kw: Keyword, state: &SimState) -> 
 
 // ── Engine invariant assertions ──────────────────────────────────────────────
 
-/// Comprehensive state consistency check. All checks use `debug_assert!` so they
-/// compile away in release builds. Called at engine lifecycle boundaries.
+/// Dump the full game log to stderr then panic. Used by `check!` below so that
+/// invariant failures always come with enough context to debug.
+#[cfg(debug_assertions)]
+macro_rules! check {
+    ($cond:expr, $state:expr, $label:expr, $($arg:tt)*) => {
+        if !$cond {
+            eprintln!("\n╔══ ENGINE INVARIANT VIOLATION ══╗");
+            eprintln!("{}", $state);
+            panic!("[{}] {}", $label, format!($($arg)*));
+        }
+    };
+}
+
+/// Comprehensive state consistency check. All checks use `check!` so they
+/// dump the game log before panicking, then compile away in release builds.
+/// Called at engine lifecycle boundaries.
 #[cfg(debug_assertions)]
 fn assert_engine_invariants(state: &SimState, label: &str) {
     // ── Stack/zone consistency: no stale stack objects ──────────────────
@@ -2929,67 +2949,70 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
         let in_objects = state.objects.get(&id)
             .map_or(false, |o| o.zone == CardZone::Stack);
         let in_abilities = state.abilities.contains_key(&id);
-        debug_assert!(in_objects || in_abilities,
-            "[{label}] stack item {id:?} not in objects(Stack) or abilities");
+        check!(in_objects || in_abilities, state, label,
+            "stack item {id:?} not in objects(Stack) or abilities");
     }
     // Every object with zone==Stack must be in state.stack (no stranded spells).
     for (&id, obj) in &state.objects {
         if obj.zone == CardZone::Stack {
-            debug_assert!(state.stack.contains(&id),
-                "[{label}] object {:?} has zone==Stack but is not in state.stack", obj.catalog_key);
+            check!(state.stack.contains(&id), state, label,
+                "object {:?} has zone==Stack but is not in state.stack", obj.catalog_key);
         }
     }
 
     // ── No ID collision between objects and abilities ───────────────────
     for &id in state.abilities.keys() {
-        debug_assert!(!state.objects.contains_key(&id),
-            "[{label}] ability ID {id:?} collides with an object ID");
+        check!(!state.objects.contains_key(&id), state, label,
+            "ability ID {id:?} collides with an object ID");
     }
 
     // ── Zone-tracking arrays match actual zones ────────────────────────
     for &id in &state.graveyard_order {
-        debug_assert!(
+        check!(
             state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Graveyard),
-            "[{label}] graveyard_order contains {id:?} but object zone is not Graveyard");
+            state, label,
+            "graveyard_order contains {id:?} but object zone is not Graveyard");
     }
     for who in [PlayerId::Us, PlayerId::Opp] {
         for &id in &state.player(who).library_order {
-            debug_assert!(
+            check!(
                 state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Library),
-                "[{label}] library_order contains {id:?} but object zone is not Library");
+                state, label,
+                "library_order contains {id:?} but object zone is not Library");
         }
     }
     // Reverse: every Library-zone object should be in its owner's library_order.
     for obj in state.objects.values() {
         if obj.zone == CardZone::Library {
-            debug_assert!(
+            check!(
                 state.player(obj.owner).library_order.contains(&obj.id),
-                "[{label}] object {:?} has zone==Library but is not in library_order", obj.catalog_key);
+                state, label,
+                "object {:?} has zone==Library but is not in library_order", obj.catalog_key);
         }
     }
 
     // ── Battlefield objects have BattlefieldState and vice versa ────────
     for obj in state.objects.values() {
         if obj.zone == CardZone::Battlefield {
-            debug_assert!(obj.bf.is_some(),
-                "[{label}] object {:?} on battlefield without BattlefieldState", obj.catalog_key);
+            check!(obj.bf.is_some(), state, label,
+                "object {:?} on battlefield without BattlefieldState", obj.catalog_key);
         } else {
-            debug_assert!(obj.bf.is_none(),
-                "[{label}] object {:?} in zone {:?} has stale BattlefieldState", obj.catalog_key, obj.zone);
+            check!(obj.bf.is_none(), state, label,
+                "object {:?} in zone {:?} has stale BattlefieldState", obj.catalog_key, obj.zone);
         }
     }
 
     // ── Every object has a catalog entry ────────────────────────────────
     for obj in state.objects.values() {
-        debug_assert!(state.catalog.contains_key(&obj.catalog_key),
-            "[{label}] object {:?} has no catalog entry", obj.catalog_key);
+        check!(state.catalog.contains_key(&obj.catalog_key), state, label,
+            "object {:?} has no catalog entry", obj.catalog_key);
     }
 
     // ── Life totals are sane ───────────────────────────────────────────
-    debug_assert!(state.us.life > -100 && state.us.life < 200,
-        "[{label}] Us life out of sane range: {}", state.us.life);
-    debug_assert!(state.opp.life > -100 && state.opp.life < 200,
-        "[{label}] Opp life out of sane range: {}", state.opp.life);
+    check!(state.us.life > -100 && state.us.life < 200, state, label,
+        "Us life out of sane range: {}", state.us.life);
+    check!(state.opp.life > -100 && state.opp.life < 200, state, label,
+        "Opp life out of sane range: {}", state.opp.life);
 }
 
 #[cfg(not(debug_assertions))]
@@ -3025,10 +3048,12 @@ fn check_state_based_actions(
             .collect();
         for id in dead_tokens {
             state.objects.remove(&id);
+            state.graveyard_order.retain(|&x| x != id);
             any = true;
         }
-        debug_assert!(
+        check!(
             state.objects.values().all(|c| !c.is_token || c.zone == CardZone::Battlefield),
+            state, "sba",
             "token found outside battlefield after SBA cleanup"
         );
 
@@ -3116,7 +3141,6 @@ pub(crate) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mu
         let c = state.permanent_bf(army_id).map_or(0, |bf| bf.counters);
         state.log(t, controller, format!("{token_key} grows to {c}/{c}"));
     } else {
-        let def = state.catalog.get(token_key).cloned();
         let new_id = state.alloc_id();
         state.objects.insert(new_id, GameObject {
             id: new_id,
@@ -3140,7 +3164,6 @@ pub(crate) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mu
 }
 
 pub(crate) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut SimState, t: u8) -> ObjId {
-    let def = state.catalog.get(token_key).cloned();
     let new_id = state.alloc_id();
     state.objects.insert(new_id, GameObject {
         id: new_id,
@@ -3394,7 +3417,7 @@ fn run_activate_submachine(
         if !ability.target_spec.is_none() && legal.is_empty() {
             eprintln!("[activate] BUG: no legal targets for ability on {:?}, skipping",
                 state.permanent_name(source_id).unwrap_or_default());
-            debug_assert!(false, "BUG: ability activated with no legal targets");
+            check!(false, state, "activate", "BUG: ability activated with no legal targets");
             return ObjId::UNSET;
         }
         if legal.is_empty() {
@@ -3457,6 +3480,7 @@ fn handle_priority_round(
         let queued = std::mem::take(&mut state.pending_triggers);
         push_triggers(queued, state, strategies);
         check_state_based_actions(state, t);
+        if state.done() { break; }
 
         let who = priority_holder;
         let strategy = strategies.get_mut(&who).unwrap();
@@ -3490,15 +3514,16 @@ fn handle_priority_round(
                 let name = state.objects.get(&card_id).map(|c| c.catalog_key.clone()).unwrap_or_default();
                 let is_instant = match face {
                     SpellFace::Main => state.def_of(card_id)
-                        .map(|d| d.is_instant()).unwrap_or(false),
+                        .map(|d| d.is_instant() || d.has_keyword(Keyword::Flash))
+                        .unwrap_or(false),
                     SpellFace::Back => state.def_of(card_id)
                         .and_then(|d| d.back.as_ref())
-                        .map(|b| b.is_instant())
+                        .map(|b| b.is_instant() || b.has_keyword(Keyword::Flash))
                         .unwrap_or(false),
                 };
                 if !is_instant && !state.stack.is_empty() {
                     eprintln!("[priority] BUG: sorcery-speed {} on non-empty stack, treating as Pass", name);
-                    debug_assert!(false, "BUG: sorcery-speed cast of {} on non-empty stack", name);
+                    check!(false, state, "priority", "BUG: sorcery-speed cast of {} on non-empty stack", name);
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
                 } else {
@@ -3513,7 +3538,7 @@ fn handle_priority_round(
                         let pool = &state.player(who).pool;
                         eprintln!("[priority] BUG: cast failed for {} by {} (pool B={} U={} tot={}, hand={})",
                             name, who, pool.b, pool.u, pool.total, state.hand_size(who));
-                        debug_assert!(false, "BUG: cast failed");
+                        check!(false, state, "priority", "BUG: cast failed");
                         last_passer = Some(who);
                         priority_holder = if who == ap { nap } else { ap };
                     }
@@ -3547,7 +3572,7 @@ fn handle_priority_round(
     }
     // CR 117.4: priority round ends only when both players pass in succession
     // with an empty stack (or the game ends).
-    debug_assert!(state.stack.is_empty() || state.done(),
+    check!(state.stack.is_empty() || state.done(), state, "priority-round-end",
         "priority round ended with non-empty stack");
     assert_engine_invariants(state, "priority-round-end");
 }
@@ -3775,7 +3800,7 @@ fn do_step(
     // Mana pool drains at the end of every step.
     state.us.pool.drain();
     state.opp.pool.drain();
-    debug_assert!(state.us.pool.total == 0 && state.opp.pool.total == 0,
+    check!(state.us.pool.total == 0 && state.opp.pool.total == 0, state, "step-end",
         "mana pool not empty after step drain");
 }
 
@@ -3804,7 +3829,7 @@ fn do_phase(
         // Mana pool drains at the end of the main phase.
         state.us.pool.drain();
         state.opp.pool.drain();
-        debug_assert!(state.us.pool.total == 0 && state.opp.pool.total == 0,
+        check!(state.us.pool.total == 0 && state.opp.pool.total == 0, state, "phase-end",
             "mana pool not empty after drain");
         if state.done() { return; }
     }
@@ -3885,12 +3910,10 @@ pub fn simulate_game(
     let opp_is_blue = matches!(opponent, "Izzet Delver" | "UB Tempo" | "UR Delver");
     let dd_matchup = MatchupInfo {
         opp_has_counters: opp_is_blue,
-        opp_has_wasteland: true,
         opp_fast_clock: opp_is_blue,
     };
     let opp_matchup = MatchupInfo {
         opp_has_counters: true,  // DD plays FoW/Daze
-        opp_has_wasteland: true, // DD plays Wasteland
         opp_fast_clock: false,   // DD is combo, not aggro
     };
 

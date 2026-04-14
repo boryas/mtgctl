@@ -12,10 +12,6 @@
         s
     }
 
-    fn seeded_rng() -> StdRng {
-        StdRng::seed_from_u64(42)
-    }
-
     fn make_strategies() -> HashMap<PlayerId, Box<dyn strategy::Strategy>> {
         HashMap::from([
             (PlayerId::Us,  Box::new(strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
@@ -981,14 +977,6 @@
         assert!(state.graveyard_of(PlayerId::Opp).count() == 0, "exiled, not dead");
     }
 
-    // ── Section 10: Ninjutsu ──────────────────────────────────────────────────
-
-    fn ninja_def() -> CardDef {
-        let mut data = CreatureData::new("", 2, 1);
-        data.abilities = vec![ninjutsu_ability("U")];
-        CardDef::new("Ninja", CardKind::Creature(data), vec![], None, vec![], CardLayout::Normal, None, vec![], vec![], vec![], vec![])
-    }
-
     fn island_land(state: &mut SimState, who: PlayerId) -> ObjId {
         add_perm_with_def(state, who, &catalog_card("Island"), BattlefieldState::new())
     }
@@ -1067,90 +1055,6 @@
 
         assert!(!state.permanent_bf(ninja_id).unwrap().attacking, "attacking cleared at EndCombat");
         assert!(!state.permanent_bf(ninja_id).unwrap().unblocked, "unblocked cleared at EndCombat");
-    }
-
-    // Negative try_ninjutsu precondition tests (deterministic — RNG roll is never reached).
-
-    #[test]
-    fn test_try_ninjutsu_no_hand_returns_none() {
-        let mut state = make_state();
-        // No hand cards — hand_size returns 0; exits before any materialized lookup.
-        add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new() });
-        assert!(try_ninjutsu(&state, PlayerId::Us, &mut seeded_rng()).is_none(), "no hand → None");
-    }
-
-    #[test]
-    fn test_try_ninjutsu_no_unblocked_returns_none() {
-        let mut state = make_state();
-        add_hand_card(&mut state, PlayerId::Us, "Ninja");
-        add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState { attacking: true, unblocked: false, ..BattlefieldState::new() });
-        state.us.pool.u = 1; state.us.pool.total = 1;
-        // Exits at the has_unblocked check before the hand scan; no materialized seeding needed.
-        assert!(try_ninjutsu(&state, PlayerId::Us, &mut seeded_rng()).is_none(), "no unblocked attacker → None");
-    }
-
-    #[test]
-    fn test_try_ninjutsu_no_ninja_in_library_returns_none() {
-        let mut state = make_state();
-        let brainstorm_def = catalog_card("Brainstorm");
-        add_hand_card_with_def(&mut state, PlayerId::Us, &brainstorm_def);
-        add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new() });
-        state.us.pool.u = 1; state.us.pool.total = 1;
-        // Brainstorm has no ninjutsu; materialized entry present, filter returns false → None.
-        assert!(try_ninjutsu(&state, PlayerId::Us, &mut seeded_rng()).is_none(), "no ninja card → None");
-    }
-
-    #[test]
-    fn test_try_ninjutsu_no_mana_returns_none() {
-        let mut state = make_state();
-        let def = ninja_def();
-        add_hand_card_with_def(&mut state, PlayerId::Us, &def);
-        add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState { attacking: true, unblocked: true, ..BattlefieldState::new() });
-        // No mana available — ninja found in materialized, but mana check fails.
-        assert!(try_ninjutsu(&state, PlayerId::Us, &mut seeded_rng()).is_none(), "no mana → None");
-    }
-
-    #[test]
-    fn test_ninjutsu_swaps_attacker_for_ninja() {
-        // try_ninjutsu returns ActivateAbility; when committed via handle_priority_round
-        // in a DeclareBlockers window, the ninja enters play and the attacker returns to hand.
-        let def = ninja_def();
-        let island_def = catalog_card("Island");
-        let catalog = vec![def.clone(), island_def];
-
-        // Loop over seeds until ninjutsu fires (35% per attempt → statistically guaranteed within 50).
-        for _seed in 0u64..50 {
-            let mut state = make_state();
-            for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-            state.current_phase = Some(TurnPosition::Step(StepKind::DeclareBlockers));
-            state.current_ap = state.us.id;
-            add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
-                attacking: true, unblocked: true, ..BattlefieldState::new()
-            });
-            island_land(&mut state, PlayerId::Us);
-            // Add Ninja to hand with materialized entry so try_ninjutsu can find it.
-            add_hand_card_with_def(&mut state, PlayerId::Us, &def);
-            // Also register the ninja in state.objects as a library card (so apply_ability_effect
-            // can look up the ninja's name at resolution).
-            let ninja_lib_id = state.alloc_id();
-            state.objects.insert(ninja_lib_id, GameObject::new(ninja_lib_id, "Ninja".to_string(), PlayerId::Us));
-            state.player_mut(PlayerId::Us).library_order.push_back(ninja_lib_id);
-            let initial_hand = state.hand_size(PlayerId::Us);
-            handle_priority_round(&mut state, 1, PlayerId::Us, &mut make_strategies());
-
-            if state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Ninja") {
-                let ninja = state.permanents_of(PlayerId::Us).find(|p| p.catalog_key == "Ninja").unwrap();
-                let ninja_bf = ninja.bf.as_ref().unwrap();
-                assert!(ninja_bf.attacking, "ninja should be attacking");
-                assert!(ninja_bf.tapped, "ninja should be tapped");
-                assert!(!state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Ragavan"), "Ragavan returned to hand");
-                assert_eq!(state.hand_size(PlayerId::Us), initial_hand, "net hand size unchanged (+1 return, -1 ninja)");
-                let ninja_id = state.permanents_of(PlayerId::Us).find(|p| p.catalog_key == "Ninja").unwrap().id;
-                assert!(state.combat_attackers.contains(&ninja_id), "ninja in combat_attackers");
-                return;
-            }
-        }
-        panic!("ninjutsu should have fired within 50 seeds");
     }
 
     // ── Section 11: Cycling ───────────────────────────────────────────────────
@@ -3889,8 +3793,7 @@
     /// Helper: put Cage on the battlefield for `who` and return its id.
     fn enter_cage(state: &mut SimState, who: PlayerId) -> ObjId {
         let cage_id = state.alloc_id();
-        let cage_def = state.catalog.get("Grafdigger's Cage").cloned()
-            .unwrap_or_else(|| panic!("Grafdigger's Cage not in catalog"));
+        assert!(state.catalog.contains_key("Grafdigger's Cage"), "Grafdigger's Cage not in catalog");
         state.objects.insert(cage_id, GameObject {
             id: cage_id,
             catalog_key: "Grafdigger's Cage".to_string(),
@@ -4058,8 +3961,7 @@
         state.catalog = test_catalog();
         // Simulate casting EE with chosen_x = 2 by setting resolving_costs_ctx before ETB.
         state.resolving_costs_ctx.chosen_x = 2;
-        let ee_def = state.catalog.get("Engineered Explosives").cloned()
-            .expect("EE must be in catalog");
+        assert!(state.catalog.contains_key("Engineered Explosives"), "EE must be in catalog");
         let ee_id = state.alloc_id();
         state.objects.insert(ee_id, GameObject {
             id: ee_id,
@@ -4691,7 +4593,6 @@
         let mut state = make_state();
         state.catalog = test_catalog();
 
-        let fluster_def = catalog_card("Flusterstorm");
         let fluster_id = state.alloc_id();
 
 
@@ -6610,7 +6511,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5 };
         let score = strategy::dd_card_fills(land_id, &gap, &state, PlayerId::Us);
         assert!(score > 0.7, "land fills high mana gap → score >0.7, got {}", score);
     }
@@ -6620,7 +6521,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let land_id = add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5 };
         let score = strategy::dd_card_fills(land_id, &gap, &state, PlayerId::Us);
         assert!(score < 0.1, "land when mana gap=0 → score <0.1, got {}", score);
     }
@@ -6630,7 +6531,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let dd_id = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5 };
         let score = strategy::dd_card_fills(dd_id, &gap, &state, PlayerId::Us);
         assert!(score >= 0.9, "DD with high threat gap → score >=0.9, got {}", score);
     }
@@ -6641,7 +6542,7 @@
         state.catalog = test_catalog();
         let _dd1 = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
         let dd2 = add_hand_card(&mut state, PlayerId::Us, "Doomsday");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5 };
         let score = strategy::dd_card_fills(dd2, &gap, &state, PlayerId::Us);
         assert!(score <= 0.15, "second DD → score low, got {}", score);
     }
@@ -6651,7 +6552,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let oracle_id = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.5, threat: 1.0, interaction: 0.5 };
         let score = strategy::dd_card_fills(oracle_id, &gap, &state, PlayerId::Us);
         assert!(score <= 0.1, "Oracle pre-DD → near-zero, got {}", score);
     }
@@ -6662,8 +6563,8 @@
         state.catalog = test_catalog();
         let bs_id = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
         // Even with all gaps filled, cantrips retain medium value
-        let gap_low = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0, selection: 0.2 };
-        let gap_high = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 1.0, selection: 0.2 };
+        let gap_low = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0 };
+        let gap_high = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 1.0 };
         let score_low = strategy::dd_card_fills(bs_id, &gap_low, &state, PlayerId::Us);
         let score_high = strategy::dd_card_fills(bs_id, &gap_high, &state, PlayerId::Us);
         assert!(score_low > 0.2, "cantrip always valuable, got {}", score_low);
@@ -6676,7 +6577,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        let gap = strategy::TargetGap { mana: 0.5, threat: 0.5, interaction: 1.0, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.5, threat: 0.5, interaction: 1.0 };
         let score = strategy::dd_card_fills(fow_id, &gap, &state, PlayerId::Us);
         assert!(score > 0.7, "FoW with high interaction gap → score >0.7, got {}", score);
     }
@@ -6703,7 +6604,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         // Opp facing combo (DD): opp_fast_clock = false
-        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_has_wasteland: true, opp_fast_clock: false };
+        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false };
         let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
         assert!(gap.mana >= 0.9, "no lands → mana gap high, got {}", gap.mana);
         assert!(gap.threat >= 0.9, "no threats → threat gap high, got {}", gap.threat);
@@ -6736,7 +6637,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         // Facing aggro: opp_fast_clock = true
-        let matchup = strategy::MatchupInfo { opp_has_counters: false, opp_has_wasteland: false, opp_fast_clock: true };
+        let matchup = strategy::MatchupInfo { opp_has_counters: false, opp_fast_clock: true };
         let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
         assert!(gap.interaction <= 0.5, "vs aggro → interaction gap capped, got {}", gap.interaction);
     }
@@ -6746,7 +6647,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let land_id = add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
-        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 1.0, threat: 1.0, interaction: 0.5 };
         let score = strategy::opp_card_fills(land_id, &gap, &state, PlayerId::Opp);
         assert!(score > 0.7, "land fills high mana gap → score >0.7, got {}", score);
     }
@@ -6756,7 +6657,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let land_id = add_hand_card(&mut state, PlayerId::Opp, "Volcanic Island");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5 };
         let score = strategy::opp_card_fills(land_id, &gap, &state, PlayerId::Opp);
         assert!(score < 0.1, "land when mana gap=0 → near-zero, got {}", score);
     }
@@ -6766,7 +6667,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let delver_id = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.0, threat: 1.0, interaction: 0.5 };
         let score = strategy::opp_card_fills(delver_id, &gap, &state, PlayerId::Opp);
         assert!(score > 0.7, "creature with high threat gap → high score, got {}", score);
     }
@@ -6778,7 +6679,7 @@
         let _board_delver = add_default_perm(&mut state, PlayerId::Opp, "Delver of Secrets");
         let hand_delver = add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
         // threat_gap low since we already have one on board
-        let gap = strategy::TargetGap { mana: 0.0, threat: 0.1, interaction: 0.5, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.0, threat: 0.1, interaction: 0.5 };
         let score = strategy::opp_card_fills(hand_delver, &gap, &state, PlayerId::Opp);
         assert!(score < 0.3, "surplus Delver on board → lower, got {}", score);
     }
@@ -6788,7 +6689,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let fow_id = add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 0.5, interaction: 1.0, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.0, threat: 0.5, interaction: 1.0 };
         let score = strategy::opp_card_fills(fow_id, &gap, &state, PlayerId::Opp);
         assert!(score > 0.7, "FoW with high interaction gap → score >0.7, got {}", score);
     }
@@ -6798,7 +6699,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let bs_id = add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        let gap = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0, selection: 0.2 };
+        let gap = strategy::TargetGap { mana: 0.0, threat: 0.0, interaction: 0.0 };
         let score = strategy::opp_card_fills(bs_id, &gap, &state, PlayerId::Opp);
         assert!(score > 0.2 && score < 0.5, "cantrip always medium, got {}", score);
     }
@@ -6827,7 +6728,7 @@
         let bs = add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
 
-        eff_put_back_eval(PlayerId::Us).call(&mut state, 0, &[]);
+        eff_put_back(PlayerId::Us, 1).call(&mut state, 0, &[]);
 
         // Oracle should be gone from hand and on top of library.
         let hand: Vec<ObjId> = state.hand_of(PlayerId::Us).map(|c| c.id).collect();
@@ -6850,8 +6751,8 @@
             ("Edge of Autumn", 0.1), ("Brainstorm", 0.35),
         ]);
 
-        eff_put_back_eval(PlayerId::Us).call(&mut state, 0, &[]);
-        eff_put_back_eval(PlayerId::Us).call(&mut state, 0, &[]);
+        eff_put_back(PlayerId::Us, 1).call(&mut state, 0, &[]);
+        eff_put_back(PlayerId::Us, 1).call(&mut state, 0, &[]);
 
         let hand: Vec<ObjId> = state.hand_of(PlayerId::Us).map(|c| c.id).collect();
         assert_eq!(hand.len(), 2, "should have 2 cards left in hand");
@@ -7027,8 +6928,7 @@
 
         // Brainstorm = draw 3, put back 2 worst
         let effect = eff_draw(PlayerId::Us, 3)
-            .then(eff_put_back_eval(PlayerId::Us))
-            .then(eff_put_back_eval(PlayerId::Us));
+            .then(eff_put_back(PlayerId::Us, 2));
         effect.call(&mut state, 0, &[]);
 
         // After draw 3: hand = Oracle(0.05), Edge(0.1), DD(0.9), FoW(0.8), BS(0.35)
@@ -7217,7 +7117,7 @@
         // Already have 2 lands on board → mana gap is 0
         make_land(&mut state, PlayerId::Opp, "Underground Sea", false);
         make_land(&mut state, PlayerId::Opp, "Polluted Delta", false);
-        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_has_wasteland: true, opp_fast_clock: false };
+        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false };
         let strat = strategy::GenericOppStrategy::new(matchup);
         let bottom = strat.london_bottom(&state, 1);
         assert_eq!(bottom.len(), 1);
@@ -7997,5 +7897,18 @@
                 assert!(lib_order.contains(&id),
                     "object {:?} in library zone for {:?} but missing from library_order", id, who);
             }
+        }
+    }
+
+    /// Stress-test: run many scenarios with random seeds to reproduce rare
+    /// invariant violations (graveyard_order desync, etc.).
+    #[test]
+    fn stress_invariant_check() {
+        let catalog = test_catalog();
+        let dd_cards = val_dd_deck();
+        let opp_cards = val_ub_tempo_deck();
+        for seed in 0..500 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let _ = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng);
         }
     }
