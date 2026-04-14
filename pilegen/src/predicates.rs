@@ -297,52 +297,15 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
 /// For stack targets, checks the current stack for opposing non-ability spells.
 /// For permanent/zone targets, checks the battlefield or zone.
 /// Returns false for `TargetSpec::None` (no target required = always valid; caller should check `is_none()` first).
+/// Delegate to `legal_targets` so that the legality check used when presenting
+/// actions is identical to the one used during casting/resolution (CR 601.2c).
 pub(crate) fn has_valid_target(
     spec: &TargetSpec,
     state: &SimState,
     actor: PlayerId,
     source_id: ObjId,
 ) -> bool {
-    has_valid_target_spec(spec, state, actor, source_id)
-}
-
-fn has_valid_target_spec(
-    spec: &TargetSpec,
-    state: &SimState,
-    actor: PlayerId,
-    source_id: ObjId,
-) -> bool {
-    match spec {
-        TargetSpec::None => false,
-        TargetSpec::Player(_) => true,   // there is always an opponent
-        TargetSpec::ObjectInZone { controller: who, zone, filter } => {
-            let target_who = who.resolve(actor);
-            objects_in_zone(zone, target_who, state)
-                .any(|id| {
-                    if *zone == ZoneId::Stack {
-                        let actor_id = state.player_id(actor);
-                        if state.stack_item_owner(id) == actor_id
-                            || !state.stack_item_is_counterable(id) { return false; }
-                    }
-                    if is_protected_from(id, source_id, state) { return false; }
-                    filter(id, state)
-                })
-        }
-        TargetSpec::Union(specs) => specs.iter().any(|s| has_valid_target_spec(s, state, actor, source_id)),
-        TargetSpec::AbilityOnStack { controller: who, ability_type } => {
-            let target_who = who.resolve(actor);
-            let target_who_id = state.player_id(target_who);
-            state.abilities_on_stack()
-                .any(|(_, ab)| {
-                    ab.owner == target_who_id && match ability_type {
-                        AbilityType::Any       => true,
-                        AbilityType::Triggered => ab.is_triggered,
-                        AbilityType::Activated => !ab.is_triggered,
-                    }
-                })
-        }
-        TargetSpec::Any(inner) => has_valid_target_spec(inner, state, actor, source_id),
-    }
+    !legal_targets(spec, actor, source_id, state).is_empty()
 }
 
 

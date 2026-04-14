@@ -17,13 +17,12 @@ pub(crate) enum CardCategory {
 #[derive(Clone, Debug)]
 pub(crate) struct MatchupInfo {
     pub(crate) opp_has_counters: bool,
-    pub(crate) opp_has_wasteland: bool,
     pub(crate) opp_fast_clock: bool,
 }
 
 impl Default for MatchupInfo {
     fn default() -> Self {
-        MatchupInfo { opp_has_counters: true, opp_has_wasteland: true, opp_fast_clock: false }
+        MatchupInfo { opp_has_counters: true, opp_fast_clock: false }
     }
 }
 
@@ -34,7 +33,6 @@ pub(crate) struct TargetGap {
     pub(crate) mana: f64,
     pub(crate) threat: f64,
     pub(crate) interaction: f64,
-    pub(crate) selection: f64,
 }
 
 // ── Strategy trait ────────────────────────────────────────────────────────────
@@ -282,10 +280,7 @@ pub(crate) fn dd_plan_gap(state: &SimState, who: PlayerId, matchup: &MatchupInfo
         0.1 // non-blue matchup: interaction is low priority
     };
 
-    // ── Selection: always has residual ───────────────────────────────────
-    let selection_gap = 0.2;
-
-    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap, selection: selection_gap }
+    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap }
 }
 
 /// Score how much `card_id` fills the DD player's current gap.
@@ -536,10 +531,7 @@ pub(crate) fn opp_plan_gap(state: &SimState, who: PlayerId, matchup: &MatchupInf
         ((1.0 - interaction_count as f64).max(0.0) * 0.5).clamp(0.0, 0.5)
     };
 
-    // ── Selection: always has residual ───────────────────────────────────
-    let selection_gap = 0.2;
-
-    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap, selection: selection_gap }
+    TargetGap { mana: mana_gap, threat: threat_gap, interaction: interaction_gap }
 }
 
 /// Score how much `card_id` fills the opponent's current gap.
@@ -1372,53 +1364,4 @@ fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
     (1.0 - p_none).max(0.0)
 }
 
-/// Try to respond to `stack[target_idx]` by casting a counterspell.
-///
-/// When `probabilistic = true`:
-///   - Per counterspell: roll P(card in hand) via hypergeometric, then a strategic 50% choice
-///     (overridden by `cost.prob` if set on the first cost option).
-///   - For `exile_blue_from_hand` costs: also roll P(have a blue pitch card in hand).
-/// When `probabilistic = false` the attempt is deterministic (used when protecting Doomsday).
-///
 // respond_with_counter — replaced by find_counter_in_legal + choose_action flow
-
-// ── Combat strategy ───────────────────────────────────────────────────────────
-
-/// Try to perform ninjutsu during a combat priority window (DeclareBlockers / CombatDamage / EndCombat).
-///
-/// Requires: unblocked attacker, ninjutsu card in hand, and enough mana.
-/// Returns an `ActivateAbility` action or `None` if conditions aren't met.
-pub(crate) fn try_ninjutsu(
-    state: &SimState,
-    who: PlayerId,
-    rng: &mut impl Rng,
-) -> Option<LegalAction> {
-    if state.hand_size(who) <= 0 { return None; }
-    let has_unblocked = state.permanents_of(who)
-        .any(|c| c.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked));
-    if !has_unblocked { return None; }
-    // Find hand cards with a ninjutsu ability (SourceZone::Hand + ReturnFromBattlefield cost).
-    let ninjas: Vec<(ObjId, usize)> = state.hand_of(who)
-        .filter_map(|c| {
-            let def = state.def_of(c.id)?;
-            let idx = def.abilities().iter().position(|ab| {
-                matches!(ab.source_zone, SourceZone::Hand)
-                    && ab.costs.iter().any(|cost| matches!(cost, CostComponent::ReturnFromBattlefield(_)))
-            })?;
-            Some((c.id, idx))
-        })
-        .collect();
-    if ninjas.is_empty() { return None; }
-    // 35% roll: simulates probability of wanting to use it.
-    if !rng.gen_bool(0.35) { return None; }
-    let pick = rng.gen_range(0..ninjas.len());
-    let (ninja_id, ability_index) = ninjas[pick];
-    let ninja_def = state.def_of(ninja_id)?;
-    let ab = ninja_def.abilities().get(ability_index)?;
-    let mana_cost = ab.costs.iter().find_map(|c| match c {
-        CostComponent::Mana(mc) => Some(mc.clone()),
-        _ => None,
-    })?;
-    if !state.potential_mana(who).can_pay(&mana_cost) { return None; }
-    Some(LegalAction::ActivateAbility { source_id: ninja_id, ability_index })
-}

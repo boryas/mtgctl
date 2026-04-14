@@ -71,42 +71,30 @@ pub(crate) fn eff_surveil(who: PlayerId, n: usize) -> Effect {
     }))
 }
 
-/// Put `n` cards back from `who`'s hand (old dumb version — takes first N).
-/// Moves `n` hand cards back to Library zone (unknown — just sets zone).
+/// Evaluator-driven put-back: score hand cards and put the `n` lowest-scoring
+/// on top of library. Calls `state.evaluate_card` to score each hand card.
 pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
-        let ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).take(n).collect();
-        for id in ids {
-            change_zone(id, ZoneId::Library, state, t, who);
-        }
-    }))
-}
-
-/// Evaluator-driven put-back: evaluate all hand cards, put the lowest-scoring one
-/// on top of library. Used by Brainstorm (called twice for "put back 2").
-/// Calls `state.evaluate_card` to score each hand card, picks the worst.
-pub(crate) fn eff_put_back_eval(who: PlayerId) -> Effect {
-    Effect(Arc::new(move |state, t, _targets| {
-        let eval = Arc::clone(&state.evaluate_card);
-        let scored: Vec<(ObjId, f64)> = state.hand_of(who)
-            .map(|c| (c.id, eval(who, c.id, state)))
-            .collect();
-        if let Some(&(worst_id, _)) = scored.iter()
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        {
-            let name = state.objects.get(&worst_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
-            // change_zone pushes to back of library_order; we need top, so fix up after.
-            change_zone(worst_id, ZoneId::Library, state, t, who);
-            let lib = match who {
-                PlayerId::Us  => &mut state.us.library_order,
-                PlayerId::Opp => &mut state.opp.library_order,
-            };
-            // Move from back (where change_zone placed it) to front (top of library).
-            if lib.back() == Some(&worst_id) {
-                lib.pop_back();
-                lib.push_front(worst_id);
+        for _ in 0..n {
+            let eval = Arc::clone(&state.evaluate_card);
+            let scored: Vec<(ObjId, f64)> = state.hand_of(who)
+                .map(|c| (c.id, eval(who, c.id, state)))
+                .collect();
+            if let Some(&(worst_id, _)) = scored.iter()
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                let name = state.objects.get(&worst_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+                change_zone(worst_id, ZoneId::Library, state, t, who);
+                let lib = match who {
+                    PlayerId::Us  => &mut state.us.library_order,
+                    PlayerId::Opp => &mut state.opp.library_order,
+                };
+                if lib.back() == Some(&worst_id) {
+                    lib.pop_back();
+                    lib.push_front(worst_id);
+                }
+                state.log(t, who, format!("puts back {}", name));
             }
-            state.log(t, who, format!("puts back {}", name));
         }
     }))
 }
@@ -408,7 +396,6 @@ pub(crate) fn eff_enter_permanent(
         let new_id = state.alloc_id();
         // Pre-register and immediately activate instances before the event fires,
         // so ETB replacement checks (e.g. Murktide self-ETB) can intercept the event.
-        let card_def = state.catalog.get(card_name.as_str()).cloned();
         state.objects.insert(new_id, GameObject {
             id: new_id,
             catalog_key: card_name.clone(),
