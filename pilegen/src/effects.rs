@@ -477,10 +477,16 @@ pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
         } else if let Some(ab) = state.abilities.remove(&id) {
             state.log(t, actor, format!("→ {} (triggered ability) countered", ab.source_name));
         } else {
-            state.log(t, actor, "→ fizzled (target already resolved)".to_string());
+            let ghost = state.objects.get(&id)
+                .map(|c| format!("{} (zone={:?})", c.catalog_key, c.zone))
+                .unwrap_or_else(|| format!("obj#{}", id.0));
+            state.log(t, actor, format!("→ fizzled (target {} not on stack)", ghost));
         }
     } else {
-        state.log(t, actor, "→ fizzled (target already resolved)".to_string());
+        let ghost = state.objects.get(&id)
+            .map(|c| format!("{} (zone={:?})", c.catalog_key, c.zone))
+            .unwrap_or_else(|| format!("obj#{}", id.0));
+        state.log(t, actor, format!("→ fizzled (target {} not on stack)", ghost));
     }
 }
 

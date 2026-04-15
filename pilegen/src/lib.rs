@@ -14,8 +14,12 @@ pub(crate) use effects::*;
 mod predicates;
 pub(crate) use predicates::*;
 
+mod planner;
+pub(crate) use planner::*;
+
 mod strategy;
 use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
+               CardCategory, dd_categorize,
                dd_plan_gap, dd_card_fills, opp_plan_gap, opp_card_fills};
 #[cfg(test)] use strategy::{dd_should_mulligan, opp_should_mulligan};
 
@@ -1066,6 +1070,16 @@ impl ManaPool {
                 if remaining == 0 { break; }
             }
         }
+    }
+
+    fn add(&mut self, other: &ManaPool) {
+        self.w += other.w;
+        self.u += other.u;
+        self.b += other.b;
+        self.r += other.r;
+        self.g += other.g;
+        self.c += other.c;
+        self.total += other.total;
     }
 
     fn drain(&mut self) {
@@ -2713,10 +2727,12 @@ fn cast_spell(
         let adv_targets = chosen_targets.to_vec();
         let adv_target_label = if !chosen_targets.is_empty() {
             let names: Vec<String> = chosen_targets.iter()
-                .map(|&tid| state.stack_item_display_name(tid).to_string())
-                .filter(|n| !n.is_empty())
+                .map(|&tid| {
+                    let name = state.stack_item_display_name(tid);
+                    if name.is_empty() { format!("<?obj#{}>", tid.0) } else { name.to_string() }
+                })
                 .collect();
-            if names.is_empty() { String::new() } else { format!(" targeting {}", names.join(", ")) }
+            format!(" targeting {}", names.join(", "))
         } else {
             String::new()
         };
@@ -2827,10 +2843,12 @@ fn cast_spell(
     };
     let target_label = if !chosen_targets.is_empty() {
         let names: Vec<String> = chosen_targets.iter()
-            .map(|&tid| state.stack_item_display_name(tid).to_string())
-            .filter(|n| !n.is_empty())
+            .map(|&tid| {
+                let name = state.stack_item_display_name(tid);
+                if name.is_empty() { format!("<?obj#{}>", tid.0) } else { name.to_string() }
+            })
             .collect();
-        if names.is_empty() { String::new() } else { format!(" targeting {}", names.join(", ")) }
+        format!(" targeting {}", names.join(", "))
     } else {
         String::new()
     };

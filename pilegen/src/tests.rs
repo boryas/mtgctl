@@ -7375,6 +7375,30 @@
     }
 
     #[test]
+    fn test_fow_not_offered_on_empty_stack() {
+        // Force of Will should NOT appear in legal actions when the stack is empty.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Give opponent a land, FoW in hand, and a blue card to pitch.
+        let sea_def = catalog_card("Underground Sea");
+        add_perm_with_def(&mut state, PlayerId::Opp, &sea_def, BattlefieldState::new());
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm"); // blue card to pitch
+        state.current_turn = 2;
+        state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
+        recompute(&mut state);
+        assert!(state.stack.is_empty(), "stack should be empty");
+
+        let legal = strategy::collect_legal_actions(&state, PlayerId::Opp);
+        let has_fow = legal.iter().any(|a| {
+            if let LegalAction::CastSpell { card_id, .. } = a {
+                state.objects.get(card_id).map_or(false, |c| c.catalog_key == "Force of Will")
+            } else { false }
+        });
+        assert!(!has_fow, "FoW should not be castable on empty stack — no valid targets");
+    }
+
+    #[test]
     fn test_cavern_colored_mana_blocked_for_non_creature() {
         // Cavern of Souls' colored mana ability requires casting_spell to be a creature.
         // With no spell being cast (or a non-creature spell), the condition should fail.
@@ -7623,11 +7647,11 @@
             }
         };
         assert!(!state.decision_log.is_empty(), "decision_log should have entries");
-        // Should contain at least a mulligan decision and an AP proactive decision.
+        // Should contain at least a mulligan decision and a planner decision.
         let has_mulligan = state.decision_log.iter().any(|l| l.contains("mulligan"));
-        let has_dd = state.decision_log.iter().any(|l| l.contains("DD"));
+        let has_plan = state.decision_log.iter().any(|l| l.contains("plan"));
         assert!(has_mulligan, "decision_log should contain mulligan entries");
-        assert!(has_dd, "decision_log should contain DD decision entries");
+        assert!(has_plan, "decision_log should contain planner entries");
         eprintln!("\n── decision_log ({} entries) ──", state.decision_log.len());
         for entry in &state.decision_log {
             eprintln!("  {}", entry);
@@ -7902,6 +7926,170 @@
 
     /// Stress-test: run many scenarios with random seeds to reproduce rare
     /// invariant violations (graveyard_order desync, etc.).
+    // ── Turn planner tests ────────────────────────────────────────────────────
+
+    /// Extract the priority-round action names from a plan (spells + land drops, skip taps).
+    fn plan_spell_names(plan: &[planner::PlanAction], state: &SimState) -> Vec<String> {
+        plan.iter().filter_map(|a| match a {
+            planner::PlanAction::CastSpell(id) | planner::PlanAction::LandDrop(id) =>
+                state.objects.get(id).map(|c| c.catalog_key.clone()),
+            planner::PlanAction::TapForMana { .. } => None,
+        }).collect()
+    }
+
+    /// Build a state with specific lands on board and cards in hand.
+    /// Loads full catalog defs so mana abilities work.
+    fn plan_test_state(
+        lands: &[&str],
+        hand: &[&str],
+    ) -> SimState {
+        let mut state = make_state();
+        let catalog = test_catalog();
+        for &name in lands {
+            let def = catalog.get(name).expect(&format!("land not in catalog: {name}"));
+            add_perm_with_def(&mut state, PlayerId::Us, def, BattlefieldState::new());
+        }
+        for &name in hand {
+            add_hand_card(&mut state, PlayerId::Us, name);
+        }
+        // Merge full catalog so plan_def_of fallback works.
+        for (k, v) in catalog {
+            state.catalog.entry(k).or_insert(v);
+        }
+        state
+    }
+
+    #[test]
+    fn plan_direct_dd_cast() {
+        // 3 black-producing lands + DD in hand → cast DD directly.
+        let state = plan_test_state(
+            &["Underground Sea", "Badlands", "Scrubland"],
+            &["Doomsday"],
+        );
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert!(names.contains(&"Doomsday".to_string()),
+            "plan should cast Doomsday, got: {:?}", names);
+        assert!(!names.contains(&"Dark Ritual".to_string()),
+            "direct path should not need Ritual");
+    }
+
+    #[test]
+    fn plan_ritual_path() {
+        // 1 black land + Ritual + DD in hand → Ritual then DD.
+        let state = plan_test_state(
+            &["Underground Sea"],
+            &["Dark Ritual", "Doomsday"],
+        );
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert_eq!(names, vec!["Dark Ritual", "Doomsday"],
+            "should cast Ritual then DD, got: {:?}", names);
+    }
+
+    #[test]
+    fn plan_land_drop_enables_dd() {
+        // No lands on board, 1 land + Ritual + DD in hand → land drop, then Ritual → DD.
+        let state = plan_test_state(
+            &[],
+            &["Underground Sea", "Dark Ritual", "Doomsday"],
+        );
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert_eq!(names, vec!["Underground Sea", "Dark Ritual", "Doomsday"],
+            "should land drop then Ritual then DD, got: {:?}", names);
+    }
+
+    #[test]
+    fn plan_petal_on_board_ritual_dd() {
+        // Lotus Petal on board (untapped) + Ritual + DD in hand, no lands.
+        let catalog = test_catalog();
+        let petal_def = catalog.get("Lotus Petal").expect("Lotus Petal not in catalog");
+        let mut state = make_state();
+        add_perm_with_def(&mut state, PlayerId::Us, petal_def, BattlefieldState::new());
+        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        for (k, v) in catalog {
+            state.catalog.entry(k).or_insert(v);
+        }
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert_eq!(names, vec!["Dark Ritual", "Doomsday"],
+            "Petal sac → Ritual → DD, got: {:?}", names);
+    }
+
+    #[test]
+    fn plan_no_dd_casts_cantrip() {
+        // Land on board + cantrip in hand, no DD → should cast cantrip.
+        let state = plan_test_state(
+            &["Underground Sea"],
+            &["Brainstorm"],
+        );
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert_eq!(names, vec!["Brainstorm"],
+            "without DD, should cast cantrip, got: {:?}", names);
+    }
+
+    #[test]
+    fn plan_land_drop_plus_cantrip() {
+        // Land in hand + cantrip in hand + land on board → land drop + cantrip.
+        let state = plan_test_state(
+            &["Underground Sea"],
+            &["Badlands", "Ponder"],
+        );
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert!(names.contains(&"Badlands".to_string()), "should land drop, got: {:?}", names);
+        assert!(names.contains(&"Ponder".to_string()), "should cast Ponder, got: {:?}", names);
+    }
+
+    #[test]
+    fn plan_empty_hand_passes() {
+        // Land on board but empty hand → empty plan.
+        let state = plan_test_state(&["Underground Sea"], &[]);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        assert!(plan.is_empty(), "empty hand should produce empty plan, got: {:?}", plan);
+    }
+
+    #[test]
+    fn plan_no_mana_for_spell() {
+        // DD in hand but no mana sources → can't cast, no spells in plan.
+        let state = plan_test_state(&[], &["Doomsday"]);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert!(!names.contains(&"Doomsday".to_string()),
+            "shouldn't cast DD without mana, got: {:?}", names);
+    }
+
+    #[test]
+    fn plan_ritual_without_dd_not_cast() {
+        // Ritual in hand, no DD → should NOT cast Ritual (wasted BBB).
+        let state = plan_test_state(
+            &["Underground Sea"],
+            &["Dark Ritual", "Brainstorm"],
+        );
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert!(!names.contains(&"Dark Ritual".to_string()),
+            "shouldn't cast Ritual without DD, got: {:?}", names);
+        assert!(names.contains(&"Brainstorm".to_string()),
+            "should cast Brainstorm instead, got: {:?}", names);
+    }
+
+    #[test]
+    fn plan_prefers_dd_over_cantrip() {
+        // Can cast either cantrip or Ritual→DD. Should pick DD.
+        let state = plan_test_state(
+            &["Underground Sea"],
+            &["Dark Ritual", "Doomsday", "Brainstorm"],
+        );
+        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let names = plan_spell_names(&plan, &state);
+        assert!(names.contains(&"Doomsday".to_string()),
+            "should prefer DD over cantrip, got: {:?}", names);
+    }
+
     #[test]
     fn stress_invariant_check() {
         let catalog = test_catalog();
