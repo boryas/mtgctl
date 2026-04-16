@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use super::*;
 
 // ── Turn plan state ─────────────────────────────────────────────────────────
@@ -321,7 +323,46 @@ pub(crate) fn dd_plan_quality(
 
 const MAX_PLAN_DEPTH: usize = 10;
 
-/// Depth-limited exhaustive search over the action space.
+/// Compute a hash key for a plan state, treating set-like fields as order-independent.
+/// Two states that reach the same pool/tapped/hand/etc. by different action orderings
+/// produce the same key, so the transposition table deduplicates them.
+fn plan_state_key(plan: &TurnPlanState) -> u64 {
+    let mut h = DefaultHasher::new();
+    // Pool — order of these fields is fixed.
+    plan.pool.w.hash(&mut h);
+    plan.pool.u.hash(&mut h);
+    plan.pool.b.hash(&mut h);
+    plan.pool.r.hash(&mut h);
+    plan.pool.g.hash(&mut h);
+    plan.pool.c.hash(&mut h);
+    plan.pool.total.hash(&mut h);
+    plan.land_drop_used.hash(&mut h);
+    // Sets: use commutative combination (sum of hashes) so order doesn't matter.
+    // XOR would collapse {A,B} with {C,D} when A^B == C^D; sum is safer.
+    let set_hash = |ids: &HashSet<ObjId>| -> u64 {
+        ids.iter().fold(0u64, |acc, id| {
+            let mut sh = DefaultHasher::new();
+            id.hash(&mut sh);
+            acc.wrapping_add(sh.finish())
+        })
+    };
+    set_hash(&plan.tapped).hash(&mut h);
+    set_hash(&plan.sacrificed).hash(&mut h);
+    // Vec fields treated as sets (order doesn't affect plan quality).
+    let vec_hash = |ids: &[ObjId]| -> u64 {
+        ids.iter().fold(0u64, |acc, id| {
+            let mut sh = DefaultHasher::new();
+            id.hash(&mut sh);
+            acc.wrapping_add(sh.finish())
+        })
+    };
+    vec_hash(&plan.hand).hash(&mut h);
+    vec_hash(&plan.spells_cast).hash(&mut h);
+    vec_hash(&plan.new_battlefield).hash(&mut h);
+    h.finish()
+}
+
+/// Depth-limited search with transposition table.
 /// Returns (quality, action sequence) for the best plan found.
 fn best_plan(
     plan: &TurnPlanState,
@@ -329,6 +370,7 @@ fn best_plan(
     state: &SimState,
     who: PlayerId,
     eval: PlanEvalFn,
+    tt: &mut HashMap<(u64, usize), f64>,
 ) -> (f64, Vec<PlanAction>) {
     let baseline = eval(plan, state);
 
@@ -336,8 +378,18 @@ fn best_plan(
         return (baseline, Vec::new());
     }
 
+    // Transposition check: if we've evaluated this state at >= this depth, reuse the score.
+    let key = plan_state_key(plan);
+    if let Some(&cached_q) = tt.get(&(key, depth)) {
+        // We know the best quality from this state — return it without the action path.
+        // (The action path was already found on the first visit; the caller only needs
+        // the quality to compare against other branches.)
+        return (cached_q, Vec::new());
+    }
+
     let legal = enumerate_plan_actions(plan, state, who);
     if legal.is_empty() {
+        tt.insert((key, depth), baseline);
         return (baseline, Vec::new());
     }
 
@@ -347,7 +399,7 @@ fn best_plan(
 
     for action in &legal {
         let next = apply_plan_action(plan, action, state);
-        let (q, mut tail) = best_plan(&next, depth - 1, state, who, eval);
+        let (q, mut tail) = best_plan(&next, depth - 1, state, who, eval, tt);
         if q > best_quality {
             best_quality = q;
             best_actions = Vec::with_capacity(1 + tail.len());
@@ -360,6 +412,7 @@ fn best_plan(
         }
     }
 
+    tt.insert((key, depth), best_quality);
     (best_quality, best_actions)
 }
 
@@ -375,7 +428,8 @@ pub(crate) fn make_turn_plan(
         return Vec::new();
     }
     let plan_state = extract_plan_state(state, who);
-    let (_quality, actions) = best_plan(&plan_state, MAX_PLAN_DEPTH, state, who, eval);
+    let mut tt = HashMap::new();
+    let (_quality, actions) = best_plan(&plan_state, MAX_PLAN_DEPTH, state, who, eval, &mut tt);
     actions
 }
 
