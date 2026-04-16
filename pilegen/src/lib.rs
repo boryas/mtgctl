@@ -1635,11 +1635,24 @@ impl SimState {
         if id == self.us.id { "us" } else { "opp" }
     }
 
+    /// Display name for a card, using the back-face name when the card is flipped.
+    fn display_name(&self, card: &GameObject) -> String {
+        if card.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
+            if let Some(back_name) = self.catalog.get(&card.catalog_key)
+                .and_then(|d| d.back.as_ref())
+                .map(|b| &b.name)
+            {
+                return back_name.clone();
+            }
+        }
+        card.catalog_key.clone()
+    }
+
     /// Return the name of the permanent with the given id.
     fn permanent_name(&self, id: ObjId) -> Option<String> {
         self.objects.get(&id)
             .filter(|c| c.zone == CardZone::Battlefield)
-            .map(|c| c.catalog_key.clone())
+            .map(|c| self.display_name(c))
     }
 
     /// Mana accessible right now for `who`: pool + what untapped permanents can still produce.
@@ -1851,7 +1864,7 @@ impl SimState {
             if bf.loyalty > 0   { tags.push(format!("loy:{}", bf.loyalty)); }
             if bf.tapped         { tags.push("tapped".into()); }
             let suffix = if tags.is_empty() { String::new() } else { format!(" [{}]", tags.join(", ")) };
-            Some(format!("{}{}", card.catalog_key, suffix))
+            Some(format!("{}{}", self.display_name(card), suffix))
         };
 
         let mut lands: Vec<&GameObject> = self.permanents_of(who)
@@ -2014,7 +2027,7 @@ impl SimState {
         let to_perm = |c: &GameObject| -> PermanentResult {
             let bf = c.bf.as_ref().unwrap();
             PermanentResult {
-                name: c.catalog_key.clone(),
+                name: self.display_name(c),
                 tapped: bf.tapped,
                 counters: bf.counters,
                 loyalty: bf.loyalty,
