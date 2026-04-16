@@ -1586,6 +1586,11 @@ impl SimState {
         if zone == CardZone::Library && old_zone != CardZone::Library {
             self.player_mut(owner).library_order.push_back(id);
         }
+        if zone == CardZone::Graveyard && old_zone != CardZone::Graveyard {
+            self.graveyard_order.push(id);
+        } else if zone != CardZone::Graveyard && old_zone == CardZone::Graveyard {
+            self.graveyard_order.retain(|&x| x != id);
+        }
         if let Some(card) = self.objects.get_mut(&id) {
             card.zone = zone;
             if !matches!(zone, CardZone::Battlefield) {
@@ -1820,11 +1825,11 @@ impl SimState {
 
         let gy: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who)
+            .filter(|c| c.owner == who && c.zone == CardZone::Graveyard)
             .map(|c| c.catalog_key.clone())
             .collect();
         if !gy.is_empty() {
-            writeln!(f, "  Graveyard : {}", Self::collapse_counts(gy).join(", "))?;
+            writeln!(f, "  Graveyard : {}", gy.join(", "))?;
         }
 
         let mut exile: Vec<String> = self.exile_of(who)
@@ -2073,21 +2078,10 @@ impl SimState {
             vec![]
         };
 
-        // Use graveyard_order for cards that went through change_zone, then append
-        // any cards in the Graveyard zone that were moved via set_card_zone (e.g. SacSelf costs).
-        let ordered_ids: Vec<ObjId> = self.graveyard_order.iter()
-            .copied()
-            .filter(|id| self.objects.get(id).map_or(false, |c| c.owner == who && c.zone == CardZone::Graveyard))
-            .collect();
-        let mut extra: Vec<(ObjId, String)> = self.objects.iter()
-            .filter(|(_, c)| c.owner == who && c.zone == CardZone::Graveyard && !ordered_ids.contains(&c.id))
-            .map(|(_, c)| (c.id, c.catalog_key.clone()))
-            .collect();
-        extra.sort_by(|a, b| a.1.cmp(&b.1));
-        let mut graveyard: Vec<String> = ordered_ids.iter()
+        let mut graveyard: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
+            .filter(|c| c.owner == who && c.zone == CardZone::Graveyard)
             .map(|c| c.catalog_key.clone())
-            .chain(extra.into_iter().map(|(_, name)| name))
             .collect();
 
         // If DD just resolved, it's in the GY but we display it on the stack instead.
