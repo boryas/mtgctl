@@ -18,11 +18,17 @@ pub(crate) enum CardCategory {
 pub(crate) struct MatchupInfo {
     pub(crate) opp_has_counters: bool,
     pub(crate) opp_fast_clock: bool,
+    /// Colors that fetch lands in this deck can find (deck-level, not per-card).
+    pub(crate) fetch_colors: Vec<Color>,
 }
 
 impl Default for MatchupInfo {
     fn default() -> Self {
-        MatchupInfo { opp_has_counters: true, opp_fast_clock: false }
+        MatchupInfo {
+            opp_has_counters: true,
+            opp_fast_clock: false,
+            fetch_colors: vec![Color::Blue, Color::Black],
+        }
     }
 }
 
@@ -265,11 +271,10 @@ pub(crate) fn dd_card_fills(card_id: ObjId, gap: &TargetGap, state: &SimState, w
     }
 }
 
-/// Hand-aware mulligan for DD player. Checks hand categories to decide keep/mull.
-/// - 7 cards: need ≥1 mana source AND (cantrip OR combo piece OR ritual). Mull 0-land, 5+-land.
-/// - 6 cards: need ≥1 mana source AND ≥1 spell. More lenient.
-/// - 5 cards: keep almost anything with a land.
-/// - 4 or fewer: always keep.
+/// Hand-aware mulligan for DD player. Uses actual mana color production.
+/// - Need ≥1 blue source (casts cantrips) OR ≥3 black sources (hardcasts DD).
+/// - Mull flood (≥5 lands) or hands with no path to DD (no threats/cantrips).
+/// - 4 or fewer cards: always keep.
 pub(crate) fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_taken: u32) -> bool {
     if mulligans_taken >= 3 { return false; } // always keep at 4 cards
 
@@ -281,7 +286,8 @@ pub(crate) fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_take
         .collect();
 
     let hand_size = hand.len();
-    let mana_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Mana)).count();
+    let mana = state.hand_land_mana(who, &[Color::Blue, Color::Black]);
+    let has_useful_mana = mana.u >= 1 || mana.b >= 3;
     let threat_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Threat)).count();
     let selection_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Selection)).count();
     let interaction_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Interaction)).count();
@@ -289,23 +295,23 @@ pub(crate) fn dd_should_mulligan(state: &SimState, who: PlayerId, mulligans_take
 
     match mulligans_taken {
         0 => {
-            // 7 cards: mull 0-land, 5+-land, or no path to DD
-            if mana_count == 0 { return true; }
-            if mana_count >= 5 { return true; }
+            // 7 cards: mull no useful mana, flood, or no path to DD
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
             // Need at least a cantrip or combo piece to have a plan
             if threat_count == 0 && selection_count == 0 { return true; }
             false
         }
         1 => {
-            // 6 cards: need ≥1 mana + ≥1 spell
-            if mana_count == 0 { return true; }
-            if mana_count >= 5 { return true; }
+            // 6 cards: need useful mana + ≥1 spell
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
             if spells == 0 { return true; }
             false
         }
         2 => {
-            // 5 cards: keep with ≥1 mana + ≥1 spell
-            if mana_count == 0 && spells == hand_size { return true; }
+            // 5 cards: keep with any useful mana + ≥1 spell
+            if !has_useful_mana && spells == hand_size { return true; }
             false
         }
         _ => false,
@@ -341,7 +347,7 @@ impl Strategy for DoomsdayStrategy {
             return action;
         }
         choose_ap_proactive(state, t, who, legal_actions,
-            &mut self.must_land_drop, &mut self.rng, &mut self.decisions)
+            &mut self.must_land_drop, &mut self.rng, &mut self.decisions, dd_plan_quality)
     }
 
     fn choose_mana_ability(&mut self, state: &SimState, who: PlayerId,
@@ -437,6 +443,48 @@ pub(crate) fn opp_categorize(name: &str, def: Option<&CardDef>) -> Option<CardCa
     None
 }
 
+/// Evaluate a plan state for a generic opponent (tempo/fair deck).
+/// Values threats on board, mana development, interaction held back, and cantrips.
+pub(crate) fn opp_plan_quality(
+    plan: &TurnPlanState,
+    state: &SimState,
+) -> f64 {
+    let mut score = 0.0;
+
+    for &id in &plan.spells_cast {
+        let name = state.objects.get(&id)
+            .map(|c| c.catalog_key.as_str()).unwrap_or("");
+        let def = state.def_of(id).or_else(|| {
+            state.objects.get(&id).and_then(|c| state.catalog.get(c.catalog_key.as_str()))
+        });
+        let cat = opp_categorize(name, def);
+        score += match cat {
+            Some(CardCategory::Threat) => 3.0,        // deploying threats is the main goal
+            Some(CardCategory::Selection) => 2.0,     // cantrips find threats/answers
+            Some(CardCategory::Interaction) => 1.0,   // proactive discard is fine, but hold counters
+            Some(CardCategory::Mana) => 0.5,          // mana rocks / rituals
+            None => 0.1,
+        };
+    }
+
+    // Land drops — always valuable.
+    score += plan.new_battlefield.len() as f64;
+
+    // Holding interaction is valuable (don't dump your hand recklessly).
+    for &id in &plan.hand {
+        let name = state.objects.get(&id)
+            .map(|c| c.catalog_key.as_str()).unwrap_or("");
+        let def = state.def_of(id).or_else(|| {
+            state.objects.get(&id).and_then(|c| state.catalog.get(c.catalog_key.as_str()))
+        });
+        if opp_categorize(name, def) == Some(CardCategory::Interaction) {
+            score += 0.3;
+        }
+    }
+
+    score
+}
+
 /// Compute the opponent's plan gap. Tempo decks want 2-3 lands, threats on board, interaction in hand.
 pub(crate) fn opp_plan_gap(state: &SimState, who: PlayerId, matchup: &MatchupInfo) -> TargetGap {
     let def_or_catalog = |id: ObjId, key: &str| -> Option<&CardDef> {
@@ -514,12 +562,13 @@ pub(crate) fn opp_card_fills(card_id: ObjId, gap: &TargetGap, state: &SimState, 
     }
 }
 
-/// Hand-aware mulligan for opponent (tempo/fair deck).
-/// - 7 cards: need ≥1 land AND (threat OR cantrip). Mull 0-land, 5+-land, all-interaction.
-/// - 6 cards: need ≥1 land + ≥1 spell. More lenient.
-/// - 5 cards: keep with ≥1 land + ≥1 spell.
-/// - 4 or fewer: always keep.
-pub(crate) fn opp_should_mulligan(state: &SimState, who: PlayerId, mulligans_taken: u32) -> bool {
+/// Hand-aware mulligan for opponent (tempo/fair deck). Uses actual mana colors.
+/// - Need ≥1 blue source (casts cantrips/interaction).
+/// - Mull flood (≥5 lands) or hands with no threats/cantrips.
+/// - 4 or fewer cards: always keep.
+pub(crate) fn opp_should_mulligan(
+    state: &SimState, who: PlayerId, mulligans_taken: u32, fetch_colors: &[Color],
+) -> bool {
     if mulligans_taken >= 3 { return false; }
 
     let hand: Vec<(ObjId, Option<CardCategory>)> = state.hand_of(who)
@@ -530,7 +579,8 @@ pub(crate) fn opp_should_mulligan(state: &SimState, who: PlayerId, mulligans_tak
         .collect();
 
     let hand_size = hand.len();
-    let mana_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Mana)).count();
+    let mana = state.hand_land_mana(who, fetch_colors);
+    let has_useful_mana = mana.u >= 1;
     let threat_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Threat)).count();
     let selection_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Selection)).count();
     let interaction_count = hand.iter().filter(|(_, cat)| *cat == Some(CardCategory::Interaction)).count();
@@ -538,22 +588,22 @@ pub(crate) fn opp_should_mulligan(state: &SimState, who: PlayerId, mulligans_tak
 
     match mulligans_taken {
         0 => {
-            // 7 cards: mull 0-land, 5+-land, or no threats/cantrips (all interaction, no clock)
-            if mana_count == 0 { return true; }
-            if mana_count >= 5 { return true; }
+            // 7 cards: mull no useful mana, flood, or no threats/cantrips
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
             if threat_count == 0 && selection_count == 0 { return true; }
             false
         }
         1 => {
-            // 6 cards: need ≥1 land + ≥1 spell
-            if mana_count == 0 { return true; }
-            if mana_count >= 5 { return true; }
+            // 6 cards: need useful mana + ≥1 spell
+            if !has_useful_mana { return true; }
+            if mana.total >= 5 { return true; }
             if spells == 0 { return true; }
             false
         }
         2 => {
-            // 5 cards: keep with ≥1 land + ≥1 spell
-            if mana_count == 0 && spells == hand_size { return true; }
+            // 5 cards: keep with any useful mana + ≥1 spell
+            if !has_useful_mana && spells == hand_size { return true; }
             false
         }
         _ => false,
@@ -586,7 +636,7 @@ impl Strategy for GenericOppStrategy {
             | Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
         if !in_main_phase { return LegalAction::Pass; }
         let mut _md = false;
-        choose_ap_proactive(state, t, who, legal_actions, &mut _md, &mut self.rng, &mut self.decisions)
+        choose_ap_proactive(state, t, who, legal_actions, &mut _md, &mut self.rng, &mut self.decisions, opp_plan_quality)
     }
 
     fn announce(&mut self, state: &SimState, card_id: ObjId,
@@ -605,7 +655,7 @@ impl Strategy for GenericOppStrategy {
 
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool {
         let who = self.player_id;
-        let mull = opp_should_mulligan(state, who, mulligans_taken);
+        let mull = opp_should_mulligan(state, who, mulligans_taken, &self.matchup.fetch_colors);
         let cats = hand_category_summary(state, who, opp_categorize);
         self.dlog(format!("T0 {}: mulligan#{} {} → {}",
             who, mulligans_taken, cats,
@@ -772,7 +822,7 @@ fn choose_ninjutsu_action(
     Some(ninjutsu_actions[rng.gen_range(0..ninjutsu_actions.len())].clone())
 }
 
-/// AP proactive decision: turn planner for Us, greedy heuristics for Opp.
+/// AP proactive decision: use the turn planner with deck-specific evaluation.
 fn choose_ap_proactive(
     state: &SimState,
     t: u8,
@@ -781,24 +831,9 @@ fn choose_ap_proactive(
     must_land_drop: &mut bool,
     rng: &mut impl Rng,
     dlog: &mut Vec<String>,
+    eval: PlanEvalFn,
 ) -> LegalAction {
-    if who == PlayerId::Us {
-        return choose_ap_proactive_planned(state, t, who, legal, must_land_drop, rng, dlog);
-    }
-    choose_ap_proactive_greedy(state, t, who, legal, must_land_drop, rng, dlog)
-}
-
-/// DD player: use the turn planner to find the optimal action sequence.
-fn choose_ap_proactive_planned(
-    state: &SimState,
-    t: u8,
-    who: PlayerId,
-    legal: &[LegalAction],
-    must_land_drop: &mut bool,
-    rng: &mut impl Rng,
-    dlog: &mut Vec<String>,
-) -> LegalAction {
-    let plan = make_turn_plan(state, who);
+    let plan = make_turn_plan(state, who, eval);
 
     // Log the plan.
     if !plan.is_empty() {
@@ -810,6 +845,13 @@ fn choose_ap_proactive_planned(
                     .map(|c| c.catalog_key.as_str()).unwrap_or("?");
                 let col = color.map_or("C".to_string(), |c| format!("{:?}", c));
                 Some(format!("tap:{}:{}", src, col))
+            }
+            PlanAction::CrackFetch { source_id, target_id } => {
+                let src = state.objects.get(source_id)
+                    .map(|c| c.catalog_key.as_str()).unwrap_or("?");
+                let tgt = state.objects.get(target_id)
+                    .map(|c| c.catalog_key.as_str()).unwrap_or("?");
+                Some(format!("fetch:{}→{}", src, tgt))
             }
         }).collect();
         dlog.push(format!("T{} {}: plan=[{}]", t, who, plan_summary.join(" → ")));
@@ -838,7 +880,7 @@ fn choose_ap_proactive_planned(
                     return LegalAction::LandDrop(*id);
                 }
             }
-            PlanAction::TapForMana { .. } => continue,
+            PlanAction::TapForMana { .. } | PlanAction::CrackFetch { .. } => continue,
         }
     }
 
@@ -848,70 +890,6 @@ fn choose_ap_proactive_planned(
     }
 
     LegalAction::Pass
-}
-
-/// Opponent player: greedy heuristic (land drop, abilities, random spells).
-fn choose_ap_proactive_greedy(
-    state: &SimState,
-    t: u8,
-    who: PlayerId,
-    legal: &[LegalAction],
-    must_land_drop: &mut bool,
-    rng: &mut impl Rng,
-    dlog: &mut Vec<String>,
-) -> LegalAction {
-    // ── Land drop ────────────────────────────────────────────────────────
-    if state.stack.is_empty() && state.player(who).lands_played_this_turn == 0 {
-        let force = *must_land_drop;
-        let lands: Vec<ObjId> = legal.iter().filter_map(|a| {
-            if let LegalAction::LandDrop(id) = a { Some(*id) } else { None }
-        }).collect();
-        if !lands.is_empty() {
-            let prob = if force { 1.0 } else { match t { 1 => 1.0, 2 => 0.9, 3 => 0.80, _ => 0.70 } };
-            if rng.gen::<f64>() < prob {
-                *must_land_drop = false;
-                let id = lands[rng.gen_range(0..lands.len())];
-                let land_name = state.objects.get(&id).map_or("?", |c| c.catalog_key.as_str());
-                dlog.push(format!("T{} {}: land drop {}", t, who, land_name));
-                return LegalAction::LandDrop(id);
-            }
-        }
-        *must_land_drop = false;
-    }
-
-    // ── On-board abilities ───────────────────────────────────────────────
-    if let Some(action) = choose_on_board_action(state, who, legal, false, must_land_drop, rng) {
-        return action;
-    }
-
-    // ── Hand spells (only on empty stack) ────────────────────────────────
-    if !state.stack.is_empty() { return LegalAction::Pass; }
-
-    let spell_actions: Vec<&LegalAction> = legal.iter().filter(|a| {
-        if let LegalAction::CastSpell { card_id, .. } = a {
-            let Some(def) = state.def_of(*card_id) else { return false };
-            !def.is_land()
-        } else { false }
-    }).collect();
-
-    if spell_actions.is_empty() {
-        return LegalAction::Pass;
-    }
-
-    // ── General casting — decaying probability for multi-spell turns ─────
-    let has_floating = state.player(who).pool.total > 0;
-    let cast_prob = if has_floating { 1.0 } else {
-        match state.player(who).spells_cast_this_turn { 0 => 1.0, 1 => 0.30, _ => 0.10 }
-    };
-    if rng.gen::<f64>() >= cast_prob {
-        return LegalAction::Pass;
-    }
-    let action = spell_actions[rng.gen_range(0..spell_actions.len())].clone();
-    if let LegalAction::CastSpell { card_id, .. } = &action {
-        let name = state.objects.get(card_id).map_or("?".to_string(), |c| c.catalog_key.clone());
-        dlog.push(format!("T{} {}: proactive cast {}", t, who, name));
-    }
-    action
 }
 
 /// Pick an on-board action (abilities) from legal actions.

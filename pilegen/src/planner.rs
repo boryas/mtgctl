@@ -21,6 +21,8 @@ pub(crate) struct TurnPlanState {
     pub(crate) new_battlefield: Vec<ObjId>,
     /// Permanents sacrificed during this plan (removed from board).
     pub(crate) sacrificed: HashSet<ObjId>,
+    /// Cards in library available for fetch search targets.
+    pub(crate) library: Vec<ObjId>,
 }
 
 // ── Plan actions ────────────────────────────────────────────────────────────
@@ -34,6 +36,8 @@ pub(crate) enum PlanAction {
     CastSpell(ObjId),
     /// Play a land from hand.
     LandDrop(ObjId),
+    /// Crack a fetch land to put a land from library onto the battlefield.
+    CrackFetch { source_id: ObjId, target_id: ObjId },
 }
 
 impl PlanAction {
@@ -91,6 +95,19 @@ pub(crate) fn enumerate_plan_actions(
         }
     }
 
+    // ── Crack fetch lands ──────────────────────────────────────────────
+    // Existing battlefield permanents with fetch abilities.
+    for card in state.permanents_of(who) {
+        if plan.tapped.contains(&card.id) { continue; }
+        if plan.sacrificed.contains(&card.id) { continue; }
+        enumerate_fetch_cracks(card.id, state, plan, &mut actions);
+    }
+    // Newly played lands with fetch abilities.
+    for &card_id in &plan.new_battlefield {
+        if plan.sacrificed.contains(&card_id) { continue; }
+        enumerate_fetch_cracks(card_id, state, plan, &mut actions);
+    }
+
     actions
 }
 
@@ -131,6 +148,34 @@ fn enumerate_mana_taps(
                 });
             }
         }
+    }
+}
+
+/// Enumerate CrackFetch actions for a single source.
+/// Each mana-producing land in the library is a possible fetch target.
+fn enumerate_fetch_cracks(
+    source_id: ObjId,
+    state: &SimState,
+    plan: &TurnPlanState,
+    actions: &mut Vec<PlanAction>,
+) {
+    let Some(def) = plan_def_of(source_id, state) else { return };
+    let has_fetch = match &def.kind {
+        CardKind::Land(l) => l.abilities.iter().any(|a| a.is_fetch_ability()),
+        _ => false,
+    };
+    if !has_fetch { return; }
+
+    // Each library land with mana abilities is a valid fetch target.
+    let mut seen = HashSet::new();
+    for &target_id in &plan.library {
+        let Some(tdef) = plan_def_of(target_id, state) else { continue };
+        if !tdef.is_land() { continue; }
+        if tdef.mana_abilities().is_empty() { continue; }
+        // Deduplicate by catalog key — fetching any of 4 Underground Seas is equivalent.
+        let key = state.objects.get(&target_id).map(|o| o.catalog_key.as_str()).unwrap_or("");
+        if !seen.insert(key.to_string()) { continue; }
+        actions.push(PlanAction::CrackFetch { source_id, target_id });
     }
 }
 
@@ -199,6 +244,12 @@ pub(crate) fn apply_plan_action(
             next.new_battlefield.push(*card_id);
             next.land_drop_used = true;
         }
+        PlanAction::CrackFetch { source_id, target_id } => {
+            // Sacrifice the fetch, move target from library to battlefield.
+            next.sacrificed.insert(*source_id);
+            next.library.retain(|&id| id != *target_id);
+            next.new_battlefield.push(*target_id);
+        }
     }
     next
 }
@@ -212,11 +263,15 @@ fn spell_mana_production(name: &str) -> Option<ManaPool> {
     }
 }
 
-// ── Quality function ────────────────────────────────────────────────────────
+// ── Quality function type ───────────────────────────────────────────────────
 
-/// Evaluate a plan state: how good is the position after executing this sequence?
-/// Higher = better. Used by the search to compare action sequences.
-pub(crate) fn plan_quality(
+/// Evaluation function that scores a plan state. Higher = better.
+/// Each deck archetype provides its own implementation.
+pub(crate) type PlanEvalFn = fn(&TurnPlanState, &SimState) -> f64;
+
+/// Evaluate a plan state for the Doomsday pilot.
+/// DD cast dominates; otherwise value cantrips, interaction, and land drops.
+pub(crate) fn dd_plan_quality(
     plan: &TurnPlanState,
     state: &SimState,
 ) -> f64 {
@@ -261,6 +316,7 @@ pub(crate) fn plan_quality(
     score
 }
 
+
 // ── Search ──────────────────────────────────────────────────────────────────
 
 const MAX_PLAN_DEPTH: usize = 10;
@@ -272,8 +328,9 @@ fn best_plan(
     depth: usize,
     state: &SimState,
     who: PlayerId,
+    eval: PlanEvalFn,
 ) -> (f64, Vec<PlanAction>) {
-    let baseline = plan_quality(plan, state);
+    let baseline = eval(plan, state);
 
     if depth == 0 {
         return (baseline, Vec::new());
@@ -290,14 +347,14 @@ fn best_plan(
 
     for action in &legal {
         let next = apply_plan_action(plan, action, state);
-        let (q, mut tail) = best_plan(&next, depth - 1, state, who);
+        let (q, mut tail) = best_plan(&next, depth - 1, state, who, eval);
         if q > best_quality {
             best_quality = q;
             best_actions = Vec::with_capacity(1 + tail.len());
             best_actions.push(action.clone());
             best_actions.append(&mut tail);
         }
-        // Early exit: DD was cast — can't do better than 100.
+        // Early exit: can't do better than 100.
         if best_quality >= 100.0 {
             break;
         }
@@ -311,13 +368,14 @@ fn best_plan(
 pub(crate) fn make_turn_plan(
     state: &SimState,
     who: PlayerId,
+    eval: PlanEvalFn,
 ) -> Vec<PlanAction> {
     // Only plan on empty stack (sorcery-speed actions).
     if !state.stack.is_empty() {
         return Vec::new();
     }
     let plan_state = extract_plan_state(state, who);
-    let (_quality, actions) = best_plan(&plan_state, MAX_PLAN_DEPTH, state, who);
+    let (_quality, actions) = best_plan(&plan_state, MAX_PLAN_DEPTH, state, who, eval);
     actions
 }
 
@@ -333,6 +391,8 @@ pub(crate) fn extract_plan_state(state: &SimState, who: PlayerId) -> TurnPlanSta
     let hand: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
     let land_drop_used = state.player(who).lands_played_this_turn >= 1;
 
+    let library: Vec<ObjId> = state.player(who).library_order.iter().copied().collect();
+
     TurnPlanState {
         pool,
         tapped,
@@ -341,5 +401,6 @@ pub(crate) fn extract_plan_state(state: &SimState, who: PlayerId) -> TurnPlanSta
         spells_cast: Vec::new(),
         new_battlefield: Vec::new(),
         sacrificed: HashSet::new(),
+        library,
     }
 }

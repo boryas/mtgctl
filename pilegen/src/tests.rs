@@ -6604,7 +6604,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         // Opp facing combo (DD): opp_fast_clock = false
-        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false };
+        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false, ..Default::default() };
         let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
         assert!(gap.mana >= 0.9, "no lands → mana gap high, got {}", gap.mana);
         assert!(gap.threat >= 0.9, "no threats → threat gap high, got {}", gap.threat);
@@ -6637,7 +6637,7 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         // Facing aggro: opp_fast_clock = true
-        let matchup = strategy::MatchupInfo { opp_has_counters: false, opp_fast_clock: true };
+        let matchup = strategy::MatchupInfo { opp_has_counters: false, opp_fast_clock: true, ..Default::default() };
         let gap = strategy::opp_plan_gap(&state, PlayerId::Opp, &matchup);
         assert!(gap.interaction <= 0.5, "vs aggro → interaction gap capped, got {}", gap.interaction);
     }
@@ -7117,7 +7117,7 @@
         // Already have 2 lands on board → mana gap is 0
         make_land(&mut state, PlayerId::Opp, "Underground Sea", false);
         make_land(&mut state, PlayerId::Opp, "Polluted Delta", false);
-        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false };
+        let matchup = strategy::MatchupInfo { opp_has_counters: true, opp_fast_clock: false, ..Default::default() };
         let strat = strategy::GenericOppStrategy::new(matchup);
         let bottom = strat.london_bottom(&state, 1);
         assert_eq!(bottom.len(), 1);
@@ -7131,7 +7131,7 @@
     fn test_dd_mull_no_land_hand() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        // All spells, no mana: should mull
+        // All spells, no lands: should mull even with Dark Ritual (can't cast without B source).
         add_hand_card(&mut state, PlayerId::Us, "Doomsday");
         add_hand_card(&mut state, PlayerId::Us, "Force of Will");
         add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
@@ -7139,11 +7139,8 @@
         add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
         add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
         add_hand_card(&mut state, PlayerId::Us, "Consider");
-        // Dark Ritual is Mana category, so actually this hand has 1 mana source.
-        // Let me replace it with an interaction spell instead.
-        // Actually Dark Ritual IS mana — so this hand has mana. Let me make a truly 0-mana hand.
-        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0),
-            "hand with Dark Ritual (mana) + DD + cantrips should keep");
+        assert!(dd_should_mulligan(&state, PlayerId::Us, 0),
+            "no lands (only Ritual) should mull — can't cast Ritual without B source");
     }
 
     #[test]
@@ -7165,15 +7162,15 @@
     fn test_dd_mull_land_flood() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        // 5 lands + 2 spells
+        // 5 mana-producing lands + 2 spells → flood
         add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
         add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
         add_hand_card(&mut state, PlayerId::Us, "Island");
         add_hand_card(&mut state, PlayerId::Us, "Swamp");
-        add_hand_card(&mut state, PlayerId::Us, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Us, "Misty Rainforest");
         add_hand_card(&mut state, PlayerId::Us, "Doomsday");
         add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
-        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "5+ lands should mull");
+        assert!(dd_should_mulligan(&state, PlayerId::Us, 0), "5+ mana lands should mull");
     }
 
     #[test]
@@ -7244,7 +7241,7 @@
         add_hand_card(&mut state, PlayerId::Opp, "Daze");
         add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
         add_hand_card(&mut state, PlayerId::Opp, "Dragon's Rage Channeler");
-        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0), "0-land opp hand should mull");
+        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]), "0-land opp hand should mull");
     }
 
     #[test]
@@ -7255,10 +7252,10 @@
         add_hand_card(&mut state, PlayerId::Opp, "Scalding Tarn");
         add_hand_card(&mut state, PlayerId::Opp, "Flooded Strand");
         add_hand_card(&mut state, PlayerId::Opp, "Polluted Delta");
-        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Opp, "Misty Rainforest");
         add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
         add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
-        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0), "5+ land opp hand should mull");
+        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]), "5+ mana lands opp hand should mull");
     }
 
     #[test]
@@ -7272,7 +7269,7 @@
         add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
         add_hand_card(&mut state, PlayerId::Opp, "Daze");
         add_hand_card(&mut state, PlayerId::Opp, "Ponder");
-        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 0), "good tempo hand should keep");
+        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]), "good tempo hand should keep");
     }
 
     #[test]
@@ -7287,7 +7284,7 @@
         add_hand_card(&mut state, PlayerId::Opp, "Fatal Push");
         add_hand_card(&mut state, PlayerId::Opp, "Thoughtseize");
         // 2 mana + 5 interaction, 0 threats, 0 selection → mull
-        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0),
+        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]),
             "all interaction no threats/cantrips should mull");
     }
 
@@ -7299,7 +7296,89 @@
         add_hand_card(&mut state, PlayerId::Opp, "Daze");
         add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
         add_hand_card(&mut state, PlayerId::Opp, "Fatal Push");
-        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 3), "always keep at 4 cards");
+        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 3, &[Color::Blue, Color::Red]), "always keep at 4 cards");
+    }
+
+    // ── Section 54b: Color-Aware Mulligan Tests ──────────────────────────────
+
+    #[test]
+    fn test_dd_mull_wasteland_only() {
+        // Wasteland produces no colored mana — should mull.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Us, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Us, "Ponder");
+        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
+        add_hand_card(&mut state, PlayerId::Us, "Consider");
+        assert!(dd_should_mulligan(&state, PlayerId::Us, 0),
+            "Wasteland-only hand should mull — no U or BBB");
+    }
+
+    #[test]
+    fn test_dd_keep_fetch_hand() {
+        // 3 fetches + Ritual + DD: fetches provide U/B, should keep.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Us, "Polluted Delta");
+        add_hand_card(&mut state, PlayerId::Us, "Misty Rainforest");
+        add_hand_card(&mut state, PlayerId::Us, "Flooded Strand");
+        add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Us, "Ponder");
+        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0),
+            "fetch lands provide U/B — should keep");
+    }
+
+    #[test]
+    fn test_dd_keep_usea_cantrips() {
+        // 1 Underground Sea + cantrips: has U, should keep.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Us, "Underground Sea");
+        add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Us, "Ponder");
+        add_hand_card(&mut state, PlayerId::Us, "Consider");
+        add_hand_card(&mut state, PlayerId::Us, "Doomsday");
+        add_hand_card(&mut state, PlayerId::Us, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Us, "Thoughtseize");
+        assert!(!dd_should_mulligan(&state, PlayerId::Us, 0),
+            "USea + cantrips should keep");
+    }
+
+    #[test]
+    fn test_opp_mull_wasteland_only() {
+        // Opponent with only Wasteland — no U, should mull.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Opp, "Wasteland");
+        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Daze");
+        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
+        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
+        assert!(opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]),
+            "Wasteland-only opp hand should mull — no U");
+    }
+
+    #[test]
+    fn test_opp_keep_fetch_hand() {
+        // Fetch land provides U via deck knowledge — should keep.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        add_hand_card(&mut state, PlayerId::Opp, "Scalding Tarn");
+        add_hand_card(&mut state, PlayerId::Opp, "Delver of Secrets");
+        add_hand_card(&mut state, PlayerId::Opp, "Brainstorm");
+        add_hand_card(&mut state, PlayerId::Opp, "Force of Will");
+        add_hand_card(&mut state, PlayerId::Opp, "Daze");
+        add_hand_card(&mut state, PlayerId::Opp, "Lightning Bolt");
+        add_hand_card(&mut state, PlayerId::Opp, "Ponder");
+        assert!(!opp_should_mulligan(&state, PlayerId::Opp, 0, &[Color::Blue, Color::Red]),
+            "fetch land provides U — should keep");
     }
 
     // ── Section 55: Mana Ability Fixes ──────────────────────────────────────
@@ -7933,7 +8012,7 @@
         plan.iter().filter_map(|a| match a {
             planner::PlanAction::CastSpell(id) | planner::PlanAction::LandDrop(id) =>
                 state.objects.get(id).map(|c| c.catalog_key.clone()),
-            planner::PlanAction::TapForMana { .. } => None,
+            planner::PlanAction::TapForMana { .. } | planner::PlanAction::CrackFetch { .. } => None,
         }).collect()
     }
 
@@ -7966,7 +8045,7 @@
             &["Underground Sea", "Badlands", "Scrubland"],
             &["Doomsday"],
         );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert!(names.contains(&"Doomsday".to_string()),
             "plan should cast Doomsday, got: {:?}", names);
@@ -7981,7 +8060,7 @@
             &["Underground Sea"],
             &["Dark Ritual", "Doomsday"],
         );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert_eq!(names, vec!["Dark Ritual", "Doomsday"],
             "should cast Ritual then DD, got: {:?}", names);
@@ -7994,7 +8073,7 @@
             &[],
             &["Underground Sea", "Dark Ritual", "Doomsday"],
         );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert_eq!(names, vec!["Underground Sea", "Dark Ritual", "Doomsday"],
             "should land drop then Ritual then DD, got: {:?}", names);
@@ -8012,7 +8091,7 @@
         for (k, v) in catalog {
             state.catalog.entry(k).or_insert(v);
         }
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert_eq!(names, vec!["Dark Ritual", "Doomsday"],
             "Petal sac → Ritual → DD, got: {:?}", names);
@@ -8025,7 +8104,7 @@
             &["Underground Sea"],
             &["Brainstorm"],
         );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert_eq!(names, vec!["Brainstorm"],
             "without DD, should cast cantrip, got: {:?}", names);
@@ -8038,7 +8117,7 @@
             &["Underground Sea"],
             &["Badlands", "Ponder"],
         );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert!(names.contains(&"Badlands".to_string()), "should land drop, got: {:?}", names);
         assert!(names.contains(&"Ponder".to_string()), "should cast Ponder, got: {:?}", names);
@@ -8048,7 +8127,7 @@
     fn plan_empty_hand_passes() {
         // Land on board but empty hand → empty plan.
         let state = plan_test_state(&["Underground Sea"], &[]);
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         assert!(plan.is_empty(), "empty hand should produce empty plan, got: {:?}", plan);
     }
 
@@ -8056,7 +8135,7 @@
     fn plan_no_mana_for_spell() {
         // DD in hand but no mana sources → can't cast, no spells in plan.
         let state = plan_test_state(&[], &["Doomsday"]);
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert!(!names.contains(&"Doomsday".to_string()),
             "shouldn't cast DD without mana, got: {:?}", names);
@@ -8069,7 +8148,7 @@
             &["Underground Sea"],
             &["Dark Ritual", "Brainstorm"],
         );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert!(!names.contains(&"Dark Ritual".to_string()),
             "shouldn't cast Ritual without DD, got: {:?}", names);
@@ -8084,13 +8163,14 @@
             &["Underground Sea"],
             &["Dark Ritual", "Doomsday", "Brainstorm"],
         );
-        let plan = planner::make_turn_plan(&state, PlayerId::Us);
+        let plan = planner::make_turn_plan(&state, PlayerId::Us, planner::dd_plan_quality);
         let names = plan_spell_names(&plan, &state);
         assert!(names.contains(&"Doomsday".to_string()),
             "should prefer DD over cantrip, got: {:?}", names);
     }
 
     #[test]
+    #[ignore] // 500 full simulations — run with `cargo test -- --ignored`
     fn stress_invariant_check() {
         let catalog = test_catalog();
         let dd_cards = val_dd_deck();

@@ -1268,6 +1268,18 @@ fn run_mana_loop(
     }
 }
 
+// ── Fetch land detection ─────────────────────────────────────────────────────
+
+/// Hardcoded list of fetch land names. These sacrifice for life to search
+/// a land — they produce no mana themselves but find duals that do.
+pub(crate) fn is_fetch(name: &str) -> bool {
+    matches!(name,
+        "Polluted Delta" | "Flooded Strand" | "Misty Rainforest" | "Scalding Tarn"
+        | "Marsh Flats" | "Bloodstained Mire" | "Windswept Heath" | "Wooded Foothills"
+        | "Verdant Catacombs" | "Arid Mesa"
+    )
+}
+
 // ── Mana potential accumulation ───────────────────────────────────────────────
 
 /// Accumulate one source's potential contribution into the pool.
@@ -1283,12 +1295,15 @@ fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut 
         .filter(|ma| !ma_requires_tap(ma) || !tapped)
         .collect();
     if avail.is_empty() { return; }
-    let count = avail.iter().map(|ma| ma.produces_count).max().unwrap_or(1);
-    p.total += count as i32;
+    let count = avail.iter().map(|ma| ma.produces_count).max().unwrap_or(1) as i32;
+    p.total += count;
     // Track which colors this source *can* produce (union across available abilities).
+    // Scale by produces_count so e.g. Ancient Tomb registers 2 colorless.
     let mut produced = [false; 5]; // W U B R G
+    let mut any_color = false;
     for ma in &avail {
         for color in &ma.produces {
+            any_color = true;
             match color {
                 Color::White => produced[0] = true,
                 Color::Blue  => produced[1] = true,
@@ -1298,8 +1313,13 @@ fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut 
             }
         }
     }
-    let [w, u, b, r, g] = produced.map(|x| x as i32);
-    p.w += w; p.u += u; p.b += b; p.r += r; p.g += g;
+    if !any_color {
+        // Source produces only colorless mana.
+        p.c += count;
+    } else {
+        let [w, u, b, r, g] = produced.map(|x| if x { count } else { 0 });
+        p.w += w; p.u += u; p.b += b; p.r += r; p.g += g;
+    }
 }
 
 // ── Simulation types ──────────────────────────────────────────────────────────
@@ -1645,6 +1665,37 @@ impl SimState {
                 .filter(|ma| matches!(ma.source_zone, SourceZone::Hand))
                 .cloned().collect();
             accumulate_source_potential(&hand_mas, false, &mut p);
+        }
+        p
+    }
+
+    /// Mana potential from lands in hand only.  Used for mulligan decisions.
+    /// Regular lands contribute their mana abilities.  Fetch lands contribute
+    /// `fetch_colors` (deck-level knowledge of what duals they can find).
+    pub(crate) fn hand_land_mana(&self, who: PlayerId, fetch_colors: &[Color]) -> ManaPool {
+        let mut p = ManaPool::default();
+        for card in self.hand_of(who) {
+            let def = self.catalog.get(&card.catalog_key);
+            let Some(def) = def else { continue };
+            if !def.is_land() { continue; }
+            let mas = def.mana_abilities();
+            if !mas.is_empty() {
+                // Regular mana-producing land.
+                accumulate_source_potential(mas, false, &mut p);
+            } else if is_fetch(&card.catalog_key) {
+                // Fetch land — contributes the deck's fetch colors.
+                p.total += 1;
+                for &c in fetch_colors {
+                    match c {
+                        Color::White => p.w += 1,
+                        Color::Blue  => p.u += 1,
+                        Color::Black => p.b += 1,
+                        Color::Red   => p.r += 1,
+                        Color::Green => p.g += 1,
+                    }
+                }
+            }
+            // Lands with no mana abilities and not a fetch (e.g. Wasteland) contribute nothing.
         }
         p
     }
@@ -3929,10 +3980,12 @@ pub fn simulate_game(
     let dd_matchup = MatchupInfo {
         opp_has_counters: opp_is_blue,
         opp_fast_clock: opp_is_blue,
+        fetch_colors: vec![Color::Blue, Color::Black],
     };
     let opp_matchup = MatchupInfo {
         opp_has_counters: true,  // DD plays FoW/Daze
         opp_fast_clock: false,   // DD is combo, not aggro
+        fetch_colors: vec![Color::Blue, Color::Black], // TODO: derive from opponent deck
     };
 
     // Wire the universal card evaluator callback (captures matchup info).
