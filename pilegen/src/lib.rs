@@ -3007,6 +3007,11 @@ macro_rules! check {
     };
 }
 
+#[cfg(not(debug_assertions))]
+macro_rules! check {
+    ($cond:expr, $state:expr, $label:expr, $($arg:tt)*) => { };
+}
+
 /// Comprehensive state consistency check. All checks use `check!` so they
 /// dump the game log before panicking, then compile away in release builds.
 /// Called at engine lifecycle boundaries.
