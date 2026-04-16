@@ -7642,25 +7642,23 @@
                 Ok(r) => r,
                 Err(_) => { panics += 1; continue; }
             };
-            match result {
-                Some(state) => {
-                    dd_success += 1;
-                    success_turns.push(state.current_turn);
-                    // Find the opening hand summary line (contains "mulligans").
-                    if let Some(info_log) = state.log.iter().find(|l| l.contains("mulligans")) {
-                        if let Some((uh, um, oh, om)) = parse_log_hand_info(info_log) {
-                            us_hand_sizes.push(uh);
-                            opp_hand_sizes.push(oh);
-                            if um > 0 { us_mulled_games += 1; }
-                            us_mull_total += um;
-                            if om > 0 { opp_mulled_games += 1; }
-                            opp_mull_total += om;
-                        }
+            let state = result;
+            if state.success {
+                dd_success += 1;
+                success_turns.push(state.current_turn);
+                // Find the opening hand summary line (contains "mulligans").
+                if let Some(info_log) = state.log.iter().find(|l| l.contains("mulligans")) {
+                    if let Some((uh, um, oh, om)) = parse_log_hand_info(info_log) {
+                        us_hand_sizes.push(uh);
+                        opp_hand_sizes.push(oh);
+                        if um > 0 { us_mulled_games += 1; }
+                        us_mull_total += um;
+                        if om > 0 { opp_mulled_games += 1; }
+                        opp_mull_total += om;
                     }
                 }
-                None => {
-                    dd_fail += 1;
-                }
+            } else {
+                dd_fail += 1;
             }
         }
 
@@ -7721,9 +7719,8 @@
         let mut rng = StdRng::seed_from_u64(42);
         // Run sims until one succeeds (DD resolves).
         let state = loop {
-            if let Some(s) = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng) {
-                break s;
-            }
+            let s = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng);
+            if s.success { break s; }
         };
         assert!(!state.decision_log.is_empty(), "decision_log should have entries");
         // Should contain at least a mulligan decision and a planner decision.

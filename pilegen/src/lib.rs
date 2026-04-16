@@ -1370,7 +1370,7 @@ pub struct SimState {
     /// Set when the game ends by normal rules (a player's life reaches 0, etc.). Holds the winner.
     winner: Option<PlayerId>,
     /// Set when Doomsday resolved — simulation ends successfully.
-    success: bool,
+    pub(crate) success: bool,
     /// Life total before Doomsday halved it (for display as "X → Y").
     pub(crate) life_before_dd: Option<i32>,
     /// Card being cast during the mana sub-loop (CR 601.2g). Set before mana loop,
@@ -3931,7 +3931,7 @@ fn do_turn(
 
 
 /// Simulate the full game up to the Doomsday turn.
-/// Returns `None` if Doomsday was countered and could not be protected — caller should retry.
+/// Returns the final `SimState` — check `state.success` to see if Doomsday resolved.
 pub fn simulate_game(
     deck_name: &str,
     opponent: &str,
@@ -3939,7 +3939,7 @@ pub fn simulate_game(
     all_cards: &[(String, i32, String)],
     opp_cards: &[(String, i32, String)],
     rng: &mut impl Rng,
-) -> Option<SimState> {
+) -> SimState {
     let on_play = rng.gen_bool(0.5);
     let us = PlayerState::new(deck_name);
     let opp = PlayerState::new(opponent);
@@ -4091,11 +4091,7 @@ pub fn simulate_game(
         }
     }
 
-    if !state.success {
-        return None;
-    }
-
-    Some(state)
+    state
 }
 
 
@@ -4109,14 +4105,25 @@ pub fn generate_scenario(
     opp_cards: &[(String, i32, String)],
 ) -> SimState {
     let mut rng = rand::thread_rng();
+    let mut attempts = 0u32;
     loop {
-        if let Some(state) =
-            simulate_game(deck_name, opp_display, catalog, all_cards, opp_cards, &mut rng)
-        {
+        attempts += 1;
+        let state =
+            simulate_game(deck_name, opp_display, catalog, all_cards, opp_cards, &mut rng);
+        if state.success {
+            if attempts > 1 {
+                eprintln!("  (generated after {} attempts)", attempts);
+            }
             // All cards are already in their correct zones in state.objects.
             // Hand cards were moved to Hand zone by sim_draw during opening hand deal.
             return state;
         }
+        let reason = if state.winner == Some(PlayerId::Opp) {
+            format!("died on turn {}", state.current_turn)
+        } else {
+            format!("did not cast DD by turn {}", state.current_turn)
+        };
+        eprintln!("  attempt {} — retry ({})", attempts, reason);
     }
 }
 
