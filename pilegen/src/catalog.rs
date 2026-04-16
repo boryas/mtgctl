@@ -15,6 +15,7 @@ pub(crate) enum Keyword {
     DoubleStrike,
     Trample,
     Flash,
+    Hexproof,
 }
 
 /// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.
@@ -388,6 +389,8 @@ pub(crate) struct CreatureData {
     pub(crate) abilities: Vec<AbilityDef>,
     pub(crate) mana_abilities: Vec<ManaAbility>,
     pub(crate) keywords: Keywords,
+    /// Creature subtypes (e.g. "Ninja", "Wizard", "Human"). Used for emblem/CE filters.
+    pub(crate) creature_subtypes: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -467,6 +470,7 @@ impl CreatureData {
             abilities: vec![],
             mana_abilities: vec![],
             keywords: Keywords::default(),
+            creature_subtypes: vec![],
         }
     }
 }
@@ -811,10 +815,11 @@ impl CardDef {
         self.keywords().contains(kw)
     }
 
-    /// Returns true if this card has the given subtype (e.g. `"adventure"`).
+    /// Returns true if this card has the given subtype (e.g. `"adventure"`, `"Ninja"`).
     pub(crate) fn has_subtype(&self, st: &str) -> bool {
         match &self.kind {
             CardKind::Instant(s) | CardKind::Sorcery(s) => s.subtypes.iter().any(|t| t == st),
+            CardKind::Creature(c) => c.creature_subtypes.iter().any(|t| t == st),
             _ => false,
         }
     }
@@ -1255,6 +1260,120 @@ pub(crate) fn build_tamiyo_plus_two(who: PlayerId, source_id: ObjId) -> Effect {
             expiry: Some(Expiry::StartOfControllerNextTurn),
         });
         state.log(t, who, format!("{} +2: attackers get -1/-0 until your next turn", source_name));
+    }))
+}
+
+/// Tamiyo −3: return target instant or sorcery from your graveyard to your hand.
+/// If it's a green card, add one mana of any color.
+pub(crate) fn build_tamiyo_minus_three(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let Some(&target_id) = targets.first() else { return; };
+        // Check if the card is green before moving it.
+        let is_green = state.objects.get(&target_id)
+            .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
+            .map_or(false, |d| d.colors.contains(&Color::Green));
+        let card_name = state.objects.get(&target_id)
+            .map(|o| o.catalog_key.clone())
+            .unwrap_or_default();
+        change_zone(target_id, ZoneId::Hand, state, t, who);
+        state.log(t, who, format!("{} −3: return {} to hand", source_name, card_name));
+        if is_green {
+            // "Add one mana of any color" — use strategy color choice.
+            let f = std::sync::Arc::clone(&state.resolve_choice);
+            let ChoiceResult::Color(chosen) =
+                f(source_id, &ChoiceRequest::Color, state) else { return };
+            let spec = match chosen {
+                Color::White => "W",
+                Color::Blue  => "U",
+                Color::Black => "B",
+                Color::Red   => "R",
+                Color::Green => "G",
+            };
+            fire_event(GameEvent::ManaProduced { who, spec: spec.into() }, state, t, who);
+            state.log(t, who, format!("  (green card → add {{{}}})", spec));
+        }
+    }))
+}
+
+/// Kaito −2: tap target creature, put two stun counters on it.
+pub(crate) fn build_kaito_minus_two(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let Some(&target_id) = targets.first() else { return; };
+        let target_name = state.permanent_name(target_id).unwrap_or_default();
+        if let Some(bf) = state.permanent_bf_mut(target_id) {
+            bf.tapped = true;
+            bf.stun_counters += 2;
+        }
+        state.log(t, who, format!("{} −2: tap {} + 2 stun counters", source_name, target_name));
+    }))
+}
+
+/// Kaito 0: surveil 2, then draw a card for each opponent who lost life this turn.
+/// In a 1v1 game, this draws 0 or 1 card.
+pub(crate) fn build_kaito_zero(who: PlayerId, source_id: ObjId) -> Effect {
+    let surveil = eff_surveil(who, 2);
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        surveil.call(state, t, &[]);
+        // 1v1: check if the single opponent lost life this turn.
+        let opp = who.opp();
+        let opp_lost = state.player(opp).life_lost_this_turn > 0;
+        let draw_count = if opp_lost { 1 } else { 0 };
+        if draw_count > 0 {
+            eff_draw(who, draw_count).call(state, t, &[]);
+        }
+        state.log(t, who, format!(
+            "{} 0: surveil 2{}",
+            source_name,
+            if draw_count > 0 { ", draw 1 (opp lost life)" } else { "" }
+        ));
+    }))
+}
+
+/// Tamiyo −7: draw cards equal to half library (rounded up).
+/// You get an emblem with "You have no maximum hand size."
+pub(crate) fn build_tamiyo_minus_seven(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let lib_size = state.library_size(who);
+        let draw_count = (lib_size + 1) / 2; // rounded up
+        eff_draw(who, draw_count).call(state, t, &[]);
+        state.player_mut(who).no_max_hand_size = true;
+        state.log(t, who, format!(
+            "{} −7: draw {} (half library), emblem: no max hand size",
+            source_name, draw_count
+        ));
+    }))
+}
+
+/// Kaito +1: you get an emblem with "Ninjas you control get +1/+1."
+/// Modeled as a permanent L7 CE (Expiry::Never).
+pub(crate) fn build_kaito_plus_one(who: PlayerId, source_id: ObjId) -> Effect {
+    Effect(std::sync::Arc::new(move |state, t, _targets| {
+        let source_name = state.permanent_name(source_id).unwrap_or_default();
+        let ts = state.next_ci_timestamp();
+        state.continuous_instances.push(ContinuousInstance {
+            source_id,
+            controller: who,
+            layer: ContinuousLayer::L7PowerToughness,
+            reads: vec![],
+            writes: vec![CeWrites::PowerToughness],
+            timestamp: ts,
+            filter: std::sync::Arc::new(move |id, _controller, state| {
+                let obj = match state.objects.get(&id) { Some(o) => o, None => return false };
+                if obj.controller != who { return false; }
+                state.def_of(id).map_or(false, |d| d.has_subtype("Ninja"))
+            }),
+            modifier: std::sync::Arc::new(|def, _state| {
+                if let CardKind::Creature(c) = &mut def.kind {
+                    c.adjust_pt(1, 1);
+                }
+            }),
+            expiry: Expiry::Never,
+        });
+        state.log(t, who, format!("{} +1: emblem — Ninjas you control get +1/+1", source_name));
     }))
 }
 

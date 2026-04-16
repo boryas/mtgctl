@@ -157,6 +157,19 @@ pub(crate) fn is_protected_from(target_id: ObjId, source_id: ObjId, state: &SimS
     })
 }
 
+/// CR 702.11b: a permanent with hexproof can't be the target of spells or abilities
+/// an opponent controls. `source_controller` is whoever is activating/casting.
+pub(crate) fn is_hexproof_from(target_id: ObjId, source_controller: PlayerId, state: &SimState) -> bool {
+    let target_controller = state.objects.get(&target_id).map(|o| o.controller);
+    if target_controller == Some(source_controller) { return false; } // can't hexproof yourself
+    state.def_of(target_id).map_or(false, |d| {
+        match &d.kind {
+            CardKind::Creature(c) => c.keywords.contains(Keyword::Hexproof),
+            _ => false,
+        }
+    })
+}
+
 /// Protection predicate: source is a colored spell (on the stack with ≥1 color).
 /// Used by Emrakul, the Aeons Torn.
 pub(crate) fn obj_pred_colored_spell() -> ObjPredicate {
@@ -258,6 +271,8 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
                     }
                     // CR 702.16d: protection prevents targeting.
                     if is_protected_from(id, source_id, state) { return false; }
+                    // CR 702.11b: hexproof prevents opponent targeting.
+                    if is_hexproof_from(id, controller, state) { return false; }
                     filter(id, state)
                 })
                 .collect()

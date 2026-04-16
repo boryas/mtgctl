@@ -1848,6 +1848,7 @@ fn barrowgoyf() -> CardDef {
 fn ingenious_infiltrator() -> CardDef {
     let mut data = CreatureData::new("1UB", 2, 1);
     data.abilities = vec![ninjutsu_ability("1U")];
+    data.creature_subtypes = vec!["Ninja".into()];
     simple(
         "Ingenious Infiltrator",
         CardKind::Creature(data),
@@ -1856,17 +1857,103 @@ fn ingenious_infiltrator() -> CardDef {
     )
 }
 
-/// Legendary. Ninjutsu {1UB}. CR 702.49, CR 704.5k (legendary rule).
+/// Legendary Planeswalker — Kaito. Loyalty 4. Ninjutsu {1UB}.
+/// +1: emblem "Ninjas you control get +1/+1."
+/// 0: Surveil 2, draw per opponent who lost life this turn.
+/// −2: Tap target creature, put 2 stun counters on it.
+/// Static: during your turn, if loyalty > 0, he's a 3/4 Ninja creature with hexproof.
 fn kaito_bane_of_nightmares() -> CardDef {
-    let mut data = CreatureData::new("2UB", 3, 4);
-    data.legendary = true;
-    data.abilities = vec![ninjutsu_ability("1UB")];
-    simple(
+    CardDef::new(
         "Kaito, Bane of Nightmares",
-        CardKind::Creature(data),
+        CardKind::Planeswalker(PlaneswalkerData {
+            mana_cost: "2UB".into(),
+            loyalty: 4,
+            abilities: vec![
+                // Ninjutsu from hand (not a loyalty ability).
+                ninjutsu_ability("1UB"),
+                // +1: emblem "Ninjas you control get +1/+1."
+                AbilityDef {
+                    costs: vec![CostComponent::LoyaltyAdjust(1)],
+                    ability_factory: Some(Arc::new(build_kaito_plus_one)),
+                    timing: ActivationTiming::Sorcery,
+                    ..Default::default()
+                },
+                // 0: Surveil 2, draw if opp lost life.
+                AbilityDef {
+                    costs: vec![CostComponent::LoyaltyAdjust(0)],
+                    ability_factory: Some(Arc::new(build_kaito_zero)),
+                    timing: ActivationTiming::Sorcery,
+                    ..Default::default()
+                },
+                // −2: Tap target creature + 2 stun counters.
+                AbilityDef {
+                    costs: vec![CostComponent::LoyaltyAdjust(-2)],
+                    ability_factory: Some(Arc::new(build_kaito_minus_two)),
+                    target_spec: TargetSpec::ObjectInZone {
+                        controller: Who::Opp,
+                        zone: ZoneId::Battlefield,
+                        filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                    },
+                    timing: ActivationTiming::Sorcery,
+                    ..Default::default()
+                },
+            ],
+        }),
         parse_colors("2UB", true, true),
         None,
+        vec![Supertype::Legendary], CardLayout::Normal, None,
+        vec![],
+        vec![replacement_planeswalker_etb(4)],
+        vec![],
+        vec![kaito_animation_ce()],
     )
+}
+
+/// Static CE for Kaito: "During your turn, as long as Kaito has one or more loyalty
+/// counters on him, he's a 3/4 Ninja creature and has hexproof."
+/// Modeled as a self-targeting L4 CE that conditionally makes Kaito a creature.
+fn kaito_animation_ce() -> StaticAbilityDef {
+    Arc::new(move |source_id, controller| ContinuousInstance {
+        source_id,
+        controller,
+        layer: ContinuousLayer::L4TypeEffects,
+        reads: vec![],
+        writes: vec![CeWrites::CardTypes, CeWrites::PowerToughness, CeWrites::Abilities],
+        timestamp: 0,
+        filter: Arc::new(move |id, _ctr, _state| id == source_id),
+        modifier: Arc::new(move |def, state| {
+            // Check conditions: controller's turn AND loyalty > 0.
+            let is_my_turn = state.current_ap == state.player_id(controller);
+            let has_loyalty = state.permanent_bf(source_id)
+                .map_or(false, |bf| bf.loyalty > 0);
+            if !is_my_turn || !has_loyalty { return; }
+            // Add Creature type (Kaito is now a Planeswalker Creature).
+            if !def.types.contains(&CardType::Creature) {
+                def.types.push(CardType::Creature);
+            }
+            // Set to 3/4 Ninja with hexproof.
+            match &mut def.kind {
+                CardKind::Planeswalker(pw) => {
+                    // Overlay creature data: 3/4 Ninja creature with hexproof.
+                    // P/T is set directly since this is a type-setting effect, not a modifier.
+                    let mut c = CreatureData::new(&pw.mana_cost, 3, 4);
+                    c.legendary = true;
+                    c.creature_subtypes = vec!["Ninja".into()];
+                    c.keywords.insert(Keyword::Hexproof);
+                    // Carry over abilities so loyalty abilities remain activatable.
+                    c.abilities = pw.abilities.clone();
+                    def.kind = CardKind::Creature(c);
+                }
+                CardKind::Creature(c) => {
+                    // Already animated (e.g. multiple CEs); just ensure stats.
+                    c.creature_subtypes = vec!["Ninja".into()];
+                    c.keywords.insert(Keyword::Hexproof);
+                }
+                _ => {}
+            }
+        }),
+        expiry: Expiry::WhileSourceOnBattlefield,
+    })
 }
 
 /// ETB: search your library for a creature with toughness ≤ 2, put it into your hand.
@@ -2206,12 +2293,34 @@ fn tamiyo_inquisitive_student() -> CardDef {
         CardKind::Planeswalker(PlaneswalkerData {
             mana_cost: String::new(),
             loyalty: 2,
-            abilities: vec![AbilityDef {
-                costs: vec![CostComponent::LoyaltyAdjust(2)],
-                ability_factory: Some(Arc::new(build_tamiyo_plus_two)),
-                timing: ActivationTiming::Sorcery,
-                ..Default::default()
-            }],
+            abilities: vec![
+                AbilityDef {
+                    costs: vec![CostComponent::LoyaltyAdjust(2)],
+                    ability_factory: Some(Arc::new(build_tamiyo_plus_two)),
+                    timing: ActivationTiming::Sorcery,
+                    ..Default::default()
+                },
+                AbilityDef {
+                    costs: vec![CostComponent::LoyaltyAdjust(-3)],
+                    ability_factory: Some(Arc::new(build_tamiyo_minus_three)),
+                    target_spec: TargetSpec::ObjectInZone {
+                        controller: Who::Actor,
+                        zone: ZoneId::Graveyard,
+                        filter: cost_pred_or(
+                            obj_pred_from_card(pred_type_eq(CardType::Instant)),
+                            obj_pred_from_card(pred_type_eq(CardType::Sorcery)),
+                        ),
+                    },
+                    timing: ActivationTiming::Sorcery,
+                    ..Default::default()
+                },
+                AbilityDef {
+                    costs: vec![CostComponent::LoyaltyAdjust(-7)],
+                    ability_factory: Some(Arc::new(build_tamiyo_minus_seven)),
+                    timing: ActivationTiming::Sorcery,
+                    ..Default::default()
+                },
+            ],
         }),
         parse_colors("U", false, false),
         None,

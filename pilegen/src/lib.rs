@@ -220,6 +220,9 @@ struct BattlefieldState {
     pub(crate) etb_choice: Option<ChoiceResult>,
     /// Equipment: the creature this Equipment is attached to (CR 301.5).
     pub(crate) attached_to: Option<ObjId>,
+    /// Stun counters (CR 122.1d): "If a permanent with a stun counter on it would become
+    /// untapped, instead remove a stun counter from it."
+    pub(crate) stun_counters: u32,
 }
 
 impl BattlefieldState {
@@ -228,7 +231,7 @@ impl BattlefieldState {
             tapped: false, damage: 0, entered_this_turn: true, counters: 0,
             power_mod: 0, toughness_mod: 0, loyalty: 0, pw_activated_this_turn: false,
             attacking: false, unblocked: false, attack_target: None,
-            active_face: 0, etb_choice: None, attached_to: None,
+            active_face: 0, etb_choice: None, attached_to: None, stun_counters: 0,
         }
     }
 }
@@ -598,6 +601,8 @@ pub(crate) enum Expiry {
     /// Fires once, then self-removes. Used for delayed triggers (e.g. Sneak Attack
     /// "sacrifice at the beginning of the next end step").
     OneShot,
+    /// Never expires. Used for emblems (CR 114).
+    Never,
 }
 
 /// A single registered continuous-effect instance.
@@ -1337,6 +1342,10 @@ struct PlayerState {
     pool: ManaPool,
     /// Number of cards drawn this turn; reset each Untap. Used for Bowmasters / Tamiyo triggers.
     draws_this_turn: u8,
+    /// Total life lost this turn; reset each Untap. Used for Kaito 0 ability.
+    life_lost_this_turn: i32,
+    /// Tamiyo −7 emblem: "You have no maximum hand size." (CR 114)
+    no_max_hand_size: bool,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
     library_order: std::collections::VecDeque<ObjId>,
 }
@@ -1351,6 +1360,8 @@ impl PlayerState {
             spells_cast_this_turn: 0,
             pool: ManaPool::default(),
             draws_this_turn: 0,
+            life_lost_this_turn: 0,
+            no_max_hand_size: false,
             library_order: std::collections::VecDeque::new(),
         }
     }
@@ -1729,6 +1740,7 @@ impl SimState {
 
     fn lose_life(&mut self, who: PlayerId, n: i32) {
         self.player_mut(who).life -= n;
+        self.player_mut(who).life_lost_this_turn += n;
     }
 
     fn gain_life(&mut self, who: PlayerId, n: i32) {
@@ -2140,6 +2152,7 @@ fn sim_play_land(
 
 /// Discard down to 7 at end of turn.
 fn sim_discard_to_limit(state: &mut SimState, t: u8, who: PlayerId) {
+    if state.player(who).no_max_hand_size { return; }
     let hand = state.hand_size(who);
     if hand > 7 {
         let n = hand - 7;
@@ -3679,7 +3692,12 @@ fn do_step(
             let perm_ids: Vec<ObjId> = state.permanents_of(ap).map(|c| c.id).collect();
             for id in perm_ids {
                 if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.tapped = false;
+                    // CR 122.1d: stun counters replace untapping.
+                    if bf.stun_counters > 0 && bf.tapped {
+                        bf.stun_counters -= 1;
+                    } else {
+                        bf.tapped = false;
+                    }
                     bf.entered_this_turn = false;
                     bf.pw_activated_this_turn = false;
                 }
@@ -3687,6 +3705,7 @@ fn do_step(
             state.player_mut(ap).lands_played_this_turn = 0;
             state.player_mut(ap).spells_cast_this_turn = 0;
             state.player_mut(ap).draws_this_turn = 0;
+            state.player_mut(ap).life_lost_this_turn = 0;
             // Expire "until your next turn" trigger and continuous instances for the active player.
             state.trigger_instances.retain(|ti| {
                 !(ti.expiry == Some(Expiry::StartOfControllerNextTurn) && ti.controller == ap)
