@@ -744,13 +744,17 @@ pub(crate) fn recompute(state: &mut SimState) {
         let Some(base) = state.catalog.get(&catalog_key) else { continue };
         let mut def = base.clone();
 
-        // DFC back-face substitution.
+        // DFC back-face substitution: replace all printed characteristics with the
+        // back face's values (CR 712.8a — the game sees only the face that's up).
         {
             let obj = state.objects.get(&id).unwrap();
             if obj.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
                 if let Some(ref back) = def.back.take() {
                     def.name = back.name.clone();
                     def.kind = back.kind.clone();
+                    def.types = back.types.clone();
+                    def.supertypes = back.supertypes.clone();
+                    def.colors = back.colors.clone();
                 }
             }
         }

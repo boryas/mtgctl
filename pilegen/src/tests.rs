@@ -1551,6 +1551,32 @@
     }
 
     #[test]
+    fn test_fatal_push_cannot_target_flipped_tamiyo() {
+        let mut state = make_state();
+        let tamiyo_id = add_default_perm(&mut state, PlayerId::Opp, "Tamiyo, Inquisitive Student");
+
+        // Flip Tamiyo to her back face (Seasoned Scholar, a planeswalker).
+        if let Some(bf) = state.objects.get_mut(&tamiyo_id).and_then(|o| o.bf.as_mut()) {
+            bf.active_face = 1;
+            bf.loyalty = 2;
+        }
+        recompute(&mut state);
+
+        // Fatal Push targets "creature with mana value 3 or less".
+        let filter = obj_pred_from_card(pred_and(
+            pred_type_eq(CardType::Creature),
+            pred_mana_value_le(3),
+        ));
+        let spec = TargetSpec::ObjectInZone {
+            controller: Who::Opp,
+            zone: ZoneId::Battlefield,
+            filter,
+        };
+        let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
+        assert!(targets.is_empty(), "Fatal Push should not be able to target flipped Tamiyo (she is a planeswalker, not a creature)");
+    }
+
+    #[test]
     fn test_stat_mod_reversed_at_cleanup() {
         // A L7 ContinuousInstance with EndOfTurn expiry should be removed during Cleanup,
         // restoring the effective P/T of the affected permanent.
