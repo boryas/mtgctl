@@ -682,6 +682,87 @@
         assert!(!state.hand_of(PlayerId::Opp).any(|c| c.catalog_key == "Counterspell"), "card removed from opp hand");
     }
 
+    #[test]
+    fn test_reveal_hand_marks_cards_known() {
+        let mut state = make_state();
+        let a = add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
+        let b = add_hand_card(&mut state, PlayerId::Opp, "Island");
+        assert!(matches!(state.objects[&a].zone, CardZone::Hand { known: false }));
+        assert!(matches!(state.objects[&b].zone, CardZone::Hand { known: false }));
+
+        eff_reveal_hand(PlayerId::Us, Who::Opp).call(&mut state, 1, &[]);
+
+        assert!(matches!(state.objects[&a].zone, CardZone::Hand { known: true }),
+                "reveal should mark card a as known");
+        assert!(matches!(state.objects[&b].zone, CardZone::Hand { known: true }),
+                "reveal should mark card b as known");
+    }
+
+    #[test]
+    fn test_thoughtseize_reveals_then_discards() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let _a = add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
+        let _b = add_hand_card(&mut state, PlayerId::Opp, "Dark Ritual");
+        let _c = add_hand_card(&mut state, PlayerId::Opp, "Island");
+
+        // Thoughtseize's effect: reveal hand, discard nonland, lose 2 life.
+        let effect = eff_reveal_hand(PlayerId::Us, Who::Opp)
+            .then(eff_discard(PlayerId::Us, Who::Opp, 1, pred_not(pred_type_eq(CardType::Land))))
+            .then(eff_life_loss(PlayerId::Us, 2));
+        effect.call(&mut state, 1, &[]);
+
+        assert_eq!(state.hand_size(PlayerId::Opp), 2);
+        for card in state.hand_of(PlayerId::Opp) {
+            assert!(matches!(card.zone, CardZone::Hand { known: true }),
+                    "{} should be known after Thoughtseize", card.catalog_key);
+        }
+    }
+
+    #[test]
+    fn test_put_back_resets_hand_knowledge() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let a = add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
+        let b = add_hand_card(&mut state, PlayerId::Opp, "Dark Ritual");
+        let c = add_hand_card(&mut state, PlayerId::Opp, "Island");
+        // Mark all as known (as if previously revealed by Thoughtseize).
+        for id in [a, b, c] {
+            state.objects.get_mut(&id).unwrap().zone = CardZone::Hand { known: true };
+        }
+        add_library_card(&mut state, PlayerId::Opp, "Swamp");
+        add_library_card(&mut state, PlayerId::Opp, "Swamp");
+        add_library_card(&mut state, PlayerId::Opp, "Swamp");
+        wire_eval(&mut state, vec![
+            ("Counterspell", 0.9), ("Dark Ritual", 0.5), ("Island", 0.1),
+            ("Swamp", 0.2),
+        ]);
+
+        // Brainstorm: draw 3, put back 2.
+        eff_draw(PlayerId::Opp, 3).then(eff_put_back(PlayerId::Opp, 2)).call(&mut state, 1, &[]);
+
+        for card in state.hand_of(PlayerId::Opp) {
+            assert!(matches!(card.zone, CardZone::Hand { known: false }),
+                    "{} should be unknown after Brainstorm put-back", card.catalog_key);
+        }
+    }
+
+    #[test]
+    fn test_hymn_does_not_reveal_hand() {
+        let mut state = make_state();
+        let _a = add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
+        let _b = add_hand_card(&mut state, PlayerId::Opp, "Dark Ritual");
+        let _c = add_hand_card(&mut state, PlayerId::Opp, "Island");
+
+        // Hymn discards 2 at random — no reveal.
+        eff_discard(PlayerId::Us, Who::Opp, 2, pred_any()).call(&mut state, 1, &[]);
+
+        assert_eq!(state.hand_size(PlayerId::Opp), 1);
+        let remaining = state.hand_of(PlayerId::Opp).next().unwrap();
+        assert!(matches!(remaining.zone, CardZone::Hand { known: false }),
+                "Hymn should NOT reveal remaining cards");
+    }
+
     // ── Section 7: Ability Activation ─────────────────────────────────────────
 
     #[test]

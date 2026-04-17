@@ -297,7 +297,7 @@ to the engine. "Effect context" = the verb appears as a spell/ability effect;
 | **Investigate** (701.25) | ~ | `eff_create_clue(controller)` (internal helper, not a named primitive) |
 | **Double** (701.9) | ✗ | Not implemented (double P/T, life, or mana — L7 CE or `eff_mana` extension) |
 | **Exchange** (701.10) | ✗ | Not implemented |
-| **Reveal** (701.16) | — | Hidden information not modeled; treat as no-op where oracle requires reveal |
+| **Reveal** (701.16) | ~ | `eff_reveal_hand(caster, target)` — sets all hand cards to `known: true`; no event fired |
 
 **Legend:** ✓ = implemented · ~ = partial/indirect · ✗ = not yet implemented · — = out of scope
 

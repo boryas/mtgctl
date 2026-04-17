@@ -96,6 +96,15 @@ pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
                 state.log(t, who, format!("puts back {}", name));
             }
         }
+        // Put-back mixes known and unknown cards, and is frequently followed by a
+        // shuffle (fetchland) — reset the ENTIRE hand to unknown, not just the
+        // cards that were put back (we can't tell which ones remain).
+        let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
+        for id in remaining {
+            if let Some(card) = state.objects.get_mut(&id) {
+                card.zone = CardZone::Hand { known: false };
+            }
+        }
     }))
 }
 
@@ -365,6 +374,27 @@ pub(crate) fn eff_doomsday() -> Effect {
         state.life_before_dd = Some(life);
         state.player_mut(PlayerId::Us).life = life / 2;
         state.success = true;
+    }))
+}
+
+/// Mark all cards in `target`'s hand as known (visible to the other player).
+/// Models "Target player reveals their hand" oracle text (CR 701.16).
+pub(crate) fn eff_reveal_hand(caster: PlayerId, target: Who) -> Effect {
+    Effect(Arc::new(move |state, t, _targets| {
+        let target_who = target.resolve(caster);
+        let ids: Vec<ObjId> = state.hand_of(target_who).map(|c| c.id).collect();
+        let names: Vec<String> = ids.iter()
+            .filter_map(|id| state.objects.get(id))
+            .map(|c| c.catalog_key.clone())
+            .collect();
+        for id in &ids {
+            if let Some(card) = state.objects.get_mut(id) {
+                card.zone = CardZone::Hand { known: true };
+            }
+        }
+        if !names.is_empty() {
+            state.log(t, caster, format!("reveals hand: {}", names.join(", ")));
+        }
     }))
 }
 

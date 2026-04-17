@@ -1623,7 +1623,8 @@ fn thoughtseize() -> CardDef {
     simple("Thoughtseize", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
         modes: untargeted_mode(|who, _source_id, _x| {
-            eff_discard(who, Who::Opp, 1, pred_not(pred_type_eq(CardType::Land)))
+            eff_reveal_hand(who, Who::Opp)
+                .then(eff_discard(who, Who::Opp, 1, pred_not(pred_type_eq(CardType::Land))))
                 .then(eff_life_loss(who, 2))
         }),
         ..Default::default()
