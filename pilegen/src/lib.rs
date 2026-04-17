@@ -17,6 +17,14 @@ pub(crate) use predicates::*;
 mod planner;
 pub(crate) use planner::*;
 
+mod snapshot;
+pub use snapshot::{
+    BoardSnapshot, PlayerSnapshot, CardId, CardEntry, PermanentEntry,
+    Stage, CardRegistry, SnapshotError,
+    encode as snapshot_encode, decode as snapshot_decode,
+    to_url_token, from_url_token,
+};
+
 mod strategy;
 use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
                CardCategory, dd_categorize,
