@@ -115,6 +115,73 @@ pub fn run_scenario(matchup: &str) -> String {
     serde_json::to_string(&state.to_result()).unwrap()
 }
 
+/// Cached card registry for snapshot encode/decode (built once from catalog).
+#[cfg(target_arch = "wasm32")]
+fn get_registry() -> &'static CardRegistry {
+    use std::sync::OnceLock;
+    static REGISTRY: OnceLock<CardRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let catalog = build_catalog();
+        let mut names: Vec<String> = catalog.into_keys().collect();
+        names.sort();
+        let entries: Vec<(&str, &str, u16)> = names.iter()
+            .enumerate()
+            .map(|(i, name)| (name.as_str(), "DEV", i as u16))
+            .collect();
+        CardRegistry::from_entries(&entries)
+    })
+}
+
+/// Encode a ScenarioResult + pile selection into a compact URL token.
+///
+/// `scenario_json`: the JSON from `run_scenario`.
+/// `pile_json`: JSON array of library indices that are pile-selected, e.g. `[0,1,2,3,4]`.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn encode_snapshot(scenario_json: &str, pile_json: &str) -> Result<String, JsValue> {
+    let result: ScenarioResult = serde_json::from_str(scenario_json)
+        .map_err(|e| JsValue::from_str(&format!("bad scenario JSON: {e}")))?;
+    let pile_indices: Vec<usize> = serde_json::from_str(pile_json)
+        .map_err(|e| JsValue::from_str(&format!("bad pile JSON: {e}")))?;
+
+    let registry = get_registry();
+    let mut snap = BoardSnapshot::from_result(&result, registry)
+        .map_err(|e| JsValue::from_str(&format!("snapshot: {e}")))?;
+
+    for &idx in &pile_indices {
+        if let Some(card) = snap.us.library.get_mut(idx) {
+            card.pile_selected = true;
+        }
+    }
+
+    Ok(to_url_token(&snap))
+}
+
+/// Decode a URL token back into ScenarioResult JSON + pile selection.
+///
+/// Returns JSON: `{ "scenario": ScenarioResult, "pile": [indices] }`.
+/// Logs/decision_log/text_summary will be empty.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn decode_snapshot(token: &str) -> Result<String, JsValue> {
+    let registry = get_registry();
+    let snap = from_url_token(token)
+        .map_err(|e| JsValue::from_str(&format!("decode: {e}")))?;
+
+    let result = snap.to_result(registry);
+    let pile: Vec<usize> = snap.us.library.iter()
+        .enumerate()
+        .filter(|(_, c)| c.pile_selected)
+        .map(|(i, _)| i)
+        .collect();
+
+    #[derive(serde::Serialize)]
+    struct Shared { scenario: ScenarioResult, pile: Vec<usize> }
+
+    serde_json::to_string(&Shared { scenario: result, pile })
+        .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
 // ── Game state ────────────────────────────────────────────────────────────────
 
 // ── Stable object identity ────────────────────────────────────────────────────
@@ -1979,7 +2046,7 @@ impl std::fmt::Display for SimState {
 }
 // ── Structured output ────────────────────────────────────────────────────────
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ScenarioResult {
     pub turn: u8,
     pub stage: String,
@@ -1997,7 +2064,7 @@ pub struct ScenarioResult {
     pub text_summary: String,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PlayerResult {
     pub deck_name: String,
     pub life: i32,
@@ -2011,7 +2078,7 @@ pub struct PlayerResult {
     pub exile: Vec<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct PermanentResult {
     pub name: String,
     pub tapped: bool,
@@ -2020,7 +2087,7 @@ pub struct PermanentResult {
     pub flipped: bool,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct CardResult {
     pub name: String,
 }
