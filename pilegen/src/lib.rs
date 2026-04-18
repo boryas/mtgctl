@@ -116,18 +116,34 @@ pub fn run_scenario(matchup: &str) -> String {
 }
 
 /// Cached card registry for snapshot encode/decode (built once from catalog).
+/// Registers both front-face and back-face names so flipped DFCs resolve.
 #[cfg(target_arch = "wasm32")]
 fn get_registry() -> &'static CardRegistry {
     use std::sync::OnceLock;
     static REGISTRY: OnceLock<CardRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| {
         let catalog = build_catalog();
-        let mut names: Vec<String> = catalog.into_keys().collect();
+        // Front-face names (canonical), sorted for stable ID assignment.
+        let mut names: Vec<String> = catalog.keys().cloned().collect();
         names.sort();
-        let entries: Vec<(&str, &str, u16)> = names.iter()
+        let mut entries: Vec<(&str, &str, u16)> = names.iter()
             .enumerate()
             .map(|(i, name)| (name.as_str(), "DEV", i as u16))
             .collect();
+        // Back-face / adventure names get the same ID as their front face.
+        let mut back_entries: Vec<(String, &str, u16)> = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            if let Some(def) = catalog.get(name) {
+                if let Some(back) = &def.back {
+                    if back.name != *name {
+                        back_entries.push((back.name.clone(), "DEV", i as u16));
+                    }
+                }
+            }
+        }
+        for (bname, set, id) in &back_entries {
+            entries.push((bname.as_str(), set, *id));
+        }
         CardRegistry::from_entries(&entries)
     })
 }
