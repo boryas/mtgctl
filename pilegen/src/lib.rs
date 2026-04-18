@@ -153,19 +153,33 @@ fn get_registry() -> &'static CardRegistry {
 /// `scenario_json`: the JSON from `run_scenario`.
 /// `pile_json`: JSON array of library indices that are pile-selected, e.g. `[0,1,2,3,4]`.
 #[cfg(target_arch = "wasm32")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct PileSelection {
+    #[serde(default)]
+    library: Vec<usize>,
+    #[serde(default)]
+    graveyard: Vec<usize>,
+}
+
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 pub fn encode_snapshot(scenario_json: &str, pile_json: &str) -> Result<String, JsValue> {
     let result: ScenarioResult = serde_json::from_str(scenario_json)
         .map_err(|e| JsValue::from_str(&format!("bad scenario JSON: {e}")))?;
-    let pile_indices: Vec<usize> = serde_json::from_str(pile_json)
+    let pile: PileSelection = serde_json::from_str(pile_json)
         .map_err(|e| JsValue::from_str(&format!("bad pile JSON: {e}")))?;
 
     let registry = get_registry();
     let mut snap = BoardSnapshot::from_result(&result, registry)
         .map_err(|e| JsValue::from_str(&format!("snapshot: {e}")))?;
 
-    for &idx in &pile_indices {
+    for &idx in &pile.library {
         if let Some(card) = snap.us.library.get_mut(idx) {
+            card.pile_selected = true;
+        }
+    }
+    for &idx in &pile.graveyard {
+        if let Some(card) = snap.us.graveyard.get_mut(idx) {
             card.pile_selected = true;
         }
     }
@@ -175,7 +189,7 @@ pub fn encode_snapshot(scenario_json: &str, pile_json: &str) -> Result<String, J
 
 /// Decode a URL token back into ScenarioResult JSON + pile selection.
 ///
-/// Returns JSON: `{ "scenario": ScenarioResult, "pile": [indices] }`.
+/// Returns JSON: `{ "scenario": ScenarioResult, "pile": { "library": [...], "graveyard": [...] } }`.
 /// Logs/decision_log/text_summary will be empty.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -184,15 +198,22 @@ pub fn decode_snapshot(token: &str) -> Result<String, JsValue> {
     let snap = from_url_token(token)
         .map_err(|e| JsValue::from_str(&format!("decode: {e}")))?;
 
+    let pile = PileSelection {
+        library: snap.us.library.iter()
+            .enumerate()
+            .filter(|(_, c)| c.pile_selected)
+            .map(|(i, _)| i)
+            .collect(),
+        graveyard: snap.us.graveyard.iter()
+            .enumerate()
+            .filter(|(_, c)| c.pile_selected)
+            .map(|(i, _)| i)
+            .collect(),
+    };
     let result = snap.to_result(registry);
-    let pile: Vec<usize> = snap.us.library.iter()
-        .enumerate()
-        .filter(|(_, c)| c.pile_selected)
-        .map(|(i, _)| i)
-        .collect();
 
     #[derive(serde::Serialize)]
-    struct Shared { scenario: ScenarioResult, pile: Vec<usize> }
+    struct Shared { scenario: ScenarioResult, pile: PileSelection }
 
     serde_json::to_string(&Shared { scenario: result, pile })
         .map_err(|e| JsValue::from_str(&e.to_string()))
