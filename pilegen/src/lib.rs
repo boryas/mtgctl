@@ -151,14 +151,15 @@ fn get_registry() -> &'static CardRegistry {
 /// Encode a ScenarioResult + pile selection into a compact URL token.
 ///
 /// `scenario_json`: the JSON from `run_scenario`.
-/// `pile_json`: JSON array of library indices that are pile-selected, e.g. `[0,1,2,3,4]`.
+/// `pile_json`: `{ "library": [[idx, slot], ...], "graveyard": [[idx, slot], ...] }`.
+/// Slots are 1..=5 (1 = top of pile, 5 = bottom). An index with slot=0 is ignored.
 #[cfg(target_arch = "wasm32")]
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct PileSelection {
     #[serde(default)]
-    library: Vec<usize>,
+    library: Vec<(usize, u8)>,
     #[serde(default)]
-    graveyard: Vec<usize>,
+    graveyard: Vec<(usize, u8)>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -173,14 +174,14 @@ pub fn encode_snapshot(scenario_json: &str, pile_json: &str) -> Result<String, J
     let mut snap = BoardSnapshot::from_result(&result, registry)
         .map_err(|e| JsValue::from_str(&format!("snapshot: {e}")))?;
 
-    for &idx in &pile.library {
+    for &(idx, slot) in &pile.library {
         if let Some(card) = snap.us.library.get_mut(idx) {
-            card.pile_selected = true;
+            card.pile_slot = slot;
         }
     }
-    for &idx in &pile.graveyard {
+    for &(idx, slot) in &pile.graveyard {
         if let Some(card) = snap.us.graveyard.get_mut(idx) {
-            card.pile_selected = true;
+            card.pile_slot = slot;
         }
     }
 
@@ -189,7 +190,7 @@ pub fn encode_snapshot(scenario_json: &str, pile_json: &str) -> Result<String, J
 
 /// Decode a URL token back into ScenarioResult JSON + pile selection.
 ///
-/// Returns JSON: `{ "scenario": ScenarioResult, "pile": { "library": [...], "graveyard": [...] } }`.
+/// Returns JSON: `{ "scenario": ScenarioResult, "pile": { "library": [[idx, slot], ...], "graveyard": [[idx, slot], ...] } }`.
 /// Logs/decision_log/text_summary will be empty.
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -201,13 +202,13 @@ pub fn decode_snapshot(token: &str) -> Result<String, JsValue> {
     let pile = PileSelection {
         library: snap.us.library.iter()
             .enumerate()
-            .filter(|(_, c)| c.pile_selected)
-            .map(|(i, _)| i)
+            .filter(|(_, c)| c.pile_slot != 0)
+            .map(|(i, c)| (i, c.pile_slot))
             .collect(),
         graveyard: snap.us.graveyard.iter()
             .enumerate()
-            .filter(|(_, c)| c.pile_selected)
-            .map(|(i, _)| i)
+            .filter(|(_, c)| c.pile_slot != 0)
+            .map(|(i, c)| (i, c.pile_slot))
             .collect(),
     };
     let result = snap.to_result(registry);

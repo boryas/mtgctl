@@ -4,11 +4,14 @@
 //! per card, mapping to real Magic set + collector number pairs via a
 //! [`CardRegistry`].
 //!
-//! # Wire format (version 1)
+//! # Wire format (version 2)
+//!
+//! `pile_slot` is a u8 in 0..=5: 0 = not in pile, 1 = top of pile, 5 = bottom.
+//! It's packed into 3 bits of each card/permanent flag byte.
 //!
 //! ```text
 //! HEADER (10 bytes):
-//!   [0]     version (u8) = 1
+//!   [0]     version (u8) = 2
 //!   [1]     turn (u8)
 //!   [2]     stage (u8: 0=Early, 1=Mid, 2=Late)
 //!   [3]     flags: bit0=on_play  bit1=us_land_drop  bit2=opp_land_drop
@@ -21,7 +24,7 @@
 //!   Per entry — CARD (5 bytes):
 //!       [2] set_index  (u16 LE)
 //!       [2] collector  (u16 LE)
-//!       [1] flags: bit0=pile_selected
+//!       [1] flags: bits0‑2=pile_slot  bit3=known
 //!
 //! PER PLAYER (us first, then opp):
 //!   [1]     deck_name_len (u8)
@@ -30,14 +33,14 @@
 //!   2× PERMANENT ZONE  (lands, permanents) — 7 bytes each:
 //!       [2] set_index  (u16 LE)
 //!       [2] collector  (u16 LE)
-//!       [1] flags: bit0=tapped  bit1=flipped  bit2=pile_selected
+//!       [1] flags: bit0=tapped  bit1=flipped  bits2‑4=pile_slot
 //!       [1] counters   (u8)
 //!       [1] loyalty    (u8)
 //!
 //!   4× CARD ZONE  (hand, library, graveyard, exile) — 5 bytes each:
 //!       [2] set_index  (u16 LE)
 //!       [2] collector  (u16 LE)
-//!       [1] flags: bit0=pile_selected  bit1=known
+//!       [1] flags: bits0‑2=pile_slot  bit3=known
 //!
 //!   [1]     hand_hidden (u8)
 //! ```
@@ -101,7 +104,8 @@ pub struct PermanentEntry {
     pub id: CardId,
     pub tapped: bool,
     pub flipped: bool,
-    pub pile_selected: bool,
+    /// 0 = not in pile; 1..=5 = slot (1 = top of pile, 5 = bottom).
+    pub pile_slot: u8,
     pub counters: u8,
     pub loyalty: u8,
 }
@@ -110,7 +114,8 @@ pub struct PermanentEntry {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CardEntry {
     pub id: CardId,
-    pub pile_selected: bool,
+    /// 0 = not in pile; 1..=5 = slot (1 = top of pile, 5 = bottom).
+    pub pile_slot: u8,
     /// True if this card is known/revealed (relevant for opponent's hand).
     pub known: bool,
 }
@@ -195,7 +200,7 @@ impl BoardSnapshot {
         let stack: Vec<CardEntry> = r.stack.iter()
             .map(|name| Ok(CardEntry {
                 id: lookup(registry, name)?,
-                pile_selected: false,
+                pile_slot: 0,
                 known: true,
             }))
             .collect::<Result<_, _>>()?;
@@ -251,28 +256,28 @@ impl PlayerSnapshot {
         let hand = p.hand.iter()
             .map(|cr| Ok(CardEntry {
                 id: lookup(reg, &cr.name)?,
-                pile_selected: false,
+                pile_slot: 0,
                 known: true,
             }))
             .collect::<Result<_, _>>()?;
         let library = p.library.iter()
             .map(|name| Ok(CardEntry {
                 id: lookup(reg, name)?,
-                pile_selected: false,
+                pile_slot: 0,
                 known: true,
             }))
             .collect::<Result<_, _>>()?;
         let graveyard = p.graveyard.iter()
             .map(|name| Ok(CardEntry {
                 id: lookup(reg, name)?,
-                pile_selected: false,
+                pile_slot: 0,
                 known: false,
             }))
             .collect::<Result<_, _>>()?;
         let exile = p.exile.iter()
             .map(|name| Ok(CardEntry {
                 id: lookup(reg, name)?,
-                pile_selected: false,
+                pile_slot: 0,
                 known: false,
             }))
             .collect::<Result<_, _>>()?;
@@ -334,7 +339,7 @@ fn perm_entry(reg: &CardRegistry, pr: &PermanentResult) -> Result<PermanentEntry
         id: lookup(reg, &pr.name)?,
         tapped: pr.tapped,
         flipped: pr.flipped,
-        pile_selected: false,
+        pile_slot: 0,
         counters: pr.counters as u8,
         loyalty: pr.loyalty as u8,
     })
@@ -342,7 +347,7 @@ fn perm_entry(reg: &CardRegistry, pr: &PermanentResult) -> Result<PermanentEntry
 
 // ── Binary encoding ──────────────────────────────────────────────────────────
 
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const NONE_LIFE: i16 = i16::MIN;
 
 pub fn encode(snap: &BoardSnapshot) -> Vec<u8> {
@@ -418,9 +423,9 @@ fn write_player(b: &mut Vec<u8>, p: &PlayerSnapshot) {
             b.extend_from_slice(&e.id.set_index.to_le_bytes());
             b.extend_from_slice(&e.id.collector_number.to_le_bytes());
             let mut f: u8 = 0;
-            if e.tapped        { f |= 1; }
-            if e.flipped       { f |= 2; }
-            if e.pile_selected { f |= 4; }
+            if e.tapped  { f |= 1; }
+            if e.flipped { f |= 2; }
+            f |= (e.pile_slot & 0x07) << 2;
             b.push(f);
             b.push(e.counters);
             b.push(e.loyalty);
@@ -440,9 +445,8 @@ fn write_cards(b: &mut Vec<u8>, zone: &[CardEntry]) {
     for e in zone {
         b.extend_from_slice(&e.id.set_index.to_le_bytes());
         b.extend_from_slice(&e.id.collector_number.to_le_bytes());
-        let mut f: u8 = 0;
-        if e.pile_selected { f |= 1; }
-        if e.known         { f |= 2; }
+        let mut f: u8 = e.pile_slot & 0x07;
+        if e.known { f |= 0x08; }
         b.push(f);
     }
 }
@@ -477,11 +481,11 @@ fn read_permanents(c: &mut Cursor<'_>) -> Result<Vec<PermanentEntry>, SnapshotEr
         let f = c.u8()?;
         v.push(PermanentEntry {
             id: CardId::new(set_index, coll),
-            tapped:        f & 1 != 0,
-            flipped:       f & 2 != 0,
-            pile_selected: f & 4 != 0,
-            counters: c.u8()?,
-            loyalty:  c.u8()?,
+            tapped:    f & 1 != 0,
+            flipped:   f & 2 != 0,
+            pile_slot: (f >> 2) & 0x07,
+            counters:  c.u8()?,
+            loyalty:   c.u8()?,
         });
     }
     Ok(v)
@@ -496,8 +500,8 @@ fn read_cards(c: &mut Cursor<'_>) -> Result<Vec<CardEntry>, SnapshotError> {
         let f = c.u8()?;
         v.push(CardEntry {
             id: CardId::new(set_index, coll),
-            pile_selected: f & 1 != 0,
-            known:         f & 2 != 0,
+            pile_slot: f & 0x07,
+            known:     f & 0x08 != 0,
         });
     }
     Ok(v)
@@ -658,7 +662,7 @@ mod tests {
             stage: Stage::Early,
             on_play: true,
             life_before_dd: Some(20),
-            stack: vec![CardEntry { id: dd_id, pile_selected: false, known: true }],
+            stack: vec![CardEntry { id: dd_id, pile_slot: 0, known: true }],
             us: PlayerSnapshot {
                 deck_name: "Doomsday".into(),
                 life: 10,
@@ -666,29 +670,29 @@ mod tests {
                 lands: vec![
                     PermanentEntry {
                         id: sea_id, tapped: true, flipped: false,
-                        pile_selected: false, counters: 0, loyalty: 0,
+                        pile_slot: 0, counters: 0, loyalty: 0,
                     },
                     PermanentEntry {
                         id: delta_id, tapped: true, flipped: false,
-                        pile_selected: false, counters: 0, loyalty: 0,
+                        pile_slot: 0, counters: 0, loyalty: 0,
                     },
                 ],
                 permanents: vec![
                     PermanentEntry {
                         id: petal_id, tapped: false, flipped: false,
-                        pile_selected: false, counters: 0, loyalty: 0,
+                        pile_slot: 0, counters: 0, loyalty: 0,
                     },
                 ],
                 hand: vec![],
                 library: vec![
-                    CardEntry { id: oracle_id, pile_selected: true, known: true },
-                    CardEntry { id: ritual_id, pile_selected: true, known: true },
-                    CardEntry { id: petal_id, pile_selected: true, known: true },
-                    CardEntry { id: sea_id, pile_selected: true, known: true },
-                    CardEntry { id: sea_id, pile_selected: true, known: true },
+                    CardEntry { id: oracle_id, pile_slot: 1, known: true },
+                    CardEntry { id: ritual_id, pile_slot: 2, known: true },
+                    CardEntry { id: petal_id, pile_slot: 3, known: true },
+                    CardEntry { id: sea_id, pile_slot: 4, known: true },
+                    CardEntry { id: sea_id, pile_slot: 5, known: true },
                 ],
                 graveyard: vec![
-                    CardEntry { id: ritual_id, pile_selected: false, known: false },
+                    CardEntry { id: ritual_id, pile_slot: 0, known: false },
                 ],
                 exile: vec![],
                 hand_hidden: 0,
@@ -700,17 +704,17 @@ mod tests {
                 lands: vec![
                     PermanentEntry {
                         id: volc_id, tapped: false, flipped: false,
-                        pile_selected: false, counters: 0, loyalty: 0,
+                        pile_slot: 0, counters: 0, loyalty: 0,
                     },
                 ],
                 permanents: vec![
                     PermanentEntry {
                         id: delver_id, tapped: false, flipped: true,
-                        pile_selected: false, counters: 0, loyalty: 0,
+                        pile_slot: 0, counters: 0, loyalty: 0,
                     },
                 ],
                 hand: vec![
-                    CardEntry { id: ritual_id, pile_selected: false, known: true },
+                    CardEntry { id: ritual_id, pile_slot: 0, known: true },
                 ],
                 library: vec![],
                 graveyard: vec![],
@@ -763,14 +767,15 @@ mod tests {
     }
 
     #[test]
-    fn pile_selected_survives_roundtrip() {
+    fn pile_slot_survives_roundtrip() {
         let snap = sample_snapshot();
         let bytes = encode(&snap);
         let decoded = decode(&bytes).unwrap();
-        // Library cards should have pile_selected=true.
-        assert!(decoded.us.library.iter().all(|c| c.pile_selected));
-        // Graveyard card should have pile_selected=false.
-        assert!(decoded.us.graveyard.iter().all(|c| !c.pile_selected));
+        // Library cards were assigned slots 1..=5 in sample_snapshot.
+        let slots: Vec<u8> = decoded.us.library.iter().map(|c| c.pile_slot).collect();
+        assert_eq!(slots, vec![1, 2, 3, 4, 5]);
+        // Graveyard card is not in the pile.
+        assert!(decoded.us.graveyard.iter().all(|c| c.pile_slot == 0));
     }
 
     #[test]
@@ -783,7 +788,7 @@ mod tests {
 
     #[test]
     fn decode_truncated() {
-        assert!(matches!(decode(&[1, 2]), Err(SnapshotError::TooShort)));
+        assert!(matches!(decode(&[VERSION, 2]), Err(SnapshotError::TooShort)));
     }
 
     fn sample_registry() -> CardRegistry {
