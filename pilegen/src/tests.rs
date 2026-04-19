@@ -2779,6 +2779,59 @@
         assert_eq!(state.objects[&spell_id].zone, CardZone::Stack, "zone unchanged after fizzle");
     }
 
+    // ── Section 56: Stifle (counter activated or triggered ability) ──────────
+
+    /// Stifle counters an opponent's triggered ability on the stack.
+    #[test]
+    fn test_stifle_counters_triggered_ability() {
+        let mut state = make_state();
+        let def = catalog_card("Stifle");
+        state.catalog.insert(def.name.clone(), def);
+
+        let ab_id = push_opp_triggered_ability(&mut state);
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Stifle");
+        state.us.pool.u = 1; state.us.pool.total = 1;
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[ab_id], 0, 0, None);
+        assert!(result.is_some(), "Stifle should be castable targeting a triggered ability");
+
+        let card_on_stack = result.unwrap();
+        let spell_state = state.objects[&card_on_stack].spell.clone().unwrap();
+        spell_state.effect.unwrap().call(&mut state, 1, &spell_state.chosen_targets);
+
+        assert!(!state.stack.contains(&ab_id), "triggered ability should be removed from stack");
+        assert!(!state.abilities.contains_key(&ab_id), "triggered ability removed from abilities map");
+    }
+
+    /// Stifle's TargetSpec (`AbilityType::Any`) lists both activated and triggered abilities
+    /// as legal targets — what distinguishes it from Consign to Memory.
+    #[test]
+    fn test_stifle_targets_activated_or_triggered() {
+        let mut state = make_state();
+
+        // Push one triggered, one activated opponent ability onto the stack.
+        let trig_id = push_opp_triggered_ability(&mut state);
+        let act_id = state.alloc_id();
+        let opp_player_id = state.player_id(PlayerId::Opp);
+        state.abilities.insert(act_id, StackAbility {
+            id: act_id,
+            source_name: "Activated Ability".to_string(),
+            owner: opp_player_id,
+            effect: Effect(std::sync::Arc::new(|_, _, _| {})),
+            chosen_targets: vec![],
+            costs_paid_ctx: CostsPaidCtx::default(),
+            is_triggered: false,
+            counterable: true,
+            choice_spec: None,
+        });
+        state.stack.push(act_id);
+
+        let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Any };
+        let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
+        assert!(targets.contains(&trig_id), "triggered ability is a legal Stifle target");
+        assert!(targets.contains(&act_id), "activated ability is a legal Stifle target");
+    }
+
     // ── 28. Force of Negation ─────────────────────────────────────────────────
 
     /// The pitch-cost condition on Force of Negation is true when it's not the caster's turn
@@ -6353,6 +6406,136 @@
             "Tumble should not damage non-flyer");
         assert_eq!(state.permanent_bf(flyer_id).unwrap().damage, 6,
             "Tumble should deal 6 damage to flyer");
+    }
+
+    // ── Prismatic Ending ─────────────────────────────────────────────────────
+
+    /// Converge = chosen_x + 1. With chosen_x = 2, converge = 3, so Null Rod (MV 2)
+    /// is exiled. With chosen_x = 0, converge = 1, so Null Rod (MV 2) is spared.
+    #[test]
+    fn test_prismatic_ending_exiles_iff_mv_le_converge() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let rod_id = add_default_perm(&mut state, PlayerId::Opp, "Null Rod");
+        recompute(&mut state);
+
+        // chosen_x = 2 → converge = 3 ≥ Null Rod's MV 2 → exiled.
+        let def = catalog_card("Prismatic Ending");
+        let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 2, 0).1;
+        eff.call(&mut state, 1, &[rod_id]);
+        assert_eq!(state.objects[&rod_id].zone, CardZone::Exile { on_adventure: false },
+            "Null Rod (MV 2) should be exiled when converge = 3");
+
+        // Reset: put Null Rod back on the battlefield for the second case.
+        let rod2_id = add_default_perm(&mut state, PlayerId::Opp, "Null Rod");
+        recompute(&mut state);
+
+        // chosen_x = 0 → converge = 1 < Null Rod's MV 2 → spared.
+        let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
+        eff.call(&mut state, 1, &[rod2_id]);
+        assert_eq!(state.objects[&rod2_id].zone, CardZone::Battlefield,
+            "Null Rod (MV 2) should survive when converge = 1");
+    }
+
+    // ── Phelia, Exuberant Shepherd ───────────────────────────────────────────
+
+    /// Attack trigger exiles our own nonland permanent, delayed trigger returns it at end
+    /// of turn under our control, and Phelia gains a +1/+1 counter because the returned
+    /// card entered under our control.
+    #[test]
+    fn test_phelia_blinks_own_permanent_gains_counter() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let phelia_id = add_perm_with_def(
+            &mut state,
+            PlayerId::Us,
+            &catalog_card("Phelia, Exuberant Shepherd"),
+            BattlefieldState { attacking: true, entered_this_turn: false, ..BattlefieldState::new() },
+        );
+        // Target our own Null Rod — owner == Phelia's controller, so +1/+1 counter.
+        let target_id = add_default_perm(&mut state, PlayerId::Us, "Null Rod");
+        recompute(&mut state);
+
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player: PlayerId::Us },
+            &mut state, 1, PlayerId::Us,
+        );
+        let phelia_pos = state.pending_triggers.iter()
+            .position(|ctx| ctx.source_name == "Phelia, Exuberant Shepherd")
+            .expect("Phelia attack trigger should queue on DeclareAttackers");
+        let ctx = state.pending_triggers.remove(phelia_pos);
+
+        let legal = legal_targets(&ctx.target_spec, PlayerId::Us, phelia_id, &state);
+        let picked = pick_targets(&ctx.target_spec, &legal, &state);
+        assert_eq!(picked, vec![target_id], "only legal target is our Null Rod");
+        ctx.effect.call(&mut state, 1, &picked);
+
+        assert_eq!(state.objects[&target_id].zone, CardZone::Exile { on_adventure: false },
+            "target exiled after trigger resolves");
+        assert_eq!(state.trigger_instances.len(), 1, "delayed return trigger registered");
+
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::End, active_player: PlayerId::Us },
+            &mut state, 1, PlayerId::Us,
+        );
+        let delayed_pos = state.pending_triggers.iter()
+            .position(|ctx| ctx.source_name == "Phelia (delayed return)")
+            .expect("delayed return trigger should queue on End step");
+        let ctx = state.pending_triggers.remove(delayed_pos);
+        ctx.effect.call(&mut state, 1, &[]);
+
+        assert_eq!(state.objects[&target_id].zone, CardZone::Battlefield,
+            "target returns to battlefield at end of turn");
+        assert_eq!(state.objects[&target_id].controller, PlayerId::Us,
+            "our card returns under our control");
+        assert_eq!(state.permanent_bf(phelia_id).unwrap().counters, 1,
+            "Phelia gets +1/+1: card entered under our control");
+    }
+
+    /// Blinking an opponent's permanent: it returns under opp's control and Phelia does
+    /// NOT gain a +1/+1 counter.
+    #[test]
+    fn test_phelia_blinks_opponent_permanent_no_counter() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let phelia_id = add_perm_with_def(
+            &mut state,
+            PlayerId::Us,
+            &catalog_card("Phelia, Exuberant Shepherd"),
+            BattlefieldState { attacking: true, entered_this_turn: false, ..BattlefieldState::new() },
+        );
+        let target_id = add_default_perm(&mut state, PlayerId::Opp, "Null Rod");
+        recompute(&mut state);
+
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player: PlayerId::Us },
+            &mut state, 1, PlayerId::Us,
+        );
+        let phelia_pos = state.pending_triggers.iter()
+            .position(|ctx| ctx.source_name == "Phelia, Exuberant Shepherd")
+            .expect("Phelia attack trigger should queue");
+        let ctx = state.pending_triggers.remove(phelia_pos);
+        let legal = legal_targets(&ctx.target_spec, PlayerId::Us, phelia_id, &state);
+        let picked = pick_targets(&ctx.target_spec, &legal, &state);
+        ctx.effect.call(&mut state, 1, &picked);
+
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::End, active_player: PlayerId::Us },
+            &mut state, 1, PlayerId::Us,
+        );
+        let delayed_pos = state.pending_triggers.iter()
+            .position(|ctx| ctx.source_name == "Phelia (delayed return)")
+            .expect("delayed return trigger should queue");
+        let ctx = state.pending_triggers.remove(delayed_pos);
+        ctx.effect.call(&mut state, 1, &[]);
+
+        assert_eq!(state.objects[&target_id].controller, PlayerId::Opp,
+            "opp's card returns under opp's control");
+        assert_eq!(state.permanent_bf(phelia_id).unwrap().counters, 0,
+            "no counter: card did not enter under our control");
     }
 
     // ── Cori-Steel Cutter ────────────────────────────────────────────────────

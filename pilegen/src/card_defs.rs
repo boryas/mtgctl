@@ -98,6 +98,7 @@ fn all_cards() -> Vec<CardDef> {
         hydroblast(),
         sheoldreds_edict(),
         spell_pierce(),
+        stifle(),
         flusterstorm(),
         mindbreak_trap(),
         // Spells — sorceries
@@ -127,6 +128,7 @@ fn all_cards() -> Vec<CardDef> {
         murktide_regent(),
         dauthi_voidwalker(),
         lavinia_azorius_renegade(),
+        phelia_exuberant_shepherd(),
         hexing_squelcher(),
         dragons_rage_channeler(),
         simian_spirit_guide(),
@@ -144,6 +146,7 @@ fn all_cards() -> Vec<CardDef> {
         price_of_progress(),
         meltdown(),
         rough_tumble(),
+        prismatic_ending(),
         // Opponent archetypes / hate cards
         null_rod(),
         karn_the_great_creator(),
@@ -1171,6 +1174,19 @@ fn spell_pierce() -> CardDef {
     }), parse_colors("U", true, false), None)
 }
 
+/// Counter target activated or triggered ability. (Mana abilities can't be targeted.)
+/// Mana abilities never go on the stack (CR 605.3a), so `AbilityOnStack` already excludes them.
+fn stifle() -> CardDef {
+    simple("Stifle", CardKind::Instant(SpellData {
+        mana_cost: "U".to_string(),
+        modes: single_mode(
+            TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Any },
+            |who, _source_id, _x| eff_counter_target(who),
+        ),
+        ..Default::default()
+    }), parse_colors("U", true, false), None)
+}
+
 /// Counter target instant or sorcery spell unless its controller pays {1}.
 /// Storm (CR 702.40): when you cast this spell, copy it for each spell cast before it
 /// this turn. Copies are counterable stack abilities targeting other legal targets.
@@ -2169,6 +2185,123 @@ fn lavinia_azorius_renegade() -> CardDef {
 
             }
         })],
+    )
+}
+
+/// Phelia, Exuberant Shepherd — {1}{W} Legendary Creature — Dog (2/2)
+/// Flash.
+/// Whenever Phelia attacks, exile up to one other target nonland permanent. At the
+/// beginning of the next end step, return that card to the battlefield under its
+/// owner's control. If it entered under your control, put a +1/+1 counter on Phelia.
+///
+/// "Entered under your control" ≡ the exiled card's owner is Phelia's controller
+/// (since returns go to owner). Blinking your own permanent grows Phelia; blinking
+/// an opponent's does not.
+///
+/// Attack trigger fires on `EnteredStep { DeclareAttackers }` gated by
+/// `permanent_bf(src).attacking` (same pattern as Tamiyo). "Up to one" is modeled
+/// via `TargetSpec::Union` of Actor+Opp nonland permanents; pick_targets returns
+/// at most one; effect no-ops if `targets` is empty. Delayed return is a floating
+/// `TriggerInstance` with `Expiry::OneShot` firing on `EnteredStep { End }` (same
+/// pattern as Sneak Attack). Controller is reset to owner on return (CR 614 return
+/// to battlefield under owner's control).
+fn phelia_exuberant_shepherd() -> CardDef {
+    let mut data = CreatureData::new("1W", 2, 2);
+    data.legendary = true;
+    data.creature_subtypes = vec!["Dog".into()];
+    data.keywords.insert(Keyword::Flash);
+
+    CardDef::new(
+        "Phelia, Exuberant Shepherd",
+        CardKind::Creature(data),
+        parse_colors("1W", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        vec![TriggerDef {
+            check: Arc::new(|event, source_id, controller, _state, pending| {
+                let GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player } = event
+                    else { return };
+                if *active_player != controller { return; }
+
+                // Nonland permanent, not this creature itself ("other").
+                let filter: ObjPredicate = {
+                    let src = source_id;
+                    Arc::new(move |id, state| {
+                        if id == src { return false; }
+                        state.def_of(id).map_or(false, |d|
+                            !d.types.iter().any(|t| *t == CardType::Land))
+                    })
+                };
+
+                pending.push(TriggerContext {
+                    source_name: "Phelia, Exuberant Shepherd".into(),
+                    controller,
+                    target_spec: TargetSpec::Union(vec![
+                        TargetSpec::ObjectInZone {
+                            controller: Who::Actor, zone: ZoneId::Battlefield,
+                            filter: filter.clone(),
+                        },
+                        TargetSpec::ObjectInZone {
+                            controller: Who::Opp, zone: ZoneId::Battlefield,
+                            filter,
+                        },
+                    ]),
+                    effect: Effect(Arc::new(move |state, t, targets| {
+                        // EnteredStep fires regardless of whether Phelia is attacking — gate here.
+                        if !state.permanent_bf(source_id).map_or(false, |bf| bf.attacking) {
+                            return;
+                        }
+                        let Some(&target_id) = targets.first() else {
+                            state.log(t, controller, "Phelia attacks: no target chosen");
+                            return;
+                        };
+                        let Some(target_owner) = state.objects.get(&target_id).map(|o| o.owner)
+                            else { return };
+                        let returns_to_us = target_owner == controller;
+                        state.log(t, controller, format!(
+                            "Phelia attacks → exile target (returns_to_us={})", returns_to_us,
+                        ));
+                        change_zone(target_id, ZoneId::Exile, state, t, controller);
+
+                        // Delayed trigger: at next end step, return card under owner's control;
+                        // +1/+1 counter on Phelia if the card was an opponent's permanent.
+                        state.trigger_instances.push(TriggerInstance {
+                            source_id,
+                            controller,
+                            check: Arc::new(move |event, source_id, controller, _state, pending| {
+                                let GameEvent::EnteredStep { step: StepKind::End, .. } = event
+                                    else { return };
+                                pending.push(TriggerContext {
+                                    source_name: "Phelia (delayed return)".into(),
+                                    controller,
+                                    target_spec: TargetSpec::None,
+                                    effect: Effect(Arc::new(move |state, t, _targets| {
+                                        if let Some(obj) = state.objects.get_mut(&target_id) {
+                                            obj.controller = target_owner;
+                                        }
+                                        change_zone(target_id, ZoneId::Battlefield, state, t, target_owner);
+                                        state.log(t, controller, format!(
+                                            "Phelia (delayed): return exiled card to battlefield (owner={:?})",
+                                            target_owner,
+                                        ));
+                                        if returns_to_us {
+                                            if let Some(bf) = state.permanent_bf_mut(source_id) {
+                                                bf.counters += 1;
+                                                state.log(t, controller,
+                                                    "Phelia: +1/+1 counter (card returned under your control)");
+                                            }
+                                        }
+                                    })),
+                                });
+                            }),
+                            expiry: Some(Expiry::OneShot),
+                        });
+                    })),
+                });
+            }),
+            active_when: tp_on_battlefield(),
+        }],
+        vec![], vec![], vec![],
     )
 }
 
@@ -3399,6 +3532,48 @@ fn rough_tumble() -> CardDef {
         vec![], CardLayout::Split, Some(Box::new(tumble)),
         vec![], vec![], vec![], vec![],
     )
+}
+
+// ── Prismatic Ending ─────────────────────────────────────────────────────────
+
+/// Prismatic Ending — {X}{W} Sorcery.
+/// Converge — Exile target nonland permanent if its mana value is less than or
+/// equal to the number of colors of mana spent to cast this spell.
+///
+/// Modeled as base cost {W} plus `XMana` additional cost (same sunburst pattern
+/// as Engineered Explosives / Meltdown — strategy declares `chosen_x` distinct
+/// colored mana toward the {X} generic). Converge count = chosen_x + 1; the +1
+/// is the mandatory {W} pip. At resolution, the target is exiled iff its mana
+/// value ≤ converge count; otherwise the effect does nothing (CR 702.103a).
+fn prismatic_ending() -> CardDef {
+    let mut def = simple("Prismatic Ending", CardKind::Sorcery(SpellData {
+        mana_cost: "W".to_string(),
+        modes: single_mode(
+            TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Battlefield,
+                filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Land))),
+            },
+            |who, _source_id, chosen_x| {
+                let converge = chosen_x as i32 + 1;
+                Effect(Arc::new(move |state, t, targets| {
+                    let Some(&id) = targets.first() else { return };
+                    let mv = state.def_of(id)
+                        .map(|d| mana_value(d.mana_cost()))
+                        .unwrap_or(0);
+                    if mv <= converge {
+                        state.log(t, who, format!("→ Prismatic Ending (converge={}): exile MV={} target", converge, mv));
+                        change_zone(id, ZoneId::Exile, state, t, who);
+                    } else {
+                        state.log(t, who, format!("→ Prismatic Ending (converge={}): target MV={} too large; no effect", converge, mv));
+                    }
+                }))
+            },
+        ),
+        ..Default::default()
+    }), parse_colors("W", false, false), None);
+    def.additional_costs = vec![CostComponent::XMana];
+    def
 }
 
 // ── Null Rod ─────────────────────────────────────────────────────────────────

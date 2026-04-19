@@ -144,6 +144,14 @@ Modify the ZoneChange event itself rather than triggering after it.
 |------|-----------|--------|
 | City of Traitors | Controller plays another land | Sacrifice self |
 
+#### Attack triggers (CR 509.1)
+
+| Card | Condition | Effect |
+|------|-----------|--------|
+| Phelia, Exuberant Shepherd | Self attacks | Exile up to 1 other nonland permanent; delayed end-step return |
+
+Pattern: fires on `EnteredStep { DeclareAttackers, active_player }`, gated by `permanent_bf(source).attacking`.
+
 #### Upkeep triggers
 
 | Card | Condition | Effect |
@@ -157,6 +165,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Sneak Attack | Next end step | Sacrifice creature; `OneShot` `TriggerInstance` |
 | Fury (evoke) | Self ETB with `alt_cost_index` set | Sacrifice self |
 | Mishra's Bauble | Next upkeep | Draw 1; `OneShot` delayed `TriggerInstance` |
+| Phelia, Exuberant Shepherd | Next end step | Return exiled card under owner's control; +1/+1 counter if it returned under your control |
 
 #### Ward (CR 702.21)
 
@@ -306,6 +315,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Bitter Triumph | Discard OR 3 life | `CostOr` |
 | Toxic Deluge | X life | `XLife` |
 | Engineered Explosives | X mana (sunburst) | `XMana` |
+| Prismatic Ending | X mana (converge) | `XMana`; converge = chosen_x + 1 |
 | Consign to Memory | Replicate {1} | `Replicate` |
 
 ---
@@ -326,7 +336,8 @@ Modify the ZoneChange event itself rather than triggering after it.
 
 | Keyword | Cards |
 |---------|-------|
-| Flying | Emrakul, Griselbrand, Atraxa, Dragon's Rage Channeler (delirium), Insectile Aberration |
+| Flying | Emrakul, Griselbrand, Atraxa, Dragon's Rage Channeler (delirium), Insectile Aberration, Brazen Borrower |
+| Flash | Brazen Borrower, Phelia, Exuberant Shepherd |
 | Shadow | Dauthi Voidwalker |
 | Double Strike | Fury |
 | Trample | Granted by Cori-Steel Cutter via L6 CE; stored as keyword, not functionally modeled |
@@ -361,6 +372,7 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Flusterstorm | Instant/sorcery | `eff_counter_unless_pays` ({1}) + storm copies |
 | Mindbreak Trap | Any number | `eff_exile_all_targets` (exiles, doesn't counter) |
 | Consign to Memory | Triggered ability or colorless | `eff_counter_target` |
+| Stifle | Activated or triggered ability | `eff_counter_target`; `AbilityOnStack { Any }` (mana abilities never hit stack — CR 605.3a) |
 
 #### Destroy (CR 701.7)
 
@@ -384,6 +396,8 @@ Modify the ZoneChange event itself rather than triggering after it.
 | Swords to Plowshares | Creature | `eff_exile_target_gain_power` |
 | Surgical Extraction | GY card + all copies | Custom effect iterating zones |
 | Mindbreak Trap | All targeted spells | `eff_exile_all_targets` |
+| Prismatic Ending | Nonland permanent MV ≤ converge | Inline `change_zone`; reads `chosen_x` from factory arg |
+| Phelia, Exuberant Shepherd | Other nonland permanent (up to one) | Inline `change_zone`; pairs with delayed return trigger |
 
 #### Search (CR 701.19)
 
