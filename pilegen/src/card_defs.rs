@@ -124,6 +124,7 @@ fn all_cards() -> Vec<CardDef> {
         ingenious_infiltrator(),
         kaito_bane_of_nightmares(),
         recruiter_of_the_guard(),
+        stoneforge_mystic(),
         orcish_bowmasters(),
         murktide_regent(),
         dauthi_voidwalker(),
@@ -1989,6 +1990,60 @@ fn recruiter_of_the_guard() -> CardDef {
     )
 }
 
+/// Stoneforge Mystic — {1}{W} Creature — Kor Artificer 1/2.
+/// "When this creature enters, you may search your library for an Equipment card,
+///  reveal it, put it into your hand, then shuffle."
+/// "{1}{W}, {T}: You may put an Equipment card from your hand onto the battlefield."
+fn stoneforge_mystic() -> CardDef {
+    let mut data = CreatureData::new("1W", 1, 2);
+    data.creature_subtypes = vec!["Kor".into(), "Artificer".into()];
+    data.abilities = vec![AbilityDef {
+        // {1}{W}, {T}: put an Equipment card from your hand onto the battlefield.
+        costs: vec![CostComponent::Mana(parse_mana_cost("1W")), CostComponent::TapSelf],
+        choice_spec: Some(ChoiceSpec {
+            controller: Who::Actor,
+            zone: ZoneId::Hand,
+            filter: obj_pred_from_card(pred_has_subtype("Equipment")),
+        }),
+        ability_factory: Some(Arc::new(|who, _source_id| {
+            Effect(Arc::new(move |state, t, targets| {
+                let Some(&equip_id) = targets.first() else { return };
+                let name = state.objects.get(&equip_id)
+                    .map(|c| c.catalog_key.clone())
+                    .unwrap_or_default();
+                state.log(t, who, format!("Stoneforge Mystic → {} onto the battlefield", name));
+                change_zone(equip_id, ZoneId::Battlefield, state, t, who);
+            }))
+        })),
+        timing: ActivationTiming::Sorcery,
+        ..Default::default()
+    }];
+    CardDef::new(
+        "Stoneforge Mystic",
+        CardKind::Creature(data),
+        parse_colors("1W", false, false),
+        None,
+        vec![], CardLayout::Normal, None,
+        // ETB trigger: search library for an Equipment card, put into hand.
+        vec![TriggerDef {
+            check: Arc::new(|event, source_id, controller, _state, pending| {
+                if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+                    if *id == source_id && *ctlr == controller {
+                        pending.push(TriggerContext {
+                            source_name: "Stoneforge Mystic".into(),
+                            controller,
+                            target_spec: TargetSpec::None,
+                            effect: eff_fetch_search(controller, pred_has_subtype("Equipment"), ZoneId::Hand),
+                        });
+                    }
+                }
+            }),
+            active_when: tp_on_battlefield(),
+        }],
+        vec![], vec![], vec![],
+    )
+}
+
 /// ETB trigger + draw-trigger: deal 1 damage to any target and amass Orc 1 whenever
 /// opponent draws a non-natural card. Also fires on its own ETB. CR 603.
 fn orcish_bowmasters() -> CardDef {
@@ -2928,6 +2983,7 @@ fn cori_steel_cutter() -> CardDef {
         "Cori-Steel Cutter",
         CardKind::Artifact(ArtifactData {
             mana_cost: "1R".to_string(),
+            subtypes: vec!["Equipment".into()],
             abilities: vec![AbilityDef {
                 // Equip {1}{R} — sorcery-speed, targets a creature you control.
                 costs: vec![CostComponent::Mana(parse_mana_cost("1R"))],

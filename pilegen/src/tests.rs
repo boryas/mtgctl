@@ -2832,6 +2832,59 @@
         assert!(targets.contains(&act_id), "activated ability is a legal Stifle target");
     }
 
+    // ── Section 57: Stoneforge Mystic (Equipment subtype + tutor + put-from-hand) ──
+
+    /// Stoneforge's ETB tutor finds an Equipment in the library and puts it into hand;
+    /// non-Equipment artifacts and creatures stay put.
+    #[test]
+    fn test_stoneforge_etb_finds_equipment() {
+        let mut state = make_state();
+        state.catalog.insert("Stoneforge Mystic".into(), catalog_card("Stoneforge Mystic"));
+        state.catalog.insert("Cori-Steel Cutter".into(), catalog_card("Cori-Steel Cutter"));
+        state.catalog.insert("Lotus Petal".into(), catalog_card("Lotus Petal"));
+
+        let equip_id = add_library_card(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+        let petal_id = add_library_card(&mut state, PlayerId::Us, "Lotus Petal");
+
+        eff_enter_permanent(PlayerId::Us, "Stoneforge Mystic").call(&mut state, 1, &[]);
+        for ctx in std::mem::take(&mut state.pending_triggers) {
+            ctx.effect.call(&mut state, 1, &[]);
+        }
+
+        assert_eq!(state.objects[&equip_id].zone, CardZone::Hand { known: false },
+            "Equipment should be tutored into hand");
+        assert_eq!(state.objects[&petal_id].zone, CardZone::Library,
+            "non-Equipment artifact should stay in library");
+    }
+
+    /// Stoneforge's activated ability puts an Equipment from hand onto the battlefield.
+    #[test]
+    fn test_stoneforge_activated_puts_equipment_from_hand() {
+        let mut state = make_state();
+        state.catalog.insert("Stoneforge Mystic".into(), catalog_card("Stoneforge Mystic"));
+        state.catalog.insert("Cori-Steel Cutter".into(), catalog_card("Cori-Steel Cutter"));
+
+        // Stoneforge in play, untapped.
+        eff_enter_permanent(PlayerId::Us, "Stoneforge Mystic").call(&mut state, 1, &[]);
+        // Drop the ETB tutor's pending trigger — we're testing the activated ability here.
+        state.pending_triggers.clear();
+        let sfm_id = state.objects.values()
+            .find(|o| o.catalog_key == "Stoneforge Mystic" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Stoneforge should be on the battlefield");
+        if let Some(bf) = state.permanent_bf_mut(sfm_id) { bf.entered_this_turn = false; }
+
+        let equip_id = add_hand_card(&mut state, PlayerId::Us, "Cori-Steel Cutter");
+
+        // Fire the {1}{W}, {T} ability directly via its factory.
+        let def = state.catalog["Stoneforge Mystic"].clone();
+        let factory = def.as_creature().unwrap().abilities[0]
+            .ability_factory.as_ref().unwrap().clone();
+        factory(PlayerId::Us, sfm_id).call(&mut state, 1, &[equip_id]);
+
+        assert_eq!(state.objects[&equip_id].zone, CardZone::Battlefield,
+            "Equipment should be on the battlefield");
+    }
+
     // ── 28. Force of Negation ─────────────────────────────────────────────────
 
     /// The pitch-cost condition on Force of Negation is true when it's not the caster's turn

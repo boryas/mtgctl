@@ -398,6 +398,8 @@ pub(crate) struct ArtifactData {
     pub(crate) mana_cost: String,
     pub(crate) abilities: Vec<AbilityDef>,
     pub(crate) mana_abilities: Vec<ManaAbility>,
+    /// Artifact subtypes (e.g. "Equipment", "Treasure"). CR 205.3g.
+    pub(crate) subtypes: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -815,11 +817,12 @@ impl CardDef {
         self.keywords().contains(kw)
     }
 
-    /// Returns true if this card has the given subtype (e.g. `"adventure"`, `"Ninja"`).
+    /// Returns true if this card has the given subtype (e.g. `"adventure"`, `"Ninja"`, `"Equipment"`).
     pub(crate) fn has_subtype(&self, st: &str) -> bool {
         match &self.kind {
             CardKind::Instant(s) | CardKind::Sorcery(s) => s.subtypes.iter().any(|t| t == st),
             CardKind::Creature(c) => c.creature_subtypes.iter().any(|t| t == st),
+            CardKind::Artifact(a) => a.subtypes.iter().any(|t| t == st),
             _ => false,
         }
     }

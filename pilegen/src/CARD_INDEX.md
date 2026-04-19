@@ -75,6 +75,7 @@ All basic lands, ABU duals, Great Furnace use `tap_produces(mana_string)`.
 | Card | Finds | Destination |
 |------|-------|-------------|
 | Recruiter of the Guard | Creature toughness ≤ 2 | Hand |
+| Stoneforge Mystic | Equipment (artifact subtype) | Hand |
 
 #### Damage on ETB
 
@@ -405,6 +406,7 @@ Pattern: fires on `EnteredStep { DeclareAttackers, active_player }`, gated by `p
 |------|-------|-------------|
 | Fetch lands (10) | Land by subtype | Battlefield |
 | Recruiter of the Guard | Creature toughness≤2 | Hand |
+| Stoneforge Mystic | Equipment | Hand |
 | Personal Tutor | Sorcery | Library (top) |
 | Green Sun's Zenith | Green creature | Battlefield |
 | Urza's Saga | Artifact, no colored pips, MV≤1 | Battlefield |
@@ -487,9 +489,13 @@ Pattern: fires on `EnteredStep { DeclareAttackers, active_player }`, gated by `p
 
 ### Equipment / Attach (CR 301.5)
 
+Artifact subtype `"Equipment"` is stored in `ArtifactData.subtypes` and matched via
+`pred_has_subtype("Equipment")` (which delegates to `CardDef::has_subtype`).
+
 | Card | Equip cost | Grants | Notes |
 |------|-----------|--------|-------|
 | Cori-Steel Cutter | {1}{R} | +1/+1, trample, haste | `BattlefieldState.attached_to`; sorcery-speed equip; flurry auto-attaches |
+| Stoneforge Mystic | — | tutors Equipment to hand on ETB; {1}{W},{T} cheats one onto BF | Sorcery-timing activated ability; `ChoiceSpec` filters hand to Equipment |
 
 ---
 

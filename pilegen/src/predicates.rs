@@ -67,6 +67,11 @@ pub(crate) fn pred_no_colored_pips() -> CardPredicate {
     std::sync::Arc::new(|d| d.colors.is_empty())
 }
 
+/// True iff the card has the given subtype (e.g. "Equipment", "Ninja", "adventure").
+pub(crate) fn pred_has_subtype(subtype: &'static str) -> CardPredicate {
+    std::sync::Arc::new(move |d| d.has_subtype(subtype))
+}
+
 /// Logical AND of two predicates.
 pub(crate) fn pred_and(a: CardPredicate, b: CardPredicate) -> CardPredicate {
     std::sync::Arc::new(move |d| a(d) && b(d))
