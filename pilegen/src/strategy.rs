@@ -92,6 +92,44 @@ pub(crate) trait Strategy {
         candidates.first().copied()
     }
 
+    /// CR 509.1h: when an attacker is blocked by 2+ creatures, the attacking player
+    /// chooses the damage assignment order. Default: keep declaration order.
+    fn order_blockers(&mut self, _state: &SimState, _attacker_id: ObjId,
+                      blockers: &[ObjId]) -> Vec<ObjId> {
+        blockers.to_vec()
+    }
+
+    /// CR 510.1c: the attacking player divides the attacker's combat damage among
+    /// `ordered_blockers`, but must assign at least lethal damage to each blocker
+    /// before assigning any to the next one. Returns one amount per blocker; sum ≤
+    /// `total_damage`. The engine spills any leftover (`total_damage - sum`) to the
+    /// defending player or planeswalker only when the attacker has trample.
+    /// Without trample, leftover is dumped onto the last blocker (CR 510.1c sentence 3).
+    ///
+    /// Default heuristic: assign exactly lethal in order, then put any remainder onto
+    /// the last blocker (or leave for trample spillover, decided by the engine).
+    /// `lethal_per_blocker` is the engine-computed minimum for each blocker, already
+    /// reflecting deathtouch (CR 702.2c) and pre-existing damage.
+    fn assign_combat_damage(&mut self, _state: &SimState, _attacker_id: ObjId,
+                            ordered_blockers: &[ObjId], total_damage: i32,
+                            lethal_per_blocker: &[i32], has_trample: bool) -> Vec<i32> {
+        let n = ordered_blockers.len();
+        let mut out = vec![0i32; n];
+        let mut remaining = total_damage.max(0);
+        for i in 0..n {
+            if remaining <= 0 { break; }
+            let lethal = lethal_per_blocker[i].max(0);
+            let take = remaining.min(lethal);
+            out[i] = take;
+            remaining -= take;
+        }
+        // Without trample, all damage must be assigned to blockers — pile the rest on the last.
+        if !has_trample && remaining > 0 && n > 0 {
+            out[n - 1] += remaining;
+        }
+        out
+    }
+
     // ── Card evaluation (Phase 3) ──────────────────────────────────────────
 
     /// The player this strategy controls.
@@ -331,6 +369,7 @@ impl Strategy for DoomsdayStrategy {
         }
         let in_ninjutsu_step = matches!(state.current_phase,
             Some(TurnPosition::Step(StepKind::DeclareBlockers))
+            | Some(TurnPosition::Step(StepKind::FirstStrikeCombatDamage))
             | Some(TurnPosition::Step(StepKind::CombatDamage))
             | Some(TurnPosition::Step(StepKind::EndCombat)));
         if in_ninjutsu_step {
@@ -623,6 +662,7 @@ impl Strategy for GenericOppStrategy {
         }
         let in_ninjutsu_step = matches!(state.current_phase,
             Some(TurnPosition::Step(StepKind::DeclareBlockers))
+            | Some(TurnPosition::Step(StepKind::FirstStrikeCombatDamage))
             | Some(TurnPosition::Step(StepKind::CombatDamage))
             | Some(TurnPosition::Step(StepKind::EndCombat)));
         if in_ninjutsu_step {
@@ -1056,10 +1096,14 @@ fn pick_attackers(
             if !def.is_creature() { return None; }
             let atk_flies  = creature_has_keyword(p.id, Keyword::Flying, state);
             let atk_shadow = creature_has_keyword(p.id, Keyword::Shadow, state);
-            // Sum power of NAP creatures that can block this attacker.
+            // Sum power of NAP creatures that can block this attacker. CR 702.17b: a creature
+            // with reach can block fliers; CR 702.9b: flying can only be blocked by flying or reach.
             let blocking_power: i32 = nap_blockers.iter()
                 .filter(|(blk_id, _)| {
-                    if atk_flies && !creature_has_keyword(*blk_id, Keyword::Flying, state) { return false; }
+                    if atk_flies
+                        && !creature_has_keyword(*blk_id, Keyword::Flying, state)
+                        && !creature_has_keyword(*blk_id, Keyword::Reach, state)
+                    { return false; }
                     let blk_shadow = creature_has_keyword(*blk_id, Keyword::Shadow, state);
                     atk_shadow == blk_shadow
                 })
@@ -1112,8 +1156,11 @@ fn pick_blockers(
             .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
             .find_map(|p| {
                 if !state.def_of(p.id).map(|d| d.is_creature()).unwrap_or(false) { return None; }
-                // Flying attackers can only be blocked by flying creatures.
-                if atk_flies && !creature_has_keyword(p.id, Keyword::Flying, state) { return None; }
+                // Flying attackers can only be blocked by flying or reach (CR 702.9b, 702.17b).
+                if atk_flies
+                    && !creature_has_keyword(p.id, Keyword::Flying, state)
+                    && !creature_has_keyword(p.id, Keyword::Reach, state)
+                { return None; }
                 // Shadow: shadow creatures can only block/be blocked by other shadow creatures.
                 let blk_shadow = creature_has_keyword(p.id, Keyword::Shadow, state);
                 if atk_shadow != blk_shadow { return None; }

@@ -340,9 +340,14 @@ Pattern: fires on `EnteredStep { DeclareAttackers, active_player }`, gated by `p
 | Flying | Emrakul, Griselbrand, Atraxa, Dragon's Rage Channeler (delirium), Insectile Aberration, Brazen Borrower |
 | Flash | Brazen Borrower, Phelia, Exuberant Shepherd |
 | Shadow | Dauthi Voidwalker |
-| Double Strike | Fury |
-| Trample | Granted by Cori-Steel Cutter via L6 CE; stored as keyword, not functionally modeled |
+| First Strike | Engine-supported via split combat damage step (CR 510.5); no printed card currently has it |
+| Double Strike | Fury — functional: deals damage in both the first-strike and regular combat damage steps |
+| Trample | Granted by Cori-Steel Cutter via L6 CE; functional in CombatDamage step (lethal-to-blockers, excess to player/PW) |
 | Haste | Granted by Sneak Attack via L6 CE; also by Cori-Steel Cutter |
+| Vigilance | Granted by Batterskull via L6 CE; functional in DeclareAttackers (skips tap) |
+| Lifelink | Griselbrand, Atraxa; granted by Batterskull via L6 CE; functional in CombatDamage (controller gains life equal to damage dealt) |
+| Deathtouch | Atraxa; functional in CombatDamage (any nonzero damage = lethal; trample-DT assigns 1 to blockers) |
+| Reach | Engine-supported in declare-attackers/blockers; not currently on any printed card |
 
 #### Other
 
@@ -355,6 +360,7 @@ Pattern: fires on `EnteredStep { DeclareAttackers, active_player }`, gated by `p
 | Protection | Emrakul | `protection_from: vec![obj_pred_colored_spell()]` |
 | Annihilator 6 | Emrakul | Stored as keyword; **not functionally modeled** |
 | Cycling | Street Wraith, Edge of Autumn | Street Wraith: hand `AbilityDef`; Edge: **strategy-only** |
+| Living Weapon | Batterskull | ETB trigger: create Phyrexian Germ token + auto-attach |
 | Prowess | Monk Token (from Cori-Steel Cutter) | Triggered ability: +1/+1 EOT per noncreature spell |
 | Ninjutsu | Ingenious Infiltrator, Kaito | `ninjutsu_ability()` helper |
 
@@ -484,6 +490,7 @@ Pattern: fires on `EnteredStep { DeclareAttackers, active_player }`, gated by `p
 | Orcish Bowmasters | Orc Army 0/0 | Amass; grown by counters |
 | Tamiyo | Clue Token | Artifact with {2}, tap, sac: draw 1 |
 | Cori-Steel Cutter | Monk Token 1/1 | White creature with prowess; flurry trigger |
+| Batterskull | Phyrexian Germ 0/0 | Black creature; living-weapon ETB |
 
 ---
 
@@ -496,6 +503,7 @@ Artifact subtype `"Equipment"` is stored in `ArtifactData.subtypes` and matched 
 |------|-----------|--------|-------|
 | Cori-Steel Cutter | {1}{R} | +1/+1, trample, haste | `BattlefieldState.attached_to`; sorcery-speed equip; flurry auto-attaches |
 | Stoneforge Mystic | — | tutors Equipment to hand on ETB; {1}{W},{T} cheats one onto BF | Sorcery-timing activated ability; `ChoiceSpec` filters hand to Equipment |
+| Batterskull | {5} | +4/+4, vigilance, lifelink | Living-weapon ETB auto-creates Phyrexian Germ token and attaches; {3}: bounce self to hand |
 
 ---
 

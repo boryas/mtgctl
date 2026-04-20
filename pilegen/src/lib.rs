@@ -1005,6 +1005,7 @@ pub(crate) enum StepKind {
     BeginCombat,
     DeclareAttackers,
     DeclareBlockers,
+    FirstStrikeCombatDamage,
     CombatDamage,
     EndCombat,
     End,
@@ -1129,6 +1130,7 @@ fn combat_phase() -> Phase {
             Step { kind: StepKind::BeginCombat,      prio: true },
             Step { kind: StepKind::DeclareAttackers, prio: true },
             Step { kind: StepKind::DeclareBlockers,  prio: true },
+            Step { kind: StepKind::FirstStrikeCombatDamage, prio: true },
             Step { kind: StepKind::CombatDamage,     prio: true },
             Step { kind: StepKind::EndCombat,        prio: true },
         ],
@@ -3128,6 +3130,72 @@ pub(crate) fn creature_has_keyword(id: ObjId, kw: Keyword, state: &SimState) -> 
         .unwrap_or(false)
 }
 
+/// Which of the two combat-damage steps a damage pass is running.
+/// CR 510.5 splits combat damage when first strike or double strike is involved.
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum DamageStepKind { FirstStrike, Regular }
+
+/// CR 510.5 / 702.4b: who deals damage in this step.
+/// FS step:  first strike or double strike sources only.
+/// Regular:  double strike sources, plus any source without first strike.
+fn source_eligible_for_damage_step(id: ObjId, state: &SimState, step: DamageStepKind) -> bool {
+    let fs = creature_has_keyword(id, Keyword::FirstStrike, state);
+    let ds = creature_has_keyword(id, Keyword::DoubleStrike, state);
+    match step {
+        DamageStepKind::FirstStrike => fs || ds,
+        DamageStepKind::Regular     => ds || !fs,
+    }
+}
+
+/// CR 510.5: a first-strike combat damage step occurs only when at least one
+/// attacking or blocking creature has first strike or double strike.
+fn any_combatant_has_first_or_double_strike(state: &SimState) -> bool {
+    let has_fs_or_ds = |id: ObjId| {
+        creature_has_keyword(id, Keyword::FirstStrike, state)
+        || creature_has_keyword(id, Keyword::DoubleStrike, state)
+    };
+    state.combat_attackers.iter().any(|&id| has_fs_or_ds(id))
+        || state.combat_blocks.iter().any(|&(_, b)| has_fs_or_ds(b))
+}
+
+/// Validate a strategy's combat-damage assignment against CR 510.1c (lethal-in-order rule).
+/// `raw[i]` is the strategy-proposed damage to ordered_blockers[i]; `lethal[i]` is the engine-
+/// computed minimum needed for that blocker to be considered lethally damaged (deathtouch
+/// already folded in by the caller). Returns a normalized assignment; if `raw` violates the
+/// rule (or has the wrong length, negatives, or oversized sum), falls back to the default
+/// "lethal-in-order, dump-rest-on-last (or trample-spillover)" heuristic.
+fn validate_assignment(raw: &[i32], lethal: &[i32], total: i32, has_trample: bool) -> Vec<i32> {
+    let n = lethal.len();
+    let default = || {
+        let mut out = vec![0i32; n];
+        let mut remaining = total.max(0);
+        for i in 0..n {
+            if remaining <= 0 { break; }
+            let take = remaining.min(lethal[i].max(0));
+            out[i] = take;
+            remaining -= take;
+        }
+        if !has_trample && remaining > 0 && n > 0 {
+            out[n - 1] += remaining;
+        }
+        out
+    };
+    if raw.len() != n { return default(); }
+    if raw.iter().any(|&x| x < 0) { return default(); }
+    let sum: i32 = raw.iter().sum();
+    if sum > total { return default(); }
+    // Without trample, every point of damage must land on a blocker.
+    if !has_trample && sum < total { return default(); }
+    // CR 510.1c: a blocker behind the current one can only receive damage if every earlier
+    // blocker has already been assigned at least lethal damage.
+    let mut earlier_full = true;
+    for i in 0..n {
+        if !earlier_full && raw[i] > 0 { return default(); }
+        if raw[i] < lethal[i] { earlier_full = false; }
+    }
+    raw.to_vec()
+}
+
 
 // ── Engine invariant assertions ──────────────────────────────────────────────
 
@@ -3788,6 +3856,182 @@ fn handle_priority_round(
     assert_engine_invariants(state, "priority-round-end");
 }
 
+/// One pass of combat damage (CR 510). `step` selects whether sources with first
+/// strike / double strike act (FirstStrike pass) or whether normal sources act
+/// (Regular pass). Both phases — attacker→blockers and blockers→attacker — happen
+/// simultaneously within a single pass; SBA between passes (handled by the step
+/// driver) cleans up any creatures that died from first-strike damage.
+fn do_combat_damage_pass(
+    state: &mut SimState,
+    t: u8,
+    ap: PlayerId,
+    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
+    step: DamageStepKind,
+) {
+    if state.combat_attackers.is_empty() { return; }
+    let nap = ap.opp();
+    let attackers   = state.combat_attackers.clone();
+    let block_pairs = state.combat_blocks.clone();
+
+    let alive = |id: ObjId, state: &SimState| -> bool {
+        state.objects.get(&id).map(|o| o.zone == CardZone::Battlefield).unwrap_or(false)
+    };
+
+    // Group blockers per attacker, preserving combat_blocks order (CR 509.1h).
+    // Filter to live blockers — anything killed by the prior FS pass is already gone.
+    let mut blocks_by_atk: HashMap<ObjId, Vec<ObjId>> = HashMap::new();
+    let mut was_blocked: std::collections::HashSet<ObjId> = Default::default();
+    for &(a, b) in &block_pairs {
+        was_blocked.insert(a);
+        if alive(b, state) {
+            blocks_by_atk.entry(a).or_default().push(b);
+        }
+    }
+
+    let pt = |id: ObjId, state: &SimState| -> (i32, i32) {
+        state.def_of(id).and_then(|d| d.as_creature())
+            .map(|c| (c.power(), c.toughness())).unwrap_or((1, 1))
+    };
+
+    let mut player_damage = 0i32;
+    let mut pw_damage: HashMap<ObjId, i32> = HashMap::new();
+    // Damage actually dealt by each source this pass (drives lifelink life gain).
+    let mut dealt: HashMap<ObjId, i32> = HashMap::new();
+
+    // Phase 1: each attacker assigns its damage.
+    for &atk_id in &attackers {
+        if !alive(atk_id, state) { continue; }
+        if !source_eligible_for_damage_step(atk_id, state, step) { continue; }
+        let (atk_pow, _) = pt(atk_id, state);
+        if atk_pow <= 0 { continue; }
+        let atk_dt      = creature_has_keyword(atk_id, Keyword::Deathtouch, state);
+        let atk_trample = creature_has_keyword(atk_id, Keyword::Trample, state);
+
+        if was_blocked.contains(&atk_id) {
+            let blockers = blocks_by_atk.get(&atk_id).cloned().unwrap_or_default();
+            if blockers.is_empty() {
+                // CR 702.19c: a trample attacker whose blockers all left combat dumps
+                // its damage to the defender. Without trample, no damage is dealt.
+                if atk_trample {
+                    let target = state.objects.get(&atk_id)
+                        .and_then(|p| p.bf.as_ref()).and_then(|bf| bf.attack_target);
+                    match target {
+                        None => player_damage += atk_pow,
+                        Some(pw) => *pw_damage.entry(pw).or_insert(0) += atk_pow,
+                    }
+                    *dealt.entry(atk_id).or_insert(0) += atk_pow;
+                }
+                continue;
+            }
+            // Compute lethal-per-blocker so the strategy can reason about it.
+            // CR 702.2c (deathtouch): any nonzero damage is lethal.
+            let lethal_per_blocker: Vec<i32> = blockers.iter().map(|&b| {
+                let (_, blk_tgh) = pt(b, state);
+                let blk_existing = state.permanent_bf(b).map(|bf| bf.damage).unwrap_or(0);
+                if atk_dt { 1 } else { (blk_tgh - blk_existing).max(1) }
+            }).collect();
+
+            // Strategy chooses the assignment; validator ensures CR 510.1c.
+            let raw = strategies.get_mut(&ap).unwrap()
+                .assign_combat_damage(state, atk_id, &blockers, atk_pow,
+                                      &lethal_per_blocker, atk_trample);
+            let assignment = validate_assignment(
+                &raw, &lethal_per_blocker, atk_pow, atk_trample);
+
+            let mut remaining = atk_pow;
+            for (i, &blk_id) in blockers.iter().enumerate() {
+                let assign = assignment[i];
+                if assign > 0 && !is_protected_from(blk_id, atk_id, state) {
+                    let (_, blk_tgh) = pt(blk_id, state);
+                    if let Some(bf) = state.permanent_bf_mut(blk_id) {
+                        if atk_dt {
+                            bf.damage = bf.damage.max(blk_tgh);
+                        } else {
+                            bf.damage += assign;
+                        }
+                    }
+                    *dealt.entry(atk_id).or_insert(0) += assign;
+                }
+                remaining -= assign;
+            }
+            // CR 702.19b (trample): leftover damage spills to defending player/PW.
+            if atk_trample && remaining > 0 {
+                let target = state.objects.get(&atk_id)
+                    .and_then(|p| p.bf.as_ref()).and_then(|bf| bf.attack_target);
+                match target {
+                    None => player_damage += remaining,
+                    Some(pw) => *pw_damage.entry(pw).or_insert(0) += remaining,
+                }
+                *dealt.entry(atk_id).or_insert(0) += remaining;
+            }
+        } else {
+            // Unblocked.
+            let target = state.objects.get(&atk_id)
+                .and_then(|p| p.bf.as_ref()).and_then(|bf| bf.attack_target);
+            match target {
+                None => player_damage += atk_pow,
+                Some(pw) => *pw_damage.entry(pw).or_insert(0) += atk_pow,
+            }
+            *dealt.entry(atk_id).or_insert(0) += atk_pow;
+        }
+    }
+
+    // Phase 2: blockers deal damage to their attacker.
+    for &(atk_id, blk_id) in &block_pairs {
+        if !alive(blk_id, state) { continue; }
+        // CR 510.1d: a blocker whose attacker has left the battlefield deals no damage.
+        if !alive(atk_id, state) { continue; }
+        if !source_eligible_for_damage_step(blk_id, state, step) { continue; }
+        let (blk_pow, _) = pt(blk_id, state);
+        if blk_pow <= 0 { continue; }
+        let blk_dt = creature_has_keyword(blk_id, Keyword::Deathtouch, state);
+        let (_, atk_tgh) = pt(atk_id, state);
+        if !is_protected_from(atk_id, blk_id, state) {
+            if let Some(bf) = state.permanent_bf_mut(atk_id) {
+                if blk_dt {
+                    bf.damage = bf.damage.max(atk_tgh);
+                } else {
+                    bf.damage += blk_pow;
+                }
+            }
+            *dealt.entry(blk_id).or_insert(0) += blk_pow;
+        }
+    }
+
+    // CR 702.15b (lifelink): damage dealt by a lifelink source causes its
+    // controller to gain that much life.
+    let lifelink_gains: Vec<(PlayerId, ObjId, i32)> = dealt.iter()
+        .filter(|(_, &amt)| amt > 0)
+        .filter(|(&id, _)| creature_has_keyword(id, Keyword::Lifelink, state))
+        .filter_map(|(&id, &amt)| {
+            state.objects.get(&id).map(|o| (o.controller, id, amt))
+        })
+        .collect();
+    for (ctlr, src_id, amt) in lifelink_gains {
+        state.gain_life(ctlr, amt);
+        let name = state.permanent_name(src_id).unwrap_or_default();
+        let life = state.life_of(ctlr);
+        state.log(t, ctlr, format!("Lifelink: {} gains {} life from {} (life: {})", ctlr, amt, name, life));
+    }
+
+    if player_damage > 0 {
+        state.lose_life(nap, player_damage);
+        state.log(t, ap, format!("Combat: {} damage to {} (life: {})", player_damage, nap, state.life_of(nap)));
+    }
+    for (&pw_id, &dmg) in &pw_damage {
+        let new_loyalty = if let Some(bf) = state.permanent_bf_mut(pw_id) {
+            bf.loyalty -= dmg;
+            Some(bf.loyalty)
+        } else {
+            None
+        };
+        if let Some(new_loyalty) = new_loyalty {
+            let pw_name = state.permanent_name(pw_id).unwrap_or_default();
+            state.log(t, ap, format!("Combat: {} damage to {} (loyalty: {})", dmg, pw_name, new_loyalty));
+        }
+    }
+}
+
 /// Execute a single step: apply automatic effects, then optionally run a priority round.
 fn do_step(
     state: &mut SimState,
@@ -3857,11 +4101,12 @@ fn do_step(
         StepKind::DeclareAttackers => {
             // Strategy decides who attacks and what each attacker targets.
             let decisions = strategies.get_mut(&ap).unwrap().declare_attackers(state);
-            // Apply: mark each attacker on the battlefield.
+            // Apply: mark each attacker on the battlefield. CR 702.20: vigilance skips the tap.
             for &(atk_id, target) in &decisions {
+                let vigilant = creature_has_keyword(atk_id, Keyword::Vigilance, state);
                 if let Some(bf) = state.permanent_bf_mut(atk_id) {
                     bf.attacking = true;
-                    bf.tapped = true;
+                    if !vigilant { bf.tapped = true; }
                     bf.attack_target = target;
                 }
             }
@@ -3902,7 +4147,28 @@ fn do_step(
                 let blk_name = state.objects.get(&blk_id).map(|p| p.catalog_key.clone()).unwrap_or_default();
                 state.log(t, nap, format!("{} blocks {}", blk_name, atk_name));
             }
-            state.combat_blocks = blocks;
+            // CR 509.1h: when an attacker is blocked by 2+ creatures, the attacking player
+            // chooses the damage assignment order. Ask the attacker's strategy to reorder.
+            let mut by_atk: HashMap<ObjId, Vec<ObjId>> = HashMap::new();
+            for &(a, b) in &blocks { by_atk.entry(a).or_default().push(b); }
+            let mut ordered: Vec<(ObjId, ObjId)> = Vec::with_capacity(blocks.len());
+            // Preserve attacker order from `blocks` for stable output.
+            let mut seen: std::collections::HashSet<ObjId> = Default::default();
+            for &(a, _) in &blocks {
+                if !seen.insert(a) { continue; }
+                let bs = by_atk.remove(&a).unwrap_or_default();
+                let final_order = if bs.len() >= 2 {
+                    let chosen = strategies.get_mut(&ap).unwrap().order_blockers(state, a, &bs);
+                    // Validate: must be a permutation of `bs`. Fall back to declaration order if not.
+                    let in_set: std::collections::HashSet<ObjId> = bs.iter().copied().collect();
+                    let out_set: std::collections::HashSet<ObjId> = chosen.iter().copied().collect();
+                    if chosen.len() == bs.len() && in_set == out_set { chosen } else { bs }
+                } else {
+                    bs
+                };
+                for b in final_order { ordered.push((a, b)); }
+            }
+            state.combat_blocks = ordered;
             // Mark unblocked attackers so ninjutsu can target them.
             let blocked_atk_ids: std::collections::HashSet<ObjId> =
                 state.combat_blocks.iter().map(|(a, _)| *a).collect();
@@ -3914,73 +4180,11 @@ fn do_step(
                 }
             }
         }
+        StepKind::FirstStrikeCombatDamage => {
+            do_combat_damage_pass(state, t, ap, strategies, DamageStepKind::FirstStrike);
+        }
         StepKind::CombatDamage => {
-            if !state.combat_attackers.is_empty() {
-                let nap = ap.opp();
-                let attackers   = state.combat_attackers.clone();
-                let block_pairs = state.combat_blocks.clone();
-                let blocked_atk_ids: std::collections::HashSet<ObjId> = block_pairs.iter()
-                    .map(|(a, _)| *a).collect();
-
-                let mut player_damage = 0i32;
-
-                for &(atk_id, blk_id) in &block_pairs {
-                    let atk_pow = state.def_of(atk_id)
-                        .and_then(|d| d.as_creature())
-                        .map(|c| c.power())
-                        .unwrap_or(1);
-                    let blk_pow = state.def_of(blk_id)
-                        .and_then(|d| d.as_creature())
-                        .map(|c| c.power())
-                        .unwrap_or(1);
-                    // CR 702.16b: protection prevents damage from sources with the quality.
-                    if !is_protected_from(atk_id, blk_id, state) {
-                        if let Some(bf) = state.permanent_bf_mut(atk_id) {
-                            bf.damage += blk_pow;
-                        }
-                    }
-                    if !is_protected_from(blk_id, atk_id, state) {
-                        if let Some(bf) = state.permanent_bf_mut(blk_id) {
-                            bf.damage += atk_pow;
-                        }
-                    }
-                }
-
-                let mut pw_damage: HashMap<ObjId, i32> = HashMap::new();
-                for &atk_id in &attackers {
-                    if !blocked_atk_ids.contains(&atk_id) {
-                        let atk_pow = state.def_of(atk_id)
-                            .and_then(|d| d.as_creature())
-                            .map(|c| c.power())
-                            .unwrap_or(1);
-                        let attack_target = state.objects.get(&atk_id)
-                            .and_then(|p| p.bf.as_ref())
-                            .and_then(|bf| bf.attack_target);
-                        match attack_target {
-                            None => player_damage += atk_pow,
-                            Some(pw_id) => *pw_damage.entry(pw_id).or_insert(0) += atk_pow,
-                        }
-                    }
-                }
-
-                if player_damage > 0 {
-                    state.lose_life(nap, player_damage);
-                    state.log(t, ap, format!("Combat: {} unblocked damage to {} (life: {})", player_damage, nap, state.life_of(nap)));
-                }
-                for (&pw_id, &dmg) in &pw_damage {
-                    let new_loyalty = if let Some(bf) = state.permanent_bf_mut(pw_id) {
-                        bf.loyalty -= dmg;
-                        Some(bf.loyalty)
-                    } else {
-                        None
-                    };
-                    if let Some(new_loyalty) = new_loyalty {
-                        let pw_name = state.permanent_name(pw_id).unwrap_or_default();
-                        state.log(t, ap, format!("Combat: {} damage to {} (loyalty: {})", dmg, pw_name, new_loyalty));
-                    }
-                }
-
-            }
+            do_combat_damage_pass(state, t, ap, strategies, DamageStepKind::Regular);
         }
         StepKind::EndCombat => {
             state.combat_attackers.clear();
@@ -4032,6 +4236,13 @@ fn do_phase(
     strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     for step in &phase.steps {
+        // CR 510.5: the first-strike combat damage step occurs only when at least
+        // one attacking or blocking creature has first strike or double strike.
+        if step.kind == StepKind::FirstStrikeCombatDamage
+            && !any_combatant_has_first_or_double_strike(state)
+        {
+            continue;
+        }
         do_step(state, t, ap, step, on_play, strategies);
         if state.done() {
             return;

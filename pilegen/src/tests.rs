@@ -1335,6 +1335,671 @@
             "flying creature should attack when only ground blockers exist");
     }
 
+    /// Helper: build a vanilla creature with one or more keywords for combat tests.
+    fn keyword_creature(name: &str, power: i32, toughness: i32, kws: &[Keyword]) -> CardDef {
+        let mut data = CreatureData::new("", power, toughness);
+        data.keywords = Keywords::from_slice(kws);
+        CardDef::new(name, CardKind::Creature(data), vec![], None, vec![],
+            CardLayout::Normal, None, vec![], vec![], vec![], vec![])
+    }
+
+    // ── Vigilance (CR 702.20) ────────────────────────────────────────────────
+
+    /// A vigilant attacker is marked as attacking but does not become tapped.
+    #[test]
+    fn test_vigilance_attacker_not_tapped() {
+        let mut state = make_state();
+        let serra = keyword_creature("Serra Angel", 4, 4, &[Keyword::Flying, Keyword::Vigilance]);
+        state.catalog.insert(serra.name.clone(), serra.clone());
+        let id = add_perm(&mut state, PlayerId::Us, "Serra Angel", BattlefieldState {
+            entered_this_turn: false,
+            ..BattlefieldState::new()
+        });
+
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        let bf = state.permanent_bf(id).expect("on battlefield");
+        assert!(bf.attacking, "should be declared as attacker");
+        assert!(!bf.tapped, "vigilance: attacker should not tap");
+    }
+
+    /// A non-vigilant attacker still becomes tapped when attacking (control).
+    #[test]
+    fn test_no_vigilance_attacker_taps() {
+        let mut state = make_state();
+        let bear = keyword_creature("Grizzly Bears", 2, 2, &[]);
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let id = add_perm(&mut state, PlayerId::Us, "Grizzly Bears", BattlefieldState {
+            entered_this_turn: false,
+            ..BattlefieldState::new()
+        });
+
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        let bf = state.permanent_bf(id).expect("on battlefield");
+        assert!(bf.attacking && bf.tapped, "non-vigilance attacker taps when attacking");
+    }
+
+    // ── Lifelink (CR 702.15) ─────────────────────────────────────────────────
+
+    /// Unblocked lifelink attacker: controller gains life equal to damage dealt to player.
+    #[test]
+    fn test_lifelink_unblocked_gains_life() {
+        let mut state = make_state();
+        let initial_us = state.us.life;
+        let initial_opp = state.opp.life;
+        let vamp = keyword_creature("Vampire Nighthawk", 3, 3, &[Keyword::Lifelink]);
+        state.catalog.insert(vamp.name.clone(), vamp.clone());
+        let id = add_perm(&mut state, PlayerId::Us, "Vampire Nighthawk", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        state.combat_attackers = vec![id];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp - 3, "opponent loses 3");
+        assert_eq!(state.us.life, initial_us + 3, "lifelink gains 3");
+    }
+
+    /// Blocked lifelink attacker still gains life from damage dealt to the blocker.
+    #[test]
+    fn test_lifelink_blocked_gains_life_from_blocker() {
+        let mut state = make_state();
+        let initial_us = state.us.life;
+        let vamp = keyword_creature("Vampire Nighthawk", 3, 3, &[Keyword::Lifelink]);
+        let bear = creature("Grizzly Bears", 2, 2);
+        state.catalog.insert(vamp.name.clone(), vamp.clone());
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Vampire Nighthawk", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Grizzly Bears");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.us.life, initial_us + 3,
+            "lifelink: 3 damage to blocker → 3 life gained");
+    }
+
+    /// Lifelink on a blocker also gains life when it deals damage to the attacker.
+    #[test]
+    fn test_lifelink_on_blocker_gains_life() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let bear = creature("Grizzly Bears", 2, 2);
+        let lifelinker = keyword_creature("Ajani's Pridemate", 2, 2, &[Keyword::Lifelink]);
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        state.catalog.insert(lifelinker.name.clone(), lifelinker.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Grizzly Bears", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Ajani's Pridemate");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp + 2,
+            "lifelink blocker gains 2 from damage to attacker");
+    }
+
+    // ── Trample (CR 702.19) ──────────────────────────────────────────────────
+
+    /// A trample attacker assigns lethal damage to its blocker and spills the rest to the player.
+    #[test]
+    fn test_trample_excess_to_player() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let rhino = keyword_creature("Trampler", 5, 5, &[Keyword::Trample]);
+        let bear = creature("Grizzly Bears", 2, 2);
+        state.catalog.insert(rhino.name.clone(), rhino.clone());
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Trampler", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Grizzly Bears");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp - 3,
+            "trample: 5-power attacker assigns 2 to 2/2 blocker, 3 spill to player");
+    }
+
+    /// Trample with a non-lethal attacker still puts all damage on the blocker (no spillover).
+    #[test]
+    fn test_trample_no_excess_no_player_damage() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let small = keyword_creature("Small Trampler", 2, 2, &[Keyword::Trample]);
+        let troll = creature("Troll", 4, 4);
+        state.catalog.insert(small.name.clone(), small.clone());
+        state.catalog.insert(troll.name.clone(), troll.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Small Trampler", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Troll");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp,
+            "trample: 2-power attacker into 4/4 blocker leaves nothing for the player");
+    }
+
+    /// Non-trample attacker into a smaller blocker assigns ALL damage to the blocker — no spillover.
+    #[test]
+    fn test_no_trample_no_spillover() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let big = creature("Big", 5, 5);
+        let bear = creature("Grizzly Bears", 2, 2);
+        state.catalog.insert(big.name.clone(), big.clone());
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Big", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Grizzly Bears");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp, "no trample → no spillover");
+    }
+
+    // ── Deathtouch (CR 702.2) ────────────────────────────────────────────────
+
+    /// A 1/1 deathtouch attacker kills the 5/5 blocker after SBA, even though normally 1 < 5.
+    #[test]
+    fn test_deathtouch_attacker_kills_big_blocker() {
+        let mut state = make_state();
+        let touch = keyword_creature("Snake", 1, 1, &[Keyword::Deathtouch]);
+        let troll = creature("Troll", 5, 5);
+        state.catalog.insert(touch.name.clone(), touch.clone());
+        state.catalog.insert(troll.name.clone(), troll.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Snake", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Troll");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: true };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Troll"),
+            "deathtouch: 5/5 blocker dies to 1 damage from a deathtouch attacker");
+    }
+
+    /// A deathtouch blocker kills the attacker no matter how big.
+    #[test]
+    fn test_deathtouch_blocker_kills_attacker() {
+        let mut state = make_state();
+        let big = creature("Big", 7, 7);
+        let touch = keyword_creature("Snake", 1, 1, &[Keyword::Deathtouch]);
+        state.catalog.insert(big.name.clone(), big.clone());
+        state.catalog.insert(touch.name.clone(), touch.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Big", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Snake");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: true };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Big"),
+            "deathtouch blocker kills the 7/7 attacker");
+    }
+
+    /// Trample + deathtouch: 1 damage to a blocker is enough to be lethal, so the rest spills.
+    #[test]
+    fn test_trample_with_deathtouch_assigns_one_to_blocker() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let wurm = keyword_creature("Wurm", 5, 5, &[Keyword::Trample, Keyword::Deathtouch]);
+        let troll = creature("Troll", 4, 4);
+        state.catalog.insert(wurm.name.clone(), wurm.clone());
+        state.catalog.insert(troll.name.clone(), troll.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Wurm", BattlefieldState {
+            tapped: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Troll");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        let step = Step { kind: StepKind::CombatDamage, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp - 4,
+            "trample+deathtouch: 1 to 4/4 blocker is lethal, 4 spills to player");
+    }
+
+    // ── Reach (CR 702.17) ────────────────────────────────────────────────────
+
+    /// A reach blocker can block a flying attacker.
+    #[test]
+    fn test_reach_blocks_flyer() {
+        let mut state = make_state();
+        let dragon = keyword_creature("Dragon", 3, 3, &[Keyword::Flying]);
+        let spider = keyword_creature("Giant Spider", 2, 4, &[Keyword::Reach]);
+        state.catalog.insert(dragon.name.clone(), dragon.clone());
+        state.catalog.insert(spider.name.clone(), spider.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Dragon", BattlefieldState {
+            attacking: true,
+            ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Giant Spider");
+        state.combat_attackers = vec![atk];
+
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert_eq!(state.combat_blocks.len(), 1,
+            "reach can block a flyer");
+        assert_eq!(state.combat_blocks[0], (atk, blk));
+    }
+
+    /// A flying attacker should NOT attack into a reach blocker that would kill it.
+    #[test]
+    fn test_flying_attacker_avoids_reach_blocker() {
+        let mut state = make_state();
+        let dragon = keyword_creature("Dragon", 3, 3, &[Keyword::Flying]);
+        let spider = keyword_creature("Giant Spider", 5, 5, &[Keyword::Reach]);
+        state.catalog.insert(dragon.name.clone(), dragon.clone());
+        state.catalog.insert(spider.name.clone(), spider.clone());
+
+        let atk = add_perm(&mut state, PlayerId::Us, "Dragon", BattlefieldState {
+            entered_this_turn: false,
+            ..BattlefieldState::new()
+        });
+        add_default_perm(&mut state, PlayerId::Opp, "Giant Spider");
+
+        let step = Step { kind: StepKind::DeclareAttackers, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+
+        assert!(!state.combat_attackers.contains(&atk),
+            "flying attacker should avoid attacking into a reach blocker that outclasses it");
+    }
+
+    // ── Combat damage assignment (CR 510.1c) ─────────────────────────────────
+
+    /// Validator passthrough: a CR-legal assignment is accepted as-is.
+    #[test]
+    fn test_validate_assignment_legal_passthrough() {
+        // 5 power into [2/2, 4/4]; lethal=[2,4]. Assignment [2,3] satisfies "lethal in order".
+        let out = validate_assignment(&[2, 3], &[2, 4], 5, false);
+        assert_eq!(out, vec![2, 3]);
+    }
+
+    /// Validator: assigning to a later blocker before the earlier one reaches lethal → fallback.
+    #[test]
+    fn test_validate_assignment_skips_lethal_falls_back() {
+        // 5 power, lethal=[2,4], strategy returns [1,4] — illegal (blocker 0 not lethal).
+        // Fallback default: [2, 3] (lethal to first, rest to second).
+        let out = validate_assignment(&[1, 4], &[2, 4], 5, false);
+        assert_eq!(out, vec![2, 3], "default fallback fills lethal then dumps rest on last");
+    }
+
+    /// Validator: oversized sum → fallback.
+    #[test]
+    fn test_validate_assignment_oversum_falls_back() {
+        let out = validate_assignment(&[5, 5], &[2, 4], 5, false);
+        assert_eq!(out, vec![2, 3]);
+    }
+
+    /// Validator: trample allows leftover (engine spills to player).
+    #[test]
+    fn test_validate_assignment_trample_allows_leftover() {
+        // 7 power into [2/2]; lethal=[2]. Assigning [2] is legal — engine spills 5.
+        let out = validate_assignment(&[2], &[2], 7, true);
+        assert_eq!(out, vec![2]);
+    }
+
+    /// Validator: without trample, a sum < total is illegal — fallback dumps the rest on last.
+    #[test]
+    fn test_validate_assignment_no_trample_no_leftover_falls_back() {
+        let out = validate_assignment(&[2], &[2], 7, false);
+        assert_eq!(out, vec![7], "no trample → fallback piles excess onto last blocker");
+    }
+
+    // ── Strategy callbacks: order_blockers + assign_combat_damage ────────────
+
+    /// Test scaffolding: a Doomsday-strategy wrapper that lets a test override
+    /// `order_blockers` and `assign_combat_damage`.
+    struct ProgrammableStrat {
+        inner: strategy::DoomsdayStrategy,
+        ordered: std::cell::RefCell<Option<Vec<ObjId>>>,
+        assignment: std::cell::RefCell<Option<Vec<i32>>>,
+    }
+    impl strategy::Strategy for ProgrammableStrat {
+        fn declare_attackers(&mut self, s: &SimState) -> Vec<(ObjId, Option<ObjId>)> { self.inner.declare_attackers(s) }
+        fn declare_blockers(&mut self, s: &SimState) -> Vec<(ObjId, ObjId)> { self.inner.declare_blockers(s) }
+        fn take_mulligan(&mut self, s: &SimState, m: u32) -> bool { self.inner.take_mulligan(s, m) }
+        fn player_id(&self) -> PlayerId { self.inner.player_id() }
+        fn plan_gap(&self, s: &SimState) -> strategy::TargetGap { self.inner.plan_gap(s) }
+        fn card_fills(&self, id: ObjId, g: &strategy::TargetGap, s: &SimState) -> f64 { self.inner.card_fills(id, g, s) }
+        fn order_blockers(&mut self, _s: &SimState, _atk: ObjId, blockers: &[ObjId]) -> Vec<ObjId> {
+            self.ordered.borrow().clone().unwrap_or_else(|| blockers.to_vec())
+        }
+        fn assign_combat_damage(&mut self, _s: &SimState, _atk: ObjId, blockers: &[ObjId],
+                                total: i32, lethal: &[i32], trample: bool) -> Vec<i32> {
+            if let Some(a) = self.assignment.borrow().clone() { return a; }
+            // Fall back to the default heuristic so calls without an override work.
+            let n = blockers.len();
+            let mut out = vec![0i32; n];
+            let mut rem = total;
+            for i in 0..n {
+                if rem <= 0 { break; }
+                let take = rem.min(lethal[i].max(0));
+                out[i] = take;
+                rem -= take;
+            }
+            if !trample && rem > 0 && n > 0 { out[n - 1] += rem; }
+            out
+        }
+    }
+
+    /// Engine respects the attacker's `order_blockers` choice — combat_blocks ends up reordered.
+    #[test]
+    fn test_order_blockers_reorders_combat_blocks() {
+        let mut state = make_state();
+        let big = creature("Big", 5, 5);
+        let small_a = creature("SmallA", 2, 2);
+        let small_b = creature("SmallB", 2, 2);
+        state.catalog.insert(big.name.clone(), big.clone());
+        state.catalog.insert(small_a.name.clone(), small_a.clone());
+        state.catalog.insert(small_b.name.clone(), small_b.clone());
+
+        let atk = add_perm(&mut state, PlayerId::Us, "Big", BattlefieldState {
+            attacking: true, ..BattlefieldState::new()
+        });
+        let a = add_default_perm(&mut state, PlayerId::Opp, "SmallA");
+        let b = add_default_perm(&mut state, PlayerId::Opp, "SmallB");
+        state.combat_attackers = vec![atk];
+
+        let mut strats: HashMap<PlayerId, Box<dyn strategy::Strategy>> = HashMap::from([
+            (PlayerId::Us, Box::new(ProgrammableStrat {
+                inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
+                // Force order [b, a] so the engine should swap from the (a, b) declaration order.
+                ordered: std::cell::RefCell::new(Some(vec![b, a])),
+                assignment: std::cell::RefCell::new(None),
+            }) as Box<dyn strategy::Strategy>),
+            (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
+        ]);
+        // Pre-populate combat_blocks via DeclareBlockers — the opp's declare_blockers will pick
+        // both creatures since neither is too small to chump-block productively. Bypass that and
+        // inject the blocks then run the order step manually by calling do_step on DeclareBlockers
+        // after manually setting the strategy outputs would be hard. Instead we emulate the
+        // ordering call directly through the public path by injecting a fake declare_blockers.
+        // Simplest path: inject blocks via state.combat_blocks and call do_step(DeclareBlockers)
+        // — but that re-runs declare_blockers. So we drive the engine's reorder logic by calling
+        // do_step(DeclareBlockers) and asserting the final order.
+        // Replace opp strategy with one that always returns blocks (a, b) in that order.
+        struct FixedBlocker { atk: ObjId, blocks: Vec<ObjId> }
+        impl strategy::Strategy for FixedBlocker {
+            fn declare_attackers(&mut self, _s: &SimState) -> Vec<(ObjId, Option<ObjId>)> { vec![] }
+            fn declare_blockers(&mut self, _s: &SimState) -> Vec<(ObjId, ObjId)> {
+                self.blocks.iter().map(|&b| (self.atk, b)).collect()
+            }
+            fn take_mulligan(&mut self, _s: &SimState, _m: u32) -> bool { false }
+            fn player_id(&self) -> PlayerId { PlayerId::Opp }
+            fn plan_gap(&self, _s: &SimState) -> strategy::TargetGap { strategy::TargetGap::default() }
+            fn card_fills(&self, _i: ObjId, _g: &strategy::TargetGap, _s: &SimState) -> f64 { 0.0 }
+        }
+        strats.insert(PlayerId::Opp, Box::new(FixedBlocker { atk, blocks: vec![a, b] }));
+
+        let step = Step { kind: StepKind::DeclareBlockers, prio: false };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut strats);
+
+        assert_eq!(state.combat_blocks, vec![(atk, b), (atk, a)],
+            "attacker's order_blockers([b, a]) should win over opp's (a, b) declaration order");
+    }
+
+    /// Engine respects the attacker's `assign_combat_damage` — strategy can dump all 5 onto the
+    /// first blocker even when the second is lethal-able with leftover, as long as it's legal.
+    #[test]
+    fn test_assign_combat_damage_strategy_choice() {
+        let mut state = make_state();
+        let big = creature("Big", 5, 5);
+        let bear_a = creature("BearA", 2, 2);
+        let bear_b = creature("BearB", 2, 2);
+        state.catalog.insert(big.name.clone(), big.clone());
+        state.catalog.insert(bear_a.name.clone(), bear_a.clone());
+        state.catalog.insert(bear_b.name.clone(), bear_b.clone());
+
+        let atk = add_perm(&mut state, PlayerId::Us, "Big", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        let a = add_default_perm(&mut state, PlayerId::Opp, "BearA");
+        let b = add_default_perm(&mut state, PlayerId::Opp, "BearB");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, a), (atk, b)];
+
+        // Strategy assigns lethal (2) to A then dumps the rest (3) on B — same total, legal under
+        // CR 510.1c since A got lethal first.
+        let mut strats: HashMap<PlayerId, Box<dyn strategy::Strategy>> = HashMap::from([
+            (PlayerId::Us, Box::new(ProgrammableStrat {
+                inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
+                ordered: std::cell::RefCell::new(None),
+                assignment: std::cell::RefCell::new(Some(vec![2, 3])),
+            }) as Box<dyn strategy::Strategy>),
+            (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
+        ]);
+
+        let step = Step { kind: StepKind::CombatDamage, prio: true };
+        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut strats);
+
+        // Both bears should have died (A took 2, B took 3 — both ≥ toughness).
+        assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "BearA"));
+        assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "BearB"));
+    }
+
+    // ── First Strike / Double Strike (CR 510.5, 702.4, 702.7) ───────────────
+
+    /// A first-strike 2/2 attacker blocked by a plain 2/2 blocker kills the blocker
+    /// in the first-strike step, so the blocker never gets to deal regular damage back.
+    #[test]
+    fn test_first_strike_attacker_kills_blocker_before_regular() {
+        let mut state = make_state();
+        let knight = keyword_creature("White Knight", 2, 2, &[Keyword::FirstStrike]);
+        let bear = creature("Grizzly Bears", 2, 2);
+        state.catalog.insert(knight.name.clone(), knight.clone());
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "White Knight", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Grizzly Bears");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        // First-strike pass: attacker deals 2; blocker (no FS) deals nothing.
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
+                true, &mut make_strategies());
+        check_state_based_actions(&mut state, 1);
+        // Blocker died; attacker is unscathed.
+        assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Grizzly Bears"),
+            "first-strike kills blocker before regular damage");
+        assert!(state.permanent_bf(atk).is_some(), "FS attacker still alive");
+
+        // Regular pass: dead blocker → no return damage. Attacker (FS only) doesn't strike again.
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::CombatDamage, prio: false },
+                true, &mut make_strategies());
+        check_state_based_actions(&mut state, 1);
+        let bf = state.permanent_bf(atk).expect("FS attacker survives");
+        assert_eq!(bf.damage, 0, "FS attacker took no return damage");
+    }
+
+    /// A double-strike attacker, unblocked, deals damage twice — once per pass.
+    #[test]
+    fn test_double_strike_unblocked_deals_damage_twice() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let fury = keyword_creature("Fury", 3, 3, &[Keyword::DoubleStrike]);
+        state.catalog.insert(fury.name.clone(), fury.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Fury", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        state.combat_attackers = vec![atk];
+
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
+                true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::CombatDamage, prio: false },
+                true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp - 6,
+            "double strike: 3 power × 2 hits = 6 damage to player");
+    }
+
+    /// A plain (no FS, no DS) attacker deals damage only in the regular step.
+    #[test]
+    fn test_plain_attacker_skips_first_strike_step() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let bear = creature("Bear", 2, 2);
+        let knight = keyword_creature("Other Knight", 1, 1, &[Keyword::FirstStrike]);
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        state.catalog.insert(knight.name.clone(), knight.clone());
+        // Add a FS creature so the FS step actually runs.
+        let _fs = add_perm(&mut state, PlayerId::Us, "Other Knight", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        let atk = add_perm(&mut state, PlayerId::Us, "Bear", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        state.combat_attackers = vec![_fs, atk];
+
+        // FS pass: only the FS knight strikes.
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
+                true, &mut make_strategies());
+        assert_eq!(state.opp.life, initial_opp - 1,
+            "FS pass deals 1 damage from the knight only; bear waits for regular");
+        // Regular pass: both deal damage (FS knight does NOT strike again).
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::CombatDamage, prio: false },
+                true, &mut make_strategies());
+        assert_eq!(state.opp.life, initial_opp - 1 - 2,
+            "regular pass deals 2 from the bear only (knight has FS, not DS)");
+    }
+
+    /// A double-strike trample attacker into a small blocker: FS pass kills the
+    /// blocker; regular pass spills full damage to the player (CR 702.19c).
+    #[test]
+    fn test_double_strike_trample_dead_blocker_spills_in_regular() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let stomper = keyword_creature("Stomper", 4, 4,
+            &[Keyword::DoubleStrike, Keyword::Trample]);
+        let bear = creature("Bear", 2, 2);
+        state.catalog.insert(stomper.name.clone(), stomper.clone());
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Stomper", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Bear");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        // FS pass: 2 to blocker (lethal), 2 trample to player.
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
+                true, &mut make_strategies());
+        check_state_based_actions(&mut state, 1);
+        assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Bear"),
+            "blocker dies in FS pass");
+        assert_eq!(state.opp.life, initial_opp - 2, "FS pass: 2 trampled");
+
+        // Regular pass: blocker is dead, attacker still 'blocked' but trample dumps all to player.
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::CombatDamage, prio: false },
+                true, &mut make_strategies());
+        assert_eq!(state.opp.life, initial_opp - 2 - 4,
+            "regular pass: dead blocker → trample spills full 4 to player");
+    }
+
+    /// A non-trample double-strike attacker whose blocker dies in FS deals NO damage
+    /// in the regular pass (the attacker is still considered blocked, no spillover).
+    #[test]
+    fn test_double_strike_no_trample_dead_blocker_no_spill() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let strong = keyword_creature("Strong", 4, 4, &[Keyword::DoubleStrike]);
+        let bear = creature("Bear", 2, 2);
+        state.catalog.insert(strong.name.clone(), strong.clone());
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Strong", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        let blk = add_default_perm(&mut state, PlayerId::Opp, "Bear");
+        state.combat_attackers = vec![atk];
+        state.combat_blocks = vec![(atk, blk)];
+
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
+                true, &mut make_strategies());
+        check_state_based_actions(&mut state, 1);
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::CombatDamage, prio: false },
+                true, &mut make_strategies());
+
+        assert_eq!(state.opp.life, initial_opp,
+            "no trample, dead blocker → second strike deals no damage to player");
+    }
+
+    /// `do_phase(combat_phase)` skips the FS step entirely when no combatant has FS or DS.
+    #[test]
+    fn test_first_strike_step_skipped_when_no_first_or_double_strike() {
+        let mut state = make_state();
+        let initial_opp = state.opp.life;
+        let bear = creature("Bear", 2, 2);
+        state.catalog.insert(bear.name.clone(), bear.clone());
+        let atk = add_perm(&mut state, PlayerId::Us, "Bear", BattlefieldState {
+            tapped: true, ..BattlefieldState::new()
+        });
+        state.combat_attackers = vec![atk];
+
+        // FS step body would deal nothing, but we want to confirm the regular pass
+        // still does its job and the FS step's predicate skips cleanly.
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
+                true, &mut make_strategies());
+        assert_eq!(state.opp.life, initial_opp,
+            "FS pass with no FS/DS source deals no damage");
+        do_step(&mut state, 1, PlayerId::Us,
+                &Step { kind: StepKind::CombatDamage, prio: false },
+                true, &mut make_strategies());
+        assert_eq!(state.opp.life, initial_opp - 2,
+            "regular pass: plain bear deals its 2 once");
+    }
+
     // ── Section 9: Trigger Tests ──────────────────────────────────────────────
 
     #[test]
@@ -2883,6 +3548,66 @@
 
         assert_eq!(state.objects[&equip_id].zone, CardZone::Battlefield,
             "Equipment should be on the battlefield");
+    }
+
+    // ── Section 58: Batterskull (Living Weapon + buff equipped + bounce self) ──
+
+    /// Living weapon ETB creates a Phyrexian Germ token and attaches Batterskull to it.
+    /// The materialized Germ shows +4/+4 (so 4/4) and gains vigilance/lifelink.
+    #[test]
+    fn test_batterskull_living_weapon_attaches_and_buffs_germ() {
+        let mut state = make_state();
+        state.catalog.insert("Batterskull".into(), catalog_card("Batterskull"));
+        state.catalog.insert("Phyrexian Germ".into(), catalog_card("Phyrexian Germ"));
+
+        eff_enter_permanent(PlayerId::Us, "Batterskull").call(&mut state, 1, &[]);
+        for ctx in std::mem::take(&mut state.pending_triggers) {
+            ctx.effect.call(&mut state, 1, &[]);
+        }
+
+        let bs_id = state.objects.values()
+            .find(|o| o.catalog_key == "Batterskull" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Batterskull on battlefield");
+        let germ_id = state.objects.values()
+            .find(|o| o.catalog_key == "Phyrexian Germ" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Phyrexian Germ token created");
+
+        let attached = state.permanent_bf(bs_id).and_then(|bf| bf.attached_to);
+        assert_eq!(attached, Some(germ_id), "Batterskull should be attached to the Germ");
+
+        // Materialized state should show +4/+4 and vigilance/lifelink on the Germ.
+        recompute(&mut state);
+        let germ_def = state.def_of(germ_id).expect("germ has materialized def");
+        let germ = germ_def.as_creature().expect("germ is a creature");
+        assert_eq!(germ.power(), 4, "0/0 Germ + Batterskull's +4/+4 = 4 power");
+        assert_eq!(germ.toughness(), 4, "0/0 Germ + Batterskull's +4/+4 = 4 toughness");
+        assert!(germ.keywords.contains(Keyword::Vigilance), "Germ has vigilance");
+        assert!(germ.keywords.contains(Keyword::Lifelink), "Germ has lifelink");
+    }
+
+    /// Batterskull's {3} activated ability returns Batterskull from BF to its owner's hand.
+    #[test]
+    fn test_batterskull_bounce_self_to_hand() {
+        let mut state = make_state();
+        state.catalog.insert("Batterskull".into(), catalog_card("Batterskull"));
+
+        eff_enter_permanent(PlayerId::Us, "Batterskull").call(&mut state, 1, &[]);
+        state.pending_triggers.clear();
+        let bs_id = state.objects.values()
+            .find(|o| o.catalog_key == "Batterskull" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Batterskull on battlefield");
+
+        // Fire the {3} ability (index 0 in abilities).
+        let def = state.catalog["Batterskull"].clone();
+        let ability = match &def.kind {
+            CardKind::Artifact(a) => &a.abilities[0],
+            _ => panic!("Batterskull is an artifact"),
+        };
+        let factory = ability.ability_factory.as_ref().unwrap().clone();
+        factory(PlayerId::Us, bs_id).call(&mut state, 1, &[]);
+
+        assert_eq!(state.objects[&bs_id].zone, CardZone::Hand { known: false },
+            "Batterskull should be in its owner's hand");
     }
 
     // ── 28. Force of Negation ─────────────────────────────────────────────────

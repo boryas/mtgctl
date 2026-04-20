@@ -76,6 +76,7 @@ fn all_cards() -> Vec<CardDef> {
         grafdiggers_cage(),
         mishras_bauble(),
         cori_steel_cutter(),
+        batterskull(),
         // Spells — instants
         brainstorm(),
         consider(),
@@ -160,6 +161,7 @@ fn all_cards() -> Vec<CardDef> {
         orc_army_token(),
         clue_token(),
         monk_token(),
+        phyrexian_germ_token(),
     ]
 }
 
@@ -2973,6 +2975,13 @@ fn monk_token() -> CardDef {
     )
 }
 
+/// 0/0 black Phyrexian Germ creature token. Created by Living Weapon equipment (CR 702.92).
+fn phyrexian_germ_token() -> CardDef {
+    let mut data = CreatureData::new("", 0, 0);
+    data.creature_subtypes = vec!["Phyrexian".into(), "Germ".into()];
+    simple("Phyrexian Germ", CardKind::Creature(data), vec![Color::Black], None)
+}
+
 /// Cori-Steel Cutter — {1}{R} Artifact — Equipment.
 /// "Equipped creature gets +1/+1 and has trample and haste."
 /// "Flurry — Whenever you cast your second spell each turn, create a 1/1 white Monk
@@ -3082,6 +3091,130 @@ fn cori_steel_cutter() -> CardDef {
                 modifier: Arc::new(|def, _state| {
                     if let CardKind::Creature(c) = &mut def.kind {
                         c.adjust_pt(1, 1);
+                    }
+                }),
+                expiry: Expiry::WhileSourceOnBattlefield,
+            }),
+        ],
+    )
+}
+
+/// Batterskull — {5} Artifact — Equipment.
+/// "Living weapon (When this Equipment enters, create a 0/0 black Phyrexian Germ
+///  creature token, then attach this to it.)"
+/// "Equipped creature gets +4/+4 and has vigilance and lifelink."
+/// "{3}: Return this Equipment to its owner's hand."
+/// "Equip {5}"
+fn batterskull() -> CardDef {
+    CardDef::new(
+        "Batterskull",
+        CardKind::Artifact(ArtifactData {
+            mana_cost: "5".to_string(),
+            subtypes: vec!["Equipment".into()],
+            abilities: vec![
+                // {3}: Return this Equipment to its owner's hand.
+                AbilityDef {
+                    costs: vec![CostComponent::Mana(parse_mana_cost("3"))],
+                    ability_factory: Some(Arc::new(|who, source_id| {
+                        Effect(Arc::new(move |state, t, _targets| {
+                            let owner = state.objects.get(&source_id).map(|o| o.owner).unwrap_or(who);
+                            change_zone(source_id, ZoneId::Hand, state, t, owner);
+                            state.log(t, who, "Batterskull → bounced to hand".to_string());
+                        }))
+                    })),
+                    ..Default::default()
+                },
+                // Equip {5} — sorcery-speed, targets a creature you control.
+                AbilityDef {
+                    costs: vec![CostComponent::Mana(parse_mana_cost("5"))],
+                    target_spec: TargetSpec::ObjectInZone {
+                        controller: Who::Actor,
+                        zone: ZoneId::Battlefield,
+                        filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                    },
+                    ability_factory: Some(Arc::new(|who, source_id| {
+                        Effect(Arc::new(move |state, t, targets| {
+                            let Some(&creature_id) = targets.first() else { return };
+                            if let Some(bf) = state.permanent_bf_mut(source_id) {
+                                bf.attached_to = Some(creature_id);
+                            }
+                            let name = state.permanent_name(creature_id).unwrap_or_default();
+                            state.log(t, who, format!("Equip Batterskull → {}", name));
+                        }))
+                    })),
+                    timing: ActivationTiming::Sorcery,
+                    ..Default::default()
+                },
+            ],
+            mana_abilities: vec![],
+        }),
+        vec![], None,
+        vec![], CardLayout::Normal, None,
+        // Living weapon ETB: create a Phyrexian Germ token, then attach this to it.
+        vec![TriggerDef {
+            check: Arc::new(|event, source_id, controller, _state, pending| {
+                if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
+                    if *id == source_id && *ctlr == controller {
+                        pending.push(TriggerContext {
+                            source_name: "Batterskull (living weapon)".into(),
+                            controller,
+                            target_spec: TargetSpec::None,
+                            effect: Effect(Arc::new(move |state, t, _targets| {
+                                let token_id = do_create_token("Phyrexian Germ", controller, state, t);
+                                if let Some(bf) = state.permanent_bf_mut(source_id) {
+                                    bf.attached_to = Some(token_id);
+                                }
+                                state.log(t, controller,
+                                    "Batterskull → created Phyrexian Germ and attached".to_string());
+                            })),
+                        });
+                    }
+                }
+            }),
+            active_when: tp_on_battlefield(),
+        }],
+        vec![], vec![],
+        // Static abilities: equipped creature gets +4/+4, vigilance, lifelink.
+        vec![
+            // L6: grant vigilance and lifelink
+            Arc::new(move |source_id, controller| ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L6AbilityEffects,
+                reads: vec![],
+                writes: vec![CeWrites::Abilities],
+                timestamp: 0,
+                filter: Arc::new(move |id, _, state| {
+                    state.objects.get(&source_id)
+                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|bf| bf.attached_to)
+                        .map_or(false, |attached| attached == id)
+                }),
+                modifier: Arc::new(|def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.keywords.insert(Keyword::Vigilance);
+                        c.keywords.insert(Keyword::Lifelink);
+                    }
+                }),
+                expiry: Expiry::WhileSourceOnBattlefield,
+            }),
+            // L7: +4/+4
+            Arc::new(move |source_id, controller| ContinuousInstance {
+                source_id,
+                controller,
+                layer: ContinuousLayer::L7PowerToughness,
+                reads: vec![],
+                writes: vec![CeWrites::PowerToughness],
+                timestamp: 0,
+                filter: Arc::new(move |id, _, state| {
+                    state.objects.get(&source_id)
+                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|bf| bf.attached_to)
+                        .map_or(false, |attached| attached == id)
+                }),
+                modifier: Arc::new(|def, _state| {
+                    if let CardKind::Creature(c) = &mut def.kind {
+                        c.adjust_pt(4, 4);
                     }
                 }),
                 expiry: Expiry::WhileSourceOnBattlefield,

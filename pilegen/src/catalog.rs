@@ -12,10 +12,12 @@ pub(crate) enum Keyword {
     Vigilance,
     Deathtouch,
     Annihilator6,
+    FirstStrike,
     DoubleStrike,
     Trample,
     Flash,
     Hexproof,
+    Reach,
 }
 
 /// Compact bitset of keyword abilities. Copy, allocation-free, O(1) contains/insert.
