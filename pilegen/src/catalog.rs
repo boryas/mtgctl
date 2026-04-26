@@ -268,6 +268,8 @@ pub(crate) struct AbilityDef {
 
     // ── Effect ────────────────────────────────────────────────────────────────
     pub(crate) ability_factory: Option<AbilityFactory>,
+    /// IR resolution body. When set, preferred over `ability_factory`.
+    pub(crate) ir_body: Option<crate::ir::action::Action>,
 
     /// False when a CE prevents activation (e.g. Disruptor Flute, Karn).
     /// Reset to true each recompute. Checked by ability_available / collect_legal_actions.
@@ -284,6 +286,7 @@ impl Default for AbilityDef {
             target_spec: TargetSpec::None,
             choice_spec: None,
             ability_factory: None,
+            ir_body: None,
             activatable: true,
             timing: ActivationTiming::Default,
         }
@@ -360,14 +363,87 @@ impl Default for ManaAbility {
     }
 }
 
-/// The five basic land subtypes.
-#[derive(Clone, Default)]
-pub(crate) struct LandTypes {
-    pub(crate) plains: bool,
-    pub(crate) island: bool,
-    pub(crate) swamp: bool,
-    pub(crate) mountain: bool,
-    pub(crate) forest: bool,
+/// One of the five basic land subtypes. Closed set (CR 205.3i); has not grown
+/// in the game's history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BasicLandType {
+    Plains,
+    Island,
+    Swamp,
+    Mountain,
+    Forest,
+}
+
+impl BasicLandType {
+    const ALL: [BasicLandType; 5] = [
+        BasicLandType::Plains,
+        BasicLandType::Island,
+        BasicLandType::Swamp,
+        BasicLandType::Mountain,
+        BasicLandType::Forest,
+    ];
+
+    fn bit(self) -> u8 {
+        match self {
+            BasicLandType::Plains => 1,
+            BasicLandType::Island => 2,
+            BasicLandType::Swamp => 4,
+            BasicLandType::Mountain => 8,
+            BasicLandType::Forest => 16,
+        }
+    }
+
+    /// Intrinsic mana color (CR 305.6).
+    pub(crate) fn mana_color(self) -> &'static str {
+        match self {
+            BasicLandType::Plains => "W",
+            BasicLandType::Island => "U",
+            BasicLandType::Swamp => "B",
+            BasicLandType::Mountain => "R",
+            BasicLandType::Forest => "G",
+        }
+    }
+
+    /// Lowercase subtype name ("plains", "island", …) — matches predicate strings.
+    pub(crate) fn as_lower(self) -> &'static str {
+        match self {
+            BasicLandType::Plains => "plains",
+            BasicLandType::Island => "island",
+            BasicLandType::Swamp => "swamp",
+            BasicLandType::Mountain => "mountain",
+            BasicLandType::Forest => "forest",
+        }
+    }
+}
+
+/// Set of basic land subtypes, stored as a bitset. `Copy` and allocation-free.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LandTypes(u8);
+
+impl LandTypes {
+    pub(crate) fn new() -> Self {
+        LandTypes(0)
+    }
+
+    pub(crate) fn from_types(types: &[BasicLandType]) -> Self {
+        let mut out = LandTypes(0);
+        for &t in types {
+            out.insert(t);
+        }
+        out
+    }
+
+    pub(crate) fn contains(self, t: BasicLandType) -> bool {
+        self.0 & t.bit() != 0
+    }
+
+    pub(crate) fn insert(&mut self, t: BasicLandType) {
+        self.0 |= t.bit();
+    }
+
+    pub(crate) fn iter(self) -> impl Iterator<Item = BasicLandType> {
+        BasicLandType::ALL.into_iter().filter(move |&t| self.contains(t))
+    }
 }
 
 // ── Per-variant data structs ──────────────────────────────────────────────────
@@ -673,6 +749,10 @@ pub struct CardDef {
     /// Uses `ObjPredicate` — the predicate can inspect the source's CardDef, zone,
     /// controller, etc. via the uniform id model.
     pub(crate) protection_from: Vec<ObjPredicate>,
+    /// Data-based IR abilities (Stage 3 dual-pathway: coexists with the
+    /// closure-based fields above). When non-empty, the engine dispatches
+    /// this card's behavior through the IR executor.
+    pub(crate) abilities: Vec<crate::ir::ability::Ability>,
 }
 
 /// Factory that creates a `ContinuousInstance` for a specific game object.
@@ -718,6 +798,14 @@ impl CardDef {
     }
 
     pub(crate) fn target_spec_for_mode(&self, mode: usize) -> &TargetSpec {
+        // IR path: prefer data-based modes when present.
+        for a in &self.abilities {
+            if let crate::ir::ability::AbilityKind::OnResolve { modes } = &a.kind {
+                if let Some(m) = modes.get(mode) {
+                    return &m.target_spec;
+                }
+            }
+        }
         match &self.kind {
             CardKind::Instant(s) | CardKind::Sorcery(s) => {
                 s.modes.as_ref()
@@ -727,6 +815,18 @@ impl CardDef {
             }
             _ => &TargetSpec::None,
         }
+    }
+
+    /// Number of modes (CR 700.2) available for this spell.
+    /// Returns the IR mode count when `abilities` carries an `OnResolve`;
+    /// otherwise falls back to legacy `SpellData.modes`. `None` if neither.
+    pub(crate) fn mode_count(&self) -> Option<usize> {
+        for a in &self.abilities {
+            if let crate::ir::ability::AbilityKind::OnResolve { modes } = &a.kind {
+                return Some(modes.len());
+            }
+        }
+        self.spell_modes().map(|m| m.len())
     }
 
     pub(crate) fn spell_modes(&self) -> Option<&SpellModes> {
@@ -777,12 +877,37 @@ impl CardDef {
         }
     }
 
+    /// Mutable access to the owning `Vec<AbilityDef>` for this card's kind,
+    /// for push/append. Returns `None` for spell kinds (which have no
+    /// activated-ability list).
+    pub(crate) fn abilities_vec_mut(&mut self) -> Option<&mut Vec<AbilityDef>> {
+        match &mut self.kind {
+            CardKind::Land(l) => Some(&mut l.abilities),
+            CardKind::Creature(c) => Some(&mut c.abilities),
+            CardKind::Artifact(a) => Some(&mut a.abilities),
+            CardKind::Planeswalker(p) => Some(&mut p.abilities),
+            CardKind::Enchantment(e) => Some(&mut e.abilities),
+            CardKind::Instant(_) | CardKind::Sorcery(_) => None,
+        }
+    }
+
     pub(crate) fn mana_abilities_mut(&mut self) -> &mut [ManaAbility] {
         match &mut self.kind {
             CardKind::Land(l) => &mut l.mana_abilities,
             CardKind::Creature(c) => &mut c.mana_abilities,
             CardKind::Artifact(a) => &mut a.mana_abilities,
             _ => &mut [],
+        }
+    }
+
+    /// Mutable access to the owning `Vec<ManaAbility>` for push/append.
+    /// Returns `None` for kinds without mana-ability lists.
+    pub(crate) fn mana_abilities_vec_mut(&mut self) -> Option<&mut Vec<ManaAbility>> {
+        match &mut self.kind {
+            CardKind::Land(l) => Some(&mut l.mana_abilities),
+            CardKind::Creature(c) => Some(&mut c.mana_abilities),
+            CardKind::Artifact(a) => Some(&mut a.mana_abilities),
+            _ => None,
         }
     }
 
@@ -886,6 +1011,7 @@ impl CardDef {
             castable: false,
             alternate_costs: vec![],
             protection_from: vec![],
+            abilities: vec![],
         }
     }
 }
@@ -959,13 +1085,6 @@ where
     }
 }
 
-/// Build a `ReplacementDef` for permanents that enter the battlefield tapped.
-pub(crate) fn replacement_enters_tapped() -> ReplacementDef {
-    etb_self_replacement(|_, id, _, state, _| {
-        if let Some(bf) = state.permanent_bf_mut(id) { bf.tapped = true; }
-    })
-}
-
 /// Build a `ReplacementDef` that sets a planeswalker's loyalty on ETB.
 pub(crate) fn replacement_planeswalker_etb(base_loyalty: i32) -> ReplacementDef {
     etb_self_replacement(move |_, id, _, state, _| {
@@ -1004,42 +1123,6 @@ pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Colo
 
 // ── Trigger check functions (one per trigger-having card) ─────────────────────
 
-/// Build a Bowmasters trigger context. Target is "any_target" = creature | planeswalker | player.
-fn bowmasters_trigger_ctx(source_id: ObjId, controller: PlayerId, log_msg: &'static str) -> TriggerContext {
-    TriggerContext {
-        source_name: "Orcish Bowmasters".into(),
-        controller,
-        target_spec: TargetSpec::Union(vec![
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) },
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Planeswalker)) },
-            TargetSpec::Player(Who::Opp),
-        ]),
-        effect: Effect(std::sync::Arc::new(move |state, t, targets| {
-            eff_damage_target(controller, 1, source_id).call(state, t, targets);
-            do_amass("Orc Army", controller, 1, state, t);
-            state.log(t, controller, log_msg);
-        })),
-    }
-}
-
-pub(crate) fn bowmasters_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
-    match event {
-        // ETB: only fires for the entering Bowmasters itself.
-        GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. }
-            if *id == source_id && *ctlr == controller =>
-        {
-            pending.push(bowmasters_trigger_ctx(source_id, controller, "Bowmasters ETB: amass Orc 1"));
-        }
-        // Opponent draws any card that isn't their natural draw-step draw.
-        GameEvent::Draw { controller: drawer, draw_index: _, is_natural }
-            if *drawer != controller && !is_natural =>
-        {
-            pending.push(bowmasters_trigger_ctx(source_id, controller, "Bowmasters draw trigger: amass Orc 1"));
-        }
-        _ => {}
-    }
-}
-
 /// ETB trigger for Recruiter of the Guard: search library for a creature with toughness ≤ 2,
 /// put it into hand. CR 700.3 (search), CR 701.14 (reveal — not modeled; card goes to hand).
 pub(crate) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
@@ -1071,29 +1154,6 @@ pub(crate) fn atraxa_etb_check(event: &GameEvent, source_id: ObjId, controller: 
     }
 }
 
-pub(crate) fn murktide_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, state: &SimState, pending: &mut Vec<TriggerContext>) {
-    if let GameEvent::ZoneChange {
-        id, from: ZoneId::Graveyard, to: ZoneId::Exile,
-        controller: exiler, ..
-    } = event {
-        let is_instant_or_sorcery = state.objects.get(id)
-            .and_then(|o| state.catalog.get(o.catalog_key.as_str()))
-            .map_or(false, |d| d.is_instant() || d.is_sorcery());
-        if is_instant_or_sorcery && *exiler == controller {
-            pending.push(TriggerContext {
-                source_name: "Murktide Regent".into(),
-                controller,
-                target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
-                    if let Some(bf) = state.permanent_bf_mut(source_id) {
-                        bf.counters += 1;
-                        state.log(t, controller, "Murktide: inst/sorc exiled → +1/+1 counter");
-                    }
-                })),
-            });
-        }
-    }
-}
 
 pub(crate) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     match event {
@@ -1176,6 +1236,80 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
             for check in &mat.granted_trigger_defs {
                 (check)(event, obj_id, controller, state, &mut pending);
             }
+        }
+    }
+
+    // Part 4: IR-based triggered abilities from CardDef.abilities.
+    // Each Triggered ability declares an `active_zone` — the source must be
+    // in that zone for the trigger to be armed. Default Battlefield; Stack
+    // for self-triggering spell abilities (storm, cascade, "when you cast").
+    let all_ids: Vec<(ObjId, PlayerId, String, crate::ir::expr::ZoneKindSel)> = state
+        .objects
+        .iter()
+        .map(|(id, o)| {
+            let zk = match o.zone {
+                CardZone::Battlefield => crate::ir::expr::ZoneKindSel::Battlefield,
+                CardZone::Stack => crate::ir::expr::ZoneKindSel::Stack,
+                CardZone::Graveyard => crate::ir::expr::ZoneKindSel::Graveyard,
+                CardZone::Exile { .. } => crate::ir::expr::ZoneKindSel::Exile,
+                CardZone::Hand { .. } => crate::ir::expr::ZoneKindSel::Hand,
+                CardZone::Library => crate::ir::expr::ZoneKindSel::Library,
+            };
+            (*id, o.controller, o.catalog_key.clone(), zk)
+        })
+        .collect();
+    for (obj_id, controller, key, obj_zone) in all_ids {
+        let Some(card_def) = state.catalog.get(&key) else { continue };
+        for ability in &card_def.abilities {
+            let crate::ir::ability::AbilityKind::Triggered {
+                spec,
+                target_spec,
+                body,
+                active_zone,
+            } = &ability.kind
+            else {
+                continue;
+            };
+            if *active_zone != obj_zone {
+                continue;
+            }
+            let Some(match_env) = crate::ir::executor::match_trigger(spec, event, obj_id, controller, state)
+            else { continue };
+            // Capture bindings from the matched event (e.g. triggered_obj,
+            // triggered_mana_spent) so the body can reference them on resolution.
+            let match_bindings: Vec<(&'static str, crate::ir::expr::Value)> =
+                match_env.bindings.iter().map(|(k, v)| (*k, v.clone())).collect();
+            let body = body.clone();
+            let source_name = card_def.name.clone();
+            let effect = Effect(std::sync::Arc::new(move |state, _t, targets| {
+                use crate::ir::executor::{execute, BindEnv};
+                use crate::ir::expr::Value;
+                let mut env = BindEnv::new()
+                    .with_source(obj_id)
+                    .with_controller(controller);
+                for (k, v) in &match_bindings {
+                    env = env.with_var(k, v.clone());
+                }
+                if let Some(&tgt) = targets.first() {
+                    let v = if tgt == state.us.id || tgt == state.opp.id {
+                        Value::Player(state.who_pid(tgt))
+                    } else {
+                        Value::Obj(tgt)
+                    };
+                    env = env.with_var("target", v);
+                }
+                let _ = execute(&body, state, &env);
+            }));
+            // "Another target X" is expressed by excluding the ability's own
+            // source from every object filter in the spec. Harmless for specs
+            // that already exclude self (the id just never matches the zone).
+            let target_spec = crate::predicates::exclude_from_target_spec(target_spec, obj_id);
+            pending.push(TriggerContext {
+                source_name,
+                controller,
+                target_spec,
+                effect,
+            });
         }
     }
 
@@ -1388,6 +1522,25 @@ pub(crate) fn build_ability_effect(
     who: PlayerId,
     source_id: ObjId,
 ) -> Effect {
+    if let Some(body) = &ability.ir_body {
+        let body = body.clone();
+        return Effect(std::sync::Arc::new(move |state, _t, targets| {
+            use crate::ir::executor::{execute, BindEnv};
+            use crate::ir::expr::Value;
+            let mut env = BindEnv::new()
+                .with_source(source_id)
+                .with_controller(who);
+            if let Some(&tgt) = targets.first() {
+                let v = if tgt == state.us.id || tgt == state.opp.id {
+                    Value::Player(state.who_pid(tgt))
+                } else {
+                    Value::Obj(tgt)
+                };
+                env = env.with_var("target", v);
+            }
+            let _ = execute(&body, state, &env);
+        }));
+    }
     if let Some(factory) = &ability.ability_factory {
         return factory(who, source_id);
     }
@@ -1406,6 +1559,32 @@ pub(crate) fn build_spell_effect(
     chosen_x: u32,
     chosen_mode: usize,
 ) -> (TargetSpec, Effect) {
+    // IR path: a CardDef may carry a data-based resolution body.
+    for a in &def.abilities {
+        if let crate::ir::ability::AbilityKind::OnResolve { modes } = &a.kind {
+            if let Some(mode) = modes.get(chosen_mode) {
+                let body = mode.body.clone();
+                let eff = Effect(std::sync::Arc::new(move |state, _t, targets| {
+                    use crate::ir::executor::{execute, BindEnv};
+                    use crate::ir::expr::Value;
+                    let mut env = BindEnv::new()
+                        .with_source(source_id)
+                        .with_controller(who);
+                    if let Some(&tgt) = targets.first() {
+                        let v = if tgt == state.us.id || tgt == state.opp.id {
+                            Value::Player(state.who_pid(tgt))
+                        } else {
+                            Value::Obj(tgt)
+                        };
+                        env = env.with_var("target", v);
+                    }
+                    let _ = execute(&body, state, &env);
+                }));
+                return (mode.target_spec.clone(), eff);
+            }
+        }
+    }
+    // Legacy path
     if let Some(mode) = def.spell_modes().and_then(|m| m.get(chosen_mode)) {
         return (mode.target_spec.clone(), (mode.factory)(who, source_id, chosen_x));
     }
@@ -1467,15 +1646,3 @@ pub(crate) fn murktide_etb_check(event: &GameEvent, source_id: ObjId, controller
     None
 }
 
-// ── Dauthi Voidwalker replacement check ──────────────────────────────────────
-
-/// Replacement check for Dauthi Voidwalker: fires when any card controlled by
-/// the opponent (not DV's controller) would be put into the graveyard from anywhere.
-pub(crate) fn dv_replacement_check(event: &GameEvent, _source_id: ObjId, controller: PlayerId, _state: &SimState) -> Option<Vec<ObjId>> {
-    if let GameEvent::ZoneChange { id, to: ZoneId::Graveyard, controller: card_controller, .. } = event {
-        if *card_controller != controller {
-            return Some(vec![*id]);
-        }
-    }
-    None
-}

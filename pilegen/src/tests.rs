@@ -2033,26 +2033,24 @@
         assert!(result.is_empty());
     }
 
-    /// Fire a Bowmasters ETB trigger for `controller` and return the TriggerContext.
-    fn bowmasters_etb_ctx(controller: PlayerId) -> TriggerContext {
-        let state = make_state();
+    /// Fire a Bowmasters ETB trigger for `controller`, choose its target, and apply it.
+    /// Drives the unified IR path via `fire_triggers` — the same route the engine takes.
+    fn fire_bowmasters_etb(controller: PlayerId, state: &mut SimState) {
+        recompute(state);
+        let bowmasters_id = state.permanents_of(controller)
+            .find(|p| p.catalog_key == "Orcish Bowmasters")
+            .expect("no Bowmasters in play").id;
         let ev = GameEvent::ZoneChange {
-            id: ObjId::UNSET,
+            id: bowmasters_id,
             actor: controller,
-            from: ZoneId::Hand,
+            from: ZoneId::Stack,
             to: ZoneId::Battlefield,
             controller,
         };
-        let mut pending = Vec::new();
-        bowmasters_check(&ev, ObjId::UNSET, controller, &state, &mut pending);
-        pending.remove(0)
-    }
-
-    /// Fire a Bowmasters ETB trigger for `controller`, choose its target, and apply it.
-    fn fire_bowmasters_etb(controller: PlayerId, state: &mut SimState) {
-        // Rebuild materialized so choose_trigger_target sees current P/T.
-        recompute(state);
-        let ctx = bowmasters_etb_ctx(controller);
+        let (pending, _) = fire_triggers(&ev, state);
+        let ctx = pending.into_iter()
+            .find(|tc| tc.source_name == "Orcish Bowmasters")
+            .expect("no Bowmasters ETB trigger fired");
         let all_targets = legal_targets(&ctx.target_spec, controller, ObjId(0), state);
         let targets: Vec<ObjId> = pick_targets(&ctx.target_spec, &all_targets, state);
         ctx.effect.call(state, 1, &targets);
@@ -2116,8 +2114,9 @@
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
         add_default_perm(&mut state, PlayerId::Us, "Troll");
         add_default_perm(&mut state, PlayerId::Us, "Orcish Bowmasters");
-        let catalog = vec![creature("Troll", 3, 3), creature("Orcish Bowmasters", 1, 1)];
-        for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
+        // Only override Troll; leaving the real Bowmasters CardDef in the catalog
+        // so its IR abilities fire via the unified trigger path.
+        state.catalog.insert("Troll".into(), creature("Troll", 3, 3));
         fire_bowmasters_etb(PlayerId::Opp, &mut state);
         check_state_based_actions(&mut state, 1);
         assert!(!state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Orcish Bowmasters"),
@@ -3007,7 +3006,7 @@
         let delta_ability = AbilityDef { costs: vec![CostComponent::SacSelf, CostComponent::Life(1)], ability_factory: Some(Arc::new(move |who, _| eff_fetch_search(who, pred.clone(), ZoneId::Battlefield))), ..Default::default() };
         let island_def = catalog_card("Underground Sea");
         let forest_def = CardDef::new("Forest", CardKind::Land(LandData {
-            land_types: LandTypes { forest: true, ..Default::default() },
+            land_types: LandTypes::from_types(&[BasicLandType::Forest]),
             ..Default::default()
         }), vec![], None, vec![Supertype::Basic], CardLayout::Normal, None, vec![], vec![], vec![], vec![]);
         let mut state = make_state();
@@ -3815,6 +3814,211 @@
         assert_eq!(state.objects[&fon_id].zone, CardZone::Graveyard, "FoN → graveyard after resolving");
     }
 
+    // ── Section 59: Meteor Sword (ETB destroy + buff equipped) ────────────────
+
+    /// Meteor Sword's ETB trigger destroys a target permanent; materialized state
+    /// for the equipped creature shows +3/+3.
+    #[test]
+    fn test_meteor_sword_etb_destroys_target_and_buffs_equipped() {
+        let mut state = make_state();
+        state.catalog.insert("Meteor Sword".into(), catalog_card("Meteor Sword"));
+
+        // Opponent creature to be destroyed by the ETB trigger.
+        let victim = add_default_perm(&mut state, PlayerId::Opp, "Delver of Secrets");
+        // Our creature to equip.
+        let ours = add_default_perm(&mut state, PlayerId::Us, "Delver of Secrets");
+
+        eff_enter_permanent(PlayerId::Us, "Meteor Sword").call(&mut state, 1, &[]);
+        let sword_id = state.objects.values()
+            .find(|o| o.catalog_key == "Meteor Sword" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Meteor Sword on battlefield");
+
+        // Resolve the ETB trigger against the opponent's creature.
+        let ctx = state.pending_triggers.pop().expect("ETB trigger queued");
+        assert_eq!(ctx.source_name, "Meteor Sword");
+        let all = legal_targets(&ctx.target_spec, PlayerId::Us, sword_id, &state);
+        assert!(all.contains(&victim), "opponent permanent is a legal target");
+        assert!(all.contains(&ours), "our permanent is also a legal target");
+        ctx.effect.call(&mut state, 1, &[victim]);
+        assert_eq!(state.objects[&victim].zone, CardZone::Graveyard,
+            "target permanent destroyed");
+
+        // Equip: attach Meteor Sword to our creature and verify +3/+3.
+        let def = state.catalog["Meteor Sword"].clone();
+        let ability = match &def.kind {
+            CardKind::Artifact(a) => &a.abilities[0],
+            _ => panic!("Meteor Sword is an artifact"),
+        };
+        let factory = ability.ability_factory.as_ref().unwrap().clone();
+        factory(PlayerId::Us, sword_id).call(&mut state, 1, &[ours]);
+        assert_eq!(state.permanent_bf(sword_id).and_then(|bf| bf.attached_to), Some(ours),
+            "Meteor Sword attached to our creature");
+
+        recompute(&mut state);
+        let eq_def = state.def_of(ours).expect("materialized def");
+        let eq = eq_def.as_creature().expect("creature");
+        assert_eq!(eq.power(), 1 + 3, "base 1 + Meteor Sword +3");
+        assert_eq!(eq.toughness(), 1 + 3, "base 1 + Meteor Sword +3");
+    }
+
+    // ── Section 60: Quantum Riddler (ETB draw + Warp alt cost + delayed exile) ──
+
+    /// ETB trigger fires with `TargetSpec::None` and draws a card for Quantum Riddler's
+    /// controller. Warp alternative cost is {1}{U}.
+    #[test]
+    fn test_quantum_riddler_etb_draws_and_warp_alt_cost_present() {
+        let def = catalog_card("Quantum Riddler");
+        let alts = def.alternate_costs();
+        assert_eq!(alts.len(), 1, "one alternate (warp) cost should be present");
+        assert!(matches!(alts[0].costs.first(), Some(CostComponent::Mana(_))),
+            "warp cost should be a mana cost");
+
+        let mut state = make_state();
+        state.catalog.insert("Quantum Riddler".into(), def);
+        // Normal (non-warp) cast: alt_cost_index is None, so only the ETB-draw trigger fires.
+        let before = state.us.draws_this_turn;
+        eff_enter_permanent(PlayerId::Us, "Quantum Riddler").call(&mut state, 1, &[]);
+        let drew = state.pending_triggers.iter()
+            .find(|ctx| ctx.source_name == "Quantum Riddler").cloned()
+            .expect("ETB draw trigger queued");
+        drew.effect.call(&mut state, 1, &[]);
+        assert!(state.us.draws_this_turn > before,
+            "Quantum Riddler ETB should draw a card");
+
+        assert!(!state.pending_triggers.iter().any(|ctx| ctx.source_name == "Quantum Riddler (warp)"),
+            "warp-exile trigger must not fire without alt_cost_index");
+        assert!(state.trigger_instances.is_empty(),
+            "no delayed end-step trigger registered on a normal cast");
+    }
+
+    /// When the spell is cast for its Warp alternative cost (alt_cost_index set),
+    /// ETB registers a delayed end-step trigger that exiles Quantum Riddler.
+    #[test]
+    fn test_quantum_riddler_warp_registers_end_step_exile() {
+        let mut state = make_state();
+        state.catalog.insert("Quantum Riddler".into(), catalog_card("Quantum Riddler"));
+
+        // Simulate "cast for warp cost": mark alt_cost_index before ETB fires.
+        state.resolving_costs_ctx.alt_cost_index = Some(0);
+        eff_enter_permanent(PlayerId::Us, "Quantum Riddler").call(&mut state, 1, &[]);
+        let qr_id = state.objects.values()
+            .find(|o| o.catalog_key == "Quantum Riddler" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Quantum Riddler on battlefield");
+
+        // Resolve the warp trigger — it registers a delayed end-step exile.
+        let warp_ctx = state.pending_triggers.iter()
+            .find(|ctx| ctx.source_name == "Quantum Riddler (warp)").cloned()
+            .expect("warp trigger queued when alt_cost_index is set");
+        warp_ctx.effect.call(&mut state, 1, &[]);
+        assert_eq!(state.trigger_instances.len(), 1,
+            "delayed end-step exile trigger should be registered");
+        assert_eq!(state.trigger_instances[0].expiry, Some(Expiry::OneShot));
+
+        // Clear ambient pending triggers from the ETB before firing end step.
+        state.pending_triggers.clear();
+
+        // Fire end step: the delayed trigger should produce an exile trigger context.
+        fire_event(
+            GameEvent::EnteredStep { step: StepKind::End, active_player: PlayerId::Us },
+            &mut state, 2, PlayerId::Us,
+        );
+        let exile_ctx = state.pending_triggers.iter()
+            .find(|ctx| ctx.source_name == "Quantum Riddler (warp exile)").cloned()
+            .expect("end step produces warp exile trigger");
+        exile_ctx.effect.call(&mut state, 2, &[]);
+        assert_eq!(state.objects[&qr_id].zone, CardZone::Exile { on_adventure: false },
+            "Quantum Riddler should be exiled at end step when cast for warp cost");
+    }
+
+    // ── Section 61: Pre-War Formalwear (ETB reanimate + static buff) ──────────
+
+    /// Pre-War Formalwear's ETB trigger targets a creature in own graveyard with MV ≤ 3,
+    /// reanimates it, and attaches self. Static buff grants +2/+2 and vigilance.
+    #[test]
+    fn test_pre_war_formalwear_etb_reanimates_and_attaches() {
+        let mut state = make_state();
+        state.catalog.insert("Pre-War Formalwear".into(), catalog_card("Pre-War Formalwear"));
+
+        // Put a small creature in our graveyard.
+        let gy_creature = add_default_perm(&mut state, PlayerId::Us, "Delver of Secrets");
+        if let Some(obj) = state.objects.get_mut(&gy_creature) {
+            obj.zone = CardZone::Graveyard;
+            obj.bf = None;
+        }
+
+        // Pre-War Formalwear ETBs → ETB trigger queued.
+        eff_enter_permanent(PlayerId::Us, "Pre-War Formalwear").call(&mut state, 1, &[]);
+        let pwf_id = state.objects.values()
+            .find(|o| o.catalog_key == "Pre-War Formalwear" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Pre-War Formalwear on battlefield");
+
+        let ctx = state.pending_triggers.iter()
+            .find(|c| c.source_name == "Pre-War Formalwear").cloned()
+            .expect("ETB trigger queued");
+        let targets = legal_targets(&ctx.target_spec, PlayerId::Us, pwf_id, &state);
+        assert!(targets.contains(&gy_creature),
+            "creature in own graveyard with MV ≤ 3 is a legal target");
+
+        ctx.effect.call(&mut state, 1, &[gy_creature]);
+        assert_eq!(state.objects[&gy_creature].zone, CardZone::Battlefield,
+            "target reanimated");
+        assert_eq!(state.permanent_bf(pwf_id).and_then(|bf| bf.attached_to), Some(gy_creature),
+            "Pre-War Formalwear attached to reanimated creature");
+
+        recompute(&mut state);
+        let eq_def = state.def_of(gy_creature).expect("materialized def");
+        let eq = eq_def.as_creature().expect("creature");
+        assert_eq!(eq.power(), 1 + 2, "base 1 + Pre-War Formalwear +2");
+        assert_eq!(eq.toughness(), 1 + 2, "base 1 + Pre-War Formalwear +2");
+        assert!(eq.keywords.contains(Keyword::Vigilance), "granted vigilance");
+    }
+
+    // ── Section 62: Cryptic Coat (ETB cloak token + attach + bounce ability) ──
+
+    /// Cryptic Coat's ETB trigger creates a Mysterious Creature token and attaches self.
+    /// Static buff grants +1/+0. {1}{U} activated ability returns self to owner's hand.
+    #[test]
+    fn test_cryptic_coat_etb_cloaks_token_and_attaches() {
+        let mut state = make_state();
+        state.catalog.insert("Cryptic Coat".into(), catalog_card("Cryptic Coat"));
+        state.catalog.insert("Mysterious Creature".into(), catalog_card("Mysterious Creature"));
+
+        eff_enter_permanent(PlayerId::Us, "Cryptic Coat").call(&mut state, 1, &[]);
+        let coat_id = state.objects.values()
+            .find(|o| o.catalog_key == "Cryptic Coat" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Cryptic Coat on battlefield");
+
+        // Resolve ETB: creates the token and attaches self to it.
+        let ctx = state.pending_triggers.iter()
+            .find(|c| c.source_name == "Cryptic Coat").cloned()
+            .expect("ETB trigger queued");
+        ctx.effect.call(&mut state, 1, &[]);
+
+        let token_id = state.objects.values()
+            .find(|o| o.catalog_key == "Mysterious Creature" && o.zone == CardZone::Battlefield)
+            .map(|o| o.id).expect("Mysterious Creature token created");
+        assert_eq!(state.permanent_bf(coat_id).and_then(|bf| bf.attached_to), Some(token_id),
+            "Cryptic Coat attached to the cloaked token");
+
+        // +1/+0 applies to equipped creature.
+        recompute(&mut state);
+        let tok_def = state.def_of(token_id).expect("materialized def");
+        let tok = tok_def.as_creature().expect("creature");
+        assert_eq!(tok.power(), 2 + 1, "base 2 + Cryptic Coat +1");
+        assert_eq!(tok.toughness(), 2, "Cryptic Coat does not buff toughness");
+
+        // Activated ability: {1}{U} returns Cryptic Coat to owner's hand.
+        let def = state.catalog["Cryptic Coat"].clone();
+        let bounce = match &def.kind {
+            CardKind::Artifact(a) => &a.abilities[0],
+            _ => panic!("Cryptic Coat is an artifact"),
+        };
+        let factory = bounce.ability_factory.as_ref().unwrap().clone();
+        factory(PlayerId::Us, coat_id).call(&mut state, 1, &[]);
+        assert!(matches!(state.objects[&coat_id].zone, CardZone::Hand { .. }),
+            "Cryptic Coat returned to owner's hand");
+    }
+
     // ── Section 29: Dauthi Voidwalker ─────────────────────────────────────────
 
     /// DV replacement: when opponent's card would go to graveyard, it exiles with a void counter.
@@ -3922,6 +4126,71 @@
         assert_eq!(
             state.objects[&opp_card_id].counters.get(&CounterType::Void).copied().unwrap_or(0),
             0,
+        );
+    }
+
+    /// DV activated ability (IR path): after activation, the chosen exiled
+    /// card becomes castable with a zero alternate cost, via `Action::ApplyCE`
+    /// + `CEMod::CastableFrom` + `CEMod::AltCost(Free)`.
+    #[test]
+    fn test_dv_activated_grants_castable_from_exile_via_ir() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let dv_def = catalog_card("Dauthi Voidwalker");
+        // Activated ability is synthesized from the IR `AbilityKind::Activated`.
+        assert_eq!(
+            dv_def.abilities().len(),
+            1,
+            "DV should expose one synthesized activated ability",
+        );
+        let ability = &dv_def.abilities()[0];
+        assert!(
+            ability.ir_body.is_some(),
+            "DV's activated ability should carry an IR body",
+        );
+        assert!(
+            ability.choice_spec.is_some(),
+            "DV's activated ability should carry a choice_spec (chooses an exiled card)",
+        );
+
+        let dv_id = add_perm_with_def(&mut state, PlayerId::Us, &dv_def, BattlefieldState::new());
+
+        // Exiled Opp-owned card with a Void counter — the chosen target.
+        let exiled_id = state.alloc_id();
+        let mut counters = HashMap::new();
+        counters.insert(CounterType::Void, 1);
+        state.objects.insert(exiled_id, GameObject {
+            id: exiled_id,
+            catalog_key: "Dark Ritual".to_string(),
+            owner: PlayerId::Opp,
+            controller: PlayerId::Opp,
+            zone: CardZone::Exile { on_adventure: false },
+            is_token: false, spell: None, bf: None, materialized: None,
+            counters,
+            ci_timestamp: 0,
+        });
+        recompute(&mut state);
+
+        // Pre-condition: exiled card is not castable by default.
+        assert!(
+            !state.objects[&exiled_id].materialized.as_ref().unwrap().castable,
+            "exiled card should not be castable before DV activation",
+        );
+
+        // Simulate ability resolution: chosen id lands in targets[0].
+        let eff = build_ability_effect(ability, PlayerId::Us, dv_id);
+        eff.call(&mut state, 1, &[exiled_id]);
+        recompute(&mut state);
+
+        let mat = state.objects[&exiled_id].materialized.as_ref().unwrap();
+        assert!(
+            mat.castable,
+            "after DV activation, the chosen exiled card should be castable",
+        );
+        assert!(
+            !mat.alternate_costs.is_empty(),
+            "after DV activation, the chosen exiled card should have an alt-cost entry (free cast)",
         );
     }
 
@@ -5482,10 +5751,7 @@
             state.stack.push(id);
         }
 
-        // Simulate 2 spells cast before Flusterstorm.
-        state.us.spells_cast_this_turn = 2;
-
-        // Also put flusterstorm on the stack (as if we just cast it) with spell_a as target.
+        // Put flusterstorm on the stack (as if we just cast it) with spell_a as target.
         state.objects.insert(fluster_id, GameObject {
             id: fluster_id,
             catalog_key: "Flusterstorm".to_string(),
@@ -5505,11 +5771,22 @@
         });
         state.stack.push(fluster_id);
 
-        // Fire the SpellCast event — storm trigger should fire.
+        // Layer-B event log: populate prior SpellCast events + the triggering
+        // Flusterstorm cast. Storm body evaluates as EventCount(ThisTurn,
+        // SpellCast caster=Us) - 1, so 3 logged → 2 copies.
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: spell_a, mana_spent: true,
+        });
+        state.event_log.push(1, GameEvent::SpellCast {
+            caster: PlayerId::Us, card_id: spell_b, mana_spent: true,
+        });
         let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        state.event_log.push(1, event.clone());
+
+        // Fire the SpellCast event — storm trigger should fire.
         let (triggers, _) = fire_triggers(&event, &state);
         assert_eq!(triggers.len(), 1, "storm should produce exactly one trigger context");
-        assert_eq!(triggers[0].source_name, "Flusterstorm (storm trigger)");
+        assert_eq!(triggers[0].source_name, "Flusterstorm");
 
         // Resolve the storm trigger effect — should create 2 copies on the stack.
         let stack_before = state.stack.len();
@@ -5521,7 +5798,7 @@
         for &copy_id in &state.stack[stack_before..] {
             let ability = state.abilities.get(&copy_id)
                 .expect("copy should be a StackAbility");
-            assert_eq!(ability.source_name, "Flusterstorm (storm copy)");
+            assert_eq!(ability.source_name, "Flusterstorm");
             assert!(ability.counterable, "storm copies should be counterable");
         }
     }
@@ -5531,15 +5808,37 @@
         let mut state = make_state();
         state.catalog = test_catalog();
 
+        // Set up Flusterstorm on the stack so the dispatch can find its ability.
         let fluster_id = state.alloc_id();
+        state.objects.insert(fluster_id, GameObject {
+            id: fluster_id,
+            catalog_key: "Flusterstorm".to_string(),
+            owner: PlayerId::Us,
+            controller: PlayerId::Us,
+            zone: CardZone::Stack,
+            is_token: false,
+            spell: Some(SpellState {
+                effect: None,
+                chosen_targets: vec![],
+                is_back_face: false,
+                costs_paid_ctx: CostsPaidCtx::default(),
+            }),
+            bf: None,
+            materialized: None,
+            counters: HashMap::new(), ci_timestamp: 0,
+        });
+        state.stack.push(fluster_id);
 
-
-        // No spells cast before this one.
-        state.us.spells_cast_this_turn = 0;
-
+        // Only the Flusterstorm cast itself is in the log — no prior spells.
         let event = GameEvent::SpellCast { caster: PlayerId::Us, card_id: fluster_id, mana_spent: true };
+        state.event_log.push(1, event.clone());
+
         let (triggers, _) = fire_triggers(&event, &state);
-        assert!(triggers.is_empty(), "no storm copies when first spell of the turn");
+        assert_eq!(triggers.len(), 1, "storm trigger still fires (resolves to 0 copies)");
+
+        let stack_before = state.stack.len();
+        triggers[0].effect.call(&mut state, 1, &[]);
+        assert_eq!(state.stack.len(), stack_before, "no copies when first spell of the turn");
     }
 
     #[test]
@@ -5907,9 +6206,9 @@
 
         let def = state.def_of(sea_id).expect("Underground Sea should have materialized def");
         let land = def.as_land().expect("should still be a Land");
-        assert!(land.land_types.mountain, "nonbasic should gain Mountain type");
-        assert!(!land.land_types.island, "nonbasic should lose Island type");
-        assert!(!land.land_types.swamp, "nonbasic should lose Swamp type");
+        assert!(land.land_types.contains(BasicLandType::Mountain), "nonbasic should gain Mountain type");
+        assert!(!land.land_types.contains(BasicLandType::Island), "nonbasic should lose Island type");
+        assert!(!land.land_types.contains(BasicLandType::Swamp), "nonbasic should lose Swamp type");
         assert_eq!(land.mana_abilities.len(), 1, "should have exactly one mana ability");
         assert!(land.abilities.is_empty(), "non-mana abilities should be cleared");
     }
@@ -5927,8 +6226,8 @@
 
         let def = state.def_of(island_id).expect("Island should have materialized def");
         let land = def.as_land().expect("should be a Land");
-        assert!(land.land_types.island, "basic Island should keep Island type");
-        assert!(!land.land_types.mountain, "basic Island should not gain Mountain");
+        assert!(land.land_types.contains(BasicLandType::Island), "basic Island should keep Island type");
+        assert!(!land.land_types.contains(BasicLandType::Mountain), "basic Island should not gain Mountain");
     }
 
     /// Legendary supertype is preserved on Karakas under Magus of the Moon.
@@ -5946,7 +6245,7 @@
         assert!(def.supertypes.contains(&Supertype::Legendary),
             "Karakas should keep Legendary supertype");
         let land = def.as_land().expect("should be a Land");
-        assert!(land.land_types.mountain, "Karakas should become a Mountain");
+        assert!(land.land_types.contains(BasicLandType::Mountain), "Karakas should become a Mountain");
         assert!(land.abilities.is_empty(), "Karakas activated ability should be stripped");
     }
 
@@ -5964,9 +6263,9 @@
 
         let def = state.def_of(delta_id).expect("Polluted Delta should have materialized def");
         let land = def.as_land().expect("should be a Land");
-        assert!(land.land_types.mountain, "Polluted Delta should be a Mountain");
-        assert!(!land.land_types.island, "should lose Island subtype");
-        assert!(!land.land_types.swamp, "should lose Swamp subtype");
+        assert!(land.land_types.contains(BasicLandType::Mountain), "Polluted Delta should be a Mountain");
+        assert!(!land.land_types.contains(BasicLandType::Island), "should lose Island subtype");
+        assert!(!land.land_types.contains(BasicLandType::Swamp), "should lose Swamp subtype");
         assert!(land.abilities.is_empty(), "fetch ability should be cleared");
         assert_eq!(land.mana_abilities.len(), 1, "should have exactly one mana ability");
     }
@@ -5983,7 +6282,7 @@
 
         // Verify CE is active.
         let def = state.def_of(sea_id).unwrap();
-        assert!(def.as_land().unwrap().land_types.mountain, "should be Mountain while Magus in play");
+        assert!(def.as_land().unwrap().land_types.contains(BasicLandType::Mountain), "should be Mountain while Magus in play");
 
         // Magus leaves the battlefield.
         change_zone(magus_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
@@ -5991,9 +6290,9 @@
 
         let def = state.def_of(sea_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.island, "Underground Sea should revert to Island");
-        assert!(land.land_types.swamp, "Underground Sea should revert to Swamp");
-        assert!(!land.land_types.mountain, "should no longer be a Mountain");
+        assert!(land.land_types.contains(BasicLandType::Island), "Underground Sea should revert to Island");
+        assert!(land.land_types.contains(BasicLandType::Swamp), "Underground Sea should revert to Swamp");
+        assert!(!land.land_types.contains(BasicLandType::Mountain), "should no longer be a Mountain");
     }
 
     /// Magus of the Moon does not affect creatures (modifier early-returns for non-Land).
@@ -6025,8 +6324,8 @@
 
         let def = state.def_of(snow_id).expect("Snow-Covered Island should have materialized def");
         let land = def.as_land().expect("should be a Land");
-        assert!(land.land_types.island, "Snow-Covered Island should keep Island type");
-        assert!(!land.land_types.mountain, "should not gain Mountain");
+        assert!(land.land_types.contains(BasicLandType::Island), "Snow-Covered Island should keep Island type");
+        assert!(!land.land_types.contains(BasicLandType::Mountain), "should not gain Mountain");
         assert!(def.supertypes.contains(&Supertype::Basic), "should keep Basic");
         assert!(def.supertypes.contains(&Supertype::Snow), "should keep Snow");
     }
@@ -6045,7 +6344,7 @@
         for (id, name) in [(sea_id, "Underground Sea"), (tundra_id, "Tundra")] {
             let def = state.def_of(id).unwrap_or_else(|| panic!("{name} should have materialized def"));
             let land = def.as_land().unwrap_or_else(|| panic!("{name} should be a Land"));
-            assert!(land.land_types.mountain, "{name} should be a Mountain");
+            assert!(land.land_types.contains(BasicLandType::Mountain), "{name} should be a Mountain");
             assert_eq!(land.mana_abilities.len(), 1, "{name} should have one mana ability");
             assert!(land.abilities.is_empty(), "{name} non-mana abilities should be cleared");
         }
@@ -6064,9 +6363,9 @@
 
         let def = state.def_of(sea_id).expect("Underground Sea should have materialized def");
         let land = def.as_land().expect("should still be a Land");
-        assert!(land.land_types.mountain, "nonbasic should gain Mountain type");
-        assert!(!land.land_types.island, "nonbasic should lose Island type");
-        assert!(!land.land_types.swamp, "nonbasic should lose Swamp type");
+        assert!(land.land_types.contains(BasicLandType::Mountain), "nonbasic should gain Mountain type");
+        assert!(!land.land_types.contains(BasicLandType::Island), "nonbasic should lose Island type");
+        assert!(!land.land_types.contains(BasicLandType::Swamp), "nonbasic should lose Swamp type");
         assert_eq!(land.mana_abilities.len(), 1, "should have exactly one mana ability");
     }
 
@@ -6086,13 +6385,13 @@
         // Underground Sea (island + swamp) should keep both and still be a swamp.
         let def = state.def_of(sea_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.swamp, "should have Swamp");
-        assert!(land.land_types.island, "should keep Island");
+        assert!(land.land_types.contains(BasicLandType::Swamp), "should have Swamp");
+        assert!(land.land_types.contains(BasicLandType::Island), "should keep Island");
 
         // Urborg itself gains Swamp too.
         let urborg_mat = state.def_of(urborg_id).unwrap();
         let urborg_land = urborg_mat.as_land().unwrap();
-        assert!(urborg_land.land_types.swamp, "Urborg itself should be a Swamp");
+        assert!(urborg_land.land_types.contains(BasicLandType::Swamp), "Urborg itself should be a Swamp");
     }
 
     /// Urborg adds Swamp + "{T}: Add {B}" to a basic Island.
@@ -6109,8 +6408,8 @@
 
         let def = state.def_of(island_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.island, "should keep Island");
-        assert!(land.land_types.swamp, "should gain Swamp");
+        assert!(land.land_types.contains(BasicLandType::Island), "should keep Island");
+        assert!(land.land_types.contains(BasicLandType::Swamp), "should gain Swamp");
         assert_eq!(land.mana_abilities.len(), 2, "should have U and B mana abilities");
     }
 
@@ -6128,7 +6427,7 @@
 
         let def = state.def_of(swamp_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.swamp, "should still be a Swamp");
+        assert!(land.land_types.contains(BasicLandType::Swamp), "should still be a Swamp");
         assert_eq!(land.mana_abilities.len(), 1, "should not get a duplicate mana ability");
     }
 
@@ -6145,9 +6444,9 @@
 
         let def = state.def_of(sea_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.forest, "should gain Forest");
-        assert!(land.land_types.island, "should keep Island");
-        assert!(land.land_types.swamp, "should keep Swamp");
+        assert!(land.land_types.contains(BasicLandType::Forest), "should gain Forest");
+        assert!(land.land_types.contains(BasicLandType::Island), "should keep Island");
+        assert!(land.land_types.contains(BasicLandType::Swamp), "should keep Swamp");
     }
 
     /// Urborg CI is removed when it leaves; lands revert.
@@ -6161,14 +6460,14 @@
         let island_def = catalog_card("Island");
         let island_id = add_perm_with_def(&mut state, PlayerId::Us, &island_def, BattlefieldState::new());
         recompute(&mut state);
-        assert!(state.def_of(island_id).unwrap().as_land().unwrap().land_types.swamp);
+        assert!(state.def_of(island_id).unwrap().as_land().unwrap().land_types.contains(BasicLandType::Swamp));
 
         change_zone(urborg_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
         recompute(&mut state);
 
         let land = state.def_of(island_id).unwrap().as_land().unwrap();
-        assert!(!land.land_types.swamp, "Island should revert — no longer a Swamp");
-        assert!(land.land_types.island, "Island should keep Island type");
+        assert!(!land.land_types.contains(BasicLandType::Swamp), "Island should revert — no longer a Swamp");
+        assert!(land.land_types.contains(BasicLandType::Island), "Island should keep Island type");
     }
 
     /// Yavimaya + Blood Moon interaction: Blood Moon (L4) makes nonbasics into Mountains
@@ -6194,10 +6493,10 @@
         // static ability. Yavimaya's CE ceases to exist → nonbasics are Mountains only.
         let def = state.def_of(sea_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.mountain, "Blood Moon should make it a Mountain");
-        assert!(!land.land_types.forest, "Yavimaya CE suppressed — no Forest");
-        assert!(!land.land_types.island, "original Island type should be gone");
-        assert!(!land.land_types.swamp, "original Swamp type should be gone");
+        assert!(land.land_types.contains(BasicLandType::Mountain), "Blood Moon should make it a Mountain");
+        assert!(!land.land_types.contains(BasicLandType::Forest), "Yavimaya CE suppressed — no Forest");
+        assert!(!land.land_types.contains(BasicLandType::Island), "original Island type should be gone");
+        assert!(!land.land_types.contains(BasicLandType::Swamp), "original Swamp type should be gone");
         assert_eq!(land.mana_abilities.len(), 1,
             "should have only R mana ability");
 
@@ -6205,8 +6504,8 @@
         // strips its static ability, so its CE doesn't exist.
         let yav_mat = state.def_of(yav_id).unwrap();
         let yav_land = yav_mat.as_land().unwrap();
-        assert!(yav_land.land_types.mountain, "Yavimaya should be a Mountain under Blood Moon");
-        assert!(!yav_land.land_types.forest, "Yavimaya's CE is suppressed — no Forest");
+        assert!(yav_land.land_types.contains(BasicLandType::Mountain), "Yavimaya should be a Mountain under Blood Moon");
+        assert!(!yav_land.land_types.contains(BasicLandType::Forest), "Yavimaya's CE is suppressed — no Forest");
     }
 
     /// CR 613.7: dependency (Blood Moon writes LandTypes, Yavimaya reads LandTypes)
@@ -6227,14 +6526,14 @@
         // Same result as test_yavimaya_plus_blood_moon: Yavimaya's CE is suppressed.
         let def = state.def_of(sea_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.mountain, "Blood Moon should make it a Mountain");
-        assert!(!land.land_types.forest, "Yavimaya CE suppressed — no Forest");
+        assert!(land.land_types.contains(BasicLandType::Mountain), "Blood Moon should make it a Mountain");
+        assert!(!land.land_types.contains(BasicLandType::Forest), "Yavimaya CE suppressed — no Forest");
         assert_eq!(land.mana_abilities.len(), 1, "only R mana ability");
 
         let yav_mat = state.def_of(yav_id).unwrap();
         let yav_land = yav_mat.as_land().unwrap();
-        assert!(yav_land.land_types.mountain);
-        assert!(!yav_land.land_types.forest, "Yavimaya's CE is suppressed");
+        assert!(yav_land.land_types.contains(BasicLandType::Mountain));
+        assert!(!yav_land.land_types.contains(BasicLandType::Forest), "Yavimaya's CE is suppressed");
     }
 
     /// Urborg's CE is also suppressed under Blood Moon — nonbasics are Mountains only.
@@ -6253,15 +6552,15 @@
         // Urborg's CE suppressed — nonbasics are Mountains only, no Swamp.
         let def = state.def_of(sea_id).unwrap();
         let land = def.as_land().unwrap();
-        assert!(land.land_types.mountain);
-        assert!(!land.land_types.swamp, "Urborg CE suppressed — no Swamp");
+        assert!(land.land_types.contains(BasicLandType::Mountain));
+        assert!(!land.land_types.contains(BasicLandType::Swamp), "Urborg CE suppressed — no Swamp");
         assert_eq!(land.mana_abilities.len(), 1, "only R mana ability");
 
         // Urborg itself is a Mountain (nonbasic, legendary).
         let urborg_mat = state.def_of(urborg_id).unwrap();
         let urborg_land = urborg_mat.as_land().unwrap();
-        assert!(urborg_land.land_types.mountain);
-        assert!(!urborg_land.land_types.swamp, "Urborg's own CE is suppressed");
+        assert!(urborg_land.land_types.contains(BasicLandType::Mountain));
+        assert!(!urborg_land.land_types.contains(BasicLandType::Swamp), "Urborg's own CE is suppressed");
     }
 
     // ── Section 32: Protection ─────────────────────────────────────────────────
@@ -6497,8 +6796,12 @@
         let mv_id = add_perm_with_def(&mut state, PlayerId::Us, &mv_def, BattlefieldState::new());
         recompute(&mut state);
 
-        // Activate the {U},{T} ability (second ability, index 0 in abilities vec).
+        // Activate the {U},{T} ability (only activated ability, index 0).
+        // The ability is on the IR path — synthesized from AbilityKind::Activated
+        // at catalog build time, carrying Action::GrantCEToNextSpellCast as ir_body.
         let ability = &mv_def.abilities()[0];
+        assert!(ability.ir_body.is_some(),
+            "Mistrise Village's synthesized ability should carry an IR body");
         let eff = build_ability_effect(ability, PlayerId::Us, mv_id);
         eff.call(&mut state, 1, &[]);
 
@@ -6590,6 +6893,210 @@
 
         assert!(state.latent_spell_mods.is_empty(),
             "Mistrise Village LatentSpellMod should expire at end of turn");
+    }
+
+    // ── Clue Token + Wasteland (IR Activated) ───────────────────────────────────
+
+    #[test]
+    fn test_clue_token_activated_draws_via_ir() {
+        // Clue Token is on the IR path; the synthesized AbilityDef should
+        // carry the Action::Draw body via ir_body and resolve through the
+        // executor when build_ability_effect runs.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let def = catalog_card("Clue Token");
+        assert_eq!(def.abilities().len(), 1, "Clue Token should expose a single synthesized ability");
+        let clue_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        recompute(&mut state);
+
+        // Seed a known card on top of Us's library so Draw is observable.
+        let top_id = {
+            let brainstorm = catalog_card("Brainstorm");
+            let id = state.alloc_id();
+            state.objects.insert(id, GameObject {
+                id, catalog_key: "Brainstorm".to_string(),
+                owner: PlayerId::Us, controller: PlayerId::Us,
+                zone: CardZone::Library, is_token: false,
+                bf: None, spell: None, materialized: None,
+                counters: HashMap::new(), ci_timestamp: 0,
+            });
+            state.us.library_order.push_front(id);
+            state.catalog.entry("Brainstorm".to_string()).or_insert(brainstorm);
+            id
+        };
+
+        let ability = &def.abilities()[0];
+        assert!(ability.ir_body.is_some(), "Clue Token's synthesized ability should carry an IR body");
+        let eff = build_ability_effect(ability, PlayerId::Us, clue_id);
+        eff.call(&mut state, 1, &[]);
+
+        assert!(matches!(state.objects[&top_id].zone, CardZone::Hand { .. }),
+            "Clue Token activation should draw the top card into hand");
+    }
+
+    #[test]
+    fn test_island_mana_ability_produces_blue_via_ir() {
+        // Island is on the IR path: a no-target `AbilityKind::Activated` whose
+        // body is `Action::AddMana`. The classifier (`is_mana_ability`) must
+        // tag it as a mana ability (CR 605.1a) so the build_catalog synthesis
+        // routes it to the ManaAbility list, not the regular AbilityDef list.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let def = catalog_card("Island");
+        assert_eq!(def.abilities.len(), 1, "Island IR abilities vec should carry one ability");
+        assert!(
+            matches!(def.abilities[0].kind, crate::ir::ability::AbilityKind::Activated { .. }),
+            "Island's IR ability must be AbilityKind::Activated (no separate Mana variant)"
+        );
+        assert!(
+            crate::ir::executor::is_mana_ability(&def.abilities[0]),
+            "Island must classify as a mana ability per CR 605.1a"
+        );
+
+        let mana_abils = def.mana_abilities();
+        assert_eq!(mana_abils.len(), 1, "synthesis must produce exactly one ManaAbility");
+        let ma = &mana_abils[0];
+        assert_eq!(ma.produces, vec![Color::Blue], "Island advertises blue");
+        assert_eq!(ma.produces_count, 1, "Island produces one mana");
+
+        let _island_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        assert_eq!(state.us.pool.u, 0, "pool starts empty");
+        let eff = (ma.make_effect)(PlayerId::Us, None);
+        eff.call(&mut state, 1, &[]);
+        assert_eq!(state.us.pool.u, 1, "Island mana ability must add U to pool");
+    }
+
+    #[test]
+    fn test_deathrite_first_ability_is_not_a_mana_ability() {
+        // Per CR 605.1a, an activated ability is a mana ability iff (1) no
+        // target, (2) not a loyalty ability, (3) could add mana on resolution.
+        // Deathrite Shaman's first ability — "{T}: Exile target land card from
+        // a graveyard. Add one mana of any color." — produces mana but has a
+        // target, so it is NOT a mana ability and uses the stack (CR 605.3b).
+        // This test exercises the classifier directly without porting DRS.
+        use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+        use crate::ir::action::{Action, ManaSpec, Who as IrWho};
+        use crate::ir::context::Ctx;
+        use crate::ir::expr::{Expr, ZoneKindSel};
+
+        // Shape of Deathrite's first ability.
+        let drs_first = Ability {
+            kind: AbilityKind::Activated {
+                cost: ActivatedCost { components: vec![CostComponent::TapSelf] },
+                // "From a graveyard" — any graveyard. Modeled as a union of
+                // self-and-opponent for the classifier test; the exact shape
+                // doesn't matter — what matters is that target_spec != None.
+                target_spec: TargetSpec::Union(vec![
+                    TargetSpec::ObjectInZone {
+                        controller: Who::Actor,
+                        zone: ZoneId::Graveyard,
+                        filter: obj_pred_from_card(pred_type_eq(CardType::Land)),
+                    },
+                    TargetSpec::ObjectInZone {
+                        controller: Who::Opp,
+                        zone: ZoneId::Graveyard,
+                        filter: obj_pred_from_card(pred_type_eq(CardType::Land)),
+                    },
+                ]),
+                choice_spec: None,
+                body: Action::Sequence(vec![
+                    Action::Exile {
+                        target: Expr::Ctx(Ctx::Var("target")),
+                        bind_as: None,
+                    },
+                    Action::AddMana {
+                        who: IrWho::You,
+                        count: Expr::Num(1),
+                        spec: ManaSpec::AnyOneColor,
+                    },
+                ]),
+                timing: ActivationTiming::Default,
+                activation_condition: None,
+                active_zone: ZoneKindSel::Battlefield,
+            },
+            text: Some("{T}: Exile target land card from a graveyard. Add one mana of any color."),
+        };
+
+        // Body could produce mana — the AddMana is reachable through Sequence.
+        assert!(
+            crate::ir::executor::body_can_produce_mana(match &drs_first.kind {
+                AbilityKind::Activated { body, .. } => body,
+                _ => panic!("expected Activated"),
+            }),
+            "DRS body reaches AddMana so body_can_produce_mana is true"
+        );
+        // But the ability has a target, so CR 605.1a #1 fails — NOT a mana ability.
+        assert!(
+            !crate::ir::executor::is_mana_ability(&drs_first),
+            "DRS first ability has a target → NOT a mana ability per CR 605.1a"
+        );
+
+        // Bridge dispatch: a non-mana activated ability synthesizes an
+        // AbilityDef (uses the stack), not a ManaAbility.
+        assert!(
+            crate::ir::executor::ir_activated_as_legacy(&drs_first).is_some(),
+            "DRS routes through the regular activated-ability bridge"
+        );
+        assert!(
+            crate::ir::executor::ir_activated_as_mana_ability_legacy(&drs_first).is_none(),
+            "DRS does NOT route through the mana-ability bridge"
+        );
+
+        // Compare against a Birds-of-Paradise-shaped ability: identical body
+        // shape (sans the Exile prefix) but no target. This one IS a mana ability.
+        let birds = Ability {
+            kind: AbilityKind::Activated {
+                cost: ActivatedCost { components: vec![CostComponent::TapSelf] },
+                target_spec: TargetSpec::None,
+                choice_spec: None,
+                body: Action::AddMana {
+                    who: IrWho::You,
+                    count: Expr::Num(1),
+                    spec: ManaSpec::AnyOneColor,
+                },
+                timing: ActivationTiming::Default,
+                activation_condition: None,
+                active_zone: ZoneKindSel::Battlefield,
+            },
+            text: Some("{T}: Add one mana of any color."),
+        };
+        assert!(
+            crate::ir::executor::is_mana_ability(&birds),
+            "Birds: no target + body produces mana → IS a mana ability"
+        );
+        assert!(
+            crate::ir::executor::ir_activated_as_legacy(&birds).is_none(),
+            "Birds skips the regular bridge (returns None for mana-classified)"
+        );
+        assert!(
+            crate::ir::executor::ir_activated_as_mana_ability_legacy(&birds).is_some(),
+            "Birds synthesizes a ManaAbility (stack-bypass per CR 605.3b)"
+        );
+    }
+
+    #[test]
+    fn test_wasteland_activated_destroys_target_nonbasic_via_ir() {
+        // Wasteland is on the IR path; the Action::Destroy body should resolve
+        // the "target" binding from the targets slice passed to the effect.
+        let mut state = make_state();
+        state.catalog = test_catalog();
+
+        let def = catalog_card("Wasteland");
+        assert_eq!(def.abilities().len(), 1, "Wasteland should expose a single synthesized ability");
+        let wl_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        let victim_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
+        recompute(&mut state);
+
+        let ability = &def.abilities()[0];
+        assert!(!ability.target_spec.is_none(), "Wasteland ability must have a TargetSpec");
+        assert!(ability.ir_body.is_some(), "Wasteland's synthesized ability should carry an IR body");
+        let eff = build_ability_effect(ability, PlayerId::Us, wl_id);
+        eff.call(&mut state, 1, &[victim_id]);
+
+        assert_eq!(state.objects[&victim_id].zone, CardZone::Graveyard,
+            "targeted nonbasic land should be destroyed");
     }
 
     // ── Section 47: Brotherhood's End ───────────────────────────────────────────
@@ -7237,12 +7744,12 @@
         recompute(&mut state);
 
         fire_event(
-            GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player: PlayerId::Us },
+            GameEvent::CreatureAttacked { attacker_id: phelia_id, attacker_controller: PlayerId::Us },
             &mut state, 1, PlayerId::Us,
         );
         let phelia_pos = state.pending_triggers.iter()
             .position(|ctx| ctx.source_name == "Phelia, Exuberant Shepherd")
-            .expect("Phelia attack trigger should queue on DeclareAttackers");
+            .expect("Phelia attack trigger should queue on CreatureAttacked");
         let ctx = state.pending_triggers.remove(phelia_pos);
 
         let legal = legal_targets(&ctx.target_spec, PlayerId::Us, phelia_id, &state);
@@ -7259,7 +7766,7 @@
             &mut state, 1, PlayerId::Us,
         );
         let delayed_pos = state.pending_triggers.iter()
-            .position(|ctx| ctx.source_name == "Phelia (delayed return)")
+            .position(|ctx| ctx.source_name.contains("(delayed)"))
             .expect("delayed return trigger should queue on End step");
         let ctx = state.pending_triggers.remove(delayed_pos);
         ctx.effect.call(&mut state, 1, &[]);
@@ -7289,7 +7796,7 @@
         recompute(&mut state);
 
         fire_event(
-            GameEvent::EnteredStep { step: StepKind::DeclareAttackers, active_player: PlayerId::Us },
+            GameEvent::CreatureAttacked { attacker_id: phelia_id, attacker_controller: PlayerId::Us },
             &mut state, 1, PlayerId::Us,
         );
         let phelia_pos = state.pending_triggers.iter()
@@ -7305,7 +7812,7 @@
             &mut state, 1, PlayerId::Us,
         );
         let delayed_pos = state.pending_triggers.iter()
-            .position(|ctx| ctx.source_name == "Phelia (delayed return)")
+            .position(|ctx| ctx.source_name.contains("(delayed)"))
             .expect("delayed return trigger should queue");
         let ctx = state.pending_triggers.remove(delayed_pos);
         ctx.effect.call(&mut state, 1, &[]);

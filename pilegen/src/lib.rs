@@ -31,6 +31,8 @@ use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
                dd_plan_gap, dd_card_fills, opp_plan_gap, opp_card_fills};
 #[cfg(test)] use strategy::{dd_should_mulligan, opp_should_mulligan};
 
+mod ir;
+
 #[cfg(test)]
 mod tests;
 
@@ -237,6 +239,9 @@ pub(crate) enum CounterType {
     Void,
     /// Placed on Engineered Explosives (and similar) via sunburst on entry.
     Charge,
+    /// +1/+1 counter. Stored in `BattlefieldState.counters` for legacy
+    /// compatibility; read by `fold_game_state_into_def`.
+    PlusOnePlusOne,
 }
 
 
@@ -901,6 +906,13 @@ pub(crate) fn recompute(state: &mut SimState) {
             ci.timestamp = obj.ci_timestamp;
             static_cis.push(ci);
         }
+        // IR-authored static abilities (dual-pathway alongside static_ability_defs).
+        for ability in &card_def.abilities {
+            for mut ci in crate::ir::executor::ir_static_to_cis(id, obj.controller, ability) {
+                ci.timestamp = obj.ci_timestamp;
+                static_cis.push(ci);
+            }
+        }
     }
 
     // Build combined CI list: static-ability CIs + ephemeral CIs from state.
@@ -947,14 +959,20 @@ pub(crate) fn recompute(state: &mut SimState) {
         // If an earlier CI (e.g. Blood Moon) stripped them, this CI is suppressed.
         if ci_idx < static_count {
             let src = ci.source_id;
+            let has_statics = |d: &CardDef| -> bool {
+                !d.static_ability_defs.is_empty()
+                    || d.abilities.iter().any(|a| {
+                        matches!(a.kind, crate::ir::ability::AbilityKind::Static { .. })
+                    })
+            };
             let base_has_statics = state.objects.get(&src)
                 .and_then(|o| state.catalog.get(&o.catalog_key))
-                .map(|d| !d.static_ability_defs.is_empty())
+                .map(has_statics)
                 .unwrap_or(false);
             if base_has_statics {
                 let suppressed = state.objects.get(&src)
                     .and_then(|o| o.materialized.as_ref())
-                    .map(|d| d.static_ability_defs.is_empty())
+                    .map(|d| !has_statics(d))
                     .unwrap_or(false);
                 if suppressed { continue; }
             }
@@ -1544,6 +1562,10 @@ pub struct SimState {
     /// All active continuous-effect instances. Checked at `recompute` time; expired entries
     /// are removed at Cleanup / start-of-turn as appropriate.
     pub(crate) continuous_instances: Vec<ContinuousInstance>,
+    /// Append-only record of every `GameEvent` that fired (post-prohibition, post-replacement).
+    /// Layer B state surface for IR queries (`Expr::EventCount`, etc.) and the eventual
+    /// replacement for scattered `this_turn` counters. See `ir/event_log.rs`.
+    pub(crate) event_log: crate::ir::event_log::EventLog,
     /// Latent spell mods (CR 611.2f): consumed during 601.2a when a qualifying spell is cast.
     /// Entries expire at EndOfTurn cleanup if not consumed.
     pub(crate) latent_spell_mods: Vec<LatentSpellMod>,
@@ -1625,6 +1647,7 @@ impl SimState {
             continuous_instances: Vec::new(),
             latent_spell_mods: Vec::new(),
             ci_timestamp_counter: 0,
+            event_log: crate::ir::event_log::EventLog::new(),
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
             resolve_choice: std::sync::Arc::new(|_, req, _| match req {
@@ -2304,6 +2327,12 @@ pub(crate) fn card_zone_to_id(zone: &CardZone) -> ZoneId {
 }
 
 
+/// Offset added to IR-replacement indices when forming `repl_applied` keys,
+/// so they never collide with legacy `replacement_defs` indices on the same
+/// object. Any value larger than a card's plausible replacement count works;
+/// `usize::MAX / 2` leaves room on both sides.
+pub(crate) const IR_REPL_KEY_BASE: usize = usize::MAX / 2;
+
 /// The central elemental event pipeline.
 ///
 /// Stage order per the Comprehensive Rules:
@@ -2366,6 +2395,33 @@ pub(crate) fn fire_event(
             }
             if found.is_some() { break; }
         }
+        // Part A-IR: card-bound IR Replacement abilities from catalog.
+        // Keys are offset by IR_REPL_KEY_BASE so they don't collide with
+        // legacy `def_idx` keys.
+        if found.is_none() {
+            for (id, obj) in &state.objects {
+                let card_def = match state.catalog.get(&obj.catalog_key) {
+                    Some(d) => d,
+                    None => continue,
+                };
+                for (ab_idx, ability) in card_def.abilities.iter().enumerate() {
+                    if !matches!(ability.kind, crate::ir::ability::AbilityKind::Replacement { .. }) {
+                        continue;
+                    }
+                    let key = (*id, IR_REPL_KEY_BASE + ab_idx);
+                    if state.repl_applied.contains(&key) { continue; }
+                    let Some(targets) = crate::ir::executor::ir_replacement_match(
+                        ability, &event, *id, obj.controller, state,
+                    ) else { continue };
+                    let Some(effect) = crate::ir::executor::ir_replacement_effect(
+                        ability, *id, obj.controller,
+                    ) else { continue };
+                    found = Some((key, targets, effect));
+                    break;
+                }
+                if found.is_some() { break; }
+            }
+        }
         // Part B: ephemeral replacement instances (runtime-created by abilities).
         if found.is_none() {
             for (idx, inst) in state.replacement_instances.iter().enumerate() {
@@ -2389,6 +2445,10 @@ pub(crate) fn fire_event(
 
     // Stage 3: Apply state mutation.
     do_effect(&event, state);
+
+    // Stage 3b: Record on the event log (Layer B). Pushed after do_effect so the
+    // log reflects events that actually happened (post-prohibition, post-replacement).
+    state.event_log.push(t as u32, event.clone());
 
     // Stage 4: Log.
     log_event(&event, state, t, actor);
@@ -2622,7 +2682,7 @@ fn can_pay_single_cost(
     }
 }
 
-fn can_pay_costs(
+pub(crate) fn can_pay_costs(
     costs: &[CostComponent],
     state: &SimState,
     who: PlayerId,
@@ -2772,7 +2832,7 @@ fn pay_single_cost(
 /// For `SacPermanent` and `ReturnFromBattlefield`, prefers permanents without mana
 /// abilities to preserve mana sources where possible.
 /// Returns a `CostsPaidCtx` recording which objects moved during payment.
-fn pay_costs(
+pub(crate) fn pay_costs(
     costs: &[CostComponent],
     state: &mut SimState,
     t: u8,
@@ -3409,39 +3469,6 @@ fn check_state_based_actions(
     }
 }
 
-pub(crate) fn do_amass(token_key: &str, controller: PlayerId, n: i32, state: &mut SimState, t: u8) {
-    let army_id: Option<ObjId> = state.permanents_of(controller)
-        .find(|c| c.catalog_key == token_key)
-        .map(|c| c.id);
-    if let Some(army_id) = army_id {
-        if let Some(bf) = state.permanent_bf_mut(army_id) {
-            bf.counters += n;
-        }
-        let c = state.permanent_bf(army_id).map_or(0, |bf| bf.counters);
-        state.log(t, controller, format!("{token_key} grows to {c}/{c}"));
-    } else {
-        let new_id = state.alloc_id();
-        state.objects.insert(new_id, GameObject {
-            id: new_id,
-            catalog_key: token_key.to_string(),
-            owner: controller,
-            controller,
-            zone: CardZone::Battlefield,
-            is_token: true,
-            spell: None,
-            bf: Some(BattlefieldState {
-                counters: n,
-                ..BattlefieldState::new()
-            }),
-            materialized: None,
-            counters: HashMap::new(), ci_timestamp: 0,
-        });
-        let ts = state.next_ci_timestamp();
-        if let Some(obj) = state.objects.get_mut(&new_id) { obj.ci_timestamp = ts; }
-        state.log(t, controller, format!("{token_key} token created {n}/{n}"));
-    }
-}
-
 pub(crate) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut SimState, t: u8) -> ObjId {
     let new_id = state.alloc_id();
     state.objects.insert(new_id, GameObject {
@@ -3601,8 +3628,8 @@ fn run_cast_submachine(
     let def = def?;
 
     let options = AnnounceOptions {
-        available_modes: def.spell_modes()
-            .map(|m| (0..m.len()).collect())
+        available_modes: def.mode_count()
+            .map(|n| (0..n).collect())
             .unwrap_or_else(|| vec![0]),
         available_alt_costs: def.alternate_costs().to_vec(),
         has_x_cost: def.additional_costs.iter()
@@ -4273,6 +4300,7 @@ fn do_turn(
 ) {
     state.current_turn = t;
     state.current_ap = state.player_id(ap);
+    state.event_log.mark_turn_start();
     do_phase(state, t, ap, &beginning_phase(), on_play, strategies);
     if state.done() { return; }
 
@@ -4500,7 +4528,7 @@ fn card_has_implementation(def: &CardDef) -> bool {
     match &def.kind {
         CardKind::Creature(_) | CardKind::Artifact(_)
         | CardKind::Planeswalker(_) | CardKind::Enchantment(_) => true,
-        CardKind::Instant(s) | CardKind::Sorcery(s) => s.modes.is_some(),
+        CardKind::Instant(s) | CardKind::Sorcery(s) => s.modes.is_some() || def.mode_count().is_some(),
         CardKind::Land(_) => true,
     }
 }

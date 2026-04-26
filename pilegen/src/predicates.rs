@@ -24,15 +24,17 @@ pub(crate) fn pred_has_supertype(s: Supertype) -> CardPredicate {
 
 /// True iff the card is a land with the given land subtype (island, swamp, …).
 pub(crate) fn pred_land_subtype(subtype: &'static str) -> CardPredicate {
+    use crate::catalog::BasicLandType;
+    let kind = match subtype {
+        "plains"   => Some(BasicLandType::Plains),
+        "island"   => Some(BasicLandType::Island),
+        "swamp"    => Some(BasicLandType::Swamp),
+        "mountain" => Some(BasicLandType::Mountain),
+        "forest"   => Some(BasicLandType::Forest),
+        _          => None,
+    };
     std::sync::Arc::new(move |d| {
-        d.as_land().map_or(false, |l| match subtype {
-            "island"   => l.land_types.island,
-            "swamp"    => l.land_types.swamp,
-            "plains"   => l.land_types.plains,
-            "mountain" => l.land_types.mountain,
-            "forest"   => l.land_types.forest,
-            _          => false,
-        })
+        kind.map_or(false, |k| d.as_land().map_or(false, |l| l.land_types.contains(k)))
     })
 }
 
@@ -257,6 +259,33 @@ pub(crate) fn pick_targets(spec: &TargetSpec, targets: &[ObjId], state: &SimStat
     }
     // Fallback: first target
     vec![targets[0]]
+}
+
+/// Produce a copy of `spec` whose object filters exclude `exclude_id`.
+/// Used by IR-dispatched triggers to express "another target X" without letting
+/// card-level filters close over a source ObjId they don't know.
+pub(crate) fn exclude_from_target_spec(spec: &TargetSpec, exclude_id: ObjId) -> TargetSpec {
+    match spec {
+        TargetSpec::None => TargetSpec::None,
+        TargetSpec::Player(w) => TargetSpec::Player(*w),
+        TargetSpec::ObjectInZone { controller, zone, filter } => {
+            let inner = filter.clone();
+            TargetSpec::ObjectInZone {
+                controller: *controller,
+                zone: *zone,
+                filter: std::sync::Arc::new(move |id, state| {
+                    id != exclude_id && inner(id, state)
+                }),
+            }
+        }
+        TargetSpec::Union(specs) => TargetSpec::Union(
+            specs.iter().map(|s| exclude_from_target_spec(s, exclude_id)).collect(),
+        ),
+        TargetSpec::AbilityOnStack { controller, ability_type } => {
+            TargetSpec::AbilityOnStack { controller: *controller, ability_type: ability_type.clone() }
+        }
+        TargetSpec::Any(inner) => TargetSpec::Any(Box::new(exclude_from_target_spec(inner, exclude_id))),
+    }
 }
 
 /// Enumerate all legal targets for `spec` given the current game state.

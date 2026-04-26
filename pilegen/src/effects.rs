@@ -73,6 +73,7 @@ pub(crate) fn eff_surveil(who: PlayerId, n: usize) -> Effect {
 
 /// Evaluator-driven put-back: score hand cards and put the `n` lowest-scoring
 /// on top of library. Calls `state.evaluate_card` to score each hand card.
+#[allow(dead_code)]
 pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
         for _ in 0..n {
