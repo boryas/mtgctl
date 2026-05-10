@@ -237,7 +237,14 @@ fn walk(
                 crate::ir::action::Who::You => who,
                 _ => who, // best-effort for Phase 1
             };
-            let n = expr_const_u32(count)?;
+            // Dynamic count (e.g. `Expr::HandSize(Controller)` for LED's
+            // "discard your hand"): no schema decision — the executor's
+            // dynamic-count loop handles the sweep at run time. The cost
+            // is always payable (discarding zero or more cards is valid;
+            // CR 701.8 doesn't gate on hand size for the cost itself).
+            let Some(n) = expr_const_u32(count) else {
+                return Some(());
+            };
             if n == 0 {
                 return Some(());
             }

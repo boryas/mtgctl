@@ -219,8 +219,29 @@ fn lower_one(action: &Action, out: &mut Vec<CostComponent>) -> Option<()> {
             out.push(CostComponent::TapSelf);
             Some(())
         }
+        // `Move { what: Source, to: <zone> }` is the deterministic source-
+        // moves-itself shape used by cycling/discard-self and exile-self
+        // costs. Lowers to the matching CostComponent::*Self variant.
+        Action::Move { what, to, to_owner: None, bind_as: None } if expr_is_source(what) => {
+            use crate::ir::expr::ZoneKindSel;
+            match to {
+                ZoneKindSel::Graveyard => out.push(CostComponent::DiscardSelf),
+                ZoneKindSel::Exile => out.push(CostComponent::ExileSelf),
+                _ => return None,
+            }
+            Some(())
+        }
         Action::PayMana(mc) => {
             out.push(CostComponent::Mana(mc.clone()));
+            Some(())
+        }
+        // `Discard { count: HandSize(Controller), filter: None }` is the
+        // canonical "discard your entire hand" shape (LED). Lowers to the
+        // legacy `DiscardHand` component.
+        Action::Discard { who: Who::You, count, at_random: _, filter: None }
+            if expr_is_controller_hand_size(count) =>
+        {
+            out.push(CostComponent::DiscardHand);
             Some(())
         }
         Action::PayLife { who: _, amount: Expr::Num(n) } => {
@@ -282,6 +303,14 @@ fn filter_is_self(f: &Filter) -> bool {
 
 fn expr_const_one(e: &Expr) -> bool {
     matches!(e, Expr::Num(1))
+}
+
+/// True when `e` is `Expr::HandSize(Expr::Ctx(Ctx::Controller))` — the
+/// canonical "size of the controller's hand" shape, used as a count in
+/// "discard your hand" cost trees.
+fn expr_is_controller_hand_size(e: &Expr) -> bool {
+    let Expr::HandSize(inner) = e else { return false };
+    matches!(inner.as_ref(), Expr::Ctx(Ctx::Controller))
 }
 
 /// Bridge-side helper: extract a legacy component vec from any `CostBody`.

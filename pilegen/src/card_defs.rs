@@ -970,8 +970,9 @@ fn lotus_petal() -> CardDef {
 /// Discard your hand, Sacrifice Lion's Eye Diamond: Add three mana of any one color.
 /// Activate only as an instant. CR 605.3, CR 601.2g (excluded from mana sub-loop).
 fn lions_eye_diamond() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, CostBody};
+    use crate::ir::ability::{Ability, AbilityKind};
     use crate::ir::action::{Action, ManaSpec, Who};
+    use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel};
     let mut def = simple("Lion's Eye Diamond", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
@@ -980,7 +981,22 @@ fn lions_eye_diamond() -> CardDef {
     }), vec![], Some(10));
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: CostBody::Legacy(vec![CostComponent::DiscardHand, CostComponent::SacSelf]),
+            // "Discard your hand, Sacrifice ~". The discard side is modelled
+            // as `Action::Discard` with `count = HandSize(Controller)` —
+            // the "Discard(All)" composition (per
+            // feedback_discard_hand_idiom.md): no separate `DiscardHand`
+            // primitive, just a dynamic count over the canonical hand-size
+            // expression. The walk emits no decision (dynamic count) and
+            // the executor's loop sweeps the hand.
+            cost: ir_seq(vec![
+                Action::Discard {
+                    who: Who::You,
+                    count: Expr::HandSize(Box::new(Expr::Ctx(Ctx::Controller))),
+                    at_random: false,
+                    filter: None,
+                },
+                act_sac_self("$led_self"),
+            ]),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::AddMana {
@@ -1056,6 +1072,12 @@ fn mox_opal() -> CardDef {
 /// not an activated ability). Do not use this stub as a model for any cost
 /// migration — see CARD_INDEX.org "Sagas" gap entry. Replace once the saga
 /// trigger/lore-counter machinery lands.
+///
+/// Cost storage is migrated to IR (same broken sac-self shape) so the catalog
+/// has zero `CostBody::Legacy` users for sac-shaped costs. Tests that exercise
+/// the chapter III predicate (`test_urza_saga_*`) call `eff_fetch_search`
+/// directly — they never instantiate this card, so the storage shape is
+/// irrelevant to test parity.
 fn ursas_saga() -> CardDef {
     let pred = pred_and(
         pred_type_eq(CardType::Artifact),
@@ -1064,7 +1086,7 @@ fn ursas_saga() -> CardDef {
     simple("Urza's Saga", CardKind::Artifact(ArtifactData {
         mana_cost: String::new(),
         abilities: vec![AbilityDef {
-            costs: CostBody::Legacy(vec![CostComponent::SacSelf]),
+            costs: ir_sac_self("$saga_self"),
             ability_factory: Some(Arc::new(move |who, _| {
                 eff_fetch_search(who, pred.clone(), ZoneId::Battlefield)
             })),
@@ -2330,11 +2352,25 @@ fn thassas_oracle() -> CardDef {
 /// Cycling (hand ability): discard this + pay 2 life → draw 1. CR 702.28.
 fn street_wraith() -> CardDef {
     use crate::ir::action::{Action, Who as IrWho};
-    use crate::ir::expr::Expr;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut data = CreatureData::new("3BB", 3, 4);
     data.abilities = vec![AbilityDef {
         source_zone: SourceZone::Hand,
-        costs: CostBody::Legacy(vec![CostComponent::DiscardSelf, CostComponent::Life(2)]),
+        // `DiscardSelf` is "send the source itself to the graveyard" — no
+        // candidate enumeration. Use `Action::Move` (deterministic) rather
+        // than `MoveByChoice` (which would try to find the source in `Hand`
+        // — but the activation pipeline pre-moves hand-source abilities to
+        // Stack before paying costs, so the source isn't in Hand anymore).
+        costs: ir_seq(vec![
+            Action::Move {
+                what: Expr::Ctx(Ctx::Source),
+                to: ZoneKindSel::Graveyard,
+                to_owner: None,
+                bind_as: None,
+            },
+            act_pay_life(2),
+        ]),
         ir_body: Some(Action::Draw { who: IrWho::You, n: Expr::Num(1) }),
         ..Default::default()
     }];
@@ -4341,12 +4377,22 @@ fn dragons_rage_channeler() -> CardDef {
 fn simian_spirit_guide() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
+    use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel};
     let data = CreatureData::new("2R", 2, 2);
     let mut def = simple("Simian Spirit Guide", CardKind::Creature(data), parse_colors("R", false, false), None);
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: CostBody::Legacy(vec![CostComponent::ExileSelf]),
+            // `ExileSelf` from hand: same source-self pattern as Street
+            // Wraith's cycling cost — `Action::Move` (deterministic) rather
+            // than `MoveByChoice`, since the activation pipeline pre-moves
+            // hand-source abilities to Stack before paying costs.
+            cost: CostBody::Ir(Action::Move {
+                what: Expr::Ctx(Ctx::Source),
+                to: ZoneKindSel::Exile,
+                to_owner: None,
+                bind_as: None,
+            }),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::AddMana {
