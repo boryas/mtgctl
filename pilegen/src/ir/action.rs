@@ -161,6 +161,20 @@ pub(crate) enum Action {
         count: Expr,
         bind_as: Option<&'static str>,
     },
+    /// Cost-tree primitive: return `count` permanents matching `filter` from
+    /// the battlefield to their owners' hands. Mirrors `Sacrifice`'s shape.
+    /// `bind_as` is the schema-binding name the strategy answers under and
+    /// the executor reads from at run time — required for cost-tree usage
+    /// because the IR executor consumes the binding rather than calling a
+    /// callback (cf. Sacrifice, which still uses `state.sacrifice_choice`
+    /// because its single migrated cost shape only ever has one candidate
+    /// — the source itself).
+    ReturnFromBattlefield {
+        who: Who,
+        filter: Filter,
+        count: Expr,
+        bind_as: Option<&'static str>,
+    },
 
     // ── continuous-effect application ────────────────────────────────────
     /// Apply a bundle of CE modifications to `target` until `expiry`.

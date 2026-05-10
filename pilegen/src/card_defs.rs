@@ -1136,6 +1136,9 @@ fn consider() -> CardDef {
 /// or pay {1U} (20% probability). CR 701.5.
 /// "Counter target spell unless its controller pays {1}."
 fn daze() -> CardDef {
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter};
     let mut c = simple("Daze", CardKind::Instant(SpellData {
         mana_cost: "1U".to_string(),
         modes: single_mode(
@@ -1144,8 +1147,24 @@ fn daze() -> CardDef {
         ),
         ..Default::default()
     }), parse_colors("1U", true, false), None);
+    // Phase 4 step 5 (alt-cost migration): "Return an Island you control to
+    // its owner's hand." First card to actually flow through `pay_ir_cost`
+    // at runtime. The schema decision is bound to "$daze_island" and the
+    // executor reads that binding to know which permanent to bounce.
+    let island_filter = Filter(Expr::Contains(
+        Box::new(Expr::SubtypeLit("island".to_string())),
+        Box::new(Expr::Subtypes(Box::new(Expr::Ctx(Ctx::It)))),
+    ));
     c.alternate_costs = vec![
-        AlternateCost { costs: CostBody::Legacy(vec![CostComponent::ReturnFromBattlefield(obj_pred_from_card(pred_land_subtype("island")))]), ..Default::default() },
+        AlternateCost {
+            costs: CostBody::Ir(Action::ReturnFromBattlefield {
+                who: crate::ir::action::Who::You,
+                filter: island_filter,
+                count: Expr::Num(1),
+                bind_as: Some("$daze_island"),
+            }),
+            ..Default::default()
+        },
     ];
     c
 }

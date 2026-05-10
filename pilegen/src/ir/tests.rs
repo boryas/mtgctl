@@ -2455,6 +2455,46 @@ mod cost_phase4 {
     }
 
     #[test]
+    fn daze_alt_cost_storage_is_ir_return_from_battlefield() {
+        // Phase 4 step 5 regression: Daze's alt cost is the first card to
+        // actually run through `pay_ir_cost` at runtime (not the bridge).
+        let cat = crate::card_defs::build_catalog();
+        let daze = cat.get("Daze").expect("Daze in catalog");
+        let alts = daze.alternate_costs();
+        assert_eq!(alts.len(), 1, "Daze has one alt cost");
+        let CostBody::Ir(action) = &alts[0].costs else {
+            panic!("Daze's alt cost is CostBody::Ir(_) after Phase 4 step 5")
+        };
+        match action {
+            Action::ReturnFromBattlefield {
+                count: Expr::Num(1),
+                bind_as: Some("$daze_island"),
+                ..
+            } => {}
+            _ => panic!("Daze's alt cost is Action::ReturnFromBattlefield {{ count: 1, bind_as: Some(...) }}"),
+        }
+    }
+
+    #[test]
+    fn return_from_battlefield_walk_unpayable_with_no_candidates() {
+        use crate::ir::action::Who;
+        use crate::ir::cost_exec::build_schema;
+        use crate::ir::expr::Filter;
+        use crate::ObjId;
+        use super::cost_phase1::make_state;
+
+        let state = make_state();
+        let action = Action::ReturnFromBattlefield {
+            who: Who::You,
+            filter: Filter(Expr::Bool(true)),
+            count: Expr::Num(1),
+            bind_as: Some("$pick"),
+        };
+        // No permanents on the battlefield — schema build returns None.
+        assert!(build_schema(&action, &state, crate::PlayerId::Us, ObjId::UNSET).is_none());
+    }
+
+    #[test]
     fn wasteland_storage_is_ir_sequence() {
         // Phase 4 step 3 regression: TapSelf+SacSelf migrated to a Sequence.
         let cat = crate::card_defs::build_catalog();

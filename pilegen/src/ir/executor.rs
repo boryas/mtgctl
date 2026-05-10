@@ -363,6 +363,43 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::ReturnFromBattlefield { who, filter, count, bind_as } => {
+            // Cost-tree-driven object selection. Unlike Sacrifice (which calls
+            // back into `state.sacrifice_choice` for historical reasons),
+            // ReturnFromBattlefield consumes the strategy's BindEnv answer
+            // directly — `bind_as` names the binding the schema decision was
+            // emitted under, and the strategy's `propose_announcement` filled
+            // it in. Phase 4 step 5 will roll the same pattern back into
+            // Sacrifice once binding-driven selection is the universal mode.
+            let who = resolve_who(who, state, env, actor);
+            let n = expect_num(eval_expr(count, state, env)) as usize;
+            if n == 0 {
+                return ExecResult::Ok;
+            }
+            let Some(name) = bind_as else {
+                return ExecResult::Unimplemented(
+                    "ReturnFromBattlefield without bind_as (binding-driven selection requires a name)",
+                );
+            };
+            let chosen = match env.get(name) {
+                Some(crate::ir::expr::Value::ObjSet(ids)) => ids.clone(),
+                Some(crate::ir::expr::Value::Obj(id)) => vec![*id],
+                _ => return ExecResult::Unimplemented(
+                    "ReturnFromBattlefield: binding missing or wrong shape",
+                ),
+            };
+            for id in chosen.into_iter().take(n) {
+                if !matches(filter, id, state, env) {
+                    continue;
+                }
+                if state.permanent_bf(id).is_none() {
+                    continue;
+                }
+                change_zone(id, ZoneId::Hand, state, t, who);
+            }
+            ExecResult::Ok
+        }
+
         Action::Discard { who, count, at_random: _, filter } => {
             use rand::Rng;
             let who = resolve_who(who, state, env, actor);

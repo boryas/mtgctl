@@ -237,6 +237,65 @@ impl CostBody {
     pub(crate) fn is_empty_legacy(&self) -> bool {
         matches!(self, CostBody::Legacy(v) if v.is_empty())
     }
+
+    /// True iff payment of this cost involves any mana spend. Used by
+    /// `cast_spell` to set `SpellCast::mana_spent` correctly across both
+    /// storage variants. For `Legacy`, scans for `CostComponent::Mana(_)`;
+    /// for `Ir`, walks the action tree for `Action::PayMana(_)`.
+    pub(crate) fn includes_mana(&self) -> bool {
+        match self {
+            CostBody::Legacy(v) => {
+                v.iter().any(|c| matches!(c, crate::CostComponent::Mana(_)))
+            }
+            CostBody::Ir(a) => action_includes_pay_mana(a),
+        }
+    }
+
+    /// Extract the (first) mana cost component, if any. Used by `cast_spell`
+    /// when computing the `mana_cost` to drain from the pool for the
+    /// alt-cost path. Returns `None` for IR costs (alt-cost mana costs
+    /// haven't migrated yet — when they do, return the `PayMana(mc)` value).
+    pub(crate) fn first_mana_cost(&self) -> Option<crate::ManaCost> {
+        match self {
+            CostBody::Legacy(v) => v.iter().find_map(|c| match c {
+                crate::CostComponent::Mana(mc) => Some(mc.clone()),
+                _ => None,
+            }),
+            CostBody::Ir(a) => first_pay_mana(a),
+        }
+    }
+}
+
+fn action_includes_pay_mana(a: &Action) -> bool {
+    use crate::ir::action::Action::*;
+    match a {
+        PayMana(_) => true,
+        Sequence(actions) => actions.iter().any(action_includes_pay_mana),
+        IfThen { then, else_, .. } => {
+            action_includes_pay_mana(then)
+                || else_.as_ref().map_or(false, |e| action_includes_pay_mana(e))
+        }
+        MayDo { action, .. } => action_includes_pay_mana(action),
+        ForEach { body, .. } => action_includes_pay_mana(body),
+        Choose { options, .. } => options
+            .iter()
+            .any(|o| action_includes_pay_mana(&o.action)),
+        _ => false,
+    }
+}
+
+fn first_pay_mana(a: &Action) -> Option<crate::ManaCost> {
+    use crate::ir::action::Action::*;
+    match a {
+        PayMana(mc) => Some(mc.clone()),
+        Sequence(actions) => actions.iter().find_map(first_pay_mana),
+        IfThen { then, else_, .. } => first_pay_mana(then)
+            .or_else(|| else_.as_ref().and_then(|e| first_pay_mana(e))),
+        MayDo { action, .. } => first_pay_mana(action),
+        ForEach { body, .. } => first_pay_mana(body),
+        Choose { options, .. } => options.iter().find_map(|o| first_pay_mana(&o.action)),
+        _ => None,
+    }
 }
 
 /// One mode of a spell under `AbilityKind::OnResolve`.

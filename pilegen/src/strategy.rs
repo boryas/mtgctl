@@ -1056,10 +1056,25 @@ fn announce_with_alt_costs(
 ) -> AnnounceChoice {
     let chosen_x = if options.has_x_cost { 3 } else { 0 };
     for (i, alt) in options.available_alt_costs.iter().enumerate() {
-        let alt_legacy = alt.costs.expect_legacy();
-        if state.hand_size(who) >= alt.hand_min
-            && can_pay_costs(alt_legacy, state, who, card_id, false, 0)
-        {
+        // Feasibility check on either storage variant.
+        let payable = match &alt.costs {
+            crate::ir::ability::CostBody::Legacy(legacy) => {
+                state.hand_size(who) >= alt.hand_min
+                    && can_pay_costs(legacy, state, who, card_id, false, 0)
+            }
+            crate::ir::ability::CostBody::Ir(action) => {
+                state.hand_size(who) >= alt.hand_min
+                    && crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some()
+            }
+        };
+        if payable {
+            // Probabilistic gating uses the legacy heuristic (exile-blue
+            // detection). IR-storage alt costs skip the gating today —
+            // when more probabilistic alts migrate, recast this in IR terms.
+            let alt_legacy: &[CostComponent] = match &alt.costs {
+                crate::ir::ability::CostBody::Legacy(v) => v,
+                crate::ir::ability::CostBody::Ir(_) => &[],
+            };
             if probabilistic {
                 // Check exile-blue pitch availability.
                 let has_exile_blue = alt_legacy.iter().any(|c| matches!(c, CostComponent::ExileFromHand(_)));
@@ -1266,9 +1281,20 @@ fn spell_is_affordable(
         true
     } else {
         def.alternate_costs().iter().any(|c| {
-            state.hand_size(who) >= c.hand_min
-                && can_pay_costs(c.costs.expect_legacy(), state, who, card_id, false, 0)
-                && c.condition.as_ref().map_or(true, |f| f(who, state))
+            if state.hand_size(who) < c.hand_min {
+                return false;
+            }
+            if c.condition.as_ref().map_or(false, |f| !f(who, state)) {
+                return false;
+            }
+            match &c.costs {
+                crate::ir::ability::CostBody::Legacy(legacy) => {
+                    can_pay_costs(legacy, state, who, card_id, false, 0)
+                }
+                crate::ir::ability::CostBody::Ir(action) => {
+                    crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some()
+                }
+            }
         })
     };
     // Use strategy default X=3 for XLife cost affordability check.

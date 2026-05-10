@@ -3074,9 +3074,25 @@ fn cast_spell(
             .iter()
             .enumerate()
             .find(|(_, c)| {
-                state.hand_size(who) >= c.hand_min
-                    && can_pay_costs(c.costs.expect_legacy(), state, who, card_id, false, 0)
-                    && c.condition.as_ref().map_or(true, |f| f(who, state))
+                if state.hand_size(who) < c.hand_min {
+                    return false;
+                }
+                if c.condition.as_ref().map_or(false, |f| !f(who, state)) {
+                    return false;
+                }
+                // Feasibility check: dispatch on CostBody. Legacy uses the
+                // original closure-based predicate; Ir builds a schema and
+                // treats Some(_) as payable (build_schema returns None when
+                // candidates are missing or constants exceed limits).
+                match &c.costs {
+                    crate::ir::ability::CostBody::Legacy(legacy) => {
+                        can_pay_costs(legacy, state, who, card_id, false, 0)
+                    }
+                    crate::ir::ability::CostBody::Ir(action) => {
+                        crate::ir::cost_exec::build_schema(action, state, who, card_id)
+                            .is_some()
+                    }
+                }
             });
         match found {
             Some((i, c)) => (Some(c.clone()), Some(i)),
@@ -3217,7 +3233,7 @@ fn cast_spell(
     // SpellCast fires after all costs paid and spell is on the stack.
     let mana_spent = match &alt_cost {
         None     => mana_value(def.mana_cost()) > 0,
-        Some(ac) => ac.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::Mana(_))),
+        Some(ac) => ac.costs.includes_mana(),
     };
     fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent }, state, t, who);
 
@@ -3717,9 +3733,7 @@ fn run_cast_submachine(
 
     // ── ComputeCost + ActivateMana (CR 601.2f-g) ────────────────────────
     let mana_cost = if let Some(ref alt) = preferred_cost {
-        alt.costs.expect_legacy().iter().find_map(|c| {
-            if let CostComponent::Mana(mc) = c { Some(mc.clone()) } else { None }
-        }).unwrap_or_default()
+        alt.costs.first_mana_cost().unwrap_or_default()
     } else if face == SpellFace::Back {
         let def = state.def_of(card_id)
             .or_else(|| {

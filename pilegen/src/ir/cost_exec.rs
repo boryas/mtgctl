@@ -61,10 +61,31 @@ pub(crate) fn pay(
     env.source = Some(source);
     env.controller = Some(who);
     match execute_mut(cost, state, &mut env) {
-        ExecResult::Ok => Ok(crate::CostsPaidCtx::default()),
+        ExecResult::Ok => Ok(build_costs_paid_ctx(schema, &env)),
         ExecResult::ManaShortage(rem) => Err(PayError::ManaShortage(rem)),
         ExecResult::Unimplemented(s) => panic!("cost_exec::pay: unimplemented action: {}", s),
     }
+}
+
+/// Read each `Objects` decision's binding back out of the post-execution
+/// `BindEnv` to populate `CostsPaidCtx.objects_moved`. This is the IR
+/// counterpart to `pay_single_cost`'s `ctx.objects_moved.push(id)` calls.
+/// Order of insertion matches schema-decision order, which matches the
+/// order in which the cost tree consumed them.
+fn build_costs_paid_ctx(schema: &CostSchema, env: &BindEnv) -> crate::CostsPaidCtx {
+    use crate::ir::expr::Value;
+    let mut ctx = crate::CostsPaidCtx::default();
+    for d in &schema.decisions {
+        if !matches!(d.kind, crate::ir::cost::DecisionKind::Objects { .. }) {
+            continue;
+        }
+        match env.bindings.get(d.binding) {
+            Some(Value::Obj(id)) => ctx.objects_moved.push(*id),
+            Some(Value::ObjSet(ids)) => ctx.objects_moved.extend(ids.iter().copied()),
+            _ => {}
+        }
+    }
+    ctx
 }
 
 // ── internals ───────────────────────────────────────────────────────────────
@@ -178,6 +199,31 @@ fn walk(
             }
             schema.push(Decision {
                 binding: idx.next_binding("sac"),
+                kind: DecisionKind::Objects { candidates, count: n },
+            });
+            Some(())
+        }
+
+        Action::ReturnFromBattlefield { who: _, filter, count, bind_as } => {
+            // Mirror of Sacrifice's walk. `bind_as` (when Some) names the
+            // schema decision so the executor's BindEnv lookup finds the
+            // strategy's chosen ObjIds — we use it as the binding key here.
+            let n = expr_const_u32(count)?;
+            if n == 0 {
+                return Some(());
+            }
+            let candidates: Vec<ObjId> = state
+                .permanents_of(who)
+                .filter(|c| c.bf.is_some())
+                .map(|c| c.id)
+                .filter(|&id| filter_matches_for_schema(filter, id, source, state))
+                .collect();
+            if (candidates.len() as u32) < n {
+                return None;
+            }
+            let binding = bind_as.unwrap_or_else(|| idx.next_binding("ret"));
+            schema.push(Decision {
+                binding,
                 kind: DecisionKind::Objects { candidates, count: n },
             });
             Some(())
