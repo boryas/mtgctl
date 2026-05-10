@@ -205,6 +205,8 @@ pub(crate) fn ir_cost_as_legacy(action: &Action) -> Option<Vec<CostComponent>> {
 }
 
 fn lower_one(action: &Action, out: &mut Vec<CostComponent>) -> Option<()> {
+    use crate::ir::action::{MoveVerb, Who};
+    use crate::ir::expr::ZoneKindSel;
     match action {
         Action::Noop => Some(()),
         Action::Sequence(actions) => {
@@ -217,11 +219,46 @@ fn lower_one(action: &Action, out: &mut Vec<CostComponent>) -> Option<()> {
             out.push(CostComponent::TapSelf);
             Some(())
         }
+        Action::PayMana(mc) => {
+            out.push(CostComponent::Mana(mc.clone()));
+            Some(())
+        }
+        Action::PayLife { who: _, amount: Expr::Num(n) } => {
+            out.push(CostComponent::Life(*n as i32));
+            Some(())
+        }
+        Action::LoyaltyAdjust(n) => {
+            out.push(CostComponent::LoyaltyAdjust(*n));
+            Some(())
+        }
+        // Old Sacrifice variant — pre-MoveByChoice migration. Still present
+        // until Lotus Petal etc. switch over.
         Action::Sacrifice { who: Who::You, filter, count, bind_as: None }
             if filter_is_self(filter) && expr_const_one(count) =>
         {
             out.push(CostComponent::SacSelf);
             Some(())
+        }
+        // MoveByChoice — recognise the canonical (from, to, verb) self-shapes
+        // and lower to the corresponding legacy CostComponent.
+        Action::MoveByChoice { who: Who::You, from, to, verb, filter, count, bind_as: _ }
+            if filter_is_self(filter) && expr_const_one(count) =>
+        {
+            match (from, to, verb) {
+                (ZoneKindSel::Battlefield, ZoneKindSel::Graveyard, MoveVerb::Sacrifice) => {
+                    out.push(CostComponent::SacSelf);
+                    Some(())
+                }
+                (ZoneKindSel::Hand, ZoneKindSel::Exile, MoveVerb::Exile) => {
+                    out.push(CostComponent::ExileSelf);
+                    Some(())
+                }
+                (ZoneKindSel::Hand, ZoneKindSel::Graveyard, MoveVerb::Discard) => {
+                    out.push(CostComponent::DiscardSelf);
+                    Some(())
+                }
+                _ => None,
+            }
         }
         _ => None,
     }

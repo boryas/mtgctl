@@ -2350,11 +2350,14 @@ mod cost_phase4 {
 
     #[test]
     fn ir_cost_as_legacy_returns_none_for_unsupported_shape() {
-        // PayLife is not in the Phase 4 step 1 lowering coverage; the shim
-        // grows as later steps add card shapes.
-        let action = Action::PayLife {
+        // The shim grows over time. Pick a shape that genuinely isn't yet
+        // covered: a Sacrifice with a non-self filter (used in cost trees
+        // for "sacrifice another creature" — not yet authored on any card).
+        let action = Action::Sacrifice {
             who: crate::ir::action::Who::You,
-            amount: Expr::Num(1),
+            filter: crate::ir::expr::Filter(Expr::Bool(true)),
+            count: Expr::Num(1),
+            bind_as: None,
         };
         assert!(ir_cost_as_legacy(&action).is_none());
     }

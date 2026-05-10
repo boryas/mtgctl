@@ -1255,7 +1255,15 @@ fn ability_available(
     if ability.timing == ActivationTiming::Sorcery && !state.stack.is_empty() {
         return false;
     }
-    can_pay_costs(&ability.costs.expect_legacy(), state, who, source_id, source_untapped, 0)
+    let cost_payable = match &ability.costs {
+        crate::ir::ability::CostBody::Legacy(comps) => {
+            can_pay_costs(comps, state, who, source_id, source_untapped, 0)
+        }
+        crate::ir::ability::CostBody::Ir(action) => {
+            crate::ir::cost_exec::build_schema(action, state, who, source_id).is_some()
+        }
+    };
+    cost_payable
         && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who, source_id))
 }
 
@@ -1365,7 +1373,7 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
             if ma.timing == ActivationTiming::Default { continue; } // handled in mana sub-loop
             if ma.timing == ActivationTiming::Sorcery && !state.stack.is_empty() { continue; }
             if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
-            if ma.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::TapSelf)) && !untapped { continue; }
+            if ma.costs.requires_tap_self() && !untapped { continue; }
             if ma.condition.as_ref().map_or(false, |cond| !cond(*perm_id, state)) { continue; }
             if !can_pay_costs(&ma.costs.expect_legacy(), state, who, *perm_id, *untapped, 0) { continue; }
             actions.push(LegalAction::ActivateManaAbility { source_id: *perm_id, ability_index: idx });

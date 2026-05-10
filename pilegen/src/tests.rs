@@ -3874,7 +3874,7 @@
         let def = catalog_card("Quantum Riddler");
         let alts = def.alternate_costs();
         assert_eq!(alts.len(), 1, "one alternate (warp) cost should be present");
-        assert!(matches!(alts[0].costs.expect_legacy().first(), Some(CostComponent::Mana(_))),
+        assert!(alts[0].costs.includes_mana(),
             "warp cost should be a mana cost");
 
         let mut state = make_state();

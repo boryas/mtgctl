@@ -1382,8 +1382,19 @@ fn execute_mana_activation(
         });
     let Some(ma) = ma else { return; };
 
-    // Pay costs (tap, sac, exile, etc.) via the unified path.
-    let _ctx = pay_costs(&ma.costs.expect_legacy(), state, t, who, act.source_id, 0);
+    // Pay costs (tap, sac, exile, etc.) via the unified path. Dispatches on
+    // CostBody — IR mana abilities (basic land tap) flow through pay_ir_cost;
+    // legacy ones still use pay_costs.
+    let _ctx = match &ma.costs {
+        crate::ir::ability::CostBody::Legacy(comps) => {
+            pay_costs(comps, state, t, who, act.source_id, 0)
+        }
+        crate::ir::ability::CostBody::Ir(action) => {
+            let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
+            pay_ir_cost(state, t, who, act.source_id, action, &mut no_strategy)
+                .unwrap_or_else(crate::CostsPaidCtx::default)
+        }
+    };
 
     // Resolve effect immediately — mana production, logging via ManaProduced event.
     ma.make_effect.clone()(who, act.color_choice).call(state, t, &[]);
@@ -1471,7 +1482,7 @@ pub(crate) fn is_fetch(name: &str) -> bool {
 /// tap or sacrifice produces one mana. The per-color fields reflect which colors
 /// that source *can* produce (union across all available abilities).
 fn ma_requires_tap(ma: &ManaAbility) -> bool {
-    ma.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::TapSelf))
+    ma.costs.requires_tap_self()
 }
 
 fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {

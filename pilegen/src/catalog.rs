@@ -299,21 +299,67 @@ impl Default for AbilityDef {
 impl AbilityDef {
     /// True if this is a loyalty ability (costs contain a `LoyaltyAdjust`).
     pub(crate) fn is_loyalty_ability(&self) -> bool {
-        self.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::LoyaltyAdjust(_)))
+        self.loyalty_delta().is_some()
     }
 
-    /// Returns the loyalty delta if this is a loyalty ability.
+    /// Returns the loyalty delta if this is a loyalty ability. Variant-agnostic:
+    /// `Legacy` scans for `CostComponent::LoyaltyAdjust(n)`; `Ir` walks the
+    /// action tree for `Action::LoyaltyAdjust(n)`.
     pub(crate) fn loyalty_delta(&self) -> Option<i32> {
-        self.costs.expect_legacy().iter().find_map(|c| {
-            if let CostComponent::LoyaltyAdjust(n) = c { Some(*n) } else { None }
-        })
+        match &self.costs {
+            crate::ir::ability::CostBody::Legacy(comps) => {
+                comps.iter().find_map(|c| {
+                    if let CostComponent::LoyaltyAdjust(n) = c { Some(*n) } else { None }
+                })
+            }
+            crate::ir::ability::CostBody::Ir(a) => action_loyalty_delta(a),
+        }
     }
 
     /// True if this looks like a fetch land activation (SacSelf + Life cost > 0).
+    /// Variant-agnostic: works for both `Legacy` and `Ir` cost storage by
+    /// reusing the same shape predicates the affordability path uses.
     pub(crate) fn is_fetch_ability(&self) -> bool {
-        let comps = self.costs.expect_legacy();
-        comps.iter().any(|c| matches!(c, CostComponent::SacSelf))
-            && comps.iter().any(|c| matches!(c, CostComponent::Life(n) if *n > 0))
+        if !self.costs.requires_sac_self() {
+            return false;
+        }
+        match &self.costs {
+            crate::ir::ability::CostBody::Legacy(comps) => {
+                comps.iter().any(|c| matches!(c, CostComponent::Life(n) if *n > 0))
+            }
+            crate::ir::ability::CostBody::Ir(a) => action_includes_paylife_positive(a),
+        }
+    }
+}
+
+fn action_loyalty_delta(a: &crate::ir::action::Action) -> Option<i32> {
+    use crate::ir::action::Action::*;
+    match a {
+        LoyaltyAdjust(n) => Some(*n),
+        Sequence(actions) => actions.iter().find_map(action_loyalty_delta),
+        IfThen { then, else_, .. } => action_loyalty_delta(then)
+            .or_else(|| else_.as_ref().and_then(|e| action_loyalty_delta(e))),
+        MayDo { action, .. } => action_loyalty_delta(action),
+        ForEach { body, .. } => action_loyalty_delta(body),
+        Choose { options, .. } => options.iter().find_map(|o| action_loyalty_delta(&o.action)),
+        _ => None,
+    }
+}
+
+fn action_includes_paylife_positive(a: &crate::ir::action::Action) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::expr::Expr;
+    match a {
+        PayLife { amount: Expr::Num(n), .. } => *n > 0,
+        Sequence(actions) => actions.iter().any(action_includes_paylife_positive),
+        IfThen { then, else_, .. } => {
+            action_includes_paylife_positive(then)
+                || else_.as_ref().map_or(false, |e| action_includes_paylife_positive(e))
+        }
+        MayDo { action, .. } => action_includes_paylife_positive(action),
+        ForEach { body, .. } => action_includes_paylife_positive(body),
+        Choose { options, .. } => options.iter().any(|o| action_includes_paylife_positive(&o.action)),
+        _ => false,
     }
 }
 

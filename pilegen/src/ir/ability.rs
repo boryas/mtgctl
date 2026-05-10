@@ -238,6 +238,34 @@ impl CostBody {
         matches!(self, CostBody::Legacy(v) if v.is_empty())
     }
 
+    /// True iff this cost requires tapping the source — used by the mana
+    /// affordability predictor (`accumulate_source_potential`) to skip
+    /// already-tapped sources. Variant-agnostic: `Legacy` scans for
+    /// `CostComponent::TapSelf`; `Ir` walks for `Action::Tap { Source }`.
+    pub(crate) fn requires_tap_self(&self) -> bool {
+        match self {
+            CostBody::Legacy(v) => {
+                v.iter().any(|c| matches!(c, crate::CostComponent::TapSelf))
+            }
+            CostBody::Ir(a) => action_includes_tap_source(a),
+        }
+    }
+
+    /// True iff this cost requires sacrificing the source — used by the
+    /// affordability predictor to mark a source as no longer available
+    /// after activation. Variant-agnostic: `Legacy` scans for
+    /// `CostComponent::SacSelf`; `Ir` walks for the `MoveByChoice` shape
+    /// (BF→GY, verb=Sacrifice, filter=It==Source) or the legacy
+    /// `Action::Sacrifice` with the same filter.
+    pub(crate) fn requires_sac_self(&self) -> bool {
+        match self {
+            CostBody::Legacy(v) => {
+                v.iter().any(|c| matches!(c, crate::CostComponent::SacSelf))
+            }
+            CostBody::Ir(a) => action_includes_sac_source(a),
+        }
+    }
+
     /// True iff payment of this cost involves any mana spend. Used by
     /// `cast_spell` to set `SpellCast::mana_spent` correctly across both
     /// storage variants. For `Legacy`, scans for `CostComponent::Mana(_)`;
@@ -263,6 +291,56 @@ impl CostBody {
             }),
             CostBody::Ir(a) => first_pay_mana(a),
         }
+    }
+}
+
+fn action_includes_sac_source(a: &Action) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::action::MoveVerb;
+    use crate::ir::expr::ZoneKindSel;
+    let filter_self = |f: &crate::ir::expr::Filter| {
+        let crate::ir::expr::Filter(expr) = f;
+        let crate::ir::expr::Expr::Eq(lhs, rhs) = expr else { return false };
+        let l_is_it = matches!(lhs.as_ref(), crate::ir::expr::Expr::Ctx(crate::ir::context::Ctx::It));
+        let r_is_src = matches!(rhs.as_ref(), crate::ir::expr::Expr::Ctx(crate::ir::context::Ctx::Source));
+        let l_is_src = matches!(lhs.as_ref(), crate::ir::expr::Expr::Ctx(crate::ir::context::Ctx::Source));
+        let r_is_it = matches!(rhs.as_ref(), crate::ir::expr::Expr::Ctx(crate::ir::context::Ctx::It));
+        (l_is_it && r_is_src) || (l_is_src && r_is_it)
+    };
+    match a {
+        Sacrifice { filter, .. } if filter_self(filter) => true,
+        MoveByChoice { from: ZoneKindSel::Battlefield, to: ZoneKindSel::Graveyard,
+                       verb: MoveVerb::Sacrifice, filter, .. } if filter_self(filter) => true,
+        Sequence(actions) => actions.iter().any(action_includes_sac_source),
+        IfThen { then, else_, .. } => {
+            action_includes_sac_source(then)
+                || else_.as_ref().map_or(false, |e| action_includes_sac_source(e))
+        }
+        MayDo { action, .. } => action_includes_sac_source(action),
+        ForEach { body, .. } => action_includes_sac_source(body),
+        Choose { options, .. } => options.iter().any(|o| action_includes_sac_source(&o.action)),
+        _ => false,
+    }
+}
+
+fn action_includes_tap_source(a: &Action) -> bool {
+    use crate::ir::action::Action::*;
+    match a {
+        Tap { target } => matches!(
+            target,
+            crate::ir::expr::Expr::Ctx(crate::ir::context::Ctx::Source)
+        ),
+        Sequence(actions) => actions.iter().any(action_includes_tap_source),
+        IfThen { then, else_, .. } => {
+            action_includes_tap_source(then)
+                || else_.as_ref().map_or(false, |e| action_includes_tap_source(e))
+        }
+        MayDo { action, .. } => action_includes_tap_source(action),
+        ForEach { body, .. } => action_includes_tap_source(body),
+        Choose { options, .. } => options
+            .iter()
+            .any(|o| action_includes_tap_source(&o.action)),
+        _ => false,
     }
 }
 
