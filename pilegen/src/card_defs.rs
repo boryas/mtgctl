@@ -603,6 +603,7 @@ fn karakas() -> CardDef {
 fn ancient_tomb() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
+    use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel};
     let mut def = simple("Ancient Tomb", CardKind::Land(LandData {
         mana_abilities: vec![],
@@ -610,7 +611,10 @@ fn ancient_tomb() -> CardDef {
     }), vec![], None);
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: CostBody::Legacy(vec![CostComponent::TapSelf]),
+            // Same cost shape as Underground Sea's tap-for-mana abilities
+            // (`{T}: Add <X>`). Body differs — adds CC and pays 2 life as
+            // a side-effect — but the cost is just TapSelf.
+            cost: CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) }),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::Sequence(vec![

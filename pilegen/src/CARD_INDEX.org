@@ -67,6 +67,18 @@ All basic lands, ABU duals, Great Furnace use ~tap_produces(mana_string)~.
 | ABU duals (10)          | Two colors   | Two ~tap_produces~ calls    |
 | Great Furnace           | {R}          | Also typed as Artifact      |
 
+*Design gap (2026-05-10):* basic-land mana abilities are currently
+authored on each card via ~ir_tap_mana(color)~. The CR-correct model
+(CR 305.6) is that the ability is granted by the *basic land subtype*
+itself — Island grants ~{T}: Add U~, Swamp grants ~{T}: Add B~, etc.
+Underground Sea has both abilities because it has both subtypes. The
+right implementation is a single continuous effect keyed on subtype,
+not 50+ ~ir_tap_mana~ calls. Doing this would also make Urborg
+(grants Swamp subtype to all lands) and Blood Moon / Magus of the
+Moon (replace subtypes with Mountain) fall out for free instead of
+being special-cased. *Deferred* — finishing cost-IR migration is
+prioritized first; this is its own architectural pass.
+
 ** Sacrifice for mana
 
 | Card               | Cost                | Produces             | Notes                                                                              |
