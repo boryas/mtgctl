@@ -204,24 +204,23 @@ fn walk(
             Some(())
         }
 
-        Action::ReturnFromBattlefield { who: _, filter, count, bind_as } => {
-            // Mirror of Sacrifice's walk. `bind_as` (when Some) names the
+        Action::MoveByChoice { who: _, from, to: _, verb: _, filter, count, bind_as } => {
+            // Generalised player-pick-from-zone primitive. `from` zone
+            // determines the candidate pool (permanents-of for Battlefield,
+            // hand-of for Hand, etc.). `bind_as` (when Some) names the
             // schema decision so the executor's BindEnv lookup finds the
-            // strategy's chosen ObjIds — we use it as the binding key here.
+            // strategy's chosen ObjIds.
             let n = expr_const_u32(count)?;
             if n == 0 {
                 return Some(());
             }
-            let candidates: Vec<ObjId> = state
-                .permanents_of(who)
-                .filter(|c| c.bf.is_some())
-                .map(|c| c.id)
+            let candidates: Vec<ObjId> = candidates_in_zone(state, who, *from)
                 .filter(|&id| filter_matches_for_schema(filter, id, source, state))
                 .collect();
             if (candidates.len() as u32) < n {
                 return None;
             }
-            let binding = bind_as.unwrap_or_else(|| idx.next_binding("ret"));
+            let binding = bind_as.unwrap_or_else(|| idx.next_binding("pick"));
             schema.push(Decision {
                 binding,
                 kind: DecisionKind::Objects { candidates, count: n },
@@ -381,6 +380,27 @@ fn filter_matches_for_schema(filter: &Filter, candidate: ObjId, source: ObjId, s
 
 fn owner_of(id: ObjId, state: &SimState) -> Option<PlayerId> {
     state.objects.get(&id).map(|o| o.owner)
+}
+
+/// Iterate object ids in `who`'s view of `zone` — the candidate pool for
+/// `Action::MoveByChoice`. Battlefield uses `permanents_of` (objects with
+/// `bf` set); other zones use the per-player iterators.
+fn candidates_in_zone<'a>(
+    state: &'a SimState,
+    who: PlayerId,
+    zone: crate::ir::expr::ZoneKindSel,
+) -> Box<dyn Iterator<Item = ObjId> + 'a> {
+    use crate::ir::expr::ZoneKindSel;
+    match zone {
+        ZoneKindSel::Battlefield => Box::new(
+            state.permanents_of(who).filter(|c| c.bf.is_some()).map(|c| c.id),
+        ),
+        ZoneKindSel::Hand => Box::new(state.hand_of(who).map(|c| c.id)),
+        ZoneKindSel::Graveyard => Box::new(state.graveyard_of(who).map(|c| c.id)),
+        ZoneKindSel::Exile => Box::new(state.exile_of(who).map(|c| c.id)),
+        ZoneKindSel::Library => Box::new(state.library_of(who).map(|c| c.id)),
+        ZoneKindSel::Stack | ZoneKindSel::Command => Box::new(std::iter::empty()),
+    }
 }
 
 fn validate(schema: &CostSchema, env: &BindEnv) -> Result<(), PayError> {

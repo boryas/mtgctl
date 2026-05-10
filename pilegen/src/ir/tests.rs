@@ -2455,9 +2455,13 @@ mod cost_phase4 {
     }
 
     #[test]
-    fn daze_alt_cost_storage_is_ir_return_from_battlefield() {
+    fn daze_alt_cost_storage_is_ir_move_by_choice_return() {
         // Phase 4 step 5 regression: Daze's alt cost is the first card to
         // actually run through `pay_ir_cost` at runtime (not the bridge).
+        // Uses the unified `MoveByChoice` primitive with `MoveVerb::Return`
+        // and the (Battlefield → Hand) transition.
+        use crate::ir::action::MoveVerb;
+        use crate::ir::expr::ZoneKindSel;
         let cat = crate::card_defs::build_catalog();
         let daze = cat.get("Daze").expect("Daze in catalog");
         let alts = daze.alternate_costs();
@@ -2466,26 +2470,34 @@ mod cost_phase4 {
             panic!("Daze's alt cost is CostBody::Ir(_) after Phase 4 step 5")
         };
         match action {
-            Action::ReturnFromBattlefield {
+            Action::MoveByChoice {
+                from: ZoneKindSel::Battlefield,
+                to: ZoneKindSel::Hand,
+                verb: MoveVerb::Return,
                 count: Expr::Num(1),
                 bind_as: Some("$daze_island"),
                 ..
             } => {}
-            _ => panic!("Daze's alt cost is Action::ReturnFromBattlefield {{ count: 1, bind_as: Some(...) }}"),
+            _ => panic!(
+                "Daze's alt cost is MoveByChoice {{ from: Battlefield, to: Hand, verb: Return, count: 1, bind_as: Some(...) }}"
+            ),
         }
     }
 
     #[test]
-    fn return_from_battlefield_walk_unpayable_with_no_candidates() {
-        use crate::ir::action::Who;
+    fn move_by_choice_walk_unpayable_with_no_candidates() {
+        use crate::ir::action::{MoveVerb, Who};
         use crate::ir::cost_exec::build_schema;
-        use crate::ir::expr::Filter;
+        use crate::ir::expr::{Filter, ZoneKindSel};
         use crate::ObjId;
         use super::cost_phase1::make_state;
 
         let state = make_state();
-        let action = Action::ReturnFromBattlefield {
+        let action = Action::MoveByChoice {
             who: Who::You,
+            from: ZoneKindSel::Battlefield,
+            to: ZoneKindSel::Hand,
+            verb: MoveVerb::Return,
             filter: Filter(Expr::Bool(true)),
             count: Expr::Num(1),
             bind_as: Some("$pick"),

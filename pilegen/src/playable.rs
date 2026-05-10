@@ -284,6 +284,7 @@ fn action_kind_name(a: &Action) -> &'static str {
         Action::MayDo { .. } => "MayDo",
         Action::ForEach { .. } => "ForEach",
         Action::Choose { .. } => "Choose",
+        Action::MoveByChoice { .. } => "MoveByChoice",
         _ => "Action(other)",
     }
 }

@@ -16,6 +16,25 @@ pub(crate) enum Expiry {
     Permanent,
 }
 
+/// Verb tag on `Action::MoveByChoice` — disambiguates the event family that
+/// fires when the chosen objects shift zones. The (from, to) pair alone
+/// isn't enough: bf→gy can be Sacrifice (CR 701.16 triggers) or a Destroy
+/// effect's zone movement; hand→gy is Discard (CR 701.8 triggers); etc.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MoveVerb {
+    /// "Return ~ to its owner's hand" / "Bounce ~ to library" — the standard
+    /// zone-change family. No special trigger family beyond zone-change.
+    Return,
+    /// "Exile ~" — fires exile triggers (CR 701.18) in addition to zone-change.
+    Exile,
+    /// "Sacrifice ~" — fires sacrifice triggers (CR 701.16) in addition to
+    /// zone-change. Tokens cease to exist on graveyard arrival (CR 704.5d).
+    Sacrifice,
+    /// "Discard ~" — fires discard triggers (CR 701.8) in addition to
+    /// zone-change. Madness etc. trigger off this event family.
+    Discard,
+}
+
 /// Who is performing the action / receiving the choice.
 #[derive(Clone)]
 pub(crate) enum Who {
@@ -161,16 +180,27 @@ pub(crate) enum Action {
         count: Expr,
         bind_as: Option<&'static str>,
     },
-    /// Cost-tree primitive: return `count` permanents matching `filter` from
-    /// the battlefield to their owners' hands. Mirrors `Sacrifice`'s shape.
-    /// `bind_as` is the schema-binding name the strategy answers under and
-    /// the executor reads from at run time — required for cost-tree usage
-    /// because the IR executor consumes the binding rather than calling a
-    /// callback (cf. Sacrifice, which still uses `state.sacrifice_choice`
-    /// because its single migrated cost shape only ever has one candidate
-    /// — the source itself).
-    ReturnFromBattlefield {
+    /// Player picks `count` objects matching `filter` from `from` zone and
+    /// moves them to `to` zone. Subsumes return-to-hand, exile-from-hand,
+    /// return-from-graveyard, exile-from-graveyard, etc. — anywhere a
+    /// player chooses K from a filtered pool and the chosen objects shift
+    /// zones.
+    ///
+    /// `verb` disambiguates event semantics: the same (from, to) shape can
+    /// fire different event families (e.g. bf→gy is Sacrifice (CR 701.16
+    /// triggers) vs. Destroy-effect zone movement). Carrying the verb
+    /// explicitly avoids inferring intent from zone shape.
+    ///
+    /// `bind_as: Some(name)` is required for cost-tree usage — the schema
+    /// decision is keyed under `name` so the executor's BindEnv readback
+    /// finds the strategy's choice. Existing `Sacrifice`/`Discard` use a
+    /// callback for selection; once those switch to binding-driven
+    /// execution they collapse into this variant.
+    MoveByChoice {
         who: Who,
+        from: ZoneKindSel,
+        to: ZoneKindSel,
+        verb: MoveVerb,
         filter: Filter,
         count: Expr,
         bind_as: Option<&'static str>,

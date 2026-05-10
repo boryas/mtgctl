@@ -1136,9 +1136,9 @@ fn consider() -> CardDef {
 /// or pay {1U} (20% probability). CR 701.5.
 /// "Counter target spell unless its controller pays {1}."
 fn daze() -> CardDef {
-    use crate::ir::action::Action;
+    use crate::ir::action::{Action, MoveVerb};
     use crate::ir::context::Ctx;
-    use crate::ir::expr::{Expr, Filter};
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
     let mut c = simple("Daze", CardKind::Instant(SpellData {
         mana_cost: "1U".to_string(),
         modes: single_mode(
@@ -1157,8 +1157,11 @@ fn daze() -> CardDef {
     ));
     c.alternate_costs = vec![
         AlternateCost {
-            costs: CostBody::Ir(Action::ReturnFromBattlefield {
+            costs: CostBody::Ir(Action::MoveByChoice {
                 who: crate::ir::action::Who::You,
+                from: ZoneKindSel::Battlefield,
+                to: ZoneKindSel::Hand,
+                verb: MoveVerb::Return,
                 filter: island_filter,
                 count: Expr::Num(1),
                 bind_as: Some("$daze_island"),
