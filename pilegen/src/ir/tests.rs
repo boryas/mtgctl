@@ -2559,6 +2559,81 @@ mod cost_phase4 {
     }
 
     #[test]
+    fn engineered_explosives_storage_is_ir_pay_mana_then_sacrifice() {
+        // First end-to-end IR migration of an `AbilityDef` cost. EE is
+        // `{2}, Sacrifice ~`. Cost shape: Sequence(PayMana(2), MoveByChoice
+        // (Battlefield → Graveyard, verb=Sacrifice)).
+        use crate::ir::action::MoveVerb;
+        use crate::ir::expr::ZoneKindSel;
+        let cat = crate::card_defs::build_catalog();
+        let ee = cat.get("Engineered Explosives").expect("EE in catalog");
+        let ab = ee
+            .abilities()
+            .iter()
+            .find(|a| matches!(a.source_zone, crate::SourceZone::Battlefield))
+            .expect("EE has a battlefield activated ability");
+        let CostBody::Ir(action) = &ab.costs else {
+            panic!("EE's activated ability cost is CostBody::Ir(_) post-migration")
+        };
+        let Action::Sequence(steps) = action else {
+            panic!("EE cost is Action::Sequence(...)")
+        };
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(steps[0], Action::PayMana(_)));
+        match &steps[1] {
+            Action::MoveByChoice {
+                from: ZoneKindSel::Battlefield,
+                to: ZoneKindSel::Graveyard,
+                verb: MoveVerb::Sacrifice,
+                count: Expr::Num(1),
+                bind_as: Some("$ee_self"),
+                ..
+            } => {}
+            _ => panic!(
+                "EE step 1 is MoveByChoice {{ from: Battlefield, to: Graveyard, verb: Sacrifice, count: 1, bind_as: Some(...) }}"
+            ),
+        }
+    }
+
+    #[test]
+    fn engineered_explosives_pay_ir_cost_drains_mana_and_sacrifices() {
+        // End-to-end runtime: pay EE's `{2}, Sacrifice ~` cost via
+        // `pay_ir_cost`. Asserts pool drained by 2, EE in graveyard,
+        // and `CostsPaidCtx.objects_moved` contains the EE id.
+        use crate::ir::ability::CostBody;
+        use crate::{BattlefieldState, CardZone, PlayerId};
+        use super::cost_phase1::{insert_obj, make_state};
+
+        let mut state = make_state();
+        let ee_def = crate::card_defs::build_catalog()
+            .get("Engineered Explosives").expect("EE in catalog").clone();
+        state.catalog.insert(ee_def.name.clone(), ee_def.clone());
+        let ee_id = insert_obj(&mut state, PlayerId::Us, ee_def.clone());
+        // Move EE to battlefield and give it a `bf` slot.
+        state.set_card_zone(ee_id, CardZone::Battlefield);
+        state.objects.get_mut(&ee_id).unwrap().bf = Some(BattlefieldState::new());
+        // Fill the pool with {2}.
+        state.player_mut(PlayerId::Us).pool.c = 2;
+        state.player_mut(PlayerId::Us).pool.total = 2;
+
+        // Locate the activated ability and pay via the IR cost path.
+        let ab = ee_def.abilities().iter()
+            .find(|a| matches!(a.source_zone, crate::SourceZone::Battlefield))
+            .expect("battlefield ability");
+        let CostBody::Ir(action) = &ab.costs else { panic!("expected Ir cost") };
+
+        let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
+        let ctx = crate::pay_ir_cost(&mut state, 1, PlayerId::Us, ee_id, action, &mut no_strategy)
+            .expect("pay_ir_cost succeeds for EE");
+
+        assert_eq!(state.player(PlayerId::Us).pool.total, 0, "pool drained by 2");
+        assert!(matches!(state.objects[&ee_id].zone, CardZone::Graveyard),
+            "EE moved to graveyard");
+        assert_eq!(ctx.objects_moved, vec![ee_id],
+            "CostsPaidCtx.objects_moved records the sacrificed EE");
+    }
+
+    #[test]
     fn move_by_choice_walk_unpayable_with_no_candidates() {
         use crate::ir::action::{MoveVerb, Who};
         use crate::ir::cost_exec::build_schema;

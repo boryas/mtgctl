@@ -954,8 +954,15 @@ fn mox_opal() -> CardDef {
     def
 }
 
-/// Chapter III ability: search for an artifact with no colored pips and MV ≤ 1.
-/// Full chapter/saga trigger system is future work; modeled as a sacrifice-self activated ability.
+/// **ABNORMAL — sagas are not implemented.** Urza's Saga is a saga; its real
+/// behavior is "add a lore counter on entry and after your draw step; chapter
+/// abilities trigger when the lore-counter passes thresholds; sacrifice as
+/// SBA when lore-count > final chapter (CR 715)." This card stub fakes
+/// chapter III as a sacrifice-self *activated* ability, which is wrong shape
+/// (the sac is automatic, not paid by the controller; the chapter trigger is
+/// not an activated ability). Do not use this stub as a model for any cost
+/// migration — see CARD_INDEX.org "Sagas" gap entry. Replace once the saga
+/// trigger/lore-counter machinery lands.
 fn ursas_saga() -> CardDef {
     let pred = pred_and(
         pred_type_eq(CardType::Artifact),
@@ -987,16 +994,37 @@ fn ursas_saga() -> CardDef {
 /// {2}, Sacrifice: destroy each nonland permanent with MV equal to the charge count.
 /// CR 702.43 sunburst, CR 701.7 destroy.
 fn engineered_explosives() -> CardDef {
+    use crate::ir::action::{Action, MoveVerb};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
     let mut def = CardDef::new(
         "Engineered Explosives",
         CardKind::Artifact(ArtifactData {
             mana_cost: "0".to_string(),
             abilities: vec![AbilityDef {
                 source_zone: SourceZone::Battlefield,
-                costs: CostBody::Legacy(vec![
-                    CostComponent::Mana(parse_mana_cost("2")),
-                    CostComponent::SacSelf,
-                ]),
+                // First end-to-end IR migration of an `AbilityDef` cost:
+                // `{2}, Sacrifice ~`. Pays through `pay_ir_cost` via the
+                // `pay_ability_cost` dispatch on `CostBody`. Cost shape is
+                // a Sequence of PayMana(2) and the unified MoveByChoice
+                // (Battlefield → Graveyard, verb=Sacrifice) with the
+                // `It == Source` filter. PayMana drains the pre-tapped
+                // pool (the mana sub-loop has already filled it pre-pay).
+                costs: CostBody::Ir(Action::Sequence(vec![
+                    Action::PayMana(parse_mana_cost("2")),
+                    Action::MoveByChoice {
+                        who: crate::ir::action::Who::You,
+                        from: ZoneKindSel::Battlefield,
+                        to: ZoneKindSel::Graveyard,
+                        verb: MoveVerb::Sacrifice,
+                        filter: Filter(Expr::Eq(
+                            Box::new(Expr::Ctx(Ctx::It)),
+                            Box::new(Expr::Ctx(Ctx::Source)),
+                        )),
+                        count: Expr::Num(1),
+                        bind_as: Some("$ee_self"),
+                    },
+                ])),
                 ability_factory: Some(Arc::new(|who, source_id| {
                     Effect(Arc::new(move |state, t, _targets| {
                         // EE has been sacrificed; zone-independent counters persist in objects map.

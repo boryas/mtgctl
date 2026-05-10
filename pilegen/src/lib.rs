@@ -2912,7 +2912,20 @@ fn pay_ability_cost(
         }
     }
 
-    let ctx = pay_costs(&ability.costs.expect_legacy(), state, t, who, source_id, 0);
+    // Dispatch on CostBody. Legacy → pay_costs; Ir → pay_ir_cost. The IR
+    // path uses the strategy's default announcement (no per-ability strategy
+    // ref threaded through here yet — sufficient for cost shapes whose
+    // strategy choice is a no-op like SacSelf with a single candidate).
+    let ctx = match &ability.costs {
+        crate::ir::ability::CostBody::Legacy(comps) => {
+            pay_costs(comps, state, t, who, source_id, 0)
+        }
+        crate::ir::ability::CostBody::Ir(action) => {
+            let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
+            pay_ir_cost(state, t, who, source_id, action, &mut no_strategy)
+                .unwrap_or_else(crate::CostsPaidCtx::default)
+        }
+    };
 
     // Log loyalty adjustment.
     if let Some(n) = ability.loyalty_delta() {
@@ -3804,9 +3817,9 @@ fn run_activate_submachine(
 
     // ── Mana loop (CR 602.2b) ──────────────────────────────────────────
     // Fill pool via strategy-driven mana loop before paying costs.
-    if let Some(mc) = ability.costs.expect_legacy().iter().find_map(|c| {
-        if let CostComponent::Mana(mc) = c { Some(mc.clone()) } else { None }
-    }) {
+    // Works across both `CostBody` variants: Legacy scans for
+    // `CostComponent::Mana`, Ir walks for `Action::PayMana`.
+    if let Some(mc) = ability.costs.first_mana_cost() {
         run_mana_loop(state, t, who, &mc, &mut *strategy);
     }
 
