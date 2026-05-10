@@ -770,8 +770,8 @@
         let mut state = make_state();
         state.us.pool.b = 2;
         state.us.pool.total = 2;
-        let ability = AbilityDef { costs: vec![CostComponent::Mana(parse_mana_cost("B"))], ..Default::default() };
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
+        let ability = AbilityDef { costs: crate::ir::ability::CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("B"))]), ..Default::default() };
+        pay_costs(&ability.costs.expect_legacy(), &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
 
         assert_eq!(state.us.pool.b, 1, "1 black spent");
         assert_eq!(state.us.pool.total, 1);
@@ -781,8 +781,8 @@
     fn test_pay_activation_cost_life() {
         let mut state = make_state();
         let initial = state.us.life;
-        let ability = AbilityDef { costs: vec![CostComponent::Life(2)], ..Default::default() };
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
+        let ability = AbilityDef { costs: crate::ir::ability::CostBody::Legacy(vec![CostComponent::Life(2)]), ..Default::default() };
+        pay_costs(&ability.costs.expect_legacy(), &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
 
         assert_eq!(state.us.life, initial - 2);
     }
@@ -791,8 +791,8 @@
     fn test_pay_activation_cost_sacrifice_self() {
         let mut state = make_state();
         let petal_id = add_default_perm(&mut state, PlayerId::Us, "Lotus Petal");
-        let ability = AbilityDef { costs: vec![CostComponent::SacSelf], ..Default::default() };
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, petal_id, 0);
+        let ability = AbilityDef { costs: crate::ir::ability::CostBody::Legacy(vec![CostComponent::SacSelf]), ..Default::default() };
+        pay_costs(&ability.costs.expect_legacy(), &mut state, 1, PlayerId::Us, petal_id, 0);
 
         assert!(state.permanents_of(PlayerId::Us).count() == 0, "Lotus Petal should be sacrificed");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Lotus Petal"));
@@ -1157,7 +1157,7 @@
         // and sends it to the graveyard.
         let mut state = make_state();
         let wraith_def = catalog_card("Street Wraith");
-        let ability = AbilityDef { source_zone: SourceZone::Hand, costs: vec![CostComponent::DiscardSelf, CostComponent::Life(2)], ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
+        let ability = AbilityDef { source_zone: SourceZone::Hand, costs: crate::ir::ability::CostBody::Legacy(vec![CostComponent::DiscardSelf, CostComponent::Life(2)]), ability_factory: Some(Arc::new(|who, _| eff_draw(who, 1))), ..Default::default() };
         let catalog = vec![wraith_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         // Add Street Wraith to hand and a library card to draw
@@ -1165,7 +1165,7 @@
         add_library_card(&mut state, PlayerId::Us, "Island");
         let initial_hand = state.hand_size(PlayerId::Us);
 
-        pay_costs(&ability.costs, &mut state, 1, PlayerId::Us, wraith_id, 0);
+        pay_costs(&ability.costs.expect_legacy(), &mut state, 1, PlayerId::Us, wraith_id, 0);
 
         assert!(!state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Street Wraith"), "Street Wraith removed from hand");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Street Wraith"), "in graveyard");
@@ -1218,7 +1218,7 @@
         let borrower_def = catalog_card("Brazen Borrower");
         let island2_def = CardDef::new("Island2", CardKind::Land(LandData {
             mana_abilities: vec![ManaAbility {
-                costs: vec![CostComponent::TapSelf],
+                costs: crate::ir::ability::CostBody::Legacy(vec![CostComponent::TapSelf]),
                 produces: produces_colors("U"),
                 make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "U")),
                 ..Default::default()
@@ -3003,7 +3003,7 @@
     #[test]
     fn test_fetchland_search_via_ability_factory() {
         let pred = pred_and(pred_type_eq(CardType::Land), pred_or(pred_land_subtype("island"), pred_land_subtype("swamp")));
-        let delta_ability = AbilityDef { costs: vec![CostComponent::SacSelf, CostComponent::Life(1)], ability_factory: Some(Arc::new(move |who, _| eff_fetch_search(who, pred.clone(), ZoneId::Battlefield))), ..Default::default() };
+        let delta_ability = AbilityDef { costs: crate::ir::ability::CostBody::Legacy(vec![CostComponent::SacSelf, CostComponent::Life(1)]), ability_factory: Some(Arc::new(move |who, _| eff_fetch_search(who, pred.clone(), ZoneId::Battlefield))), ..Default::default() };
         let island_def = catalog_card("Underground Sea");
         let forest_def = CardDef::new("Forest", CardKind::Land(LandData {
             land_types: LandTypes::from_types(&[BasicLandType::Forest]),

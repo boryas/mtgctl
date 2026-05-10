@@ -2167,7 +2167,7 @@ fn mana_for_basic_land(kind: BasicLandType) -> crate::ManaAbility {
     let color = kind.mana_color();
     let color_owned = color.to_string();
     crate::ManaAbility {
-        costs: vec![crate::CostComponent::TapSelf],
+        costs: crate::ir::ability::CostBody::Legacy(vec![crate::CostComponent::TapSelf]),
         produces: crate::produces_colors(color),
         produces_count: 1,
         make_effect: std::sync::Arc::new(move |who, _| crate::eff_mana(who, color_owned.clone())),
@@ -2284,7 +2284,11 @@ pub(crate) fn ir_activated_as_legacy(
     };
     Some(crate::AbilityDef {
         source_zone,
-        costs: crate::playable::cost_body_to_legacy(cost),
+        // Bridge produces a legacy `CostBody::Legacy(_)` so the downstream
+        // mana sub-loop / activation pipeline (which still calls
+        // `expect_legacy()`) keeps working. The lowering shim survives until
+        // those pipelines learn to dispatch on `CostBody` natively.
+        costs: crate::ir::ability::CostBody::Legacy(crate::playable::cost_body_to_legacy(cost)),
         target_spec: target_spec.clone(),
         choice_spec: choice_spec.clone(),
         ability_factory: None,
@@ -2437,7 +2441,11 @@ pub(crate) fn ir_activated_as_mana_ability_legacy(
 
     Some(crate::ManaAbility {
         source_zone,
-        costs: crate::playable::cost_body_to_legacy(cost),
+        // Bridge produces a legacy `CostBody::Legacy(_)` so the downstream
+        // mana sub-loop / activation pipeline (which still calls
+        // `expect_legacy()`) keeps working. The lowering shim survives until
+        // those pipelines learn to dispatch on `CostBody` natively.
+        costs: crate::ir::ability::CostBody::Legacy(crate::playable::cost_body_to_legacy(cost)),
         produces: produces_vec,
         produces_count: count,
         make_effect,

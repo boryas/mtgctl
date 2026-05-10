@@ -136,7 +136,7 @@ fn enumerate_mana_taps(
         if ma.timing != ActivationTiming::Default { continue; }
         if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
         // Check tap cost — source must be untapped.
-        let requires_tap = ma.costs.iter().any(|c| matches!(c, CostComponent::TapSelf));
+        let requires_tap = ma.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::TapSelf));
         if requires_tap && plan.tapped.contains(&source_id) { continue; }
         // Check condition predicate (e.g. Metalcraft for Mox Opal).
         if ma.condition.as_ref().map_or(false, |cond| !cond(source_id, state)) { continue; }
@@ -197,12 +197,12 @@ pub(crate) fn apply_plan_action(
             let ma = def.and_then(|d| d.mana_abilities().get(*ability_index));
             if let Some(ma) = ma {
                 // Mark tapped if ability requires tap.
-                let requires_tap = ma.costs.iter().any(|c| matches!(c, CostComponent::TapSelf));
+                let requires_tap = ma.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::TapSelf));
                 if requires_tap {
                     next.tapped.insert(*source_id);
                 }
                 // Mark sacrificed if ability requires sac.
-                let requires_sac = ma.costs.iter().any(|c| matches!(c, CostComponent::SacSelf));
+                let requires_sac = ma.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::SacSelf));
                 if requires_sac {
                     next.sacrificed.insert(*source_id);
                 }

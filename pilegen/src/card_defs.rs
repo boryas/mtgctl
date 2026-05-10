@@ -258,7 +258,7 @@ fn color_to_mana_char(c: Color) -> &'static str {
 fn tap_produces(s: &str) -> ManaAbility {
     let s_owned = s.to_string();
     ManaAbility {
-        costs: vec![CostComponent::TapSelf],
+        costs: CostBody::Legacy(vec![CostComponent::TapSelf]),
         produces: produces_colors(s),
         produces_count: 1,
         make_effect: std::sync::Arc::new(move |who, _color| eff_mana(who, s_owned.clone())),
@@ -306,7 +306,7 @@ fn ir_tap_mana(s: &str) -> crate::ir::ability::Ability {
 /// `AbilityDef` for a fetch land: sacrifice self, pay 1 life, search → Battlefield.
 fn fetch_ability(pred: CardPredicate) -> AbilityDef {
     AbilityDef {
-        costs: vec![CostComponent::SacSelf, CostComponent::Life(1)],
+        costs: CostBody::Legacy(vec![CostComponent::SacSelf, CostComponent::Life(1)]),
         ability_factory: Some(Arc::new(move |who, _| {
             eff_fetch_search(who, pred.clone(), ZoneId::Battlefield)
         })),
@@ -577,7 +577,7 @@ fn karakas() -> CardDef {
         CardKind::Land(LandData {
             mana_abilities: vec![tap_produces("W")],
             abilities: vec![AbilityDef {
-                costs: vec![CostComponent::TapSelf],
+                costs: CostBody::Legacy(vec![CostComponent::TapSelf]),
                 target_spec: TargetSpec::Union(vec![
                     TargetSpec::ObjectInZone {
                         controller: Who::Actor,
@@ -639,7 +639,7 @@ fn city_of_traitors() -> CardDef {
         "City of Traitors",
         CardKind::Land(LandData {
             mana_abilities: vec![ManaAbility {
-                costs: vec![CostComponent::TapSelf],
+                costs: CostBody::Legacy(vec![CostComponent::TapSelf]),
                 produces_count: 2,
                 make_effect: Arc::new(|who, _| eff_mana(who, "CC")),
                 ..Default::default()
@@ -794,12 +794,12 @@ fn cavern_of_souls() -> CardDef {
             // {T}: Add one mana of any color (type restriction and uncounterable not yet modeled)
             mana_abilities: vec![
                 ManaAbility {
-                    costs: vec![CostComponent::TapSelf],
+                    costs: CostBody::Legacy(vec![CostComponent::TapSelf]),
                     make_effect: std::sync::Arc::new(|who, _| eff_mana(who, "C")),
                     ..Default::default()
                 },
                 ManaAbility {
-                    costs: vec![CostComponent::TapSelf],
+                    costs: CostBody::Legacy(vec![CostComponent::TapSelf]),
                     produces: produces_colors("WUBRG"),
                     make_effect: std::sync::Arc::new(|who, color| {
                         eff_mana(who, color.map(color_to_mana_char).unwrap_or("1"))
@@ -964,7 +964,7 @@ fn ursas_saga() -> CardDef {
     simple("Urza's Saga", CardKind::Artifact(ArtifactData {
         mana_cost: String::new(),
         abilities: vec![AbilityDef {
-            costs: vec![CostComponent::SacSelf],
+            costs: CostBody::Legacy(vec![CostComponent::SacSelf]),
             ability_factory: Some(Arc::new(move |who, _| {
                 eff_fetch_search(who, pred.clone(), ZoneId::Battlefield)
             })),
@@ -993,10 +993,10 @@ fn engineered_explosives() -> CardDef {
             mana_cost: "0".to_string(),
             abilities: vec![AbilityDef {
                 source_zone: SourceZone::Battlefield,
-                costs: vec![
+                costs: CostBody::Legacy(vec![
                     CostComponent::Mana(parse_mana_cost("2")),
                     CostComponent::SacSelf,
-                ],
+                ]),
                 ability_factory: Some(Arc::new(|who, source_id| {
                     Effect(Arc::new(move |state, t, _targets| {
                         // EE has been sacrificed; zone-independent counters persist in objects map.
@@ -2123,7 +2123,7 @@ fn sneak_attack() -> CardDef {
         "Sneak Attack",
         CardKind::Enchantment(EnchantmentData {
             abilities: vec![AbilityDef {
-                costs: vec![CostComponent::Mana(parse_mana_cost("R"))],
+                costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("R"))]),
                 choice_spec: Some(ChoiceSpec {
                     controller: Who::Actor,
                     zone: ZoneId::Hand,
@@ -2206,7 +2206,7 @@ fn street_wraith() -> CardDef {
     let mut data = CreatureData::new("3BB", 3, 4);
     data.abilities = vec![AbilityDef {
         source_zone: SourceZone::Hand,
-        costs: vec![CostComponent::DiscardSelf, CostComponent::Life(2)],
+        costs: CostBody::Legacy(vec![CostComponent::DiscardSelf, CostComponent::Life(2)]),
         ir_body: Some(Action::Draw { who: IrWho::You, n: Expr::Num(1) }),
         ..Default::default()
     }];
@@ -2249,21 +2249,21 @@ fn kaito_bane_of_nightmares() -> CardDef {
                 ninjutsu_ability("1UB"),
                 // +1: emblem "Ninjas you control get +1/+1."
                 AbilityDef {
-                    costs: vec![CostComponent::LoyaltyAdjust(1)],
+                    costs: CostBody::Legacy(vec![CostComponent::LoyaltyAdjust(1)]),
                     ability_factory: Some(Arc::new(build_kaito_plus_one)),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
                 // 0: Surveil 2, draw if opp lost life.
                 AbilityDef {
-                    costs: vec![CostComponent::LoyaltyAdjust(0)],
+                    costs: CostBody::Legacy(vec![CostComponent::LoyaltyAdjust(0)]),
                     ability_factory: Some(Arc::new(build_kaito_zero)),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
                 // −2: Tap target creature + 2 stun counters.
                 AbilityDef {
-                    costs: vec![CostComponent::LoyaltyAdjust(-2)],
+                    costs: CostBody::Legacy(vec![CostComponent::LoyaltyAdjust(-2)]),
                     ability_factory: Some(Arc::new(build_kaito_minus_two)),
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Opp,
@@ -2357,7 +2357,7 @@ fn stoneforge_mystic() -> CardDef {
     data.creature_subtypes = vec!["Kor".into(), "Artificer".into()];
     data.abilities = vec![AbilityDef {
         // {1}{W}, {T}: put an Equipment card from your hand onto the battlefield.
-        costs: vec![CostComponent::Mana(parse_mana_cost("1W")), CostComponent::TapSelf],
+        costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("1W")), CostComponent::TapSelf]),
         choice_spec: Some(ChoiceSpec {
             controller: Who::Actor,
             zone: ZoneId::Hand,
@@ -3066,13 +3066,13 @@ fn tamiyo_inquisitive_student() -> CardDef {
             loyalty: 2,
             abilities: vec![
                 AbilityDef {
-                    costs: vec![CostComponent::LoyaltyAdjust(2)],
+                    costs: CostBody::Legacy(vec![CostComponent::LoyaltyAdjust(2)]),
                     ability_factory: Some(Arc::new(build_tamiyo_plus_two)),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
                 },
                 AbilityDef {
-                    costs: vec![CostComponent::LoyaltyAdjust(-3)],
+                    costs: CostBody::Legacy(vec![CostComponent::LoyaltyAdjust(-3)]),
                     ability_factory: Some(Arc::new(build_tamiyo_minus_three)),
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Actor,
@@ -3086,7 +3086,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
                     ..Default::default()
                 },
                 AbilityDef {
-                    costs: vec![CostComponent::LoyaltyAdjust(-7)],
+                    costs: CostBody::Legacy(vec![CostComponent::LoyaltyAdjust(-7)]),
                     ability_factory: Some(Arc::new(build_tamiyo_minus_seven)),
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
@@ -3626,7 +3626,7 @@ fn cori_steel_cutter() -> CardDef {
             subtypes: vec!["Equipment".into()],
             abilities: vec![AbilityDef {
                 // Equip {1}{R} — sorcery-speed, targets a creature you control.
-                costs: vec![CostComponent::Mana(parse_mana_cost("1R"))],
+                costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("1R"))]),
                 target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Actor,
                     zone: ZoneId::Battlefield,
@@ -3745,7 +3745,7 @@ fn batterskull() -> CardDef {
             abilities: vec![
                 // {3}: Return this Equipment to its owner's hand.
                 AbilityDef {
-                    costs: vec![CostComponent::Mana(parse_mana_cost("3"))],
+                    costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("3"))]),
                     ability_factory: Some(Arc::new(|who, source_id| {
                         Effect(Arc::new(move |state, t, _targets| {
                             let owner = state.objects.get(&source_id).map(|o| o.owner).unwrap_or(who);
@@ -3757,7 +3757,7 @@ fn batterskull() -> CardDef {
                 },
                 // Equip {5} — sorcery-speed, targets a creature you control.
                 AbilityDef {
-                    costs: vec![CostComponent::Mana(parse_mana_cost("5"))],
+                    costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("5"))]),
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Actor,
                         zone: ZoneId::Battlefield,
@@ -3878,7 +3878,7 @@ fn meteor_sword() -> CardDef {
             subtypes: vec!["Equipment".into()],
             abilities: vec![AbilityDef {
                 // Equip {3} — sorcery-speed, targets a creature you control.
-                costs: vec![CostComponent::Mana(parse_mana_cost("3"))],
+                costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("3"))]),
                 target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Actor,
                     zone: ZoneId::Battlefield,
@@ -3942,7 +3942,7 @@ fn pre_war_formalwear() -> CardDef {
             subtypes: vec!["Equipment".into()],
             abilities: vec![AbilityDef {
                 // Equip {3} — sorcery-speed, targets a creature you control.
-                costs: vec![CostComponent::Mana(parse_mana_cost("3"))],
+                costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("3"))]),
                 target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Actor,
                     zone: ZoneId::Battlefield,
@@ -4069,7 +4069,7 @@ fn cryptic_coat() -> CardDef {
             abilities: vec![
                 // {1}{U}: Return this Equipment to its owner's hand.
                 AbilityDef {
-                    costs: vec![CostComponent::Mana(parse_mana_cost("1U"))],
+                    costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("1U"))]),
                     ability_factory: Some(Arc::new(|who, source_id| {
                         Effect(Arc::new(move |state, t, _targets| {
                             let owner = state.objects.get(&source_id).map(|o| o.owner).unwrap_or(who);
@@ -4376,7 +4376,7 @@ fn griselbrand() -> CardDef {
     data.legendary = true;
     data.keywords = Keywords::from_slice(&[Keyword::Flying, Keyword::Lifelink]);
     data.abilities = vec![AbilityDef {
-        costs: vec![CostComponent::Life(7)],
+        costs: CostBody::Legacy(vec![CostComponent::Life(7)]),
         ability_factory: Some(Arc::new(|who, _| eff_draw(who, 7))),
         ..Default::default()
     }];
@@ -4476,7 +4476,7 @@ fn mishras_bauble() -> CardDef {
     simple("Mishra's Bauble", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
         abilities: vec![AbilityDef {
-            costs: vec![CostComponent::TapSelf, CostComponent::SacSelf],
+            costs: CostBody::Legacy(vec![CostComponent::TapSelf, CostComponent::SacSelf]),
             ability_factory: Some(Arc::new(|who, _source_id| {
                 Effect(Arc::new(move |state, t, _targets| {
                     // "Look at the top card" — informational only in the sim.

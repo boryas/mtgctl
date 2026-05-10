@@ -84,10 +84,10 @@ pub(crate) fn enumerate_playable(state: &SimState, who: PlayerId) -> Vec<Playabl
                 continue;
             }
             let source_untapped = card.bf.as_ref().map_or(false, |bf| !bf.tapped);
-            if !crate::can_pay_costs(&ability.costs, state, who, card.id, source_untapped, 0) {
+            if !crate::can_pay_costs(&ability.costs.expect_legacy(), state, who, card.id, source_untapped, 0) {
                 continue;
             }
-            let schema = legacy_cost_as_ir(&ability.costs)
+            let schema = legacy_cost_as_ir(&ability.costs.expect_legacy())
                 .and_then(|action| build_schema(&action, state, who, card.id));
             out.push(PlayableAction {
                 source: card.id,

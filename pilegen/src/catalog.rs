@@ -253,8 +253,11 @@ pub(crate) struct AbilityDef {
     /// Where the source must be located for this ability to be activatable.
     /// Default: Battlefield. Set to Hand for cycling, channel, ninjutsu, etc.
     pub(crate) source_zone: SourceZone,
-    /// All costs to activate this ability, paid simultaneously.
-    pub(crate) costs: Vec<CostComponent>,
+    /// All costs to activate this ability, paid simultaneously. `CostBody`
+    /// holds either a legacy `Vec<CostComponent>` or an IR `Action`.
+    /// Per-card migration converts Legacy → Ir; the legacy mana sub-loop /
+    /// activation pipeline reads Legacy directly via `expect_legacy()`.
+    pub(crate) costs: crate::ir::ability::CostBody,
 
     // ── Target (optional) ─────────────────────────────────────────────────────
     /// If not `TargetSpec::None`, a valid target must exist for the ability to be available.
@@ -282,7 +285,7 @@ impl Default for AbilityDef {
     fn default() -> Self {
         AbilityDef {
             source_zone: SourceZone::Battlefield,
-            costs: Vec::new(),
+            costs: crate::ir::ability::CostBody::Legacy(Vec::new()),
             target_spec: TargetSpec::None,
             choice_spec: None,
             ability_factory: None,
@@ -296,20 +299,21 @@ impl Default for AbilityDef {
 impl AbilityDef {
     /// True if this is a loyalty ability (costs contain a `LoyaltyAdjust`).
     pub(crate) fn is_loyalty_ability(&self) -> bool {
-        self.costs.iter().any(|c| matches!(c, CostComponent::LoyaltyAdjust(_)))
+        self.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::LoyaltyAdjust(_)))
     }
 
     /// Returns the loyalty delta if this is a loyalty ability.
     pub(crate) fn loyalty_delta(&self) -> Option<i32> {
-        self.costs.iter().find_map(|c| {
+        self.costs.expect_legacy().iter().find_map(|c| {
             if let CostComponent::LoyaltyAdjust(n) = c { Some(*n) } else { None }
         })
     }
 
     /// True if this looks like a fetch land activation (SacSelf + Life cost > 0).
     pub(crate) fn is_fetch_ability(&self) -> bool {
-        self.costs.iter().any(|c| matches!(c, CostComponent::SacSelf))
-            && self.costs.iter().any(|c| matches!(c, CostComponent::Life(n) if *n > 0))
+        let comps = self.costs.expect_legacy();
+        comps.iter().any(|c| matches!(c, CostComponent::SacSelf))
+            && comps.iter().any(|c| matches!(c, CostComponent::Life(n) if *n > 0))
     }
 }
 
@@ -334,7 +338,7 @@ pub(crate) type ManaEffectFactory =
 #[derive(Clone)]
 pub(crate) struct ManaAbility {
     pub(crate) source_zone: SourceZone,
-    pub(crate) costs: Vec<CostComponent>,
+    pub(crate) costs: crate::ir::ability::CostBody,
     pub(crate) produces: Vec<Color>,
     pub(crate) produces_count: usize,
     pub(crate) make_effect: ManaEffectFactory,
@@ -352,7 +356,7 @@ impl Default for ManaAbility {
     fn default() -> Self {
         Self {
             source_zone: SourceZone::Battlefield,
-            costs: vec![],
+            costs: crate::ir::ability::CostBody::Legacy(vec![]),
             produces: vec![],
             produces_count: 1,
             make_effect: std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_, _, _| {}))),
@@ -493,10 +497,10 @@ pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
     let mc = parse_mana_cost(mana_cost);
     AbilityDef {
         source_zone: SourceZone::Hand,
-        costs: vec![
+        costs: crate::ir::ability::CostBody::Legacy(vec![
             CostComponent::Mana(mc),
             CostComponent::ReturnFromBattlefield(cost_pred_unblocked_attacker()),
-        ],
+        ]),
         ability_factory: Some(std::sync::Arc::new(|who, source_id| {
             Effect(std::sync::Arc::new(move |state: &mut SimState, t, _targets: &[ObjId]| {
                 let attack_target = state.resolving_costs_ctx.returned_attack_targets

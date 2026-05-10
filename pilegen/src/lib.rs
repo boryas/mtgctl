@@ -1383,7 +1383,7 @@ fn execute_mana_activation(
     let Some(ma) = ma else { return; };
 
     // Pay costs (tap, sac, exile, etc.) via the unified path.
-    let _ctx = pay_costs(&ma.costs, state, t, who, act.source_id, 0);
+    let _ctx = pay_costs(&ma.costs.expect_legacy(), state, t, who, act.source_id, 0);
 
     // Resolve effect immediately — mana production, logging via ManaProduced event.
     ma.make_effect.clone()(who, act.color_choice).call(state, t, &[]);
@@ -1471,7 +1471,7 @@ pub(crate) fn is_fetch(name: &str) -> bool {
 /// tap or sacrifice produces one mana. The per-color fields reflect which colors
 /// that source *can* produce (union across all available abilities).
 fn ma_requires_tap(ma: &ManaAbility) -> bool {
-    ma.costs.iter().any(|c| matches!(c, CostComponent::TapSelf))
+    ma.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::TapSelf))
 }
 
 fn accumulate_source_potential(abilities: &[ManaAbility], tapped: bool, p: &mut ManaPool) {
@@ -2912,7 +2912,7 @@ fn pay_ability_cost(
         }
     }
 
-    let ctx = pay_costs(&ability.costs, state, t, who, source_id, 0);
+    let ctx = pay_costs(&ability.costs.expect_legacy(), state, t, who, source_id, 0);
 
     // Log loyalty adjustment.
     if let Some(n) = ability.loyalty_delta() {
@@ -3804,7 +3804,7 @@ fn run_activate_submachine(
 
     // ── Mana loop (CR 602.2b) ──────────────────────────────────────────
     // Fill pool via strategy-driven mana loop before paying costs.
-    if let Some(mc) = ability.costs.iter().find_map(|c| {
+    if let Some(mc) = ability.costs.expect_legacy().iter().find_map(|c| {
         if let CostComponent::Mana(mc) = c { Some(mc.clone()) } else { None }
     }) {
         run_mana_loop(state, t, who, &mc, &mut *strategy);
