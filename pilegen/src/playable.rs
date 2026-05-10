@@ -84,11 +84,26 @@ pub(crate) fn enumerate_playable(state: &SimState, who: PlayerId) -> Vec<Playabl
                 continue;
             }
             let source_untapped = card.bf.as_ref().map_or(false, |bf| !bf.tapped);
-            if !crate::can_pay_costs(&ability.costs.expect_legacy(), state, who, card.id, source_untapped, 0) {
+            // Variant-aware feasibility: Legacy uses the closure-based
+            // predicate; Ir uses build_schema (which returns None when
+            // candidates are missing). The schema is reused below — for
+            // Legacy it goes through the legacy_cost_as_ir shim; for Ir
+            // it walks the action tree directly.
+            let (payable, schema) = match &ability.costs {
+                crate::ir::ability::CostBody::Legacy(comps) => {
+                    let payable = crate::can_pay_costs(comps, state, who, card.id, source_untapped, 0);
+                    let schema = legacy_cost_as_ir(comps)
+                        .and_then(|action| build_schema(&action, state, who, card.id));
+                    (payable, schema)
+                }
+                crate::ir::ability::CostBody::Ir(action) => {
+                    let schema = build_schema(action, state, who, card.id);
+                    (schema.is_some(), schema)
+                }
+            };
+            if !payable {
                 continue;
             }
-            let schema = legacy_cost_as_ir(&ability.costs.expect_legacy())
-                .and_then(|action| build_schema(&action, state, who, card.id));
             out.push(PlayableAction {
                 source: card.id,
                 kind: PlayableKind::Activate { ability_index: idx },
@@ -185,19 +200,15 @@ fn filter_is_source() -> Filter {
 }
 
 // ── ir_cost_as_legacy ───────────────────────────────────────────────────────
-
-/// Reverse shim: lower a Phase-4 IR cost `Action` back to `Vec<CostComponent>`
-/// for the legacy bridges (`ir_activated_as_legacy`,
-/// `ir_activated_as_mana_ability_legacy`) that still synthesize legacy
-/// `AbilityDef`/`ManaAbility` structs. Phase 6 deletes both the bridges and
-/// this function together.
-///
-/// Returns `None` for IR shapes the shim cannot lower — callers panic at
-/// catalog-build time, which is the right failure mode (a card in the catalog
-/// using an unmapped IR cost shape is a bug to fix at migration time, not at
-/// run time).
-///
-/// Coverage grows as Phase 4 migrates more cards. Today: TapSelf only.
+//
+// Reverse shim — was used by the legacy bridges to lower IR costs back to
+// `Vec<CostComponent>` so synthesized `AbilityDef`/`ManaAbility` structs
+// could feed the legacy mana sub-loop / activation pipeline. As of the
+// Phase-6 push the bridges pass `CostBody` through directly (no lowering),
+// so this shim's only remaining caller is the cost_phase4 test module's
+// round-trip checks. Marked dead-code-tolerant; the function is kept until
+// the cost_phase4 tests get retired alongside the legacy executor.
+#[allow(dead_code)]
 pub(crate) fn ir_cost_as_legacy(action: &Action) -> Option<Vec<CostComponent>> {
     let mut out = Vec::new();
     lower_one(action, &mut out)?;
@@ -314,9 +325,10 @@ fn expr_is_controller_hand_size(e: &Expr) -> bool {
 }
 
 /// Bridge-side helper: extract a legacy component vec from any `CostBody`.
-/// Legacy variant returns its components verbatim; IR variant goes through
-/// `ir_cost_as_legacy`. Panics if the IR shape isn't covered — this is a
-/// catalog-time bug, fixable by extending `ir_cost_as_legacy`.
+/// Now unused by production code (the bridges pass `CostBody` through
+/// directly); retained for the cost_phase4 round-trip tests until those
+/// retire alongside the legacy executor.
+#[allow(dead_code)]
 pub(crate) fn cost_body_to_legacy(cost: &CostBody) -> Vec<CostComponent> {
     match cost {
         CostBody::Legacy(v) => v.clone(),

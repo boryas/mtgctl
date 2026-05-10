@@ -2284,11 +2284,11 @@ pub(crate) fn ir_activated_as_legacy(
     };
     Some(crate::AbilityDef {
         source_zone,
-        // Bridge produces a legacy `CostBody::Legacy(_)` so the downstream
-        // mana sub-loop / activation pipeline (which still calls
-        // `expect_legacy()`) keeps working. The lowering shim survives until
-        // those pipelines learn to dispatch on `CostBody` natively.
-        costs: crate::ir::ability::CostBody::Legacy(crate::playable::cost_body_to_legacy(cost)),
+        // Pass-through: the bridge clones the IR `CostBody` directly into
+        // the synthesized legacy struct. Downstream consumers (mana sub-loop,
+        // pay_ability_cost, planner, strategy castability check) all
+        // dispatch on `CostBody` natively now — no lowering needed.
+        costs: cost.clone(),
         target_spec: target_spec.clone(),
         choice_spec: choice_spec.clone(),
         ability_factory: None,
@@ -2441,11 +2441,11 @@ pub(crate) fn ir_activated_as_mana_ability_legacy(
 
     Some(crate::ManaAbility {
         source_zone,
-        // Bridge produces a legacy `CostBody::Legacy(_)` so the downstream
-        // mana sub-loop / activation pipeline (which still calls
-        // `expect_legacy()`) keeps working. The lowering shim survives until
-        // those pipelines learn to dispatch on `CostBody` natively.
-        costs: crate::ir::ability::CostBody::Legacy(crate::playable::cost_body_to_legacy(cost)),
+        // Pass-through: the bridge clones the IR `CostBody` directly into
+        // the synthesized legacy struct. Downstream consumers (mana sub-loop,
+        // pay_ability_cost, planner, strategy castability check) all
+        // dispatch on `CostBody` natively now — no lowering needed.
+        costs: cost.clone(),
         produces: produces_vec,
         produces_count: count,
         make_effect,

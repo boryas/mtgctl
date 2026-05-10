@@ -871,8 +871,18 @@ fn is_ninjutsu_action(state: &SimState, source_id: ObjId, ability_index: usize) 
     state.def_of(source_id)
         .and_then(|d| d.abilities().get(ability_index))
         .map_or(false, |ab| {
+            // Variant-agnostic: ninjutsu is "hand-source ability whose cost
+            // includes a ReturnFromBattlefield". For Legacy storage we
+            // scan components; for Ir storage we'd recognise the
+            // MoveByChoice(BF→Hand, verb=Return) shape — no card emits
+            // that yet, so this falls through to false for Ir.
             matches!(ab.source_zone, SourceZone::Hand)
-                && ab.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::ReturnFromBattlefield(_)))
+                && match &ab.costs {
+                    crate::ir::ability::CostBody::Legacy(comps) => {
+                        comps.iter().any(|c| matches!(c, CostComponent::ReturnFromBattlefield(_)))
+                    }
+                    crate::ir::ability::CostBody::Ir(_) => false,
+                }
         })
 }
 
@@ -1375,7 +1385,15 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
             if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
             if ma.costs.requires_tap_self() && !untapped { continue; }
             if ma.condition.as_ref().map_or(false, |cond| !cond(*perm_id, state)) { continue; }
-            if !can_pay_costs(&ma.costs.expect_legacy(), state, who, *perm_id, *untapped, 0) { continue; }
+            let payable = match &ma.costs {
+                crate::ir::ability::CostBody::Legacy(comps) => {
+                    can_pay_costs(comps, state, who, *perm_id, *untapped, 0)
+                }
+                crate::ir::ability::CostBody::Ir(action) => {
+                    crate::ir::cost_exec::build_schema(action, state, who, *perm_id).is_some()
+                }
+            };
+            if !payable { continue; }
             actions.push(LegalAction::ActivateManaAbility { source_id: *perm_id, ability_index: idx });
         }
     }
