@@ -1172,9 +1172,29 @@ fn daze() -> CardDef {
     c
 }
 
+/// Filter: "a blue card in hand other than the source" — the canonical
+/// pitch-cost shape used by FoW, FoN, and similar Mercadian Masques pitch
+/// cards. Excluding `Source` enforces "you can't pitch the spell to itself."
+fn pitch_blue_filter() -> crate::ir::expr::Filter {
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter};
+    Filter(Expr::And(
+        Box::new(Expr::Not(Box::new(Expr::Eq(
+            Box::new(Expr::Ctx(Ctx::It)),
+            Box::new(Expr::Ctx(Ctx::Source)),
+        )))),
+        Box::new(Expr::Contains(
+            Box::new(Expr::ColorLit(Color::Blue)),
+            Box::new(Expr::Colors(Box::new(Expr::Ctx(Ctx::It)))),
+        )),
+    ))
+}
+
 /// Counter target noncreature spell. Pitch cost (exile a blue card) only available when it's
 /// not your turn; the countered spell is exiled via a scoped replacement (CR 118.9b, 614.1a).
 fn force_of_negation() -> CardDef {
+    use crate::ir::action::{Action, MoveVerb};
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut c = simple("Force of Negation", CardKind::Instant(SpellData {
         mana_cost: "1UU".to_string(),
         modes: single_mode(
@@ -1187,9 +1207,20 @@ fn force_of_negation() -> CardDef {
         ),
         ..Default::default()
     }), parse_colors("1UU", true, false), None);
+    // Phase 4 step 5 follow-up: pitch alt cost migrated to MoveByChoice
+    // (Hand → Exile, verb=Exile). The hand_min and condition gates are
+    // unchanged — those live on AlternateCost, not the cost tree.
     c.alternate_costs = vec![
         AlternateCost {
-            costs: CostBody::Legacy(vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue)))]),
+            costs: CostBody::Ir(Action::MoveByChoice {
+                who: crate::ir::action::Who::You,
+                from: ZoneKindSel::Hand,
+                to: ZoneKindSel::Exile,
+                verb: MoveVerb::Exile,
+                filter: pitch_blue_filter(),
+                count: Expr::Num(1),
+                bind_as: Some("$fon_pitch"),
+            }),
             hand_min: 2,
             condition: Some(std::sync::Arc::new(|caster, state| {
                 state.current_ap != state.player_id(caster)
@@ -1203,6 +1234,8 @@ fn force_of_negation() -> CardDef {
 /// Counter target spell. Alternate costs: exile a blue card from hand + pay 1 life (pitch),
 /// or pay {3UU} (hard cost, rare). CR 702.14 (pitch cost), CR 701.5.
 fn force_of_will() -> CardDef {
+    use crate::ir::action::{Action, MoveVerb};
+    use crate::ir::expr::{Expr, ZoneKindSel};
     let mut c = simple("Force of Will", CardKind::Instant(SpellData {
         mana_cost: "3UU".to_string(),
         modes: single_mode(
@@ -1211,8 +1244,28 @@ fn force_of_will() -> CardDef {
         ),
         ..Default::default()
     }), parse_colors("3UU", true, false), None);
+    // Phase 4 step 5 follow-up: pitch alt cost migrated to a Sequence of
+    // MoveByChoice (hand → exile) and PayLife(1).
     c.alternate_costs = vec![
-        AlternateCost { costs: CostBody::Legacy(vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue))), CostComponent::Life(1)]), hand_min: 2, ..Default::default() },
+        AlternateCost {
+            costs: CostBody::Ir(Action::Sequence(vec![
+                Action::MoveByChoice {
+                    who: crate::ir::action::Who::You,
+                    from: ZoneKindSel::Hand,
+                    to: ZoneKindSel::Exile,
+                    verb: MoveVerb::Exile,
+                    filter: pitch_blue_filter(),
+                    count: Expr::Num(1),
+                    bind_as: Some("$fow_pitch"),
+                },
+                Action::PayLife {
+                    who: crate::ir::action::Who::You,
+                    amount: Expr::Num(1),
+                },
+            ])),
+            hand_min: 2,
+            ..Default::default()
+        },
     ];
     c
 }

@@ -2485,6 +2485,65 @@ mod cost_phase4 {
     }
 
     #[test]
+    fn force_of_negation_alt_cost_storage_is_ir_pitch() {
+        use crate::ir::action::MoveVerb;
+        use crate::ir::expr::ZoneKindSel;
+        let cat = crate::card_defs::build_catalog();
+        let fon = cat.get("Force of Negation").expect("FoN in catalog");
+        let alts = fon.alternate_costs();
+        assert_eq!(alts.len(), 1, "FoN has one alt cost");
+        let CostBody::Ir(action) = &alts[0].costs else {
+            panic!("FoN's alt cost is CostBody::Ir(_) after pitch migration")
+        };
+        match action {
+            Action::MoveByChoice {
+                from: ZoneKindSel::Hand,
+                to: ZoneKindSel::Exile,
+                verb: MoveVerb::Exile,
+                count: Expr::Num(1),
+                bind_as: Some("$fon_pitch"),
+                ..
+            } => {}
+            _ => panic!(
+                "FoN's pitch cost is MoveByChoice {{ from: Hand, to: Exile, verb: Exile, count: 1, bind_as: Some(...) }}"
+            ),
+        }
+    }
+
+    #[test]
+    fn force_of_will_alt_cost_storage_is_ir_pitch_then_pay_life() {
+        // FoW pitch is a Sequence: [MoveByChoice(Hand→Exile, blue), PayLife(1)].
+        use crate::ir::action::MoveVerb;
+        use crate::ir::expr::ZoneKindSel;
+        let cat = crate::card_defs::build_catalog();
+        let fow = cat.get("Force of Will").expect("FoW in catalog");
+        let alts = fow.alternate_costs();
+        assert_eq!(alts.len(), 1, "FoW has one alt cost");
+        let CostBody::Ir(action) = &alts[0].costs else {
+            panic!("FoW's alt cost is CostBody::Ir(_) after pitch migration")
+        };
+        let Action::Sequence(steps) = action else {
+            panic!("FoW's pitch cost is Action::Sequence(...)")
+        };
+        assert_eq!(steps.len(), 2);
+        match &steps[0] {
+            Action::MoveByChoice {
+                from: ZoneKindSel::Hand,
+                to: ZoneKindSel::Exile,
+                verb: MoveVerb::Exile,
+                count: Expr::Num(1),
+                bind_as: Some("$fow_pitch"),
+                ..
+            } => {}
+            _ => panic!("step 0 is MoveByChoice(Hand→Exile, exile, blue, count=1)"),
+        }
+        match &steps[1] {
+            Action::PayLife { amount: Expr::Num(1), .. } => {}
+            _ => panic!("step 1 is PayLife(1)"),
+        }
+    }
+
+    #[test]
     fn move_by_choice_walk_unpayable_with_no_candidates() {
         use crate::ir::action::{MoveVerb, Who};
         use crate::ir::cost_exec::build_schema;
