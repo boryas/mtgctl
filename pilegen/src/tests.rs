@@ -3093,6 +3093,7 @@
     }
 
     /// Snuff Out alternate cost requires life > 4 (can't pay if at exactly 4 or below).
+    /// Goes through the IR feasibility path (`build_schema`) post-migration.
     #[test]
     fn test_snuff_out_cant_pay_life_when_low() {
         let mut state = make_state();
@@ -3101,8 +3102,11 @@
         let snuff_id = add_hand_card(&mut state, PlayerId::Us, "Snuff Out");
         state.us.life = 4; // exactly 4 — can't pay (would reach 0)
         let alt = &def.alternate_costs()[0];
-        let ok = can_pay_costs(alt.costs.expect_legacy(), &state, PlayerId::Us, snuff_id, false, 0);
-        assert!(!ok, "can't pay 4 life when at 4 life (would reach 0)");
+        let crate::ir::ability::CostBody::Ir(action) = &alt.costs else {
+            panic!("Snuff Out alt cost is IR after Phase 4 step 5 follow-up")
+        };
+        let schema = crate::ir::cost_exec::build_schema(action, &state, PlayerId::Us, snuff_id);
+        assert!(schema.is_none(), "can't pay 4 life when at 4 life (would reach 0)");
     }
 
     // ── Section 22: Street Wraith cycling ───────────────────────────────────

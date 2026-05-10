@@ -1297,6 +1297,8 @@ fn fatal_push() -> CardDef {
 
 /// Destroy target non-black creature. Alternate cost: pay 4 life (free spell). CR 701.7.
 fn snuff_out() -> CardDef {
+    use crate::ir::action::Action;
+    use crate::ir::expr::Expr;
     let mut c = simple("Snuff Out", CardKind::Instant(SpellData {
         mana_cost: "3BB".to_string(),
         modes: single_mode(
@@ -1309,8 +1311,17 @@ fn snuff_out() -> CardDef {
         ),
         ..Default::default()
     }), parse_colors("3BB", false, true), None);
+    // Phase 4 step 5 follow-up: the simplest IR alt cost — just PayLife(4).
+    // No object decision, no schema entries; the executor drains life
+    // directly and `cost_exec::pay` returns an empty CostsPaidCtx.
     c.alternate_costs = vec![
-        AlternateCost { costs: CostBody::Legacy(vec![CostComponent::Life(4)]), ..Default::default() },
+        AlternateCost {
+            costs: CostBody::Ir(Action::PayLife {
+                who: crate::ir::action::Who::You,
+                amount: Expr::Num(4),
+            }),
+            ..Default::default()
+        },
     ];
     c
 }

@@ -2544,6 +2544,21 @@ mod cost_phase4 {
     }
 
     #[test]
+    fn snuff_out_alt_cost_storage_is_ir_pay_life_4() {
+        let cat = crate::card_defs::build_catalog();
+        let snuff = cat.get("Snuff Out").expect("Snuff Out in catalog");
+        let alts = snuff.alternate_costs();
+        assert_eq!(alts.len(), 1);
+        let CostBody::Ir(action) = &alts[0].costs else {
+            panic!("Snuff Out alt cost is CostBody::Ir(_)")
+        };
+        match action {
+            Action::PayLife { amount: Expr::Num(4), .. } => {}
+            _ => panic!("Snuff Out alt cost is Action::PayLife {{ amount: Num(4) }}"),
+        }
+    }
+
+    #[test]
     fn move_by_choice_walk_unpayable_with_no_candidates() {
         use crate::ir::action::{MoveVerb, Who};
         use crate::ir::cost_exec::build_schema;

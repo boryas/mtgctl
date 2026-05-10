@@ -142,10 +142,14 @@ fn walk(
 
         Action::PayLife { who: _, amount } => {
             // Constant amount = no decision; the executor reads `amount` directly.
-            // Bail upfront if the constant exceeds current life (CR 119.4 — a
-            // player can't pay life they don't have).
+            // Bail upfront if the cost would reduce life to zero or below.
+            // (CR 119.4 strictly only forbids paying *more* life than you have,
+            // but the legacy executor's strategic safeguard refuses to commit
+            // suicide — `life > n` rather than `life >= n`. We match it here
+            // for migration parity; loosening the check is a separate decision
+            // that affects strategy behavior across the whole engine.)
             if let Some(n) = expr_const_u32(amount) {
-                if n > state.player(who).life as u32 {
+                if n >= state.player(who).life as u32 {
                     return None;
                 }
                 return Some(());
