@@ -76,6 +76,11 @@ impl BindEnv {
 pub(crate) enum ExecResult {
     Ok,
     Unimplemented(&'static str),
+    /// `Action::PayMana` reached with insufficient pool. The cost driver should
+    /// yield control to the strategy so it can activate mana abilities (each a
+    /// PlayableAction in its own right) and then resume the cost. CR 601.2g
+    /// mana sub-loop is realised by this loop, not by a separate primitive.
+    ManaShortage(crate::ManaCost),
 }
 
 pub(crate) fn execute(action: &Action, state: &mut SimState, env: &BindEnv) -> ExecResult {
@@ -219,7 +224,10 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         // Control flow
         Action::Sequence(actions) => {
             for a in actions {
-                execute_mut(a, state, env);
+                match execute_mut(a, state, env) {
+                    ExecResult::Ok => continue,
+                    other => return other,
+                }
             }
             ExecResult::Ok
         }
@@ -746,7 +754,57 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             crate::eff_mana(who, mana_spec).call(state, t, &[]);
             ExecResult::Ok
         }
+
+        Action::PayMana(mc) => {
+            let player = state.player_mut(actor);
+            if !player.pool.can_pay(mc) {
+                return ExecResult::ManaShortage(remaining_mana(&player.pool, mc));
+            }
+            player.pool.spend(mc);
+            ExecResult::Ok
+        }
+
+        Action::LoyaltyAdjust(n) => {
+            let source_id = match env.source {
+                Some(id) => id,
+                None => return ExecResult::Unimplemented("LoyaltyAdjust without env.source"),
+            };
+            if let Some(bf) = state.permanent_bf_mut(source_id) {
+                bf.loyalty += *n;
+                bf.pw_activated_this_turn = true;
+            }
+            ExecResult::Ok
+        }
+
+        // Replicate (CR 702.58) is meaningful only inside a cast cost tree —
+        // the cost executor records the chosen replicate count and pushes the
+        // copies after the spell lands on the stack. Outside a cost context
+        // this is a no-op (legacy `CostComponent::Replicate` behaved the same).
+        Action::Replicate(_) => ExecResult::Ok,
     }
+}
+
+/// Compute the residual `ManaCost` after applying `pool` to `cost`. Pays the
+/// colored pips first (each color drains the matching pool field) and then
+/// computes the generic shortfall from total. Used by `Action::PayMana` to
+/// surface a precise `remaining` to the cost driver when the pool is short.
+pub(crate) fn remaining_mana(pool: &crate::ManaPool, cost: &crate::ManaCost) -> crate::ManaCost {
+    let mut r = crate::ManaCost::default();
+    r.w = (cost.w - pool.w).max(0);
+    r.u = (cost.u - pool.u).max(0);
+    r.b = (cost.b - pool.b).max(0);
+    r.r = (cost.r - pool.r).max(0);
+    r.g = (cost.g - pool.g).max(0);
+    r.c = (cost.c - pool.c).max(0);
+    let pool_after_specifics = pool.total
+        - (cost.w.min(pool.w)
+            + cost.u.min(pool.u)
+            + cost.b.min(pool.b)
+            + cost.r.min(pool.r)
+            + cost.g.min(pool.g)
+            + cost.c.min(pool.c));
+    r.generic = (cost.generic - pool_after_specifics).max(0);
+    r
 }
 
 /// Lower a `ManaSpec` + count + chosen-color hint into the `eff_mana` spec
@@ -2188,7 +2246,7 @@ pub(crate) fn ir_activated_as_legacy(
     };
     Some(crate::AbilityDef {
         source_zone,
-        costs: cost.components.clone(),
+        costs: crate::playable::cost_body_to_legacy(cost),
         target_spec: target_spec.clone(),
         choice_spec: choice_spec.clone(),
         ability_factory: None,
@@ -2341,7 +2399,7 @@ pub(crate) fn ir_activated_as_mana_ability_legacy(
 
     Some(crate::ManaAbility {
         source_zone,
-        costs: cost.components.clone(),
+        costs: crate::playable::cost_body_to_legacy(cost),
         produces: produces_vec,
         produces_count: count,
         make_effect,

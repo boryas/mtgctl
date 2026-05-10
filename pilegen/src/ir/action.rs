@@ -255,6 +255,27 @@ pub(crate) enum Action {
         spec: ManaSpec,
     },
 
+    // ── mana payment ─────────────────────────────────────────────────────
+    /// Drain `cost` from the controller's mana pool. Symmetric with `AddMana`.
+    /// CR 601.2g/h. Pool-based: this is just the *demand*. Mana abilities
+    /// (the *supply*) are activated separately by the strategy as ordinary
+    /// playable actions; when the pool can't yet pay, the cost driver yields
+    /// control back to the strategy to activate more mana.
+    PayMana(crate::ManaCost),
+
+    // ── planeswalker loyalty ─────────────────────────────────────────────
+    /// Activate-cost adjustment to the source's loyalty (CR 606.5). Sets
+    /// `pw_activated_this_turn` so each planeswalker activates at most once
+    /// per turn (CR 606.3c). `n` is signed: +1 for "+1: …" abilities, −X
+    /// for "−X: …".
+    LoyaltyAdjust(i32),
+
+    // ── replicate ────────────────────────────────────────────────────────
+    /// CR 702.58. Pay `cost` zero-or-more extra times at announcement; each
+    /// extra payment creates a copy of the spell on the stack. Only valid
+    /// inside a cast cost tree (not an arbitrary effect body).
+    Replicate(crate::ManaCost),
+
     // ── library placement ────────────────────────────────────────────────
     /// Move `count` cards from zone `from` (owned by `who`) onto their
     /// library — `top` = top, `!top` = bottom. Agency: strategy picks which

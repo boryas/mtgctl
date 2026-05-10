@@ -205,7 +205,7 @@ pub(crate) type AbilityFactory = std::sync::Arc<dyn Fn(PlayerId, ObjId) -> Effec
 /// e.g. "If it's not your turn" on Force of Negation. `None` = always available.
 #[derive(Clone, Default)]
 pub(crate) struct AlternateCost {
-    pub(crate) costs: Vec<CostComponent>,
+    pub(crate) costs: crate::ir::ability::CostBody,
     pub(crate) hand_min: i32,
     pub(crate) prob: Option<f64>,
     pub(crate) condition: Option<std::sync::Arc<dyn Fn(PlayerId, &SimState) -> bool + Send + Sync>>,

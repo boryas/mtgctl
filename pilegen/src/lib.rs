@@ -33,6 +33,8 @@ use strategy::{Strategy, DoomsdayStrategy, GenericOppStrategy, MatchupInfo,
 
 mod ir;
 
+mod playable;
+
 #[cfg(test)]
 mod tests;
 
@@ -1408,6 +1410,46 @@ fn run_mana_loop(
 
         execute_mana_activation(state, t, who, &act);
     }
+}
+
+/// Phase 3 cost-IR: pay an `Action`-shaped cost.
+///
+/// 1. Build the schema via `cost_exec::build_schema`. `None` here means the
+///    cost is structurally unpayable (e.g. Sacrifice with insufficient
+///    targets) — bail.
+/// 2. Ask the strategy for a `BindEnv` answering every Decision. With no
+///    strategy available, fall back to `default_announcement`.
+/// 3. Run the cost via `cost_exec::pay`. On `ManaShortage`, drive the
+///    mana sub-loop (CR 601.2g) and retry. The retry cap prevents an
+///    infinite loop when the strategy keeps producing no progress.
+///
+/// Returns `None` on any unrecoverable failure (invalid bindings, mana
+/// shortage that can't be satisfied, structural unpayability).
+#[allow(dead_code)]
+pub(crate) fn pay_ir_cost(
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    source: ObjId,
+    action: &crate::ir::action::Action,
+    strategy: &mut Option<&mut dyn Strategy>,
+) -> Option<CostsPaidCtx> {
+    let schema = crate::ir::cost_exec::build_schema(action, state, who, source)?;
+    let env = match strategy.as_deref_mut() {
+        Some(s) => s.propose_announcement(state, source, &schema),
+        None => crate::strategy::default_announcement(&schema),
+    };
+    for _attempt in 0..8 {
+        match crate::ir::cost_exec::pay(action, &schema, &env, state, t, who, source) {
+            Ok(ctx) => return Some(ctx),
+            Err(crate::ir::cost::PayError::ManaShortage(rem)) => {
+                let Some(s) = strategy.as_deref_mut() else { return None };
+                run_mana_loop(state, t, who, &rem, s);
+            }
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 // ── Fetch land detection ─────────────────────────────────────────────────────
@@ -3033,7 +3075,7 @@ fn cast_spell(
             .enumerate()
             .find(|(_, c)| {
                 state.hand_size(who) >= c.hand_min
-                    && can_pay_costs(&c.costs, state, who, card_id, false, 0)
+                    && can_pay_costs(c.costs.expect_legacy(), state, who, card_id, false, 0)
                     && c.condition.as_ref().map_or(true, |f| f(who, state))
             });
         match found {
@@ -3061,8 +3103,16 @@ fn cast_spell(
 
     // Pay cost and build a log label.
     let (cast_label, mut costs_ctx) = if let Some(ref cost) = alt_cost {
-        let ctx = pay_costs(&cost.costs, state, t, who, card_id, 0);
-        (describe_costs(&cost.costs).join(", "), ctx)
+        match &cost.costs {
+            crate::ir::ability::CostBody::Legacy(legacy) => {
+                let ctx = pay_costs(legacy, state, t, who, card_id, 0);
+                (describe_costs(legacy).join(", "), ctx)
+            }
+            crate::ir::ability::CostBody::Ir(action) => {
+                let ctx = pay_ir_cost(state, t, who, card_id, action, &mut strategy)?;
+                ("ir alt cost".to_string(), ctx)
+            }
+        }
     } else {
         state.player_mut(who).pool.spend(&cost);
         (def.mana_cost().to_string(), CostsPaidCtx::default())
@@ -3167,7 +3217,7 @@ fn cast_spell(
     // SpellCast fires after all costs paid and spell is on the stack.
     let mana_spent = match &alt_cost {
         None     => mana_value(def.mana_cost()) > 0,
-        Some(ac) => ac.costs.iter().any(|c| matches!(c, CostComponent::Mana(_))),
+        Some(ac) => ac.costs.expect_legacy().iter().any(|c| matches!(c, CostComponent::Mana(_))),
     };
     fire_event(GameEvent::SpellCast { caster: who, card_id, mana_spent }, state, t, who);
 
@@ -3667,7 +3717,7 @@ fn run_cast_submachine(
 
     // ── ComputeCost + ActivateMana (CR 601.2f-g) ────────────────────────
     let mana_cost = if let Some(ref alt) = preferred_cost {
-        alt.costs.iter().find_map(|c| {
+        alt.costs.expect_legacy().iter().find_map(|c| {
             if let CostComponent::Mana(mc) = c { Some(mc.clone()) } else { None }
         }).unwrap_or_default()
     } else if face == SpellFace::Back {

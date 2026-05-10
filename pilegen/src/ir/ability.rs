@@ -57,7 +57,7 @@ pub(crate) enum AbilityKind {
     /// them via `is_mana_ability` and routes through the synchronous
     /// stack-bypass path (CR 605.3b) automatically.
     Activated {
-        cost: ActivatedCost,
+        cost: CostBody,
         /// Target spec for the ability. `TargetSpec::None` is the no-target
         /// case (Clue Token, Karn's +1, Birds of Paradise).
         target_spec: crate::TargetSpec,
@@ -197,10 +197,46 @@ pub(crate) enum ReplacementBody {
     Prevent,
 }
 
-/// Cost of an activated ability.
+/// Cost of an activated ability or alternate spell cost.
+///
+/// Phase 0 of the cost-IR migration: storage holds either the legacy
+/// `Vec<CostComponent>` (unmigrated cards) or an `Action` tree (cards
+/// ported to the IR cost grammar). The two paths run independently —
+/// `cast_spell` and `pay_ability_cost` branch on this enum and dispatch
+/// to either the legacy executor (`pay_costs`) or the IR cost executor.
 #[derive(Clone)]
-pub(crate) struct ActivatedCost {
-    pub components: Vec<crate::CostComponent>,
+pub(crate) enum CostBody {
+    Legacy(Vec<crate::CostComponent>),
+    Ir(Action),
+}
+
+impl Default for CostBody {
+    fn default() -> Self {
+        CostBody::Legacy(Vec::new())
+    }
+}
+
+impl CostBody {
+    /// Empty legacy cost — convenience used by `Default for AlternateCost`.
+    pub(crate) fn empty() -> Self {
+        CostBody::Legacy(Vec::new())
+    }
+
+    /// Extract the legacy component vector. Panics on `Ir(_)` — callers on
+    /// the legacy-only path should reach here only for cards still using
+    /// `CostBody::Legacy`. Phase 1 introduces a real IR executor; until
+    /// then no card emits `Ir(_)` so this never fires.
+    pub(crate) fn expect_legacy(&self) -> &Vec<crate::CostComponent> {
+        match self {
+            CostBody::Legacy(v) => v,
+            CostBody::Ir(_) => panic!("CostBody::Ir reached legacy executor — Phase 1 not implemented"),
+        }
+    }
+
+    /// True if this is a legacy variant carrying no components.
+    pub(crate) fn is_empty_legacy(&self) -> bool {
+        matches!(self, CostBody::Legacy(v) if v.is_empty())
+    }
 }
 
 /// One mode of a spell under `AbilityKind::OnResolve`.

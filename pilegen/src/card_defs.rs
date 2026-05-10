@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use super::*;
+use crate::ir::ability::CostBody;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -270,8 +271,9 @@ fn tap_produces(s: &str) -> ManaAbility {
 /// Built as a no-target `AbilityKind::Activated` whose body is `Action::AddMana`;
 /// the bridge classifies it as a mana ability via `is_mana_ability` (CR 605.1a).
 fn ir_tap_mana(s: &str) -> crate::ir::ability::Ability {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
+    use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel};
     let colors = produces_colors(s);
     let count = if s.is_empty() {
@@ -281,7 +283,11 @@ fn ir_tap_mana(s: &str) -> crate::ir::ability::Ability {
     };
     Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost { components: vec![CostComponent::TapSelf] },
+            // Phase 4 step 1: TapSelf migrated to IR cost grammar. The
+            // legacy mana sub-loop still consumes a `Vec<CostComponent>` —
+            // `cost_body_to_legacy` lowers this back via `ir_cost_as_legacy`
+            // at the bridge boundary. Both shims die in Phase 6.
+            cost: CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) }),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::AddMana {
@@ -512,10 +518,10 @@ fn shadowy_backstreet()   -> CardDef { surveil_dual("Shadowy Backstreet",   Land
 
 /// {T}, Sacrifice: destroy target nonbasic land. CR 701.7.
 fn wasteland() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::Action;
     use crate::ir::context::Ctx;
-    use crate::ir::expr::Expr;
+    use crate::ir::expr::{Expr, Filter};
 
     let nonbasic_land = obj_pred_from_card(pred_and(
         pred_type_eq(CardType::Land),
@@ -529,9 +535,20 @@ fn wasteland() -> CardDef {
     );
     card.abilities = vec![Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost {
-                components: vec![CostComponent::TapSelf, CostComponent::SacSelf],
-            },
+            // Phase 4 step 3: TapSelf+SacSelf conjunction migrated to IR.
+            // Lowered back to legacy by the Sequence-aware shim arm.
+            cost: CostBody::Ir(Action::Sequence(vec![
+                Action::Tap { target: Expr::Ctx(Ctx::Source) },
+                Action::Sacrifice {
+                    who: crate::ir::action::Who::You,
+                    filter: Filter(Expr::Eq(
+                        Box::new(Expr::Ctx(Ctx::It)),
+                        Box::new(Expr::Ctx(Ctx::Source)),
+                    )),
+                    count: Expr::Num(1),
+                    bind_as: None,
+                },
+            ])),
             target_spec: TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
@@ -584,7 +601,7 @@ fn karakas() -> CardDef {
 }
 
 fn ancient_tomb() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
     use crate::ir::expr::{Expr, ZoneKindSel};
     let mut def = simple("Ancient Tomb", CardKind::Land(LandData {
@@ -593,7 +610,7 @@ fn ancient_tomb() -> CardDef {
     }), vec![], None);
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost { components: vec![CostComponent::TapSelf] },
+            cost: CostBody::Legacy(vec![CostComponent::TapSelf]),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::Sequence(vec![
@@ -813,9 +830,10 @@ fn cavern_of_souls() -> CardDef {
 
 /// Sacrifice: add one mana of any color. CR 106.3.
 fn lotus_petal() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
-    use crate::ir::expr::{Expr, ZoneKindSel};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
     let mut def = simple("Lotus Petal", CardKind::Artifact(ArtifactData {
         mana_cost: "0".to_string(),
         mana_abilities: vec![],
@@ -823,7 +841,19 @@ fn lotus_petal() -> CardDef {
     }), vec![], Some(25));
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost { components: vec![CostComponent::SacSelf] },
+            // Phase 4 step 2: SacSelf migrated to IR cost grammar. Filter is
+            // `It == Source` — the canonical "this object only" shape that
+            // `ir_cost_as_legacy` recognises and lowers back to SacSelf for
+            // the legacy bridge path.
+            cost: CostBody::Ir(Action::Sacrifice {
+                who: Who::You,
+                filter: Filter(Expr::Eq(
+                    Box::new(Expr::Ctx(Ctx::It)),
+                    Box::new(Expr::Ctx(Ctx::Source)),
+                )),
+                count: Expr::Num(1),
+                bind_as: None,
+            }),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::AddMana {
@@ -843,7 +873,7 @@ fn lotus_petal() -> CardDef {
 /// Discard your hand, Sacrifice Lion's Eye Diamond: Add three mana of any one color.
 /// Activate only as an instant. CR 605.3, CR 601.2g (excluded from mana sub-loop).
 fn lions_eye_diamond() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
     use crate::ir::expr::{Expr, ZoneKindSel};
     let mut def = simple("Lion's Eye Diamond", CardKind::Artifact(ArtifactData {
@@ -853,9 +883,7 @@ fn lions_eye_diamond() -> CardDef {
     }), vec![], Some(10));
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost {
-                components: vec![CostComponent::DiscardHand, CostComponent::SacSelf],
-            },
+            cost: CostBody::Legacy(vec![CostComponent::DiscardHand, CostComponent::SacSelf]),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::AddMana {
@@ -875,7 +903,7 @@ fn lions_eye_diamond() -> CardDef {
 /// Mox Opal — Legendary Artifact, {0}.
 /// Metalcraft — {T}: Add one mana of any color. Activate only if you control three or more artifacts.
 fn mox_opal() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
     use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
@@ -905,7 +933,7 @@ fn mox_opal() -> CardDef {
     def.supertypes.push(Supertype::Legendary);
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost { components: vec![CostComponent::TapSelf] },
+            cost: CostBody::Legacy(vec![CostComponent::TapSelf]),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::AddMana {
@@ -1117,7 +1145,7 @@ fn daze() -> CardDef {
         ..Default::default()
     }), parse_colors("1U", true, false), None);
     c.alternate_costs = vec![
-        AlternateCost { costs: vec![CostComponent::ReturnFromBattlefield(obj_pred_from_card(pred_land_subtype("island")))], ..Default::default() },
+        AlternateCost { costs: CostBody::Legacy(vec![CostComponent::ReturnFromBattlefield(obj_pred_from_card(pred_land_subtype("island")))]), ..Default::default() },
     ];
     c
 }
@@ -1139,7 +1167,7 @@ fn force_of_negation() -> CardDef {
     }), parse_colors("1UU", true, false), None);
     c.alternate_costs = vec![
         AlternateCost {
-            costs: vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue)))],
+            costs: CostBody::Legacy(vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue)))]),
             hand_min: 2,
             condition: Some(std::sync::Arc::new(|caster, state| {
                 state.current_ap != state.player_id(caster)
@@ -1162,7 +1190,7 @@ fn force_of_will() -> CardDef {
         ..Default::default()
     }), parse_colors("3UU", true, false), None);
     c.alternate_costs = vec![
-        AlternateCost { costs: vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue))), CostComponent::Life(1)], hand_min: 2, ..Default::default() },
+        AlternateCost { costs: CostBody::Legacy(vec![CostComponent::ExileFromHand(obj_pred_from_card(pred_has_color(Color::Blue))), CostComponent::Life(1)]), hand_min: 2, ..Default::default() },
     ];
     c
 }
@@ -1207,7 +1235,7 @@ fn snuff_out() -> CardDef {
         ..Default::default()
     }), parse_colors("3BB", false, true), None);
     c.alternate_costs = vec![
-        AlternateCost { costs: vec![CostComponent::Life(4)], ..Default::default() },
+        AlternateCost { costs: CostBody::Legacy(vec![CostComponent::Life(4)]), ..Default::default() },
     ];
     c
 }
@@ -1505,7 +1533,7 @@ fn mindbreak_trap() -> CardDef {
     }), parse_colors("2UU", true, false), None);
     c.alternate_costs = vec![
         AlternateCost {
-            costs: vec![],
+            costs: CostBody::Legacy(vec![]),
             condition: Some(Arc::new(|caster, state| {
                 state.player(caster.opp()).spells_cast_this_turn >= 3
             })),
@@ -1578,7 +1606,7 @@ fn surgical_extraction() -> CardDef {
         ..Default::default()
     }), parse_colors("B", false, false), None);
     c.alternate_costs = vec![
-        AlternateCost { costs: vec![CostComponent::Life(2)], ..Default::default() },
+        AlternateCost { costs: CostBody::Legacy(vec![CostComponent::Life(2)]), ..Default::default() },
     ];
     c
 }
@@ -2518,7 +2546,7 @@ fn murktide_regent() -> CardDef {
 /// CR 702.28 (shadow), CR 614.1a (replacement).
 fn dauthi_voidwalker() -> CardDef {
     use crate::ir::ability::{
-        Ability, AbilityKind, ActivatedCost, EventPattern, ReplacementBody,
+        Ability, AbilityKind, CostBody, EventPattern, ReplacementBody,
     };
     use crate::ir::action::{Action, Expiry as IrExpiry};
     use crate::ir::ce::{CEMod, CostSpec};
@@ -2565,9 +2593,19 @@ fn dauthi_voidwalker() -> CardDef {
 
     let may_play = Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost {
-                components: vec![CostComponent::TapSelf, CostComponent::SacSelf],
-            },
+            // Phase 4 step 3: TapSelf+SacSelf conjunction migrated to IR.
+            cost: CostBody::Ir(Action::Sequence(vec![
+                Action::Tap { target: Expr::Ctx(Ctx::Source) },
+                Action::Sacrifice {
+                    who: crate::ir::action::Who::You,
+                    filter: Filter(Expr::Eq(
+                        Box::new(Expr::Ctx(Ctx::It)),
+                        Box::new(Expr::Ctx(Ctx::Source)),
+                    )),
+                    count: Expr::Num(1),
+                    bind_as: None,
+                },
+            ])),
             target_spec: TargetSpec::None,
             choice_spec: Some(ChoiceSpec {
                 controller: Who::Opp,
@@ -3262,7 +3300,7 @@ fn yavimaya_cradle_of_growth() -> CardDef {
 /// {U}, {T}: The next spell you cast this turn can't be countered. (CR 611.2f)
 fn mistrise_village() -> CardDef {
     use crate::ir::ability::{
-        Ability, AbilityKind, ActivatedCost, EventPattern, ReplacementBody,
+        Ability, AbilityKind, CostBody, EventPattern, ReplacementBody,
     };
     use crate::ir::action::{Action, Expiry as IrExpiry, Who};
     use crate::ir::ce::CEMod;
@@ -3323,12 +3361,10 @@ fn mistrise_village() -> CardDef {
     // {U},{T}: The next spell you cast this turn can't be countered. (CR 611.2f)
     let next_spell_uncounterable = Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost {
-                components: vec![
-                    CostComponent::Mana(parse_mana_cost("U")),
-                    CostComponent::TapSelf,
-                ],
-            },
+            cost: CostBody::Legacy(vec![
+                CostComponent::Mana(parse_mana_cost("U")),
+                CostComponent::TapSelf,
+            ]),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::GrantCEToNextSpellCast {
@@ -3384,7 +3420,7 @@ fn orc_army_token() -> CardDef {
 /// Colorless Clue artifact token. Activated ability: {2}, tap self, sacrifice self → draw one.
 /// CR 701.28 (Investigate).
 fn clue_token() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, Who as IrWho};
     use crate::ir::expr::Expr;
 
@@ -3399,13 +3435,11 @@ fn clue_token() -> CardDef {
     );
     card.abilities = vec![Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost {
-                components: vec![
-                    CostComponent::Mana(parse_mana_cost("2")),
-                    CostComponent::TapSelf,
-                    CostComponent::SacSelf,
-                ],
-            },
+            cost: CostBody::Legacy(vec![
+                CostComponent::Mana(parse_mana_cost("2")),
+                CostComponent::TapSelf,
+                CostComponent::SacSelf,
+            ]),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::Draw {
@@ -4090,14 +4124,14 @@ fn dragons_rage_channeler() -> CardDef {
 /// Creature — Ape Spirit, 2/2. {2}{R}.
 /// "Exile this card from your hand: Add {R}." — hand-zone mana ability (CR 605.3).
 fn simian_spirit_guide() -> CardDef {
-    use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+    use crate::ir::ability::{Ability, AbilityKind, CostBody};
     use crate::ir::action::{Action, ManaSpec, Who};
     use crate::ir::expr::{Expr, ZoneKindSel};
     let data = CreatureData::new("2R", 2, 2);
     let mut def = simple("Simian Spirit Guide", CardKind::Creature(data), parse_colors("R", false, false), None);
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            cost: ActivatedCost { components: vec![CostComponent::ExileSelf] },
+            cost: CostBody::Legacy(vec![CostComponent::ExileSelf]),
             target_spec: TargetSpec::None,
             choice_spec: None,
             body: Action::AddMana {
@@ -4162,9 +4196,9 @@ fn fury() -> CardDef {
     );
     c.alternate_costs = vec![
         AlternateCost {
-            costs: vec![CostComponent::ExileFromHand(
+            costs: CostBody::Legacy(vec![CostComponent::ExileFromHand(
                 obj_pred_from_card(pred_has_color(Color::Red))
-            )],
+            )]),
             hand_min: 2,
             ..Default::default()
         },
@@ -4238,7 +4272,7 @@ fn quantum_riddler() -> CardDef {
     );
     c.alternate_costs = vec![
         AlternateCost {
-            costs: vec![CostComponent::Mana(parse_mana_cost("1U"))],
+            costs: CostBody::Legacy(vec![CostComponent::Mana(parse_mana_cost("1U"))]),
             ..Default::default()
         },
     ];

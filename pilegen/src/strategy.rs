@@ -92,6 +92,40 @@ pub(crate) trait Strategy {
         candidates.first().copied()
     }
 
+    /// Phase 3 cost-IR: announcement-time decision plan for an IR cost tree.
+    ///
+    /// Returns a `BindEnv` answering every `Decision` in `schema`. Replaces the
+    /// per-decision callbacks (`announce` / `choose_targets` / `choose_mana_ability`
+    /// / `choose_cost_payment`) for IR-cost cards: one structured call covers
+    /// modes, targets, and cost bindings in a single round-trip.
+    ///
+    /// Default impl picks the first `count` candidates for `Objects` decisions,
+    /// the first payable index for `Branch`, and a sensible default for `Number`
+    /// (XLife/XMana = min(3, max); Replicate = 0). Strategies override to plan
+    /// across decisions (e.g. choose Force-of-Will pitch only if the card is
+    /// safely held).
+    fn propose_announcement(
+        &mut self,
+        _state: &SimState,
+        _source: ObjId,
+        schema: &crate::ir::cost::CostSchema,
+    ) -> crate::ir::executor::BindEnv {
+        default_announcement(schema)
+    }
+
+    /// Phase 3 cost-IR: resolution-time payment plan (CR 701 "as ~ resolves, …"
+    /// kicker-style payments). Same `CostSchema`/`BindEnv` shape as
+    /// `propose_announcement`; called at a different point in the pipeline.
+    /// Default impl is identical to `propose_announcement`.
+    fn propose_resolution_payment(
+        &mut self,
+        _state: &SimState,
+        _source: ObjId,
+        schema: &crate::ir::cost::CostSchema,
+    ) -> crate::ir::executor::BindEnv {
+        default_announcement(schema)
+    }
+
     /// CR 509.1h: when an attacker is blocked by 2+ creatures, the attacking player
     /// chooses the damage assignment order. Default: keep declaration order.
     fn order_blockers(&mut self, _state: &SimState, _attacker_id: ObjId,
@@ -1022,12 +1056,13 @@ fn announce_with_alt_costs(
 ) -> AnnounceChoice {
     let chosen_x = if options.has_x_cost { 3 } else { 0 };
     for (i, alt) in options.available_alt_costs.iter().enumerate() {
+        let alt_legacy = alt.costs.expect_legacy();
         if state.hand_size(who) >= alt.hand_min
-            && can_pay_costs(&alt.costs, state, who, card_id, false, 0)
+            && can_pay_costs(alt_legacy, state, who, card_id, false, 0)
         {
             if probabilistic {
                 // Check exile-blue pitch availability.
-                let has_exile_blue = alt.costs.iter().any(|c| matches!(c, CostComponent::ExileFromHand(_)));
+                let has_exile_blue = alt_legacy.iter().any(|c| matches!(c, CostComponent::ExileFromHand(_)));
                 if has_exile_blue {
                     let hand_size = state.hand_size(who);
                     let lib_size = state.library_size(who) + hand_size as usize;
@@ -1232,7 +1267,7 @@ fn spell_is_affordable(
     } else {
         def.alternate_costs().iter().any(|c| {
             state.hand_size(who) >= c.hand_min
-                && can_pay_costs(&c.costs, state, who, card_id, false, 0)
+                && can_pay_costs(c.costs.expect_legacy(), state, who, card_id, false, 0)
                 && c.condition.as_ref().map_or(true, |f| f(who, state))
         })
     };
@@ -1367,3 +1402,49 @@ fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
 }
 
 // respond_with_counter — replaced by find_counter_in_legal + choose_action flow
+
+/// Phase 3 default `propose_announcement` body.
+///
+/// Walks the schema and answers each `Decision` with a sensible fallback:
+/// - `Objects { candidates, count }`: take the first `count` candidates. Phase
+///   4+ will sharpen this per-card via Strategy overrides; the floor is "any
+///   legal answer is better than none" so the game can keep moving.
+/// - `Branch { payable, .. }`: pick the first payable index.
+/// - `Number { kind, max }`: XLife/XMana clamp at `min(3, max)` (matches the
+///   legacy `announce` X=3 default); Replicate defaults to 0 (no copies).
+///
+/// Strategies override to plan across decisions; this default exists so every
+/// strategy keeps compiling without churn during Phase 3.
+pub(crate) fn default_announcement(
+    schema: &crate::ir::cost::CostSchema,
+) -> crate::ir::executor::BindEnv {
+    use crate::ir::cost::{DecisionKind, NumberKind};
+    use crate::ir::expr::Value;
+    let mut env = crate::ir::executor::BindEnv::new();
+    for d in &schema.decisions {
+        match &d.kind {
+            DecisionKind::Objects { candidates, count } => {
+                let n = *count as usize;
+                let picked: Vec<ObjId> = candidates.iter().take(n).copied().collect();
+                let value = if n == 1 && picked.len() == 1 {
+                    Value::Obj(picked[0])
+                } else {
+                    Value::ObjSet(picked)
+                };
+                env.bindings.insert(d.binding, value);
+            }
+            DecisionKind::Branch { payable, .. } => {
+                let i = *payable.first().unwrap_or(&0) as i64;
+                env.bindings.insert(d.binding, Value::Num(i));
+            }
+            DecisionKind::Number { kind, max } => {
+                let default = match kind {
+                    NumberKind::XLife | NumberKind::XMana => 3u32.min(*max),
+                    NumberKind::Replicate => 0,
+                };
+                env.bindings.insert(d.binding, Value::Num(default as i64));
+            }
+        }
+    }
+    env
+}

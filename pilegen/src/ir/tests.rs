@@ -1699,3 +1699,817 @@ mod execute_parity {
     #[allow(dead_code)]
     fn _touch_unused_imports(_: Keyword, _: Supertype) {}
 }
+
+// ── Phase 1 cost-IR tests ────────────────────────────────────────────────────
+//
+// Per-variant unit tests for `Action::PayMana`, `LoyaltyAdjust`, `Replicate`,
+// plus the `cost_exec::build_schema` / `pay` round-trip and equivalence
+// crosschecks against the legacy `pay_costs` for shapes both can express.
+mod cost_phase1 {
+    use crate::catalog::CreatureData;
+    use crate::ir::action::{Action, Who};
+    use crate::ir::cost::{DecisionKind, NumberKind, PayError};
+    use crate::ir::cost_exec::{build_schema, pay};
+    use crate::ir::executor::{execute_mut, BindEnv, ExecResult};
+    use crate::ir::expr::{Expr, Filter};
+    use crate::ir::context::Ctx;
+    use crate::{
+        parse_mana_cost, BattlefieldState, CardDef, CardKind, CardLayout, CardZone, Color,
+        GameObject, ObjId, PlayerId, PlayerState, SimState,
+    };
+    use std::collections::HashMap;
+
+    pub(super) fn make_state() -> SimState {
+        SimState::new(PlayerState::new("us"), PlayerState::new("opp"))
+    }
+
+    pub(super) fn make_creature(name: &str, mana: &str, p: i32, t: i32) -> CardDef {
+        CardDef::new(
+            name,
+            CardKind::Creature(CreatureData::new(mana, p, t)),
+            vec![Color::Green],
+            None,
+            vec![],
+            CardLayout::Normal,
+            None,
+            vec![], vec![], vec![], vec![],
+        )
+    }
+
+    pub(super) fn insert_obj(state: &mut SimState, owner: PlayerId, def: CardDef) -> ObjId {
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject {
+            id, catalog_key: def.name.clone(),
+            owner, controller: owner,
+            zone: CardZone::Library,
+            is_token: false, spell: None, bf: None,
+            materialized: Some(def.clone()),
+            counters: HashMap::new(),
+            ci_timestamp: 0,
+        });
+        state.catalog.entry(def.name.clone()).or_insert(def);
+        state.player_mut(owner).library_order.push_back(id);
+        id
+    }
+
+    pub(super) fn put_on_bf(state: &mut SimState, id: ObjId) {
+        state.set_card_zone(id, CardZone::Battlefield);
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.bf = Some(BattlefieldState {
+                tapped: false, damage: 0, entered_this_turn: false,
+                counters: 0, power_mod: 0, toughness_mod: 0, loyalty: 0,
+                pw_activated_this_turn: false, attacking: false,
+                unblocked: false, attack_target: None, active_face: 0,
+                etb_choice: None, attached_to: None, stun_counters: 0,
+            });
+        }
+    }
+
+    // ── PayMana ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pay_mana_drains_pool_when_payable() {
+        let mut s = make_state();
+        // Add U mana by parsing it through the standard helper.
+        crate::eff_mana(PlayerId::Us, "U").call(&mut s, 0, &[]);
+        let mc = parse_mana_cost("U");
+        let mut env = BindEnv::new().with_controller(PlayerId::Us);
+        let res = execute_mut(&Action::PayMana(mc), &mut s, &mut env);
+        assert!(matches!(res, ExecResult::Ok));
+        // Pool should be drained.
+        assert!(!s.player(PlayerId::Us).pool.can_pay(&parse_mana_cost("U")));
+    }
+
+    #[test]
+    fn pay_mana_returns_shortage_when_pool_empty() {
+        let mut s = make_state();
+        let mc = parse_mana_cost("U");
+        let mut env = BindEnv::new().with_controller(PlayerId::Us);
+        match execute_mut(&Action::PayMana(mc.clone()), &mut s, &mut env) {
+            ExecResult::ManaShortage(rem) => {
+                assert_eq!(rem.u, 1, "remaining should reflect 1 unpaid blue");
+                assert_eq!(rem.generic, 0);
+            }
+            other => panic!("expected ManaShortage, got {:?}", debug_result(&other)),
+        }
+    }
+
+    #[test]
+    fn pay_mana_partial_pool_reports_residual() {
+        let mut s = make_state();
+        crate::eff_mana(PlayerId::Us, "U").call(&mut s, 0, &[]); // 1 blue
+        let mc = parse_mana_cost("UU"); // need 2 blue
+        let mut env = BindEnv::new().with_controller(PlayerId::Us);
+        match execute_mut(&Action::PayMana(mc), &mut s, &mut env) {
+            ExecResult::ManaShortage(rem) => {
+                assert_eq!(rem.u, 1);
+                assert_eq!(rem.generic, 0);
+            }
+            other => panic!("expected ManaShortage, got {:?}", debug_result(&other)),
+        }
+    }
+
+    fn debug_result(r: &ExecResult) -> &'static str {
+        match r {
+            ExecResult::Ok => "Ok",
+            ExecResult::ManaShortage(_) => "ManaShortage",
+            ExecResult::Unimplemented(_) => "Unimplemented",
+        }
+    }
+
+    // ── LoyaltyAdjust ──────────────────────────────────────────────────────
+
+    #[test]
+    fn loyalty_adjust_modifies_source_and_marks_activated() {
+        let mut s = make_state();
+        let pw = insert_obj(&mut s, PlayerId::Us, make_creature("Walker", "{2}{U}", 0, 0));
+        put_on_bf(&mut s, pw);
+        s.permanent_bf_mut(pw).unwrap().loyalty = 4;
+
+        let mut env = BindEnv::new()
+            .with_controller(PlayerId::Us)
+            .with_source(pw);
+        let res = execute_mut(&Action::LoyaltyAdjust(-2), &mut s, &mut env);
+        assert!(matches!(res, ExecResult::Ok));
+
+        let bf = s.permanent_bf(pw).unwrap();
+        assert_eq!(bf.loyalty, 2, "loyalty -2");
+        assert!(bf.pw_activated_this_turn, "pw_activated_this_turn flag set");
+    }
+
+    #[test]
+    fn loyalty_adjust_positive_increases() {
+        let mut s = make_state();
+        let pw = insert_obj(&mut s, PlayerId::Us, make_creature("Walker", "{2}{U}", 0, 0));
+        put_on_bf(&mut s, pw);
+        s.permanent_bf_mut(pw).unwrap().loyalty = 3;
+
+        let mut env = BindEnv::new()
+            .with_controller(PlayerId::Us)
+            .with_source(pw);
+        let _ = execute_mut(&Action::LoyaltyAdjust(1), &mut s, &mut env);
+        assert_eq!(s.permanent_bf(pw).unwrap().loyalty, 4);
+    }
+
+    // ── Replicate ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn replicate_outside_cost_context_is_noop() {
+        let mut s = make_state();
+        let mut env = BindEnv::new().with_controller(PlayerId::Us);
+        let res = execute_mut(&Action::Replicate(parse_mana_cost("1U")), &mut s, &mut env);
+        assert!(matches!(res, ExecResult::Ok));
+    }
+
+    // ── Sequence short-circuits on ManaShortage ─────────────────────────────
+
+    #[test]
+    fn sequence_short_circuits_on_mana_shortage() {
+        let mut s = make_state();
+        let pw = insert_obj(&mut s, PlayerId::Us, make_creature("Walker", "{2}{U}", 0, 0));
+        put_on_bf(&mut s, pw);
+        s.permanent_bf_mut(pw).unwrap().loyalty = 4;
+
+        // Sequence: PayMana(U) (will shortage) THEN LoyaltyAdjust(-1).
+        // The loyalty adjustment must NOT run because the sequence short-circuits.
+        let mut env = BindEnv::new()
+            .with_controller(PlayerId::Us)
+            .with_source(pw);
+        let action = Action::Sequence(vec![
+            Action::PayMana(parse_mana_cost("U")),
+            Action::LoyaltyAdjust(-1),
+        ]);
+        match execute_mut(&action, &mut s, &mut env) {
+            ExecResult::ManaShortage(_) => {}
+            other => panic!("expected ManaShortage, got {:?}", debug_result(&other)),
+        }
+        // Loyalty unchanged because the second action never ran.
+        assert_eq!(s.permanent_bf(pw).unwrap().loyalty, 4);
+        assert!(!s.permanent_bf(pw).unwrap().pw_activated_this_turn);
+    }
+
+    // ── build_schema basics ────────────────────────────────────────────────
+
+    #[test]
+    fn build_schema_tap_source_no_decision() {
+        let mut s = make_state();
+        let id = insert_obj(&mut s, PlayerId::Us, make_creature("X", "{G}", 1, 1));
+        put_on_bf(&mut s, id);
+
+        let cost = Action::Tap { target: Expr::Ctx(Ctx::Source) };
+        let schema = build_schema(&cost, &s, PlayerId::Us, id).expect("payable");
+        assert_eq!(schema.decisions.len(), 0, "no decision for Tap source");
+    }
+
+    #[test]
+    fn build_schema_pay_life_constant_no_decision() {
+        let s = make_state();
+        let cost = Action::PayLife { who: Who::You, amount: Expr::Num(2) };
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        assert_eq!(schema.decisions.len(), 0);
+    }
+
+    #[test]
+    fn build_schema_pay_life_x_emits_number_decision() {
+        let s = make_state();
+        // Var(x) — non-constant; treated as XLife.
+        let cost = Action::PayLife { who: Who::You, amount: Expr::Ctx(Ctx::Var("x")) };
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        assert_eq!(schema.decisions.len(), 1);
+        match &schema.decisions[0].kind {
+            DecisionKind::Number { kind: NumberKind::XLife, max } => {
+                assert!(*max >= 1, "max should be at least 1 from default life");
+            }
+            other => panic!("wrong decision kind: {:?}", debug_decision(other)),
+        }
+    }
+
+    fn debug_decision(d: &DecisionKind) -> String {
+        match d {
+            DecisionKind::Objects { count, candidates } =>
+                format!("Objects(count={}, candidates={})", count, candidates.len()),
+            DecisionKind::Branch { labels, payable } =>
+                format!("Branch(labels={}, payable={})", labels.len(), payable.len()),
+            DecisionKind::Number { kind, max } =>
+                format!("Number({:?}, max={})", kind, max),
+        }
+    }
+
+    // ── Equivalence: PayLife(n) — IR cost path vs legacy ────────────────────
+    //
+    // Independent-implementation cross-check: paying 2 life via the IR cost
+    // executor and via the legacy `pay_costs` path drives the same change in
+    // `state.player.life`.
+
+    #[test]
+    fn equiv_pay_life_2() {
+        // Legacy path: pay_costs(&[CostComponent::Life(2)], ...).
+        let mut legacy_state = make_state();
+        let start = legacy_state.life_of(PlayerId::Us);
+        crate::pay_costs(
+            &[crate::CostComponent::Life(2)],
+            &mut legacy_state,
+            0,
+            PlayerId::Us,
+            ObjId::UNSET,
+            0,
+        );
+
+        // IR path: cost = PayLife(2). build_schema (no decisions) + pay.
+        let mut ir_state = make_state();
+        let cost = Action::PayLife { who: Who::You, amount: Expr::Num(2) };
+        let schema = build_schema(&cost, &ir_state, PlayerId::Us, ObjId::UNSET).expect("payable");
+        let env = BindEnv::new().with_controller(PlayerId::Us);
+        pay(&cost, &schema, &env, &mut ir_state, 0, PlayerId::Us, ObjId::UNSET)
+            .expect("pay should succeed");
+
+        assert_eq!(legacy_state.life_of(PlayerId::Us), start - 2);
+        assert_eq!(ir_state.life_of(PlayerId::Us), start - 2);
+        assert_eq!(legacy_state.life_of(PlayerId::Us), ir_state.life_of(PlayerId::Us));
+    }
+
+    // ── Equivalence: TapSelf — IR cost vs legacy ───────────────────────────
+
+    #[test]
+    fn equiv_tap_self() {
+        let setup = || {
+            let mut s = make_state();
+            let id = insert_obj(&mut s, PlayerId::Us, make_creature("X", "{G}", 1, 1));
+            put_on_bf(&mut s, id);
+            (s, id)
+        };
+
+        let (mut legacy_state, legacy_id) = setup();
+        crate::pay_costs(
+            &[crate::CostComponent::TapSelf],
+            &mut legacy_state,
+            0,
+            PlayerId::Us,
+            legacy_id,
+            0,
+        );
+        assert!(legacy_state.permanent_bf(legacy_id).unwrap().tapped);
+
+        let (mut ir_state, ir_id) = setup();
+        let cost = Action::Tap { target: Expr::Ctx(Ctx::Source) };
+        let schema = build_schema(&cost, &ir_state, PlayerId::Us, ir_id).expect("payable");
+        assert_eq!(schema.decisions.len(), 0);
+        let env = BindEnv::new().with_controller(PlayerId::Us);
+        pay(&cost, &schema, &env, &mut ir_state, 0, PlayerId::Us, ir_id)
+            .expect("pay should succeed");
+        assert!(ir_state.permanent_bf(ir_id).unwrap().tapped);
+    }
+
+    // ── pay validates BindEnv against schema ────────────────────────────────
+
+    #[test]
+    fn pay_validates_missing_binding() {
+        let s_setup = || {
+            let mut s = make_state();
+            // Build two artifacts so a Sacrifice with a generic filter has
+            // multiple candidates and forces a decision.
+            let a = insert_obj(&mut s, PlayerId::Us, make_creature("A", "{1}", 1, 1));
+            let b = insert_obj(&mut s, PlayerId::Us, make_creature("B", "{1}", 1, 1));
+            put_on_bf(&mut s, a);
+            put_on_bf(&mut s, b);
+            s
+        };
+
+        let mut s = s_setup();
+        // Sacrifice 1 of {creatures you control}. Two candidates ⇒ Objects decision.
+        let cost = Action::Sacrifice {
+            who: Who::You,
+            // Filter that matches the candidate object — uses Ctx::It semantics.
+            // Empty Filter (always true) keeps the test focused on count > 0.
+            filter: Filter(Expr::Bool(true)),
+            count: Expr::Num(1),
+            bind_as: None,
+        };
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        assert_eq!(schema.decisions.len(), 1, "should emit one Objects decision");
+        let env = BindEnv::new().with_controller(PlayerId::Us);
+        // Strategy did not bind anything — pay should reject.
+        let res = pay(&cost, &schema, &env, &mut s, 0, PlayerId::Us, ObjId::UNSET);
+        assert!(matches!(res, Err(PayError::MissingBinding(_))));
+    }
+}
+
+// ── Phase 2 castability tests ────────────────────────────────────────────────
+//
+// `enumerate_playable` returns the typed surface of "things `who` can do
+// right now". Tests cover empty-board / no-payable cases, a single castable
+// spell with affordable mana, and the `legacy_cost_as_ir` shim's ability to
+// translate the simple cost shapes Phase 4 will rely on (TapSelf, Mana(mc),
+// Life(n), CostAnd-of-the-above).
+mod playable_phase2 {
+    use super::cost_phase1::{insert_obj, make_creature, make_state};
+    use crate::ir::action::Action;
+    use crate::ir::cost::DecisionKind;
+    use crate::playable::{enumerate_playable, legacy_cost_as_ir, PlayableKind};
+    use crate::{parse_mana_cost, CardZone, CostComponent, ObjId, PlayerId};
+
+    fn move_to_hand(state: &mut crate::SimState, id: ObjId, _owner: PlayerId) {
+        state.set_card_zone(id, CardZone::Hand { known: true });
+        // The CE materialization pass normally sets castable from zone — short
+        // of running it here, set the bit manually so enumerate_playable sees
+        // a castable hand card.
+        if let Some(obj) = state.objects.get_mut(&id) {
+            if let Some(def) = obj.materialized.as_mut() {
+                def.castable = true;
+            }
+        }
+    }
+
+    #[test]
+    fn empty_board_yields_no_playable() {
+        let s = make_state();
+        let actions = enumerate_playable(&s, PlayerId::Us);
+        assert!(actions.is_empty(), "no cards anywhere ⇒ nothing playable");
+    }
+
+    #[test]
+    fn unaffordable_spell_in_hand_not_playable() {
+        let mut s = make_state();
+        let id = insert_obj(&mut s, PlayerId::Us, make_creature("Big", "{5}{U}{U}", 6, 6));
+        move_to_hand(&mut s, id, PlayerId::Us);
+        // Pool is empty — unaffordable.
+        let actions = enumerate_playable(&s, PlayerId::Us);
+        assert!(
+            actions.iter().all(|a| !matches!(a.kind, PlayableKind::Cast) || a.source != id),
+            "unaffordable spell should not appear as Cast playable"
+        );
+    }
+
+    #[test]
+    fn affordable_spell_appears_with_schema() {
+        let mut s = make_state();
+        // Mana costs are formatted as e.g. "1", "UU", "3BB" — no braces.
+        let id = insert_obj(&mut s, PlayerId::Us, make_creature("Cheap", "1", 1, 1));
+        move_to_hand(&mut s, id, PlayerId::Us);
+        // Give the player a single colorless to pay {1}. Setting the pool
+        // directly bypasses the ManaProduced event path which isn't wired in
+        // this bare test fixture.
+        s.player_mut(PlayerId::Us).pool.c = 1;
+        s.player_mut(PlayerId::Us).pool.total = 1;
+
+        let actions = enumerate_playable(&s, PlayerId::Us);
+        let cast: Vec<_> = actions
+            .iter()
+            .filter(|a| a.source == id && matches!(a.kind, PlayableKind::Cast))
+            .collect();
+        assert_eq!(cast.len(), 1, "exactly one Cast action for the affordable spell");
+        // PayMana doesn't emit a decision — schema should be empty (Some, but
+        // with zero decisions). The strategy's announcement plan is "answer
+        // nothing" because mana is pool-based, not a Decision.
+        let schema = cast[0].schema.as_ref().expect("schema present for IR PayMana");
+        assert_eq!(schema.decisions.len(), 0);
+    }
+
+    // ── legacy_cost_as_ir ──────────────────────────────────────────────────
+
+    #[test]
+    fn shim_translates_tap_self() {
+        let action = legacy_cost_as_ir(&[CostComponent::TapSelf]).expect("translatable");
+        assert!(matches!(action, Action::Tap { .. }));
+    }
+
+    #[test]
+    fn shim_translates_life_constant() {
+        let action = legacy_cost_as_ir(&[CostComponent::Life(2)]).expect("translatable");
+        match action {
+            Action::PayLife { .. } => {}
+            _ => panic!("expected PayLife"),
+        }
+    }
+
+    #[test]
+    fn shim_translates_xlife_to_var_x() {
+        let action = legacy_cost_as_ir(&[CostComponent::XLife]).expect("translatable");
+        match action {
+            Action::PayLife { .. } => {}
+            _ => panic!("expected PayLife with Var amount"),
+        }
+    }
+
+    #[test]
+    fn shim_sequences_multiple_components() {
+        let comps = vec![
+            CostComponent::TapSelf,
+            CostComponent::Mana(parse_mana_cost("U")),
+        ];
+        let action = legacy_cost_as_ir(&comps).expect("translatable");
+        match action {
+            Action::Sequence(v) => assert_eq!(v.len(), 2),
+            _ => panic!("expected Sequence of 2"),
+        }
+    }
+
+    #[test]
+    fn shim_returns_none_for_object_targeted_costs() {
+        // ReturnFromBattlefield uses ObjPredicate (closure-based) — outside
+        // the shim's scope. Phase 4 migrates these per-card.
+        let comps = vec![CostComponent::ReturnFromBattlefield(std::sync::Arc::new(
+            |_id, _state| true,
+        ))];
+        assert!(legacy_cost_as_ir(&comps).is_none());
+    }
+
+    #[test]
+    fn shim_translates_xlife_yields_xlife_decision_in_schema() {
+        // Putting it together: legacy XLife cost translated by the shim →
+        // schema must surface a single XLife Number decision.
+        let s = make_state();
+        let action = legacy_cost_as_ir(&[CostComponent::XLife]).expect("translatable");
+        let schema = crate::ir::cost_exec::build_schema(&action, &s, PlayerId::Us, ObjId::UNSET)
+            .expect("payable");
+        assert_eq!(schema.decisions.len(), 1);
+        assert!(matches!(
+            schema.decisions[0].kind,
+            DecisionKind::Number { .. }
+        ));
+    }
+}
+
+mod cost_phase3 {
+    //! Phase 3 wiring: `pay_ir_cost` runs the IR cost executor with a
+    //! schema-driven announcement plan; `default_announcement` answers each
+    //! `DecisionKind` so strategies that don't override get sensible bindings.
+
+    use super::cost_phase1::{insert_obj, make_creature, make_state};
+    use crate::ir::action::{Action, Who};
+    use crate::ir::context::Ctx;
+    use crate::ir::cost::{Decision, DecisionKind, NumberKind};
+    use crate::ir::expr::{Expr, Value};
+    use crate::strategy::default_announcement;
+    use crate::{ObjId, PlayerId};
+
+    // ── pay_ir_cost wiring ─────────────────────────────────────────────────
+
+    #[test]
+    fn pay_ir_cost_drains_life_with_default_strategy() {
+        let mut s = make_state();
+        let id = insert_obj(&mut s, PlayerId::Us, make_creature("Free", "", 1, 1));
+        s.player_mut(PlayerId::Us).life = 20;
+
+        let action = Action::PayLife { who: Who::You, amount: Expr::Num(2) };
+        let ctx = crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, &mut None)
+            .expect("constant PayLife is payable with no strategy");
+
+        assert_eq!(s.player(PlayerId::Us).life, 18, "2 life paid");
+        assert!(ctx.objects_moved.is_empty(), "PayLife moves no objects");
+    }
+
+    #[test]
+    fn pay_ir_cost_xlife_uses_default_strategy_binding() {
+        // Var X amount → schema emits an XLife Number decision; default
+        // strategy answers min(3, max). With max unbounded by the schema
+        // (life-only), default picks 3.
+        let mut s = make_state();
+        let id = insert_obj(&mut s, PlayerId::Us, make_creature("Free", "", 1, 1));
+        s.player_mut(PlayerId::Us).life = 20;
+
+        let action = Action::PayLife { who: Who::You, amount: Expr::Ctx(Ctx::Var("$x")) };
+        crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, &mut None)
+            .expect("XLife with default strategy resolves to 3");
+
+        assert_eq!(s.player(PlayerId::Us).life, 17, "3 life paid (default min(3,max))");
+    }
+
+    #[test]
+    fn pay_ir_cost_unpayable_returns_none() {
+        // PayLife with the player at 1 life; constant amount 5 → unpayable.
+        let mut s = make_state();
+        let id = insert_obj(&mut s, PlayerId::Us, make_creature("Free", "", 1, 1));
+        s.player_mut(PlayerId::Us).life = 1;
+
+        let action = Action::PayLife { who: Who::You, amount: Expr::Num(5) };
+        let res = crate::pay_ir_cost(&mut s, 0, PlayerId::Us, id, &action, &mut None);
+        assert!(res.is_none(), "unpayable cost yields None");
+        assert_eq!(s.player(PlayerId::Us).life, 1, "life unchanged on failure");
+    }
+
+    // ── default_announcement coverage of each DecisionKind ─────────────────
+
+    #[test]
+    fn default_announcement_picks_first_n_objects() {
+        let candidates = vec![ObjId(1), ObjId(2), ObjId(3)];
+        let schema = crate::ir::cost::CostSchema {
+            decisions: vec![Decision {
+                binding: "$pick",
+                kind: DecisionKind::Objects { candidates: candidates.clone(), count: 2 },
+            }],
+        };
+        let env = default_announcement(&schema);
+        match env.bindings.get("$pick") {
+            Some(Value::ObjSet(v)) => assert_eq!(v, &vec![ObjId(1), ObjId(2)]),
+            other => panic!("expected ObjSet of first 2, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn default_announcement_single_object_uses_obj_value() {
+        let schema = crate::ir::cost::CostSchema {
+            decisions: vec![Decision {
+                binding: "$one",
+                kind: DecisionKind::Objects { candidates: vec![ObjId(7)], count: 1 },
+            }],
+        };
+        let env = default_announcement(&schema);
+        match env.bindings.get("$one") {
+            Some(Value::Obj(id)) => assert_eq!(*id, ObjId(7)),
+            other => panic!("expected Obj(7), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn default_announcement_branch_picks_first_payable() {
+        let schema = crate::ir::cost::CostSchema {
+            decisions: vec![Decision {
+                binding: "$mode",
+                kind: DecisionKind::Branch {
+                    labels: vec!["a", "b", "c"],
+                    payable: vec![1, 2],
+                },
+            }],
+        };
+        let env = default_announcement(&schema);
+        match env.bindings.get("$mode") {
+            Some(Value::Num(n)) => assert_eq!(*n, 1, "first payable index"),
+            other => panic!("expected Num(1), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn default_announcement_xlife_picks_min_three_and_max() {
+        // max=2 → default picks 2 (capped under 3).
+        let schema = crate::ir::cost::CostSchema {
+            decisions: vec![Decision {
+                binding: "$x",
+                kind: DecisionKind::Number { kind: NumberKind::XLife, max: 2 },
+            }],
+        };
+        let env = default_announcement(&schema);
+        match env.bindings.get("$x") {
+            Some(Value::Num(n)) => assert_eq!(*n, 2),
+            other => panic!("expected Num(2), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn default_announcement_replicate_picks_zero() {
+        let schema = crate::ir::cost::CostSchema {
+            decisions: vec![Decision {
+                binding: "$rep",
+                kind: DecisionKind::Number { kind: NumberKind::Replicate, max: 5 },
+            }],
+        };
+        let env = default_announcement(&schema);
+        match env.bindings.get("$rep") {
+            Some(Value::Num(n)) => assert_eq!(*n, 0, "default replicate count is 0"),
+            other => panic!("expected Num(0), got {:?}", other),
+        }
+    }
+}
+
+// Phase 4 step 1 — TapSelf migrated to IR cost grammar.
+//
+// The migrated card storage shape changes from `CostBody::Legacy(...)` to
+// `CostBody::Ir(Action::Tap { target: Source })`, but the runtime path is
+// preserved by the `ir_cost_as_legacy` reverse shim used at the legacy
+// bridge boundary. These tests guard that:
+//   1. The reverse shim correctly lowers `Action::Tap { target: Source }`
+//      back to `vec![CostComponent::TapSelf]`.
+//   2. `cost_body_to_legacy` round-trips both `Legacy` and `Ir` storage.
+//   3. The migrated `ir_tap_mana` storage is `Ir(_)` (regression guard for
+//      accidental reverts).
+//   4. Basic lands built with `ir_tap_mana` still produce mana when their
+//      mana ability is activated end-to-end (CR 605.3b sub-loop).
+mod cost_phase4 {
+    use crate::ir::ability::CostBody;
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    use crate::playable::{cost_body_to_legacy, ir_cost_as_legacy};
+    use crate::CostComponent;
+
+    #[test]
+    fn ir_cost_as_legacy_lowers_tap_source() {
+        let action = Action::Tap { target: Expr::Ctx(Ctx::Source) };
+        let comps = ir_cost_as_legacy(&action).expect("Tap source is covered");
+        assert_eq!(comps.len(), 1);
+        assert!(matches!(comps[0], CostComponent::TapSelf));
+    }
+
+    #[test]
+    fn ir_cost_as_legacy_lowers_sequence_of_tap_source() {
+        let action = Action::Sequence(vec![Action::Tap { target: Expr::Ctx(Ctx::Source) }]);
+        let comps = ir_cost_as_legacy(&action).expect("Sequence of Tap source is covered");
+        assert_eq!(comps.len(), 1);
+        assert!(matches!(comps[0], CostComponent::TapSelf));
+    }
+
+    #[test]
+    fn ir_cost_as_legacy_returns_none_for_unsupported_shape() {
+        // PayLife is not in the Phase 4 step 1 lowering coverage; the shim
+        // grows as later steps add card shapes.
+        let action = Action::PayLife {
+            who: crate::ir::action::Who::You,
+            amount: Expr::Num(1),
+        };
+        assert!(ir_cost_as_legacy(&action).is_none());
+    }
+
+    #[test]
+    fn cost_body_to_legacy_passes_through_legacy() {
+        let body = CostBody::Legacy(vec![CostComponent::TapSelf]);
+        let comps = cost_body_to_legacy(&body);
+        assert_eq!(comps.len(), 1);
+        assert!(matches!(comps[0], CostComponent::TapSelf));
+    }
+
+    #[test]
+    fn cost_body_to_legacy_lowers_ir_tap_source() {
+        let body = CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) });
+        let comps = cost_body_to_legacy(&body);
+        assert_eq!(comps.len(), 1);
+        assert!(matches!(comps[0], CostComponent::TapSelf));
+    }
+
+    #[test]
+    fn ir_cost_as_legacy_lowers_sac_self_canonical() {
+        use crate::ir::action::Who;
+        use crate::ir::expr::Filter;
+        let action = Action::Sacrifice {
+            who: Who::You,
+            filter: Filter(Expr::Eq(
+                Box::new(Expr::Ctx(Ctx::It)),
+                Box::new(Expr::Ctx(Ctx::Source)),
+            )),
+            count: Expr::Num(1),
+            bind_as: None,
+        };
+        let comps = ir_cost_as_legacy(&action).expect("SacSelf shape is covered");
+        assert_eq!(comps.len(), 1);
+        assert!(matches!(comps[0], CostComponent::SacSelf));
+    }
+
+    #[test]
+    fn ir_cost_as_legacy_lowers_sac_self_with_swapped_eq_operands() {
+        // Filter `Source == It` is equivalent to `It == Source`. The shim
+        // accepts both orderings so card authors don't have to remember a
+        // canonical orientation.
+        use crate::ir::action::Who;
+        use crate::ir::expr::Filter;
+        let action = Action::Sacrifice {
+            who: Who::You,
+            filter: Filter(Expr::Eq(
+                Box::new(Expr::Ctx(Ctx::Source)),
+                Box::new(Expr::Ctx(Ctx::It)),
+            )),
+            count: Expr::Num(1),
+            bind_as: None,
+        };
+        let comps = ir_cost_as_legacy(&action).expect("SacSelf shape covered for swapped Eq");
+        assert!(matches!(comps[0], CostComponent::SacSelf));
+    }
+
+    #[test]
+    fn ir_cost_as_legacy_rejects_sac_with_non_self_filter() {
+        // A filter that targets all permanents is NOT SacSelf — strategy must
+        // pick. Phase 4 step 2 only covers the single-self shape; broader
+        // filtered Sacrifice migrates in step 5.
+        use crate::ir::action::Who;
+        use crate::ir::expr::Filter;
+        let action = Action::Sacrifice {
+            who: Who::You,
+            filter: Filter(Expr::Bool(true)),
+            count: Expr::Num(1),
+            bind_as: None,
+        };
+        assert!(ir_cost_as_legacy(&action).is_none());
+    }
+
+    #[test]
+    fn lotus_petal_storage_is_ir_sacrifice() {
+        let cat = crate::card_defs::build_catalog();
+        let petal = cat.get("Lotus Petal").expect("Lotus Petal in catalog");
+        let ability = petal
+            .abilities
+            .iter()
+            .find(|a| matches!(
+                &a.kind,
+                crate::ir::ability::AbilityKind::Activated { cost: CostBody::Ir(_), .. }
+            ))
+            .expect("Lotus Petal's ability stored as CostBody::Ir(_) after Phase 4 step 2");
+        let crate::ir::ability::AbilityKind::Activated { cost, .. } = &ability.kind else {
+            unreachable!()
+        };
+        let CostBody::Ir(action) = cost else { unreachable!() };
+        assert!(
+            matches!(action, Action::Sacrifice { count: Expr::Num(1), bind_as: None, .. }),
+            "Lotus Petal cost is Action::Sacrifice {{ count: 1 }}"
+        );
+        // And the shim round-trips it back to SacSelf for the legacy bridge.
+        let lowered = ir_cost_as_legacy(action).expect("SacSelf-shape lowers");
+        assert!(matches!(lowered[0], CostComponent::SacSelf));
+    }
+
+    #[test]
+    fn wasteland_storage_is_ir_sequence() {
+        // Phase 4 step 3 regression: TapSelf+SacSelf migrated to a Sequence.
+        let cat = crate::card_defs::build_catalog();
+        let waste = cat.get("Wasteland").expect("Wasteland in catalog");
+        let ability = waste
+            .abilities
+            .iter()
+            .find(|a| matches!(
+                &a.kind,
+                crate::ir::ability::AbilityKind::Activated { cost: CostBody::Ir(_), .. }
+            ))
+            .expect("Wasteland's ability is CostBody::Ir(_) after step 3");
+        let crate::ir::ability::AbilityKind::Activated { cost, .. } = &ability.kind else {
+            unreachable!()
+        };
+        let CostBody::Ir(action) = cost else { unreachable!() };
+        let Action::Sequence(steps) = action else {
+            panic!("Wasteland cost is Action::Sequence")
+        };
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(steps[0], Action::Tap { .. }));
+        assert!(matches!(steps[1], Action::Sacrifice { .. }));
+        // Round-trip via the shim — Sequence should lower to TapSelf+SacSelf.
+        let lowered = ir_cost_as_legacy(action).expect("Sequence shape lowers");
+        assert_eq!(lowered.len(), 2);
+        assert!(matches!(lowered[0], CostComponent::TapSelf));
+        assert!(matches!(lowered[1], CostComponent::SacSelf));
+    }
+
+    #[test]
+    fn ir_tap_mana_storage_is_ir() {
+        // Regression guard: an island built via the basic_land factory uses
+        // `ir_tap_mana`, whose cost should now be `CostBody::Ir(_)`. If this
+        // test starts failing because someone reverted the migration, the
+        // bridges will silently still work (cost_body_to_legacy handles both),
+        // but the IR-cost coverage budget shrinks.
+        let cat = crate::card_defs::build_catalog();
+        let island = cat.get("Island").expect("Island in catalog");
+        let ability = island
+            .abilities
+            .iter()
+            .find(|a| matches!(
+                &a.kind,
+                crate::ir::ability::AbilityKind::Activated { cost: CostBody::Ir(_), .. }
+            ))
+            .expect("Island's mana ability stored as CostBody::Ir(_) after Phase 4 step 1");
+        let crate::ir::ability::AbilityKind::Activated { cost, .. } = &ability.kind else {
+            unreachable!()
+        };
+        let CostBody::Ir(action) = cost else {
+            unreachable!("matched Ir(_) above")
+        };
+        assert!(
+            matches!(action, Action::Tap { target: Expr::Ctx(Ctx::Source) }),
+            "Island mana ability cost is Action::Tap {{ target: Source }}"
+        );
+    }
+}

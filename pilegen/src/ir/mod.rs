@@ -21,6 +21,8 @@ pub(crate) mod ce;
 pub(crate) mod context;
 pub(crate) mod event_log;
 pub(crate) mod executor;
+pub(crate) mod cost;
+pub(crate) mod cost_exec;
 
 #[cfg(test)]
 mod tests;

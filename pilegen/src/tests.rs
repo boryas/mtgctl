@@ -3101,7 +3101,7 @@
         let snuff_id = add_hand_card(&mut state, PlayerId::Us, "Snuff Out");
         state.us.life = 4; // exactly 4 — can't pay (would reach 0)
         let alt = &def.alternate_costs()[0];
-        let ok = can_pay_costs(&alt.costs, &state, PlayerId::Us, snuff_id, false, 0);
+        let ok = can_pay_costs(alt.costs.expect_legacy(), &state, PlayerId::Us, snuff_id, false, 0);
         assert!(!ok, "can't pay 4 life when at 4 life (would reach 0)");
     }
 
@@ -3870,7 +3870,7 @@
         let def = catalog_card("Quantum Riddler");
         let alts = def.alternate_costs();
         assert_eq!(alts.len(), 1, "one alternate (warp) cost should be present");
-        assert!(matches!(alts[0].costs.first(), Some(CostComponent::Mana(_))),
+        assert!(matches!(alts[0].costs.expect_legacy().first(), Some(CostComponent::Mana(_))),
             "warp cost should be a mana cost");
 
         let mut state = make_state();
@@ -6085,7 +6085,7 @@
         recompute(&mut state);
 
         let def = state.def_of(spell_id).expect("hand card should have materialized def");
-        assert!(def.alternate_costs().iter().any(|c| c.costs.is_empty()),
+        assert!(def.alternate_costs().iter().any(|c| c.costs.is_empty_legacy()),
             "Omniscience should grant a zero-cost alternate to hand spells");
     }
 
@@ -6976,7 +6976,7 @@
         // a graveyard. Add one mana of any color." — produces mana but has a
         // target, so it is NOT a mana ability and uses the stack (CR 605.3b).
         // This test exercises the classifier directly without porting DRS.
-        use crate::ir::ability::{Ability, AbilityKind, ActivatedCost};
+        use crate::ir::ability::{Ability, AbilityKind, CostBody};
         use crate::ir::action::{Action, ManaSpec, Who as IrWho};
         use crate::ir::context::Ctx;
         use crate::ir::expr::{Expr, ZoneKindSel};
@@ -6984,7 +6984,7 @@
         // Shape of Deathrite's first ability.
         let drs_first = Ability {
             kind: AbilityKind::Activated {
-                cost: ActivatedCost { components: vec![CostComponent::TapSelf] },
+                cost: CostBody::Legacy(vec![CostComponent::TapSelf]),
                 // "From a graveyard" — any graveyard. Modeled as a union of
                 // self-and-opponent for the classifier test; the exact shape
                 // doesn't matter — what matters is that target_spec != None.
@@ -7048,7 +7048,7 @@
         // shape (sans the Exile prefix) but no target. This one IS a mana ability.
         let birds = Ability {
             kind: AbilityKind::Activated {
-                cost: ActivatedCost { components: vec![CostComponent::TapSelf] },
+                cost: CostBody::Legacy(vec![CostComponent::TapSelf]),
                 target_spec: TargetSpec::None,
                 choice_spec: None,
                 body: Action::AddMana {
