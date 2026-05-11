@@ -520,7 +520,14 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 .enumerate()
                 .filter(|(_, o)| match &o.cost {
                     None => true,
-                    Some(c) => crate::can_pay_costs(c, state, who, src, false, 0),
+                    Some(c) => {
+                        let schema_ok = crate::ir::cost_exec::build_schema(c, state, who, src).is_some();
+                        let mana_ok = match crate::ir::ability::first_pay_mana_in_action(c) {
+                            Some(mc) => state.potential_mana(who).can_pay(&mc),
+                            None => true,
+                        };
+                        schema_ok && mana_ok
+                    }
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -535,7 +542,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             };
             // Pay the option's cost (if any) before running its action.
             if let Some(c) = &options[picked].cost {
-                crate::pay_costs(c, state, t, who, src, 0);
+                let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
+                let _ = crate::pay_ir_cost(state, t, who, src, c, &mut no_strat);
             }
             let sub_env = env.clone().with_controller(who);
             execute(&options[picked].action, state, &sub_env);

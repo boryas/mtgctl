@@ -326,6 +326,14 @@ fn action_includes_pay_mana(a: &Action) -> bool {
     }
 }
 
+/// Walk the cost tree for the first `PayMana(mc)` and return `mc`. Used by
+/// `cast_spell` and effects.rs to know the mana cost for affordability /
+/// alt-cost extraction. Exposed for free-function callers; mirrors
+/// `CostBody::first_mana_cost`.
+pub(crate) fn first_pay_mana_in_action(a: &Action) -> Option<crate::ManaCost> {
+    first_pay_mana(a)
+}
+
 fn first_pay_mana(a: &Action) -> Option<crate::ManaCost> {
     use crate::ir::action::Action::*;
     match a {

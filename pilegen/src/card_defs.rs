@@ -1290,7 +1290,7 @@ fn daze() -> CardDef {
         mana_cost: "1U".to_string(),
         modes: single_mode(
             TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
-            |who, _source_id, _x| eff_counter_unless_pays(who, vec![CostComponent::Mana(parse_mana_cost("1"))]),
+            |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("1"))),
         ),
         ..Default::default()
     }), parse_colors("1U", true, false), None);
@@ -1601,7 +1601,7 @@ fn spell_pierce() -> CardDef {
                 zone: ZoneId::Stack,
                 filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Creature))),
             },
-            |who, _source_id, _x| eff_counter_unless_pays(who, vec![CostComponent::Mana(parse_mana_cost("2"))]),
+            |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("2"))),
         ),
         ..Default::default()
     }), parse_colors("U", true, false), None)
@@ -1672,7 +1672,7 @@ fn flusterstorm() -> CardDef {
         options: vec![
             ChoiceOption {
                 label: "Pay {1}",
-                cost: Some(vec![CostComponent::Mana(parse_mana_cost("1"))]),
+                cost: Some(Box::new(Action::PayMana(parse_mana_cost("1")))),
                 action: Box::new(Action::Noop),
             },
             ChoiceOption {
@@ -3137,7 +3137,7 @@ fn hexing_squelcher() -> CardDef {
                         effect: Effect(Arc::new(move |state, t, _| {
                             ward_pay_or_counter(
                                 source_id,
-                                &[CostComponent::Life(2)],
+                                &crate::ir::action::Action::PayLife { who: crate::ir::action::Who::You, amount: crate::ir::expr::Expr::Num(2) },
                                 spell_id,
                                 targeting_caster,
                                 controller,
@@ -3196,7 +3196,7 @@ fn hexing_squelcher() -> CardDef {
                                         effect: Effect(Arc::new(move |state, t, _| {
                                             ward_pay_or_counter(
                                                 source_id,
-                                                &[CostComponent::Life(2)],
+                                                &crate::ir::action::Action::PayLife { who: crate::ir::action::Who::You, amount: crate::ir::expr::Expr::Num(2) },
                                                 spell_id,
                                                 targeting_caster,
                                                 controller,

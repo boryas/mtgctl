@@ -633,7 +633,7 @@ pub(crate) enum ChoiceRequest {
     Mode(usize),
     /// Offered when a Ward trigger resolves: should the targeting player pay the ward cost?
     /// Returns `ChoiceResult::Bool(true)` to pay (spell proceeds), `false` to decline (spell countered).
-    WardPayment { cost: Vec<CostComponent> },
+    WardPayment { cost: crate::ir::action::Action },
     /// "You may put one of these onto the battlefield" (CR 101.4, e.g. Show and Tell).
     /// Returns `ChoiceResult::OptionalObject(Some(id))` to place, or `None` to decline.
     MayPutOnBattlefield { candidates: Vec<ObjId> },

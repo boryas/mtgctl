@@ -54,7 +54,9 @@ pub(crate) enum Who {
 #[derive(Clone)]
 pub(crate) struct ChoiceOption {
     pub label: &'static str,
-    pub cost: Option<Vec<crate::CostComponent>>,
+    /// Cost to pick this option (if present); the executor filters out
+    /// unpayable options before offering the chooser. `None` = free option.
+    pub cost: Option<Box<Action>>,
     pub action: Box<Action>,
 }
 

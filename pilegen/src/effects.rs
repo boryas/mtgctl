@@ -640,19 +640,29 @@ pub(crate) fn eff_each_may_put(caster: PlayerId, filter: CardPredicate) -> Effec
 
 /// Counter target spell unless its controller pays `cost` (CR 700.2).
 /// Reuses `ChoiceRequest::WardPayment` for the pay-or-decline decision.
-pub(crate) fn eff_counter_unless_pays(caster: PlayerId, cost: Vec<CostComponent>) -> Effect {
+pub(crate) fn eff_counter_unless_pays(caster: PlayerId, cost: crate::ir::action::Action) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         if let Some(&spell_id) = targets.first() {
             let spell_controller = state.objects.get(&spell_id)
                 .map(|o| o.controller)
                 .unwrap_or(caster.opp());
-            let can_pay = can_pay_costs(&cost, state, spell_controller, spell_id, false, 0);
+            // Combined feasibility: build_schema covers object/decision
+            // shapes; potential_mana covers PayMana (which emits no
+            // schema decision). Without both, an empty pool would pass
+            // the check and `pay_ir_cost` would silently fail later.
+            let schema_ok = crate::ir::cost_exec::build_schema(&cost, state, spell_controller, spell_id).is_some();
+            let mana_ok = match crate::ir::ability::first_pay_mana_in_action(&cost) {
+                Some(mc) => state.potential_mana(spell_controller).can_pay(&mc),
+                None => true,
+            };
+            let can_pay = schema_ok && mana_ok;
             let will_pay = can_pay && {
                 let f = std::sync::Arc::clone(&state.resolve_choice);
-                matches!(f(spell_id, &ChoiceRequest::WardPayment { cost: cost.to_vec() }, state), ChoiceResult::Bool(true))
+                matches!(f(spell_id, &ChoiceRequest::WardPayment { cost: cost.clone() }, state), ChoiceResult::Bool(true))
             };
             if will_pay {
-                pay_costs(&cost, state, t, spell_controller, spell_id, 0);
+                let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
+                let _ = crate::pay_ir_cost(state, t, spell_controller, spell_id, &cost, &mut no_strat);
                 let name = state.objects.get(&spell_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
                 state.log(t, spell_controller, format!("→ pays tax for {}", name));
             } else {
@@ -684,20 +694,26 @@ pub(crate) fn eff_hand_boost(who: PlayerId, n: usize) -> Effect {
 /// `targeting_spell` is countered. Called from Ward `TriggerContext` effects.
 pub(crate) fn ward_pay_or_counter(
     ward_source: ObjId,
-    cost: &[CostComponent],
+    cost: &crate::ir::action::Action,
     targeting_spell: ObjId,
     targeting_caster: PlayerId,
     ward_holder: PlayerId,
     state: &mut SimState,
     t: u8,
 ) {
-    let can_pay = can_pay_costs(cost, state, targeting_caster, ward_source, false, 0);
+    let schema_ok = crate::ir::cost_exec::build_schema(cost, state, targeting_caster, ward_source).is_some();
+    let mana_ok = match crate::ir::ability::first_pay_mana_in_action(cost) {
+        Some(mc) => state.potential_mana(targeting_caster).can_pay(&mc),
+        None => true,
+    };
+    let can_pay = schema_ok && mana_ok;
     let will_pay = can_pay && {
         let f = std::sync::Arc::clone(&state.resolve_choice);
-        matches!(f(ward_source, &ChoiceRequest::WardPayment { cost: cost.to_vec() }, state), ChoiceResult::Bool(true))
+        matches!(f(ward_source, &ChoiceRequest::WardPayment { cost: cost.clone() }, state), ChoiceResult::Bool(true))
     };
     if will_pay {
-        pay_costs(cost, state, t, targeting_caster, ward_source, 0);
+        let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
+        let _ = crate::pay_ir_cost(state, t, targeting_caster, ward_source, cost, &mut no_strat);
         state.log(t, targeting_caster, "→ pays ward cost".to_string());
     } else {
         state.log(t, ward_holder, "→ ward: countering spell (cost not paid)".to_string());

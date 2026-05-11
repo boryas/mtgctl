@@ -5591,7 +5591,7 @@
         });
         state.stack.push(spell_id);
 
-        eff_counter_unless_pays(PlayerId::Us, vec![CostComponent::Mana(parse_mana_cost("2"))])
+        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("2")))
             .call(&mut state, 1, &[spell_id]);
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
@@ -5638,7 +5638,7 @@
         });
         state.stack.push(spell_id);
 
-        eff_counter_unless_pays(PlayerId::Us, vec![CostComponent::Mana(parse_mana_cost("2"))])
+        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("2")))
             .call(&mut state, 1, &[spell_id]);
 
         assert!(state.stack.contains(&spell_id),
@@ -5672,7 +5672,7 @@
         state.stack.push(spell_id);
 
         // Daze: counter unless pays {1}
-        eff_counter_unless_pays(PlayerId::Us, vec![CostComponent::Mana(parse_mana_cost("1"))])
+        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))
             .call(&mut state, 1, &[spell_id]);
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
@@ -5722,7 +5722,7 @@
             zone: CardZone::Stack,
             is_token: false,
             spell: Some(SpellState {
-                effect: Some(eff_counter_unless_pays(PlayerId::Us, vec![CostComponent::Mana(parse_mana_cost("1"))])),
+                effect: Some(eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))),
                 chosen_targets: vec![spell_a],
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
@@ -5830,7 +5830,7 @@
         state.stack.push(spell_id);
 
         // A storm copy's effect is the same as the original: counter unless pays {1}.
-        eff_counter_unless_pays(PlayerId::Us, vec![CostComponent::Mana(parse_mana_cost("1"))])
+        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))
             .call(&mut state, 1, &[spell_id]);
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
