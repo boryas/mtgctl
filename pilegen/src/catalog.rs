@@ -540,21 +540,40 @@ pub(crate) struct EnchantmentData {
 /// Costs: mana + return an unblocked attacker. Source zone: Hand.
 /// Effect: put this card onto the battlefield tapped and attacking the same target.
 ///
-/// TODO: migrate cost to IR `Sequence([PayMana, MoveByChoice(BF→Hand,
-/// Return, unblocked-attacker)])`. Attempted; the DD test
-/// (`test_decision_log_populated`) goes into an infinite-draw loop —
-/// catalog-build or strategy enumeration of the IR ninjutsu shape
-/// trips something subtle. Diagnose before re-attempting. The new
-/// `Expr::Attacking`/`Unblocked` projections and `cost_exec::pay`
-/// returned_attack_targets capture are in place.
+/// Cost is `Sequence([PayMana(mc), MoveByChoice(BF→Hand, Return,
+/// unblocked-attacker-controlled-by-you, count=1, bind=$ninjutsu_attacker)])`.
+/// `cost_exec::pay` (`capture_returned_attack_targets`) captures the chosen
+/// attacker's pre-move `attack_target` into `CostsPaidCtx`, which the
+/// resolution effect reads to inherit the same combat target.
 pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
+    use crate::ir::action::{Action, MoveVerb, Who};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
     let mc = parse_mana_cost(mana_cost);
+    let unblocked_attacker = Filter(Expr::And(
+        Box::new(Expr::Eq(
+            Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+            Box::new(Expr::Ctx(Ctx::Controller)),
+        )),
+        Box::new(Expr::And(
+            Box::new(Expr::Attacking(Box::new(Expr::Ctx(Ctx::It)))),
+            Box::new(Expr::Unblocked(Box::new(Expr::Ctx(Ctx::It)))),
+        )),
+    ));
     AbilityDef {
         source_zone: SourceZone::Hand,
-        costs: crate::ir::ability::CostBody::Legacy(vec![
-            CostComponent::Mana(mc),
-            CostComponent::ReturnFromBattlefield(cost_pred_unblocked_attacker()),
-        ]),
+        costs: crate::ir::ability::CostBody::Ir(Action::Sequence(vec![
+            Action::PayMana(mc),
+            Action::MoveByChoice {
+                who: Who::You,
+                from: ZoneKindSel::Battlefield,
+                to: ZoneKindSel::Hand,
+                verb: MoveVerb::Return,
+                filter: unblocked_attacker,
+                count: Expr::Num(1),
+                bind_as: Some("$ninjutsu_attacker"),
+            },
+        ])),
         ability_factory: Some(std::sync::Arc::new(|who, source_id| {
             Effect(std::sync::Arc::new(move |state: &mut SimState, t, _targets: &[ObjId]| {
                 let attack_target = state.resolving_costs_ctx.returned_attack_targets

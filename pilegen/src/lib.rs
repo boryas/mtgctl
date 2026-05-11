@@ -2678,6 +2678,28 @@ pub(crate) fn change_zone(
 /// Draw one card for `who` through the event pipeline. Increments draws_this_turn, fires a Draw
 /// event (which handles the state mutation, logging, and trigger dispatch).
 fn sim_draw(state: &mut SimState, who: PlayerId, t: u8, is_natural: bool) {
+    // Sanity guard: `draws_this_turn` is u8 — overflows silently at 256.
+    // 200 draws in a single turn is almost certainly an unbounded-draw bug
+    // (a Draw replacement / trigger that fires more draws than it consumes).
+    // Panic with diagnostics so we get a reproducible crash site instead of
+    // an obscure "attempt to add with overflow" later.
+    let current = state.player(who).draws_this_turn;
+    if current >= 200 {
+        let tail: Vec<String> = state.decision_log.iter().rev().take(30).cloned().collect();
+        let recent_log: Vec<String> = state.log.iter().rev().take(50).cloned().collect();
+        panic!(
+            "sim_draw: draws_this_turn for {:?} reached {} on turn {} (is_natural={}). \
+             Likely unbounded-draw recursion.\n\
+             Last 30 decision_log entries (newest first):\n{}\n\
+             Last 50 main log entries (newest first):\n{}",
+            who,
+            current,
+            t,
+            is_natural,
+            tail.iter().map(|s| format!("  {}", s)).collect::<Vec<_>>().join("\n"),
+            recent_log.iter().map(|s| format!("  {}", s)).collect::<Vec<_>>().join("\n"),
+        );
+    }
     state.player_mut(who).draws_this_turn += 1;
     let draw_index = state.player(who).draws_this_turn;
     let ev = GameEvent::Draw { controller: who, draw_index, is_natural };

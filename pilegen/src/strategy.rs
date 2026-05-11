@@ -1270,7 +1270,18 @@ fn ability_available(
             can_pay_costs(comps, state, who, source_id, source_untapped, 0)
         }
         crate::ir::ability::CostBody::Ir(action) => {
-            crate::ir::cost_exec::build_schema(action, state, who, source_id).is_some()
+            // build_schema only checks object/branch/number decisions; PayMana
+            // emits no decision, so it doesn't verify mana availability. Add
+            // an explicit potential-mana check via the helper on CostBody so
+            // strategy doesn't enumerate activations it can't afford (which
+            // would cause the activation pipeline to silently no-op the cost
+            // and infinite-loop on retry).
+            let schema_ok = crate::ir::cost_exec::build_schema(action, state, who, source_id).is_some();
+            let mana_ok = match ability.costs.first_mana_cost() {
+                Some(mc) => state.potential_mana(who).can_pay(&mc),
+                None => true,
+            };
+            schema_ok && mana_ok
         }
     };
     cost_payable

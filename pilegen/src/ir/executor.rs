@@ -2181,12 +2181,13 @@ fn mana_for_basic_land(kind: BasicLandType) -> crate::ManaAbility {
     let color = kind.mana_color();
     let color_owned = color.to_string();
     crate::ManaAbility {
-        // TODO: migrate to IR `Tap source` like `ir_tap_mana` does. Tried
-        // this and the DD test (`test_decision_log_populated`) goes into an
-        // infinite-draw loop — the IR cost path subtly diverges from the
-        // legacy one on Urborg/Yavimaya-augmented lands somehow. Diagnose
-        // before re-attempting.
-        costs: crate::ir::ability::CostBody::Legacy(vec![crate::CostComponent::TapSelf]),
+        // IR `Tap source` — same shape as `ir_tap_mana` in card_defs. The
+        // infinite-draw loop that previously surfaced when migrating this
+        // was tracked to the strategy's castability check skipping mana
+        // availability for IR costs; fixed in strategy.rs::ability_available.
+        costs: crate::ir::ability::CostBody::Ir(crate::ir::action::Action::Tap {
+            target: crate::ir::expr::Expr::Ctx(crate::ir::context::Ctx::Source),
+        }),
         produces: crate::produces_colors(color),
         produces_count: 1,
         make_effect: std::sync::Arc::new(move |who, _| crate::eff_mana(who, color_owned.clone())),

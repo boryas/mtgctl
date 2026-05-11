@@ -60,8 +60,17 @@ pub(crate) fn pay(
     let mut env = env.clone();
     env.source = Some(source);
     env.controller = Some(who);
+    // Capture pre-move `attack_target` for any return-to-hand chosen objects
+    // — needed by Ninjutsu's effect (which reads
+    // `costs_paid_ctx.returned_attack_targets`). Must capture BEFORE the
+    // execute_mut runs, since the move clears the source's `bf` slot.
+    let returned_attack_targets = capture_returned_attack_targets(cost, &env, state);
     match execute_mut(cost, state, &mut env) {
-        ExecResult::Ok => Ok(build_costs_paid_ctx(schema, &env)),
+        ExecResult::Ok => {
+            let mut ctx = build_costs_paid_ctx(schema, &env);
+            ctx.returned_attack_targets = returned_attack_targets;
+            Ok(ctx)
+        }
         ExecResult::ManaShortage(rem) => Err(PayError::ManaShortage(rem)),
         ExecResult::Unimplemented(s) => panic!("cost_exec::pay: unimplemented action: {}", s),
     }
@@ -75,10 +84,7 @@ pub(crate) fn pay(
 /// Walk the cost action tree for any `MoveByChoice { from: Battlefield,
 /// verb: Return, … }` and capture the chosen object's pre-move
 /// `attack_target` (None for non-attackers). Used by Ninjutsu's resolution
-/// effect to know which player or planeswalker the new ninja inherits as
-/// its attack target. Currently dead — wired in when the ninjutsu IR
-/// migration lands (see catalog.rs `ninjutsu_ability` TODO).
-#[allow(dead_code)]
+/// effect via `state.resolving_costs_ctx.returned_attack_targets`.
 fn capture_returned_attack_targets(
     action: &Action,
     env: &BindEnv,
@@ -89,7 +95,6 @@ fn capture_returned_attack_targets(
     out
 }
 
-#[allow(dead_code)]
 fn walk_returns(a: &Action, env: &BindEnv, state: &SimState, out: &mut Vec<Option<ObjId>>) {
     use crate::ir::action::MoveVerb;
     use crate::ir::expr::{Value, ZoneKindSel};
