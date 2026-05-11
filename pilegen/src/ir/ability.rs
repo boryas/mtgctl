@@ -212,14 +212,16 @@ pub(crate) enum CostBody {
 
 impl Default for CostBody {
     fn default() -> Self {
-        CostBody::Legacy(Vec::new())
+        CostBody::Ir(Action::Noop)
     }
 }
 
 impl CostBody {
-    /// Empty legacy cost — convenience used by `Default for AlternateCost`.
+    /// Empty cost — no payment, no decisions. Used by `Default for
+    /// AlternateCost` (Omniscience's free-cast grant), default `AbilityDef`,
+    /// default `ManaAbility`, etc. Same shape as `Action::Noop`.
     pub(crate) fn empty() -> Self {
-        CostBody::Legacy(Vec::new())
+        CostBody::Ir(Action::Noop)
     }
 
     /// Extract the legacy component vector. Panics on `Ir(_)` — callers on
@@ -233,9 +235,11 @@ impl CostBody {
         }
     }
 
-    /// True if this is a legacy variant carrying no components.
-    pub(crate) fn is_empty_legacy(&self) -> bool {
+    /// True if this cost is structurally empty (no payment, no decisions).
+    /// Variant-agnostic: matches `Legacy(vec![])` or `Ir(Noop)`.
+    pub(crate) fn is_empty(&self) -> bool {
         matches!(self, CostBody::Legacy(v) if v.is_empty())
+            || matches!(self, CostBody::Ir(Action::Noop))
     }
 
     /// True iff this cost requires tapping the source — used by the mana

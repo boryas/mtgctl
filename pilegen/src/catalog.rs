@@ -285,7 +285,7 @@ impl Default for AbilityDef {
     fn default() -> Self {
         AbilityDef {
             source_zone: SourceZone::Battlefield,
-            costs: crate::ir::ability::CostBody::Legacy(Vec::new()),
+            costs: crate::ir::ability::CostBody::default(),
             target_spec: TargetSpec::None,
             choice_spec: None,
             ability_factory: None,
@@ -402,7 +402,7 @@ impl Default for ManaAbility {
     fn default() -> Self {
         Self {
             source_zone: SourceZone::Battlefield,
-            costs: crate::ir::ability::CostBody::Legacy(vec![]),
+            costs: crate::ir::ability::CostBody::default(),
             produces: vec![],
             produces_count: 1,
             make_effect: std::sync::Arc::new(|_, _| Effect(std::sync::Arc::new(|_, _, _| {}))),

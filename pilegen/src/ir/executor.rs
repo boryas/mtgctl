@@ -2167,6 +2167,11 @@ fn mana_for_basic_land(kind: BasicLandType) -> crate::ManaAbility {
     let color = kind.mana_color();
     let color_owned = color.to_string();
     crate::ManaAbility {
+        // TODO: migrate to IR `Tap source` like `ir_tap_mana` does. Tried
+        // this and the DD test (`test_decision_log_populated`) goes into an
+        // infinite-draw loop — the IR cost path subtly diverges from the
+        // legacy one on Urborg/Yavimaya-augmented lands somehow. Diagnose
+        // before re-attempting.
         costs: crate::ir::ability::CostBody::Legacy(vec![crate::CostComponent::TapSelf]),
         produces: crate::produces_colors(color),
         produces_count: 1,

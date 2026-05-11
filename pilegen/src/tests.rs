@@ -6089,7 +6089,7 @@
         recompute(&mut state);
 
         let def = state.def_of(spell_id).expect("hand card should have materialized def");
-        assert!(def.alternate_costs().iter().any(|c| c.costs.is_empty_legacy()),
+        assert!(def.alternate_costs().iter().any(|c| c.costs.is_empty()),
             "Omniscience should grant a zero-cost alternate to hand spells");
     }
 
