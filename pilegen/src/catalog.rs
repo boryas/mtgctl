@@ -253,10 +253,8 @@ pub(crate) struct AbilityDef {
     /// Where the source must be located for this ability to be activatable.
     /// Default: Battlefield. Set to Hand for cycling, channel, ninjutsu, etc.
     pub(crate) source_zone: SourceZone,
-    /// All costs to activate this ability, paid simultaneously. `CostBody`
-    /// holds either a legacy `Vec<CostComponent>` or an IR `Action`.
-    /// Per-card migration converts Legacy → Ir; the legacy mana sub-loop /
-    /// activation pipeline reads Legacy directly via `expect_legacy()`.
+    /// All costs to activate this ability, paid simultaneously. Single-
+    /// variant `CostBody::Ir(Action)` after Phase 6 collapsed the dual world.
     pub(crate) costs: crate::ir::ability::CostBody,
 
     // ── Target (optional) ─────────────────────────────────────────────────────
@@ -302,33 +300,20 @@ impl AbilityDef {
         self.loyalty_delta().is_some()
     }
 
-    /// Returns the loyalty delta if this is a loyalty ability. Variant-agnostic:
-    /// `Legacy` scans for `CostComponent::LoyaltyAdjust(n)`; `Ir` walks the
-    /// action tree for `Action::LoyaltyAdjust(n)`.
+    /// Returns the loyalty delta if this is a loyalty ability — walks the
+    /// IR action tree for `Action::LoyaltyAdjust(n)`.
     pub(crate) fn loyalty_delta(&self) -> Option<i32> {
-        match &self.costs {
-            crate::ir::ability::CostBody::Legacy(comps) => {
-                comps.iter().find_map(|c| {
-                    if let CostComponent::LoyaltyAdjust(n) = c { Some(*n) } else { None }
-                })
-            }
-            crate::ir::ability::CostBody::Ir(a) => action_loyalty_delta(a),
-        }
+        let crate::ir::ability::CostBody::Ir(a) = &self.costs;
+        action_loyalty_delta(a)
     }
 
     /// True if this looks like a fetch land activation (SacSelf + Life cost > 0).
-    /// Variant-agnostic: works for both `Legacy` and `Ir` cost storage by
-    /// reusing the same shape predicates the affordability path uses.
     pub(crate) fn is_fetch_ability(&self) -> bool {
         if !self.costs.requires_sac_self() {
             return false;
         }
-        match &self.costs {
-            crate::ir::ability::CostBody::Legacy(comps) => {
-                comps.iter().any(|c| matches!(c, CostComponent::Life(n) if *n > 0))
-            }
-            crate::ir::ability::CostBody::Ir(a) => action_includes_paylife_positive(a),
-        }
+        let crate::ir::ability::CostBody::Ir(a) = &self.costs;
+        action_includes_paylife_positive(a)
     }
 }
 

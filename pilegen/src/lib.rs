@@ -1382,19 +1382,11 @@ fn execute_mana_activation(
         });
     let Some(ma) = ma else { return; };
 
-    // Pay costs (tap, sac, exile, etc.) via the unified path. Dispatches on
-    // CostBody — IR mana abilities (basic land tap) flow through pay_ir_cost;
-    // legacy ones still use pay_costs.
-    let _ctx = match &ma.costs {
-        crate::ir::ability::CostBody::Legacy(comps) => {
-            pay_costs(comps, state, t, who, act.source_id, 0)
-        }
-        crate::ir::ability::CostBody::Ir(action) => {
-            let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
-            pay_ir_cost(state, t, who, act.source_id, action, &mut no_strategy)
-                .unwrap_or_else(crate::CostsPaidCtx::default)
-        }
-    };
+    // Pay costs via pay_ir_cost.
+    let crate::ir::ability::CostBody::Ir(action) = &ma.costs;
+    let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
+    let _ctx = pay_ir_cost(state, t, who, act.source_id, action, &mut no_strategy)
+        .unwrap_or_else(crate::CostsPaidCtx::default);
 
     // Resolve effect immediately — mana production, logging via ManaProduced event.
     ma.make_effect.clone()(who, act.color_choice).call(state, t, &[]);
@@ -2945,20 +2937,14 @@ fn pay_ability_cost(
         }
     }
 
-    // Dispatch on CostBody. Legacy → pay_costs; Ir → pay_ir_cost. The IR
-    // path uses the strategy's default announcement (no per-ability strategy
-    // ref threaded through here yet — sufficient for cost shapes whose
-    // strategy choice is a no-op like SacSelf with a single candidate).
-    let ctx = match &ability.costs {
-        crate::ir::ability::CostBody::Legacy(comps) => {
-            pay_costs(comps, state, t, who, source_id, 0)
-        }
-        crate::ir::ability::CostBody::Ir(action) => {
-            let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
-            pay_ir_cost(state, t, who, source_id, action, &mut no_strategy)
-                .unwrap_or_else(crate::CostsPaidCtx::default)
-        }
-    };
+    // Pay cost via pay_ir_cost. The default-announcement (no strategy ref)
+    // suffices for cost shapes whose strategy choice is a no-op (like
+    // SacSelf with a single candidate). Mana availability is pre-checked
+    // by `ability_available` and pre-filled by run_mana_loop above.
+    let crate::ir::ability::CostBody::Ir(action) = &ability.costs;
+    let mut no_strategy: Option<&mut dyn crate::strategy::Strategy> = None;
+    let ctx = pay_ir_cost(state, t, who, source_id, action, &mut no_strategy)
+        .unwrap_or_else(crate::CostsPaidCtx::default);
 
     // Log loyalty adjustment.
     if let Some(n) = ability.loyalty_delta() {
@@ -3126,19 +3112,10 @@ fn cast_spell(
                 if c.condition.as_ref().map_or(false, |f| !f(who, state)) {
                     return false;
                 }
-                // Feasibility check: dispatch on CostBody. Legacy uses the
-                // original closure-based predicate; Ir builds a schema and
-                // treats Some(_) as payable (build_schema returns None when
-                // candidates are missing or constants exceed limits).
-                match &c.costs {
-                    crate::ir::ability::CostBody::Legacy(legacy) => {
-                        can_pay_costs(legacy, state, who, card_id, false, 0)
-                    }
-                    crate::ir::ability::CostBody::Ir(action) => {
-                        crate::ir::cost_exec::build_schema(action, state, who, card_id)
-                            .is_some()
-                    }
-                }
+                // Feasibility check: build_schema returns None when
+                // candidates are missing or constants exceed limits.
+                let crate::ir::ability::CostBody::Ir(action) = &c.costs;
+                crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some()
             });
         match found {
             Some((i, c)) => (Some(c.clone()), Some(i)),
@@ -3165,16 +3142,9 @@ fn cast_spell(
 
     // Pay cost and build a log label.
     let (cast_label, mut costs_ctx) = if let Some(ref cost) = alt_cost {
-        match &cost.costs {
-            crate::ir::ability::CostBody::Legacy(legacy) => {
-                let ctx = pay_costs(legacy, state, t, who, card_id, 0);
-                (describe_costs(legacy).join(", "), ctx)
-            }
-            crate::ir::ability::CostBody::Ir(action) => {
-                let ctx = pay_ir_cost(state, t, who, card_id, action, &mut strategy)?;
-                ("ir alt cost".to_string(), ctx)
-            }
-        }
+        let crate::ir::ability::CostBody::Ir(action) = &cost.costs;
+        let ctx = pay_ir_cost(state, t, who, card_id, action, &mut strategy)?;
+        ("ir alt cost".to_string(), ctx)
     } else {
         state.player_mut(who).pool.spend(&cost);
         (def.mana_cost().to_string(), CostsPaidCtx::default())

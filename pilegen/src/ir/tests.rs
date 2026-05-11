@@ -2329,108 +2329,7 @@ mod cost_phase4 {
     use crate::ir::action::Action;
     use crate::ir::context::Ctx;
     use crate::ir::expr::Expr;
-    use crate::playable::{cost_body_to_legacy, ir_cost_as_legacy};
     use crate::CostComponent;
-
-    #[test]
-    fn ir_cost_as_legacy_lowers_tap_source() {
-        let action = Action::Tap { target: Expr::Ctx(Ctx::Source) };
-        let comps = ir_cost_as_legacy(&action).expect("Tap source is covered");
-        assert_eq!(comps.len(), 1);
-        assert!(matches!(comps[0], CostComponent::TapSelf));
-    }
-
-    #[test]
-    fn ir_cost_as_legacy_lowers_sequence_of_tap_source() {
-        let action = Action::Sequence(vec![Action::Tap { target: Expr::Ctx(Ctx::Source) }]);
-        let comps = ir_cost_as_legacy(&action).expect("Sequence of Tap source is covered");
-        assert_eq!(comps.len(), 1);
-        assert!(matches!(comps[0], CostComponent::TapSelf));
-    }
-
-    #[test]
-    fn ir_cost_as_legacy_returns_none_for_unsupported_shape() {
-        // The shim grows over time. Pick a shape that genuinely isn't yet
-        // covered: a Sacrifice with a non-self filter (used in cost trees
-        // for "sacrifice another creature" — not yet authored on any card).
-        let action = Action::Sacrifice {
-            who: crate::ir::action::Who::You,
-            filter: crate::ir::expr::Filter(Expr::Bool(true)),
-            count: Expr::Num(1),
-            bind_as: None,
-        };
-        assert!(ir_cost_as_legacy(&action).is_none());
-    }
-
-    #[test]
-    fn cost_body_to_legacy_passes_through_legacy() {
-        let body = CostBody::Legacy(vec![CostComponent::TapSelf]);
-        let comps = cost_body_to_legacy(&body);
-        assert_eq!(comps.len(), 1);
-        assert!(matches!(comps[0], CostComponent::TapSelf));
-    }
-
-    #[test]
-    fn cost_body_to_legacy_lowers_ir_tap_source() {
-        let body = CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) });
-        let comps = cost_body_to_legacy(&body);
-        assert_eq!(comps.len(), 1);
-        assert!(matches!(comps[0], CostComponent::TapSelf));
-    }
-
-    #[test]
-    fn ir_cost_as_legacy_lowers_sac_self_canonical() {
-        use crate::ir::action::Who;
-        use crate::ir::expr::Filter;
-        let action = Action::Sacrifice {
-            who: Who::You,
-            filter: Filter(Expr::Eq(
-                Box::new(Expr::Ctx(Ctx::It)),
-                Box::new(Expr::Ctx(Ctx::Source)),
-            )),
-            count: Expr::Num(1),
-            bind_as: None,
-        };
-        let comps = ir_cost_as_legacy(&action).expect("SacSelf shape is covered");
-        assert_eq!(comps.len(), 1);
-        assert!(matches!(comps[0], CostComponent::SacSelf));
-    }
-
-    #[test]
-    fn ir_cost_as_legacy_lowers_sac_self_with_swapped_eq_operands() {
-        // Filter `Source == It` is equivalent to `It == Source`. The shim
-        // accepts both orderings so card authors don't have to remember a
-        // canonical orientation.
-        use crate::ir::action::Who;
-        use crate::ir::expr::Filter;
-        let action = Action::Sacrifice {
-            who: Who::You,
-            filter: Filter(Expr::Eq(
-                Box::new(Expr::Ctx(Ctx::Source)),
-                Box::new(Expr::Ctx(Ctx::It)),
-            )),
-            count: Expr::Num(1),
-            bind_as: None,
-        };
-        let comps = ir_cost_as_legacy(&action).expect("SacSelf shape covered for swapped Eq");
-        assert!(matches!(comps[0], CostComponent::SacSelf));
-    }
-
-    #[test]
-    fn ir_cost_as_legacy_rejects_sac_with_non_self_filter() {
-        // A filter that targets all permanents is NOT SacSelf — strategy must
-        // pick. Phase 4 step 2 only covers the single-self shape; broader
-        // filtered Sacrifice migrates in step 5.
-        use crate::ir::action::Who;
-        use crate::ir::expr::Filter;
-        let action = Action::Sacrifice {
-            who: Who::You,
-            filter: Filter(Expr::Bool(true)),
-            count: Expr::Num(1),
-            bind_as: None,
-        };
-        assert!(ir_cost_as_legacy(&action).is_none());
-    }
 
     #[test]
     fn lotus_petal_storage_is_ir_sacrifice() {
@@ -2452,9 +2351,6 @@ mod cost_phase4 {
             matches!(action, Action::Sacrifice { count: Expr::Num(1), bind_as: None, .. }),
             "Lotus Petal cost is Action::Sacrifice {{ count: 1 }}"
         );
-        // And the shim round-trips it back to SacSelf for the legacy bridge.
-        let lowered = ir_cost_as_legacy(action).expect("SacSelf-shape lowers");
-        assert!(matches!(lowered[0], CostComponent::SacSelf));
     }
 
     #[test]
@@ -2681,11 +2577,6 @@ mod cost_phase4 {
         assert_eq!(steps.len(), 2);
         assert!(matches!(steps[0], Action::Tap { .. }));
         assert!(matches!(steps[1], Action::Sacrifice { .. }));
-        // Round-trip via the shim — Sequence should lower to TapSelf+SacSelf.
-        let lowered = ir_cost_as_legacy(action).expect("Sequence shape lowers");
-        assert_eq!(lowered.len(), 2);
-        assert!(matches!(lowered[0], CostComponent::TapSelf));
-        assert!(matches!(lowered[1], CostComponent::SacSelf));
     }
 
     #[test]

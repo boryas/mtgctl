@@ -877,13 +877,84 @@ fn is_ninjutsu_action(state: &SimState, source_id: ObjId, ability_index: usize) 
             // MoveByChoice(BF→Hand, verb=Return) shape — no card emits
             // that yet, so this falls through to false for Ir.
             matches!(ab.source_zone, SourceZone::Hand)
-                && match &ab.costs {
-                    crate::ir::ability::CostBody::Legacy(comps) => {
-                        comps.iter().any(|c| matches!(c, CostComponent::ReturnFromBattlefield(_)))
-                    }
-                    crate::ir::ability::CostBody::Ir(_) => false,
+                && {
+                    let crate::ir::ability::CostBody::Ir(a) = &ab.costs;
+                    action_includes_return_from_bf(a)
                 }
         })
+}
+
+/// True iff `a` (a cost-tree action) is a hand→exile pitch of a card with
+/// the given color. Used by the strategy's probabilistic FoW/FoN gating to
+/// sample whether the player has a blue card to pitch.
+fn action_pitches_color(a: &crate::ir::action::Action, color: Color) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::action::MoveVerb;
+    use crate::ir::expr::ZoneKindSel;
+    let filter_pitches = |f: &crate::ir::expr::Filter| {
+        let crate::ir::expr::Filter(expr) = f;
+        action_filter_includes_color_lit(expr, color)
+    };
+    match a {
+        MoveByChoice {
+            from: ZoneKindSel::Hand,
+            to: ZoneKindSel::Exile,
+            verb: MoveVerb::Exile,
+            filter,
+            ..
+        } if filter_pitches(filter) => true,
+        Sequence(actions) => actions.iter().any(|a| action_pitches_color(a, color)),
+        IfThen { then, else_, .. } => {
+            action_pitches_color(then, color)
+                || else_.as_ref().map_or(false, |e| action_pitches_color(e, color))
+        }
+        MayDo { action, .. } => action_pitches_color(action, color),
+        ForEach { body, .. } => action_pitches_color(body, color),
+        Choose { options, .. } => options.iter().any(|o| action_pitches_color(&o.action, color)),
+        _ => false,
+    }
+}
+
+fn action_filter_includes_color_lit(e: &crate::ir::expr::Expr, color: Color) -> bool {
+    use crate::ir::expr::Expr;
+    match e {
+        Expr::ColorLit(c) if *c == color => true,
+        Expr::And(a, b) | Expr::Or(a, b) => {
+            action_filter_includes_color_lit(a, color) || action_filter_includes_color_lit(b, color)
+        }
+        Expr::Not(inner) => action_filter_includes_color_lit(inner, color),
+        Expr::Eq(a, b) | Expr::Lt(a, b) | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b)
+        | Expr::Contains(a, b) => {
+            action_filter_includes_color_lit(a, color) || action_filter_includes_color_lit(b, color)
+        }
+        _ => false,
+    }
+}
+
+/// True iff `a` (a cost-tree action) includes a `MoveByChoice` returning
+/// permanents from the battlefield to a hand — the canonical ninjutsu cost
+/// shape. Used by the strategy's ninjutsu-action detector.
+fn action_includes_return_from_bf(a: &crate::ir::action::Action) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::action::MoveVerb;
+    use crate::ir::expr::ZoneKindSel;
+    match a {
+        MoveByChoice {
+            from: ZoneKindSel::Battlefield,
+            to: ZoneKindSel::Hand,
+            verb: MoveVerb::Return,
+            ..
+        } => true,
+        Sequence(actions) => actions.iter().any(action_includes_return_from_bf),
+        IfThen { then, else_, .. } => {
+            action_includes_return_from_bf(then)
+                || else_.as_ref().map_or(false, |e| action_includes_return_from_bf(e))
+        }
+        MayDo { action, .. } => action_includes_return_from_bf(action),
+        ForEach { body, .. } => action_includes_return_from_bf(body),
+        Choose { options, .. } => options.iter().any(|o| action_includes_return_from_bf(&o.action)),
+        _ => false,
+    }
 }
 
 /// Ninjutsu action (new protocol): find a ninjutsu ability in legal actions.
@@ -1066,28 +1137,17 @@ fn announce_with_alt_costs(
 ) -> AnnounceChoice {
     let chosen_x = if options.has_x_cost { 3 } else { 0 };
     for (i, alt) in options.available_alt_costs.iter().enumerate() {
-        // Feasibility check on either storage variant.
-        let payable = match &alt.costs {
-            crate::ir::ability::CostBody::Legacy(legacy) => {
-                state.hand_size(who) >= alt.hand_min
-                    && can_pay_costs(legacy, state, who, card_id, false, 0)
-            }
-            crate::ir::ability::CostBody::Ir(action) => {
-                state.hand_size(who) >= alt.hand_min
-                    && crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some()
-            }
-        };
+        let crate::ir::ability::CostBody::Ir(action) = &alt.costs;
+        let payable = state.hand_size(who) >= alt.hand_min
+            && crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some();
         if payable {
-            // Probabilistic gating uses the legacy heuristic (exile-blue
-            // detection). IR-storage alt costs skip the gating today —
-            // when more probabilistic alts migrate, recast this in IR terms.
-            let alt_legacy: &[CostComponent] = match &alt.costs {
-                crate::ir::ability::CostBody::Legacy(v) => v,
-                crate::ir::ability::CostBody::Ir(_) => &[],
-            };
             if probabilistic {
-                // Check exile-blue pitch availability.
-                let has_exile_blue = alt_legacy.iter().any(|c| matches!(c, CostComponent::ExileFromHand(_)));
+                // FoW/FoN pitch heuristic: if the alt cost exiles a blue
+                // card from hand, gate on probability that the player has
+                // a blue card to pitch (build_schema already verified one
+                // exists, but the heuristic is for *probabilistic* sampling
+                // across simulated runs).
+                let has_exile_blue = action_pitches_color(action, Color::Blue);
                 if has_exile_blue {
                     let hand_size = state.hand_size(who);
                     let lib_size = state.library_size(who) + hand_size as usize;
@@ -1265,24 +1325,21 @@ fn ability_available(
     if ability.timing == ActivationTiming::Sorcery && !state.stack.is_empty() {
         return false;
     }
-    let cost_payable = match &ability.costs {
-        crate::ir::ability::CostBody::Legacy(comps) => {
-            can_pay_costs(comps, state, who, source_id, source_untapped, 0)
-        }
-        crate::ir::ability::CostBody::Ir(action) => {
-            // build_schema only checks object/branch/number decisions; PayMana
-            // emits no decision, so it doesn't verify mana availability. Add
-            // an explicit potential-mana check via the helper on CostBody so
-            // strategy doesn't enumerate activations it can't afford (which
-            // would cause the activation pipeline to silently no-op the cost
-            // and infinite-loop on retry).
-            let schema_ok = crate::ir::cost_exec::build_schema(action, state, who, source_id).is_some();
-            let mana_ok = match ability.costs.first_mana_cost() {
-                Some(mc) => state.potential_mana(who).can_pay(&mc),
-                None => true,
-            };
-            schema_ok && mana_ok
-        }
+    let cost_payable = {
+        let crate::ir::ability::CostBody::Ir(action) = &ability.costs;
+        // build_schema only checks object/branch/number decisions; PayMana
+        // emits no decision, so it doesn't verify mana availability. Add
+        // an explicit potential-mana check via the helper on CostBody so
+        // strategy doesn't enumerate activations it can't afford (which
+        // would cause the activation pipeline to silently no-op the cost
+        // and infinite-loop on retry).
+        let schema_ok = crate::ir::cost_exec::build_schema(action, state, who, source_id).is_some();
+        let _ = source_untapped;
+        let mana_ok = match ability.costs.first_mana_cost() {
+            Some(mc) => state.potential_mana(who).can_pay(&mc),
+            None => true,
+        };
+        schema_ok && mana_ok
     };
     cost_payable
         && (ability.target_spec.is_none() || has_valid_target(&ability.target_spec, state, who, source_id))
@@ -1316,14 +1373,8 @@ fn spell_is_affordable(
             if c.condition.as_ref().map_or(false, |f| !f(who, state)) {
                 return false;
             }
-            match &c.costs {
-                crate::ir::ability::CostBody::Legacy(legacy) => {
-                    can_pay_costs(legacy, state, who, card_id, false, 0)
-                }
-                crate::ir::ability::CostBody::Ir(action) => {
-                    crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some()
-                }
-            }
+            let crate::ir::ability::CostBody::Ir(action) = &c.costs;
+            crate::ir::cost_exec::build_schema(action, state, who, card_id).is_some()
         })
     };
     // Use strategy default X=3 for XLife cost affordability check.
@@ -1396,15 +1447,8 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
             if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
             if ma.costs.requires_tap_self() && !untapped { continue; }
             if ma.condition.as_ref().map_or(false, |cond| !cond(*perm_id, state)) { continue; }
-            let payable = match &ma.costs {
-                crate::ir::ability::CostBody::Legacy(comps) => {
-                    can_pay_costs(comps, state, who, *perm_id, *untapped, 0)
-                }
-                crate::ir::ability::CostBody::Ir(action) => {
-                    crate::ir::cost_exec::build_schema(action, state, who, *perm_id).is_some()
-                }
-            };
-            if !payable { continue; }
+            let crate::ir::ability::CostBody::Ir(action) = &ma.costs;
+            if crate::ir::cost_exec::build_schema(action, state, who, *perm_id).is_none() { continue; }
             actions.push(LegalAction::ActivateManaAbility { source_id: *perm_id, ability_index: idx });
         }
     }

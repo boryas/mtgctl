@@ -197,16 +197,13 @@ pub(crate) enum ReplacementBody {
     Prevent,
 }
 
-/// Cost of an activated ability or alternate spell cost.
-///
-/// Phase 0 of the cost-IR migration: storage holds either the legacy
-/// `Vec<CostComponent>` (unmigrated cards) or an `Action` tree (cards
-/// ported to the IR cost grammar). The two paths run independently —
-/// `cast_spell` and `pay_ability_cost` branch on this enum and dispatch
-/// to either the legacy executor (`pay_costs`) or the IR cost executor.
+/// Cost of an activated ability or alternate spell cost. Single-variant
+/// `Ir(Action)` enum after Phase 6 collapsed the dual world. Kept as an
+/// enum (rather than a transparent newtype) so existing match arms
+/// `let CostBody::Ir(action) = &x.costs` continue to read clearly; future
+/// cleanup can make this a struct or alias.
 #[derive(Clone)]
 pub(crate) enum CostBody {
-    Legacy(Vec<crate::CostComponent>),
     Ir(Action),
 }
 
@@ -219,82 +216,45 @@ impl Default for CostBody {
 impl CostBody {
     /// Empty cost — no payment, no decisions. Used by `Default for
     /// AlternateCost` (Omniscience's free-cast grant), default `AbilityDef`,
-    /// default `ManaAbility`, etc. Same shape as `Action::Noop`.
+    /// default `ManaAbility`, etc.
     pub(crate) fn empty() -> Self {
         CostBody::Ir(Action::Noop)
     }
 
-    /// Extract the legacy component vector. Panics on `Ir(_)` — callers on
-    /// the legacy-only path should reach here only for cards still using
-    /// `CostBody::Legacy`. Phase 1 introduces a real IR executor; until
-    /// then no card emits `Ir(_)` so this never fires.
-    pub(crate) fn expect_legacy(&self) -> &Vec<crate::CostComponent> {
-        match self {
-            CostBody::Legacy(v) => v,
-            CostBody::Ir(_) => panic!("CostBody::Ir reached legacy executor — Phase 1 not implemented"),
-        }
-    }
-
     /// True if this cost is structurally empty (no payment, no decisions).
-    /// Variant-agnostic: matches `Legacy(vec![])` or `Ir(Noop)`.
     pub(crate) fn is_empty(&self) -> bool {
-        matches!(self, CostBody::Legacy(v) if v.is_empty())
-            || matches!(self, CostBody::Ir(Action::Noop))
+        matches!(self, CostBody::Ir(Action::Noop))
     }
 
     /// True iff this cost requires tapping the source — used by the mana
     /// affordability predictor (`accumulate_source_potential`) to skip
-    /// already-tapped sources. Variant-agnostic: `Legacy` scans for
-    /// `CostComponent::TapSelf`; `Ir` walks for `Action::Tap { Source }`.
+    /// already-tapped sources.
     pub(crate) fn requires_tap_self(&self) -> bool {
-        match self {
-            CostBody::Legacy(v) => {
-                v.iter().any(|c| matches!(c, crate::CostComponent::TapSelf))
-            }
-            CostBody::Ir(a) => action_includes_tap_source(a),
-        }
+        let CostBody::Ir(a) = self;
+        action_includes_tap_source(a)
     }
 
     /// True iff this cost requires sacrificing the source — used by the
     /// affordability predictor to mark a source as no longer available
-    /// after activation. Variant-agnostic: `Legacy` scans for
-    /// `CostComponent::SacSelf`; `Ir` walks for the `MoveByChoice` shape
-    /// (BF→GY, verb=Sacrifice, filter=It==Source) or the legacy
-    /// `Action::Sacrifice` with the same filter.
+    /// after activation.
     pub(crate) fn requires_sac_self(&self) -> bool {
-        match self {
-            CostBody::Legacy(v) => {
-                v.iter().any(|c| matches!(c, crate::CostComponent::SacSelf))
-            }
-            CostBody::Ir(a) => action_includes_sac_source(a),
-        }
+        let CostBody::Ir(a) = self;
+        action_includes_sac_source(a)
     }
 
     /// True iff payment of this cost involves any mana spend. Used by
-    /// `cast_spell` to set `SpellCast::mana_spent` correctly across both
-    /// storage variants. For `Legacy`, scans for `CostComponent::Mana(_)`;
-    /// for `Ir`, walks the action tree for `Action::PayMana(_)`.
+    /// `cast_spell` to set `SpellCast::mana_spent` correctly.
     pub(crate) fn includes_mana(&self) -> bool {
-        match self {
-            CostBody::Legacy(v) => {
-                v.iter().any(|c| matches!(c, crate::CostComponent::Mana(_)))
-            }
-            CostBody::Ir(a) => action_includes_pay_mana(a),
-        }
+        let CostBody::Ir(a) = self;
+        action_includes_pay_mana(a)
     }
 
     /// Extract the (first) mana cost component, if any. Used by `cast_spell`
     /// when computing the `mana_cost` to drain from the pool for the
-    /// alt-cost path. Returns `None` for IR costs (alt-cost mana costs
-    /// haven't migrated yet — when they do, return the `PayMana(mc)` value).
+    /// alt-cost path.
     pub(crate) fn first_mana_cost(&self) -> Option<crate::ManaCost> {
-        match self {
-            CostBody::Legacy(v) => v.iter().find_map(|c| match c {
-                crate::CostComponent::Mana(mc) => Some(mc.clone()),
-                _ => None,
-            }),
-            CostBody::Ir(a) => first_pay_mana(a),
-        }
+        let CostBody::Ir(a) = self;
+        first_pay_mana(a)
     }
 }
 
