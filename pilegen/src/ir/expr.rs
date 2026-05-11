@@ -33,6 +33,14 @@ pub(crate) enum Expr {
     CountersOn(Box<Expr>, CounterType), // i64
     Name(Box<Expr>),             // String
 
+    // ── battlefield-state projections ────────────────────────────────────
+    /// True iff `obj` is on the battlefield with `attacking = true`.
+    Attacking(Box<Expr>),        // Bool
+    /// True iff `obj` is on the battlefield with `unblocked = true` (an
+    /// attacker that wasn't blocked this combat). Used by ninjutsu's
+    /// "return an unblocked attacker" cost filter.
+    Unblocked(Box<Expr>),        // Bool
+
     // ── player projections ───────────────────────────────────────────────
     Life(Box<Expr>),             // i64
     HandSize(Box<Expr>),         // i64

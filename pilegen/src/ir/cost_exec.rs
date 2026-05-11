@@ -67,6 +67,70 @@ pub(crate) fn pay(
     }
 }
 
+/// Walk the cost action tree for any `MoveByChoice { from: Battlefield,
+/// verb: Return, … }` and capture the chosen object's pre-move
+/// `attack_target` (None for non-attackers). Insertion order matches
+/// payment order. Used by Ninjutsu's resolution effect to know which
+/// player or planeswalker the new ninja inherits as its attack target.
+/// Walk the cost action tree for any `MoveByChoice { from: Battlefield,
+/// verb: Return, … }` and capture the chosen object's pre-move
+/// `attack_target` (None for non-attackers). Used by Ninjutsu's resolution
+/// effect to know which player or planeswalker the new ninja inherits as
+/// its attack target. Currently dead — wired in when the ninjutsu IR
+/// migration lands (see catalog.rs `ninjutsu_ability` TODO).
+#[allow(dead_code)]
+fn capture_returned_attack_targets(
+    action: &Action,
+    env: &BindEnv,
+    state: &SimState,
+) -> Vec<Option<ObjId>> {
+    let mut out = Vec::new();
+    walk_returns(action, env, state, &mut out);
+    out
+}
+
+#[allow(dead_code)]
+fn walk_returns(a: &Action, env: &BindEnv, state: &SimState, out: &mut Vec<Option<ObjId>>) {
+    use crate::ir::action::MoveVerb;
+    use crate::ir::expr::{Value, ZoneKindSel};
+    match a {
+        Action::MoveByChoice {
+            from: ZoneKindSel::Battlefield,
+            verb: MoveVerb::Return,
+            bind_as: Some(name),
+            ..
+        } => {
+            let chosen: Vec<ObjId> = match env.bindings.get(name) {
+                Some(Value::Obj(id)) => vec![*id],
+                Some(Value::ObjSet(ids)) => ids.clone(),
+                _ => Vec::new(),
+            };
+            for id in chosen {
+                out.push(state.permanent_bf(id).and_then(|bf| bf.attack_target));
+            }
+        }
+        Action::Sequence(actions) => {
+            for a in actions {
+                walk_returns(a, env, state, out);
+            }
+        }
+        Action::IfThen { then, else_, .. } => {
+            walk_returns(then, env, state, out);
+            if let Some(e) = else_ {
+                walk_returns(e, env, state, out);
+            }
+        }
+        Action::MayDo { action, .. } => walk_returns(action, env, state, out),
+        Action::ForEach { body, .. } => walk_returns(body, env, state, out),
+        Action::Choose { options, .. } => {
+            for o in options {
+                walk_returns(&o.action, env, state, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Read each `Objects` decision's binding back out of the post-execution
 /// `BindEnv` to populate `CostsPaidCtx.objects_moved`. This is the IR
 /// counterpart to `pay_single_cost`'s `ctx.objects_moved.push(id)` calls.

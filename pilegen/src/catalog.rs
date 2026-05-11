@@ -539,6 +539,14 @@ pub(crate) struct EnchantmentData {
 ///
 /// Costs: mana + return an unblocked attacker. Source zone: Hand.
 /// Effect: put this card onto the battlefield tapped and attacking the same target.
+///
+/// TODO: migrate cost to IR `Sequence([PayMana, MoveByChoice(BF→Hand,
+/// Return, unblocked-attacker)])`. Attempted; the DD test
+/// (`test_decision_log_populated`) goes into an infinite-draw loop —
+/// catalog-build or strategy enumeration of the IR ninjutsu shape
+/// trips something subtle. Diagnose before re-attempting. The new
+/// `Expr::Attacking`/`Unblocked` projections and `cost_exec::pay`
+/// returned_attack_targets capture are in place.
 pub(crate) fn ninjutsu_ability(mana_cost: &str) -> AbilityDef {
     let mc = parse_mana_cost(mana_cost);
     AbilityDef {

@@ -1002,6 +1002,14 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Num(power_of_obj(state, o).unwrap_or(0) as i64)
         }
+        Expr::Attacking(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.attacking))
+        }
+        Expr::Unblocked(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Bool(state.permanent_bf(o).map_or(false, |bf| bf.unblocked))
+        }
         Expr::Toughness(e) => {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Num(toughness_of_obj(state, o).unwrap_or(0) as i64)
@@ -1866,6 +1874,12 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
         }
         Expr::Power(e) | Expr::Toughness(e) => {
             out.push(Axis::PT);
+            walk_reads(e, out);
+        }
+        Expr::Attacking(e) | Expr::Unblocked(e) => {
+            // Battlefield-state projection — no CE axis applies (combat
+            // state isn't a continuous-effect surface). Walk the operand
+            // for reads but emit no axis push.
             walk_reads(e, out);
         }
         // Mana cost is a printed characteristic; layer 1 copy is the only
