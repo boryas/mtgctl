@@ -1516,20 +1516,28 @@ fn fatal_push() -> CardDef {
 
 /// Destroy target non-black creature. Alternate cost: pay 4 life (free spell). CR 701.7.
 fn snuff_out() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
     use crate::ir::expr::Expr;
     let mut c = simple("Snuff Out", CardKind::Instant(SpellData {
         mana_cost: "3BB".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Battlefield,
-                filter: ir_and(ir_type(CardType::Creature), ir_not(ir_color(Color::Black))),
-            },
-            |who, _source_id, _x| eff_destroy_target(who),
-        ),
+        modes: None,
         ..Default::default()
     }), parse_colors("3BB", false, true), None);
+    c.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Battlefield,
+                    filter: ir_and(ir_type(CardType::Creature), ir_not(ir_color(Color::Black))),
+                },
+                body: Action::Destroy { target: Expr::Ctx(Ctx::Var("target")) },
+            }],
+        },
+        text: Some("Destroy target non-black creature."),
+    }];
     // Phase 4 step 5 follow-up: the simplest IR alt cost — just PayLife(4).
     // No object decision, no schema entries; the executor drains life
     // directly and `cost_exec::pay` returns an empty CostsPaidCtx.
@@ -1547,35 +1555,64 @@ fn snuff_out() -> CardDef {
 
 /// Exile target creature. Its controller gains life equal to its power. CR 701.10.
 fn swords_to_plowshares() -> CardDef {
-    simple("Swords to Plowshares", CardKind::Instant(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    let mut card = simple("Swords to Plowshares", CardKind::Instant(SpellData {
         mana_cost: "W".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Battlefield,
-                filter: ir_type(CardType::Creature),
-            },
-            |who, _source_id, _x| eff_exile_target_gain_power(who),
-        ),
+        modes: None,
         ..Default::default()
-    }), parse_colors("W", true, false), None)
+    }), parse_colors("W", true, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Battlefield,
+                    filter: ir_type(CardType::Creature),
+                },
+                // Gain life = power FIRST (read while the creature is still on the
+                // battlefield), then exile it. Same outcome as the closure.
+                body: Action::Sequence(vec![
+                    Action::GainLife {
+                        who: IrWho::Player(Expr::Controller(Box::new(Expr::Ctx(Ctx::Var("target"))))),
+                        amount: Expr::Power(Box::new(Expr::Ctx(Ctx::Var("target")))),
+                    },
+                    Action::Exile { target: Expr::Ctx(Ctx::Var("target")), bind_as: None },
+                ]),
+            }],
+        },
+        text: Some("Exile target creature. Its controller gains life equal to its power."),
+    }];
+    card
 }
 
 /// Destroy target creature or planeswalker.
 /// Additional cost: discard a card OR pay 3 life (CR 118.9d).
 fn bitter_triumph() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::context::Ctx;
     let mut def = simple("Bitter Triumph", CardKind::Instant(SpellData {
         mana_cost: "1B".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Battlefield,
-                filter: ir_or(ir_type(CardType::Creature), ir_type(CardType::Planeswalker)),
-            },
-            |who, _source_id, _x| eff_destroy_target(who),
-        ),
+        modes: None,
         ..Default::default()
     }), parse_colors("1B", false, false), None);
+    def.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Battlefield,
+                    filter: ir_or(ir_type(CardType::Creature), ir_type(CardType::Planeswalker)),
+                },
+                body: crate::ir::action::Action::Destroy {
+                    target: crate::ir::expr::Expr::Ctx(Ctx::Var("target")),
+                },
+            }],
+        },
+        text: Some("Destroy target creature or planeswalker."),
+    }];
     // "As an additional cost to cast this spell, discard a card or pay 3 life."
     // A cost-tree Choose (CR 601.2b): the chooser commits a branch at
     // announcement; the discard branch carries a nested object decision

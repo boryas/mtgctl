@@ -349,24 +349,6 @@ pub(crate) fn eff_exile_all_targets(caster: PlayerId) -> Effect {
     }))
 }
 
-/// Exile target creature; its controller gains life equal to its power.
-pub(crate) fn eff_exile_target_gain_power(caster: PlayerId) -> Effect {
-    Effect(Arc::new(move |state, t, targets| {
-        if let Some(&id) = targets.first() {
-            // Read power before exiling (materialized view).
-            let (controller, power) = state.def_of(id)
-                .and_then(|d| d.as_creature().map(|c| c.power()))
-                .map(|p| (state.objects.get(&id).map_or(caster, |o| o.controller), p))
-                .unwrap_or((caster, 0));
-            change_zone(id, ZoneId::Exile, state, t, caster);
-            if power > 0 {
-                state.gain_life(controller, power);
-                state.log(t, caster, format!("→ {} gains {} life", controller, power));
-            }
-        }
-    }))
-}
-
 /// Bounce the permanent in `targets[0]` to its controller's hand.
 pub(crate) fn eff_bounce_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {

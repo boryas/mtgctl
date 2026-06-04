@@ -5963,8 +5963,16 @@
         recompute(&mut state);
         let opp_life_before = state.opp.life;
 
-        // Swords to Plowshares: exile + controller gains life equal to power.
-        eff_exile_target_gain_power(PlayerId::Us).call(&mut state, 1, &[creature_id]);
+        // Run Swords' actual resolution body (IR) with `target` bound to the creature.
+        let swords = catalog_card("Swords to Plowshares");
+        let body = match &swords.abilities[0].kind {
+            crate::ir::ability::AbilityKind::OnResolve { modes } => modes[0].body.clone(),
+            _ => panic!("Swords should resolve via OnResolve"),
+        };
+        let env = crate::ir::executor::BindEnv::new()
+            .with_controller(PlayerId::Us)
+            .with_var("target", crate::ir::expr::Value::Obj(creature_id));
+        crate::ir::executor::execute(&body, &mut state, &env);
 
         assert_eq!(state.objects[&creature_id].zone, CardZone::Exile { on_adventure: false },
             "creature should be exiled");
