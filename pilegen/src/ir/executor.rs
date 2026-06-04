@@ -1814,6 +1814,11 @@ fn top_n(state: &SimState, env: &BindEnv, zone: &ZoneSel, n: usize) -> Vec<ObjId
 /// (only present for battlefield objects), then falls back to the base catalog
 /// entry — needed for objects in hand/graveyard/exile/stack.
 fn card_def_of<'a>(state: &'a SimState, id: ObjId) -> Option<&'a crate::catalog::CardDef> {
+    // A card-less object (ability on the stack) has no CardDef — don't fall back
+    // to the catalog by its (synthetic) catalog_key.
+    if state.objects.get(&id).map_or(false, |o| o.ability.is_some()) {
+        return None;
+    }
     state.def_of(id).or_else(|| {
         state
             .objects

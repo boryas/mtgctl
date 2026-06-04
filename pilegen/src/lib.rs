@@ -369,6 +369,9 @@ struct GameObject {
     is_token: bool,
     bf: Option<BattlefieldState>,      // Some only when zone == Battlefield
     spell: Option<SpellState>,         // Some only when zone == Stack (spell on stack)
+    /// Some only when this object is an *ability on the stack* (zone == Stack, no card).
+    /// A card-less object: it has no `CardDef`, so `def_of`/`card_def_of` return None for it.
+    ability: Option<AbilityState>,
     /// Inlined post-CE materialized snapshot. Rebuilt by `recompute` after each state-mutating tick.
     materialized: Option<CardDef>,
     /// Zone-independent counters (e.g. void counters from Dauthi Voidwalker).
@@ -385,7 +388,7 @@ impl GameObject {
         GameObject {
             id, catalog_key: catalog_key.into(), controller: owner, owner,
             zone: CardZone::Library, is_token: false, bf: None, spell: None,
-            materialized: None, counters: HashMap::new(), ci_timestamp: 0,
+            ability: None, materialized: None, counters: HashMap::new(), ci_timestamp: 0,
         }
     }
 }
@@ -415,6 +418,29 @@ pub(crate) struct StackAbility {
     pub(crate) counterable: bool,
     /// If `Some`, the engine enumerates choices at resolution and asks strategy to pick one.
     /// The chosen ObjId is prepended to `chosen_targets` before calling `effect`.
+    pub(crate) choice_spec: Option<ChoiceSpec>,
+}
+
+/// State carried by an *ability on the stack* — the card-less stack-object payload,
+/// stored in `GameObject.ability`. Mirrors the resolution-relevant fields of the
+/// legacy `StackAbility` (minus `id`/`owner`, which live on the `GameObject`). An
+/// object with `ability.is_some()` is an ability (CR 113.7 / 608): it has no card,
+/// so `def_of`/`card_def_of` return None for it.
+// Phase A scaffolding: these fields are read once abilities become GameObjects
+// (Phase B migrates the creation sites + resolution off `SimState::abilities`).
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) struct AbilityState {
+    pub(crate) source_name: String,
+    pub(crate) effect: Effect,
+    pub(crate) chosen_targets: Vec<ObjId>,
+    #[allow(dead_code)]
+    pub(crate) costs_paid_ctx: CostsPaidCtx,
+    /// True iff triggered (vs. activated).
+    pub(crate) is_triggered: bool,
+    /// False iff "can't be countered" (CR 608.2b) — checked at resolution.
+    pub(crate) counterable: bool,
+    /// If set, the engine enumerates choices at resolution and asks strategy to pick.
     pub(crate) choice_spec: Option<ChoiceSpec>,
 }
 
@@ -1707,7 +1733,10 @@ impl SimState {
     /// Return the post-CE materialized `CardDef` for the object with the given id, if any.
     /// Returns `None` for naked stack abilities (no catalog entry) or unknown ids.
     pub(crate) fn def_of(&self, id: ObjId) -> Option<&CardDef> {
-        self.objects.get(&id)?.materialized.as_ref()
+        let obj = self.objects.get(&id)?;
+        // An ability on the stack is a card-less object — it has no CardDef.
+        if obj.ability.is_some() { return None; }
+        obj.materialized.as_ref()
     }
 }
 
@@ -3370,7 +3399,7 @@ pub(crate) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         is_token: true,
         spell: None,
         bf: Some(BattlefieldState::new()),
-        materialized: None,
+        ability: None, materialized: None,
         counters: HashMap::new(), ci_timestamp: 0,
     });
     {

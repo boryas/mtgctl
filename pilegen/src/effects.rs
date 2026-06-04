@@ -447,7 +447,7 @@ pub(crate) fn eff_enter_permanent(
                 entered_this_turn: true,
                 ..BattlefieldState::new()
             }),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         fire_event(

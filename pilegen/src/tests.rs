@@ -46,7 +46,7 @@
             is_token: false,
             spell: None,
             bf: Some(bf),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         // Look up the real CardDef (including triggers/replacements) from the catalog; fall back
@@ -81,7 +81,7 @@
             is_token: false,
             spell: None,
             bf: Some(bf),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         let ts = state.next_ci_timestamp();
@@ -110,7 +110,7 @@
             is_token: false,
             spell: None,
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.catalog.entry(name.to_string())
@@ -135,7 +135,7 @@
             is_token: false,
             spell: None,
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         id
@@ -153,7 +153,7 @@
             is_token: false,
             spell: None,
             bf: None,
-            materialized: Some(def.clone()),
+            ability: None, materialized: Some(def.clone()),
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.catalog.entry(def.name.clone()).or_insert_with(|| def.clone());
@@ -171,7 +171,7 @@
             is_token: false,
             spell: None,
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.player_mut(who).library_order.push_back(id);
@@ -2450,7 +2450,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(id);
@@ -2530,7 +2530,7 @@
             is_token: true,
             spell: None,
             bf: Some(BattlefieldState::new()),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         id
@@ -3269,7 +3269,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: Some(def),
+            ability: None, materialized: Some(def),
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
@@ -3392,7 +3392,7 @@
             is_token: false,
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
@@ -3622,7 +3622,7 @@
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
@@ -3659,7 +3659,7 @@
             is_token: false,
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(y_id);
@@ -3680,7 +3680,7 @@
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(fon_id);
@@ -3715,7 +3715,7 @@
                 is_token: false,
                 bf: None,
                 spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
-                materialized: None,
+                ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
         }
@@ -3736,7 +3736,7 @@
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -3756,7 +3756,7 @@
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4007,7 +4007,7 @@
             is_token: false,
             spell: None,
             bf: Some(BattlefieldState::new()),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4022,7 +4022,7 @@
             is_token: false,
             spell: None,
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4063,7 +4063,7 @@
             is_token: false,
             spell: None,
             bf: Some(BattlefieldState::new()),
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4078,7 +4078,7 @@
             is_token: false,
             spell: None,
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4132,7 +4132,7 @@
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
             zone: CardZone::Exile { on_adventure: false },
-            is_token: false, spell: None, bf: None, materialized: None,
+            is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters,
             ci_timestamp: 0,
         });
@@ -4177,7 +4177,7 @@
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
             zone: CardZone::Graveyard,
-            is_token: false, spell: None, bf: None, materialized: None,
+            is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         let hand_id = state.alloc_id();
@@ -4187,7 +4187,7 @@
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
-            is_token: false, spell: None, bf: None, materialized: None,
+            is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         let lib_id = state.alloc_id();
@@ -4197,7 +4197,7 @@
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
             zone: CardZone::Library,
-            is_token: false, spell: None, bf: None, materialized: None,
+            is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.opp.library_order.push_back(lib_id);
@@ -4209,7 +4209,7 @@
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
-            is_token: false, spell: None, bf: None, materialized: None,
+            is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4317,6 +4317,7 @@
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
+            ability: None,
             materialized: def,
             counters: HashMap::new(), ci_timestamp: 0,
         });
@@ -4430,7 +4431,7 @@
             is_token: false,
             bf: None,
             spell: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4542,7 +4543,7 @@
             is_token: false,
             bf: None,
             spell: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4568,7 +4569,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         recompute(&mut state);
@@ -4614,7 +4615,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         recompute(&mut state);
@@ -4645,7 +4646,7 @@
                 controller: PlayerId::Us,
                 zone: CardZone::Library,
                 is_token: false,
-                bf: None, spell: None, materialized: None,
+                bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.us.library_order.push_front(id);
@@ -4664,7 +4665,7 @@
                 controller: PlayerId::Us,
                 zone: CardZone::Hand { known: false },
                 is_token: false,
-                bf: None, spell: None, materialized: None,
+                bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
 
@@ -4697,7 +4698,7 @@
                 controller: PlayerId::Us,
                 zone: CardZone::Library,
                 is_token: false,
-                bf: None, spell: None, materialized: None,
+                bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.us.library_order.push_front(id);
@@ -4715,7 +4716,7 @@
                 controller: PlayerId::Us,
                 zone: CardZone::Hand { known: false },
                 is_token: false,
-                bf: None, spell: None, materialized: None,
+                bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
 
@@ -4747,7 +4748,7 @@
                 controller: PlayerId::Us,
                 zone: CardZone::Hand { known: false },
                 is_token: false,
-                bf: None, spell: None, materialized: None,
+                bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
 
@@ -4793,7 +4794,7 @@
                 controller: PlayerId::Opp,
                 zone: CardZone::Hand { known: false },
                 is_token: false,
-                bf: None, spell: None, materialized: None,
+                bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
 
@@ -4879,7 +4880,7 @@
             controller: PlayerId::Opp,
             zone: CardZone::Hand { known: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4895,7 +4896,7 @@
             controller: PlayerId::Us,
             zone: CardZone::Graveyard,
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4916,7 +4917,7 @@
             controller: PlayerId::Us,
             zone: CardZone::Exile { on_adventure: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         recompute(&mut state);
@@ -4945,7 +4946,7 @@
             controller: PlayerId::Us,
             zone: CardZone::Hand { known: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4973,7 +4974,7 @@
             owner: who, controller: who,
             zone: CardZone::Hand { known: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -4997,7 +4998,7 @@
             owner: PlayerId::Us, controller: PlayerId::Us,
             zone: CardZone::Graveyard,
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -5027,7 +5028,7 @@
             owner: PlayerId::Us, controller: PlayerId::Us,
             zone: CardZone::Graveyard,
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -5060,7 +5061,7 @@
             owner: PlayerId::Us, controller: PlayerId::Us,
             zone: CardZone::Graveyard,
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -5107,7 +5108,7 @@
             is_token: true,
             bf: Some(BattlefieldState::new()),
             spell: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         // Mode 1: sacrifice a token
@@ -5135,7 +5136,7 @@
             controller: PlayerId::Us,
             zone: CardZone::Hand { known: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -5373,7 +5374,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -5415,7 +5416,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -5469,7 +5470,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -5582,7 +5583,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
@@ -5629,7 +5630,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
@@ -5662,7 +5663,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
@@ -5703,7 +5704,7 @@
                     costs_paid_ctx: CostsPaidCtx::default(),
                 }),
                 bf: None,
-                materialized: None,
+                ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.stack.push(id);
@@ -5724,7 +5725,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(fluster_id);
@@ -5782,7 +5783,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(fluster_id);
@@ -5820,7 +5821,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_id);
@@ -5856,7 +5857,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_a);
@@ -5876,7 +5877,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(spell_b);
@@ -6684,7 +6685,7 @@
             controller: who,
             zone: CardZone::Hand { known: false },
             is_token: false,
-            bf: None, spell: None, materialized: None,
+            bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
 
@@ -6876,7 +6877,7 @@
                 id, catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Library, is_token: false,
-                bf: None, spell: None, materialized: None,
+                bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.us.library_order.push_front(id);
@@ -7218,7 +7219,7 @@
                 catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Library,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.us.library_order.push_front(id);
@@ -7237,7 +7238,7 @@
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Stack,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
@@ -7269,7 +7270,7 @@
                 catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Library,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.us.library_order.push_front(id);
@@ -7287,7 +7288,7 @@
                 catalog_key: "Barrowgoyf".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Stack,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Barrowgoyf".to_string()).or_insert_with(|| catalog_card("Barrowgoyf"));
@@ -7848,7 +7849,7 @@
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Stack,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
@@ -7883,7 +7884,7 @@
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Stack,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
@@ -7917,7 +7918,7 @@
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Stack,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
@@ -7952,7 +7953,7 @@
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
                 zone: CardZone::Stack,
-                is_token: false, bf: None, spell: None, materialized: None,
+                is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
             state.catalog.entry("Ponder".to_string()).or_insert_with(|| catalog_card("Ponder"));
@@ -9309,7 +9310,7 @@
                 costs_paid_ctx: CostsPaidCtx::default(),
             }),
             bf: None,
-            materialized: None,
+            ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.catalog.entry(name.to_string())
