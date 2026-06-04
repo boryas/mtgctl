@@ -1371,20 +1371,14 @@ pub(crate) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
             .map(|s| s.choose_targets(state, ObjId(0), &all_targets, &ctx.target_spec))
             .unwrap_or_else(|| pick_targets(&ctx.target_spec, &all_targets, state));
         let ab_id = state.alloc_id();
-        let ab_owner = state.player_id(ctx.controller);
-        let ab = StackAbility {
-            id: ab_id,
-            source_name: ctx.source_name.clone(),
-            owner: ab_owner,
+        state.insert_stack_ability(ab_id, ctx.source_name.clone(), ctx.controller, crate::AbilityState {
             effect: ctx.effect.clone(),
             chosen_targets,
             costs_paid_ctx: CostsPaidCtx::default(),
             is_triggered: true,
             counterable: true,
             choice_spec: None,
-        };
-        state.abilities.insert(ab_id, ab);
-        state.stack.push(ab_id);
+        });
     }
 }
 

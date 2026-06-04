@@ -374,10 +374,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 let copy_id = state.alloc_id();
                 let (_, copy_eff) =
                     crate::catalog::build_spell_effect(&def, controller, copy_id, chosen_x, chosen_mode);
-                state.abilities.insert(copy_id, crate::StackAbility {
-                    id: copy_id,
-                    source_name: name.clone(),
-                    owner: state.player_id(controller),
+                state.insert_stack_ability(copy_id, name.clone(), controller, crate::AbilityState {
                     effect: copy_eff,
                     chosen_targets: targets.clone(),
                     costs_paid_ctx: crate::CostsPaidCtx::default(),
@@ -385,7 +382,6 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                     counterable: true,
                     choice_spec: None,
                 });
-                state.stack.push(copy_id);
                 let tgt_label = targets.first()
                     .map(|&id| state.stack_item_display_name(id).to_string())
                     .unwrap_or_default();

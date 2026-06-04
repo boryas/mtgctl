@@ -394,51 +394,20 @@ impl GameObject {
 }
 
 
-/// An activated or triggered ability on the stack.
-#[derive(Clone)]
-pub(crate) struct StackAbility {
-    /// The stable ObjId for this ability (also the key in `SimState::abilities`).
-    #[allow(dead_code)]
-    pub(crate) id: ObjId,
-    pub(crate) source_name: String,
-    pub(crate) owner: ObjId,         // player id
-    pub(crate) effect: Effect,
-    pub(crate) chosen_targets: Vec<ObjId>,
-    /// Objects moved during cost payment (for effects that depend on what was paid).
-    #[allow(dead_code)]
-    pub(crate) costs_paid_ctx: CostsPaidCtx,
-    /// True iff this is a triggered ability (vs. an activated ability).
-    /// Used by `TargetSpec::AbilityOnStack` with `AbilityType::Triggered` to match triggered abilities.
-    /// All stack items — including activated and triggered abilities — are legal targets
-    /// for counters that specify them; "can't be countered" is a resolution rule, not a
-    /// targeting restriction (CR 608.2b).
-    pub(crate) is_triggered: bool,
-    /// False iff this ability can't be countered (CR 608.2b). Checked at resolution;
-    /// the ability is still a legal target for counter effects.
-    pub(crate) counterable: bool,
-    /// If `Some`, the engine enumerates choices at resolution and asks strategy to pick one.
-    /// The chosen ObjId is prepended to `chosen_targets` before calling `effect`.
-    pub(crate) choice_spec: Option<ChoiceSpec>,
-}
-
 /// State carried by an *ability on the stack* — the card-less stack-object payload,
-/// stored in `GameObject.ability`. Mirrors the resolution-relevant fields of the
-/// legacy `StackAbility` (minus `id`/`owner`, which live on the `GameObject`). An
-/// object with `ability.is_some()` is an ability (CR 113.7 / 608): it has no card,
-/// so `def_of`/`card_def_of` return None for it.
-// Phase A scaffolding: these fields are read once abilities become GameObjects
-// (Phase B migrates the creation sites + resolution off `SimState::abilities`).
+/// stored in `GameObject.ability`. An object with `ability.is_some()` is an ability
+/// (CR 113.7 / 608): it has no card, so `def_of`/`card_def_of` return None for it.
+/// The ability's controller and display name live on the `GameObject` itself
+/// (`owner`/`controller` and `catalog_key`).
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) struct AbilityState {
-    pub(crate) source_name: String,
     pub(crate) effect: Effect,
     pub(crate) chosen_targets: Vec<ObjId>,
-    #[allow(dead_code)]
     pub(crate) costs_paid_ctx: CostsPaidCtx,
-    /// True iff triggered (vs. activated).
+    /// True iff triggered (vs. activated). Used by `TargetSpec::AbilityOnStack`.
     pub(crate) is_triggered: bool,
-    /// False iff "can't be countered" (CR 608.2b) — checked at resolution.
+    /// False iff "can't be countered" (CR 608.2b) — checked at resolution; the
+    /// ability is still a legal target for counter effects.
     pub(crate) counterable: bool,
     /// If set, the engine enumerates choices at resolution and asks strategy to pick.
     pub(crate) choice_spec: Option<ChoiceSpec>,
@@ -1661,9 +1630,8 @@ pub struct SimState {
     /// Spell/ability stack. Items are resolved last-in-first-out. Populated by
     /// handle_priority_round; empty between priority rounds.
     pub(crate) stack: Vec<ObjId>,
-    /// Activated and triggered abilities on the stack, keyed by their allocated ObjId.
-    pub(crate) abilities: HashMap<ObjId, StackAbility>,
-    /// All cards in all zones, keyed by stable ObjId. Added as part of staged object model migration.
+    /// All objects in all zones, keyed by stable ObjId — cards (in any zone) AND
+    /// card-less stack objects (abilities; see `GameObject.ability`).
     objects: HashMap<ObjId, GameObject>,
     /// ID allocator — starts at 1; 0 is reserved as ObjId::UNSET.
     next_id: u64,
@@ -1760,7 +1728,6 @@ impl SimState {
             pending_triggers: Vec::new(),
             resolving_costs_ctx: CostsPaidCtx::default(),
             stack: Vec::new(),
-            abilities: HashMap::new(),
             objects: HashMap::new(),
             next_id: 0,
             graveyard_order: Vec::new(),
@@ -2032,9 +1999,6 @@ impl SimState {
         if let Some(card) = self.objects.get(&id) {
             return self.player_id(card.owner);
         }
-        if let Some(ab) = self.abilities.get(&id) {
-            return ab.owner;
-        }
         ObjId::UNSET
     }
 
@@ -2042,23 +2006,38 @@ impl SimState {
         if let Some(card) = self.objects.get(&id) {
             return card.catalog_key.as_str();
         }
-        if let Some(ab) = self.abilities.get(&id) {
-            return ab.source_name.as_str();
-        }
         ""
     }
 
     /// True iff `id` is a stack item (spell or ability) that a counter could target.
-    /// All spells and all triggered/activated abilities on the stack are legal targets
-    /// for appropriate counters — "can't be countered" is enforced at resolution, not targeting.
+    /// Every object with zone==Stack — spell or ability — is a legal target;
+    /// "can't be countered" is enforced at resolution, not targeting (CR 608.2b).
     pub(crate) fn stack_item_is_counterable(&self, id: ObjId) -> bool {
-        (self.objects.contains_key(&id) && self.objects[&id].zone == CardZone::Stack)
-            || self.abilities.contains_key(&id)
+        self.objects.get(&id).map_or(false, |o| o.zone == CardZone::Stack)
     }
 
-    /// Iterate over all triggered/activated abilities currently on the stack.
-    pub(crate) fn abilities_on_stack(&self) -> impl Iterator<Item = (ObjId, &StackAbility)> {
-        self.abilities.iter().map(|(&id, ab)| (id, ab))
+    /// Iterate over all abilities (card-less stack objects) currently on the stack.
+    pub(crate) fn abilities_on_stack(&self) -> impl Iterator<Item = (ObjId, &GameObject)> {
+        self.objects.iter()
+            .filter(|(_, o)| o.ability.is_some())
+            .map(|(&id, o)| (id, o))
+    }
+
+    /// Place an ability (a card-less stack object) on the stack. `id` must be freshly
+    /// allocated; `source_name` becomes its display name (`catalog_key`). The object's
+    /// `ability` payload marks it card-less (CR 113.7 / 608).
+    pub(crate) fn insert_stack_ability(
+        &mut self,
+        id: ObjId,
+        source_name: impl Into<String>,
+        controller: PlayerId,
+        ability: AbilityState,
+    ) {
+        let mut obj = GameObject::new(id, source_name, controller);
+        obj.zone = CardZone::Stack;
+        obj.ability = Some(ability);
+        self.objects.insert(id, obj);
+        self.stack.push(id);
     }
 }
 
@@ -3055,10 +3034,7 @@ fn cast_spell(
             state.player_mut(who).pool.spend(&rep_mc);
             let (_, copy_eff) = build_spell_effect(&def, who, card_id, chosen_x, chosen_mode);
             let copy_id = state.alloc_id();
-            state.abilities.insert(copy_id, StackAbility {
-                id: copy_id,
-                source_name: format!("{} (replicate)", name),
-                owner: state.player_id(who),
+            state.insert_stack_ability(copy_id, format!("{} (replicate)", name), who, AbilityState {
                 effect: copy_eff,
                 chosen_targets: vec![tgt],
                 costs_paid_ctx: CostsPaidCtx::default(),
@@ -3066,7 +3042,6 @@ fn cast_spell(
                 counterable: true,
                 choice_spec: None,
             });
-            state.stack.push(copy_id);
             rep_count += 1;
             let tgt_name = state.stack_item_display_name(tgt).to_string();
             state.log(t, who, format!("Replicate → {} (targeting {})", name, tgt_name));
@@ -3202,13 +3177,13 @@ macro_rules! check {
 #[cfg(debug_assertions)]
 fn assert_engine_invariants(state: &SimState, label: &str) {
     // ── Stack/zone consistency: no stale stack objects ──────────────────
-    // Every ID in state.stack must exist as a spell object (zone==Stack) or an ability.
+    // Every ID in state.stack must be an object with zone==Stack (a spell, or a
+    // card-less ability object).
     for &id in &state.stack {
         let in_objects = state.objects.get(&id)
             .map_or(false, |o| o.zone == CardZone::Stack);
-        let in_abilities = state.abilities.contains_key(&id);
-        check!(in_objects || in_abilities, state, label,
-            "stack item {id:?} not in objects(Stack) or abilities");
+        check!(in_objects, state, label,
+            "stack item {id:?} not an object with zone==Stack");
     }
     // Every object with zone==Stack must be in state.stack (no stranded spells).
     for (&id, obj) in &state.objects {
@@ -3216,12 +3191,6 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
             check!(state.stack.contains(&id), state, label,
                 "object {:?} has zone==Stack but is not in state.stack", obj.catalog_key);
         }
-    }
-
-    // ── No ID collision between objects and abilities ───────────────────
-    for &id in state.abilities.keys() {
-        check!(!state.objects.contains_key(&id), state, label,
-            "ability ID {id:?} collides with an object ID");
     }
 
     // ── Zone-tracking arrays match actual zones ────────────────────────
@@ -3423,7 +3392,28 @@ fn resolve_top_of_stack(
     strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     let id = state.stack.pop().unwrap();
-    if state.objects.contains_key(&id) {
+    let is_ability = state.objects.get(&id).map_or(false, |o| o.ability.is_some());
+    if is_ability {
+        // Card-less stack object: an activated/triggered ability resolves, then
+        // ceases to exist (CR 608.2m). Remove it up front and take ownership of
+        // its payload so the effect can mutate state freely.
+        let obj = state.objects.remove(&id).expect("ability object on stack");
+        let controller = obj.controller;
+        let ability = obj.ability.expect("ability object carries an ability payload");
+        let mut effect_targets = ability.chosen_targets.clone();
+        if let Some(ref spec) = ability.choice_spec {
+            let choices = enumerate_choices(spec, controller, state);
+            if let Some(strategy) = strategies.get_mut(&controller) {
+                if let Some(chosen) = strategy.choose_for_effect(id, &choices, state) {
+                    effect_targets.insert(0, chosen);
+                }
+            }
+        }
+        // Make costs_paid_ctx visible to the effect closure (e.g. ninjutsu reads attack_target).
+        state.resolving_costs_ctx = ability.costs_paid_ctx;
+        ability.effect.call(state, t, &effect_targets);
+        state.resolving_costs_ctx = CostsPaidCtx::default();
+    } else if state.objects.contains_key(&id) {
         // It's a spell (card on the stack)
         let spell = state.objects[&id].spell.clone().unwrap_or_else(|| SpellState {
             effect: None,
@@ -3489,22 +3479,6 @@ fn resolve_top_of_stack(
             state.log(t, owner, format!("{} resolves", name));
             change_zone(id, ZoneId::Graveyard, state, t, owner);
         }
-    } else if let Some(ability) = state.abilities.remove(&id) {
-        // If the ability has a ChoiceSpec, enumerate valid choices and ask strategy to pick one.
-        let mut effect_targets = ability.chosen_targets.clone();
-        if let Some(ref spec) = ability.choice_spec {
-            let controller = state.who_pid(ability.owner);
-            let choices = enumerate_choices(spec, controller, state);
-            if let Some(strategy) = strategies.get_mut(&controller) {
-                if let Some(chosen) = strategy.choose_for_effect(id, &choices, state) {
-                    effect_targets.insert(0, chosen);
-                }
-            }
-        }
-        // Make costs_paid_ctx visible to the effect closure (e.g. ninjutsu reads attack_target).
-        state.resolving_costs_ctx = ability.costs_paid_ctx;
-        ability.effect.call(state, t, &effect_targets);
-        state.resolving_costs_ctx = CostsPaidCtx::default();
     }
 }
 
@@ -3653,20 +3627,14 @@ fn run_activate_submachine(
 
     // ── Push to stack ───────────────────────────────────────────────────
     let ab_id = state.alloc_id();
-    let ab_owner = state.player_id(who);
-    let ab = StackAbility {
-        id: ab_id,
-        source_name: source_name_for_stack,
-        owner: ab_owner,
+    state.insert_stack_ability(ab_id, source_name_for_stack, who, AbilityState {
         effect: eff,
         chosen_targets,
         costs_paid_ctx: ctx,
         is_triggered: false,
         counterable: true,
         choice_spec: ability.choice_spec.clone(),
-    };
-    state.abilities.insert(ab_id, ab);
-    state.stack.push(ab_id);
+    });
 
     ab_id
 }

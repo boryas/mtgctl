@@ -3279,11 +3279,7 @@
     /// Push a fake triggered ability onto the stack for the opponent.
     fn push_opp_triggered_ability(state: &mut SimState) -> ObjId {
         let ab_id = state.alloc_id();
-        let opp_player_id = state.player_id(PlayerId::Opp);
-        state.abilities.insert(ab_id, StackAbility {
-            id: ab_id,
-            source_name: "Test Trigger".to_string(),
-            owner: opp_player_id,
+        state.insert_stack_ability(ab_id, "Test Trigger", PlayerId::Opp, AbilityState {
             effect: Effect(std::sync::Arc::new(|_, _, _| {})),
             chosen_targets: vec![],
             costs_paid_ctx: CostsPaidCtx::default(),
@@ -3291,7 +3287,6 @@
             counterable: true,
             choice_spec: None,
         });
-        state.stack.push(ab_id);
         ab_id
     }
 
@@ -3338,7 +3333,7 @@
         spell_state.effect.unwrap().call(&mut state, 1, &spell_state.chosen_targets);
 
         assert!(!state.stack.contains(&ab_id), "triggered ability should be removed from stack");
-        assert!(!state.abilities.contains_key(&ab_id), "triggered ability removed from abilities map");
+        assert!(!state.objects.contains_key(&ab_id), "countered ability ceases to exist (removed from objects)");
     }
 
     /// `AbilityOnStack::Triggered` legal_targets enumerates opponent triggered abilities.
@@ -3357,11 +3352,7 @@
     fn test_activated_ability_not_a_trigger_target() {
         let mut state = make_state();
         let ab_id = state.alloc_id();
-        let opp_player_id = state.player_id(PlayerId::Opp);
-        state.abilities.insert(ab_id, StackAbility {
-            id: ab_id,
-            source_name: "Activated Ability".to_string(),
-            owner: opp_player_id,
+        state.insert_stack_ability(ab_id, "Activated Ability", PlayerId::Opp, AbilityState {
             effect: Effect(std::sync::Arc::new(|_, _, _| {})),
             chosen_targets: vec![],
             costs_paid_ctx: CostsPaidCtx::default(),
@@ -3369,7 +3360,6 @@
             counterable: true,
             choice_spec: None,
         });
-        state.stack.push(ab_id);
 
         let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered };
         let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
@@ -3430,7 +3420,7 @@
         spell_state.effect.unwrap().call(&mut state, 1, &spell_state.chosen_targets);
 
         assert!(!state.stack.contains(&ab_id), "triggered ability should be removed from stack");
-        assert!(!state.abilities.contains_key(&ab_id), "triggered ability removed from abilities map");
+        assert!(!state.objects.contains_key(&ab_id), "countered ability ceases to exist (removed from objects)");
     }
 
     /// Stifle's TargetSpec (`AbilityType::Any`) lists both activated and triggered abilities
@@ -3442,11 +3432,7 @@
         // Push one triggered, one activated opponent ability onto the stack.
         let trig_id = push_opp_triggered_ability(&mut state);
         let act_id = state.alloc_id();
-        let opp_player_id = state.player_id(PlayerId::Opp);
-        state.abilities.insert(act_id, StackAbility {
-            id: act_id,
-            source_name: "Activated Ability".to_string(),
-            owner: opp_player_id,
+        state.insert_stack_ability(act_id, "Activated Ability", PlayerId::Opp, AbilityState {
             effect: Effect(std::sync::Arc::new(|_, _, _| {})),
             chosen_targets: vec![],
             costs_paid_ctx: CostsPaidCtx::default(),
@@ -3454,7 +3440,6 @@
             counterable: true,
             choice_spec: None,
         });
-        state.stack.push(act_id);
 
         let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Any };
         let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
@@ -5753,11 +5738,11 @@
         let copies_pushed = state.stack.len() - stack_before;
         assert_eq!(copies_pushed, 2, "storm count 2 → 2 copies");
 
-        // Verify copies are StackAbilities.
+        // Verify copies are ability objects (card-less stack objects).
         for &copy_id in &state.stack[stack_before..] {
-            let ability = state.abilities.get(&copy_id)
-                .expect("copy should be a StackAbility");
-            assert_eq!(ability.source_name, "Flusterstorm");
+            let obj = state.objects.get(&copy_id).expect("copy should be an object on the stack");
+            let ability = obj.ability.as_ref().expect("copy should be an ability object");
+            assert_eq!(obj.catalog_key, "Flusterstorm");
             assert!(ability.counterable, "storm copies should be counterable");
         }
     }

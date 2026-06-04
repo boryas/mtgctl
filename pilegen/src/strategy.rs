@@ -49,7 +49,7 @@ pub(crate) trait Strategy {
     fn take_mulligan(&mut self, state: &SimState, mulligans_taken: u32) -> bool;
 
     /// Called when an ability resolves with a `ChoiceSpec` (CR "choose" ≠ "target").
-    /// `effect_id` is the `ObjId` of the `StackAbility` that is resolving.
+    /// `effect_id` is the `ObjId` of the ability object that is resolving.
     /// Default: pick the first valid option.
     fn choose_for_effect(&mut self, _effect_id: ObjId, choices: &[ObjId], _state: &SimState) -> Option<ObjId> {
         choices.first().copied()

@@ -490,13 +490,17 @@ pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
             }
         }
         // Check counterable property before removing (CR 608.2b).
-        let can_counter = if state.objects.contains_key(&id) {
+        let is_ability = state.objects.get(&id).map_or(false, |o| o.ability.is_some());
+        let can_counter = if is_ability {
+            state.objects.get(&id).and_then(|o| o.ability.as_ref())
+                .map_or(true, |ab| ab.counterable)
+        } else if state.objects.contains_key(&id) {
             state.def_of(id)
                 .or_else(|| state.objects.get(&id)
                     .and_then(|o| state.catalog.get(o.catalog_key.as_str())))
                 .map_or(true, |d| d.counterable())
         } else {
-            state.abilities.get(&id).map_or(true, |ab| ab.counterable)
+            true
         };
         if !can_counter {
             let name = state.stack_item_display_name(id).to_string();
@@ -504,7 +508,12 @@ pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
             return;
         }
         state.stack.remove(pos);
-        if state.objects.contains_key(&id) {
+        if is_ability {
+            // An ability that is countered ceases to exist (CR 608.2m).
+            let name = state.stack_item_display_name(id).to_string();
+            state.log(t, actor, format!("→ {} (ability) countered", name));
+            state.objects.remove(&id);
+        } else if state.objects.contains_key(&id) {
             let name = state.objects[&id].catalog_key.clone();
             state.log(t, actor, format!("→ {} countered", name));
             change_zone(id, ZoneId::Graveyard, state, t, actor);
@@ -513,8 +522,6 @@ pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
             if let Some(card) = state.objects.get_mut(&id) {
                 card.spell = None;
             }
-        } else if let Some(ab) = state.abilities.remove(&id) {
-            state.log(t, actor, format!("→ {} (triggered ability) countered", ab.source_name));
         } else {
             let ghost = state.objects.get(&id)
                 .map(|c| format!("{} (zone={:?})", c.catalog_key, c.zone))
@@ -532,7 +539,7 @@ pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
 /// Counter the spell in `targets[0]` (a stack ObjId). Removes it from `state.stack` and
 /// puts it in the owner's graveyard via `change_zone` (so replacement effects can intercept).
 /// Fizzles if the target is no longer on the stack or if it can't be countered
-/// (`CardDef::counterable == false` / `StackAbility::counterable == false`,
+/// (`CardDef::counterable == false` / `AbilityState::counterable == false`,
 /// CR 608.2b — the spell was a legal target but the effect doesn't apply).
 pub(crate) fn eff_counter_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {

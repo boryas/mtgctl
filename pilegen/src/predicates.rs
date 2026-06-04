@@ -285,8 +285,9 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
             let target_who = who.resolve(controller);
             let target_who_id = state.player_id(target_who);
             state.abilities_on_stack()
-                .filter(|(_, ab)| {
-                    ab.owner == target_who_id && match ability_type {
+                .filter(|(_, obj)| {
+                    let ab = obj.ability.as_ref().expect("ability object carries a payload");
+                    state.player_id(obj.owner) == target_who_id && match ability_type {
                         AbilityType::Any       => true,
                         AbilityType::Triggered => ab.is_triggered,
                         AbilityType::Activated => !ab.is_triggered,
