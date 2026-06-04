@@ -586,9 +586,16 @@
     #[test]
     fn test_effect_doomsday_sets_success() {
         let mut state = make_state();
-        eff_doomsday().call(&mut state, 1, &[]);
-
-        assert!(state.success);
+        let before = state.us.life;
+        let env = crate::ir::executor::BindEnv::new().with_controller(PlayerId::Us);
+        crate::ir::executor::execute(
+            &crate::ir::action::Action::EndSimulation { success: true },
+            &mut state,
+            &env,
+        );
+        assert!(state.success, "Doomsday sentinel sets the terminal success flag");
+        assert_eq!(state.life_before_dd, Some(before), "pre-DD life recorded");
+        assert_eq!(state.us.life, before / 2, "Doomsday life accounting applied");
     }
 
     #[test]
@@ -675,7 +682,7 @@
         let mut state = make_state();
         add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
         let initial_opp_hand = state.hand_size(PlayerId::Opp);
-        eff_discard(PlayerId::Us, Who::Opp, 1, pred_any()).call(&mut state, 1, &[]);
+        eff_discard(PlayerId::Us, Who::Opp, 1, ir_any()).call(&mut state, 1, &[]);
 
         assert_eq!(state.hand_size(PlayerId::Opp), initial_opp_hand - 1, "opp hand decremented");
         assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Counterspell"), "Counterspell in graveyard");
@@ -708,7 +715,7 @@
 
         // Thoughtseize's effect: reveal hand, discard nonland, lose 2 life.
         let effect = eff_reveal_hand(PlayerId::Us, Who::Opp)
-            .then(eff_discard(PlayerId::Us, Who::Opp, 1, pred_not(pred_type_eq(CardType::Land))))
+            .then(eff_discard(PlayerId::Us, Who::Opp, 1, ir_not(ir_type(CardType::Land))))
             .then(eff_life_loss(PlayerId::Us, 2));
         effect.call(&mut state, 1, &[]);
 
@@ -755,7 +762,7 @@
         let _c = add_hand_card(&mut state, PlayerId::Opp, "Island");
 
         // Hymn discards 2 at random — no reveal.
-        eff_discard(PlayerId::Us, Who::Opp, 2, pred_any()).call(&mut state, 1, &[]);
+        eff_discard(PlayerId::Us, Who::Opp, 2, ir_any()).call(&mut state, 1, &[]);
 
         assert_eq!(state.hand_size(PlayerId::Opp), 1);
         let remaining = state.hand_of(PlayerId::Opp).next().unwrap();
@@ -807,12 +814,12 @@
     fn test_effect_destroy_ability_removes_nonbasic_land() {
         let mut state = make_state();
         make_land(&mut state, PlayerId::Opp, "Bayou", false);
-        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_and(ir_type(CardType::Land), ir_not(ir_supertype(Supertype::Basic))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let bayou_def = land_def("Bayou", false);
         let catalog = vec![bayou_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, ObjId(0), &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_and(ir_type(CardType::Land), ir_not(ir_supertype(Supertype::Basic))) }, PlayerId::Us, ObjId(0), &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -825,12 +832,12 @@
     fn test_effect_destroy_ability_ignores_basic_land() {
         let mut state = make_state();
         make_land(&mut state, PlayerId::Opp, "Forest", false);
-        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_and(ir_type(CardType::Land), ir_not(ir_supertype(Supertype::Basic))) }, ability_factory: Some(Arc::new(|who, _| eff_destroy_target(who))), ..Default::default() };
         let forest_def = land_def("Forest", true);
         let catalog = vec![forest_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Land), pred_not(pred_has_supertype(Supertype::Basic)))) }, PlayerId::Us, ObjId(0), &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_and(ir_type(CardType::Land), ir_not(ir_supertype(Supertype::Basic))) }, PlayerId::Us, ObjId(0), &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -1015,11 +1022,11 @@
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Troll");
         let troll_def = creature("Troll", 2, 2);
-        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) }, ability_factory: Some(Arc::new(|who, _| eff_exile_target(who))), ..Default::default() };
+        let ability = AbilityDef { target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Creature) }, ability_factory: Some(Arc::new(|who, _| eff_exile_target(who))), ..Default::default() };
         let catalog = vec![troll_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let targets: Vec<ObjId> = legal_targets(
-            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) }, PlayerId::Us, ObjId(0), &state
+            &TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Creature) }, PlayerId::Us, ObjId(0), &state
         );
         let eff = build_ability_effect(&ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &targets);
@@ -2192,14 +2199,24 @@
         assert_eq!(result[0].source_name, "Tamiyo, Inquisitive Student");
 
         let mut state2 = state;
+        // Tap Tamiyo first: "exile, then return transformed" must yield a FRESH object,
+        // so the tapped status (and any other bf state) is reset on the way back.
+        let tamiyo_id = state2.permanents_of(PlayerId::Us)
+            .find(|p| p.catalog_key == "Tamiyo, Inquisitive Student").map(|p| p.id)
+            .expect("Tamiyo on battlefield before flip");
+        state2.objects.get_mut(&tamiyo_id).unwrap().bf.as_mut().unwrap().tapped = true;
+
         result[0].effect.call(&mut state2, 1, &[]);
-        // The flip mutates in-place: catalog_key stays as front face; active_face flips to 1.
+        // A NEW object: back on the battlefield (same catalog_key — the front-face name
+        // is unchanged) with active_face == 1, fresh starting loyalty, and untapped
+        // (the exile-return reset it) — distinguishing it from Delver's in-place flip.
         let tamiyo_bf = state2.permanents_of(PlayerId::Us)
             .find(|p| p.catalog_key == "Tamiyo, Inquisitive Student")
             .and_then(|p| p.bf.as_ref())
-            .expect("Tamiyo should still be on the battlefield (same object, same catalog_key)");
-        assert_eq!(tamiyo_bf.active_face, 1, "active_face == 1 after flip");
+            .expect("Tamiyo should be back on the battlefield after exile-return");
+        assert_eq!(tamiyo_bf.active_face, 1, "active_face == 1 after transform");
         assert_eq!(tamiyo_bf.loyalty, 2, "starting loyalty of Tamiyo, Seasoned Scholar");
+        assert!(!tamiyo_bf.tapped, "returned as a fresh untapped object (exile-return, not in-place)");
     }
 
     #[test]
@@ -2264,10 +2281,10 @@
         recompute(&mut state);
 
         // Fatal Push targets "creature with mana value 3 or less".
-        let filter = obj_pred_from_card(pred_and(
-            pred_type_eq(CardType::Creature),
-            pred_mana_value_le(3),
-        ));
+        let filter = ir_and(
+            ir_type(CardType::Creature),
+            ir_mv_le(3),
+        );
         let spec = TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
@@ -2840,7 +2857,7 @@
         let dd_id  = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let fow_id = add_library_card(&mut state, PlayerId::Us, "Force of Will");
 
-        let eff = eff_fetch_search(PlayerId::Us, pred_type_eq(CardType::Sorcery), ZoneId::Library);
+        let eff = eff_fetch_search(PlayerId::Us, ir_type(CardType::Sorcery), ZoneId::Library);
         eff.call(&mut state, 1, &[]);
 
         // Both stay in library: Doomsday was "put on top" (Library ≡ top until ordering tracked),
@@ -2896,7 +2913,7 @@
         let lotus_id = add_library_card(&mut state, PlayerId::Us, "Lotus Petal");
         let fow_id   = add_library_card(&mut state, PlayerId::Us, "Force of Will");
 
-        let pred = pred_and(pred_type_eq(CardType::Artifact), pred_and(pred_no_colored_pips(), pred_mana_value_le(1)));
+        let pred = ir_and(ir_type(CardType::Artifact), ir_and(ir_colorless(), ir_mv_le(1)));
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
@@ -2912,7 +2929,7 @@
         state.catalog.insert(white_art_def.name.clone(), white_art_def);
         add_library_card(&mut state, PlayerId::Us, "White Artifact");
 
-        let pred = pred_and(pred_type_eq(CardType::Artifact), pred_and(pred_no_colored_pips(), pred_mana_value_le(1)));
+        let pred = ir_and(ir_type(CardType::Artifact), ir_and(ir_colorless(), ir_mv_le(1)));
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
@@ -2928,7 +2945,7 @@
         state.catalog.insert(sol_ring_def.name.clone(), sol_ring_def);
         add_library_card(&mut state, PlayerId::Us, "Sol Ring");
 
-        let pred = pred_and(pred_type_eq(CardType::Artifact), pred_and(pred_no_colored_pips(), pred_mana_value_le(1)));
+        let pred = ir_and(ir_type(CardType::Artifact), ir_and(ir_colorless(), ir_mv_le(1)));
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
@@ -2947,7 +2964,7 @@
         let green_id = add_library_card(&mut state, PlayerId::Us, "Elvish Reclaimer");
         let red_id   = add_library_card(&mut state, PlayerId::Us, "Ragavan, Nimble Pilferer");
 
-        let pred = pred_and(pred_type_eq(CardType::Creature), pred_has_color(Color::Green));
+        let pred = ir_and(ir_type(CardType::Creature), ir_color(Color::Green));
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
@@ -2958,7 +2975,7 @@
     /// Fetchland regression: island-or-swamp search finds the correct land.
     #[test]
     fn test_fetchland_search_via_ability_factory() {
-        let pred = pred_and(pred_type_eq(CardType::Land), pred_or(pred_land_subtype("island"), pred_land_subtype("swamp")));
+        let pred = ir_and(ir_type(CardType::Land), ir_or(ir_subtype("island"), ir_subtype("swamp")));
         // Cost is incidental to this test (we exercise build_ability_effect /
         // the body, not pay_costs); leave default (Ir(Noop)).
         let delta_ability = AbilityDef { ability_factory: Some(Arc::new(move |who, _| eff_fetch_search(who, pred.clone(), ZoneId::Battlefield))), ..Default::default() };
@@ -3067,38 +3084,6 @@
         assert!(schema.is_none(), "can't pay 4 life when at 4 life (would reach 0)");
     }
 
-    // ── Section 22: Street Wraith cycling ───────────────────────────────────
-
-    /// can_pay_costs returns false for DiscardSelf when the card is not in hand.
-    #[test]
-    fn test_street_wraith_discard_self_not_in_hand() {
-        let mut state = make_state();
-        let wraith_def = catalog_card("Street Wraith");
-        state.catalog.insert(wraith_def.name.clone(), wraith_def);
-        // Place the wraith in the graveyard instead of hand.
-        let wraith_id = add_graveyard_card(&mut state, PlayerId::Us, "Street Wraith");
-        let costs = vec![CostComponent::DiscardSelf, CostComponent::Life(2)];
-        let ok = can_pay_costs(&costs, &state, PlayerId::Us, wraith_id, false, 0);
-        assert!(!ok, "can't cycle from graveyard — DiscardSelf requires card in hand");
-    }
-
-    /// After paying DiscardSelf + Life(2), the wraith is in the graveyard and 2 life is gone.
-    /// DiscardSelf moves the source itself so it is not in objects_moved (only "other" objects are).
-    #[test]
-    fn test_street_wraith_discard_self_pays_correctly() {
-        let mut state = make_state();
-        let wraith_def = catalog_card("Street Wraith");
-        state.catalog.insert(wraith_def.name.clone(), wraith_def);
-        state.us.life = 20;
-        let wraith_id = add_hand_card(&mut state, PlayerId::Us, "Street Wraith");
-        let costs = vec![CostComponent::DiscardSelf, CostComponent::Life(2)];
-        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, wraith_id, 0);
-        // DiscardSelf moves the source itself — not tracked in objects_moved (only "other" objects are).
-        assert!(ctx.objects_moved.is_empty(), "DiscardSelf does not appear in objects_moved");
-        assert!(state.graveyard_of(PlayerId::Us).any(|c| c.id == wraith_id), "wraith in graveyard");
-        assert_eq!(state.us.life, 18, "2 life paid");
-    }
-
     // ── Section 23: Daze bounce cost ────────────────────────────────────────
 
     /// Daze's alternate cost bounces a blue-producing land; the bounced id is recorded.
@@ -3119,34 +3104,6 @@
         assert!(state.hand_of(PlayerId::Us).any(|c| c.id == island_id), "Island returned to hand");
     }
 
-    // ── Section 24: Ninjutsu costs_paid_ctx ─────────────────────────────────
-
-    /// pay_costs for ReturnFromBattlefield captures the attacker's attack_target.
-    #[test]
-    fn test_ninjutsu_return_cost_records_attack_target() {
-        let mut state = make_state();
-        let opp_id = state.opp.id;
-        // Set up an attacking Ragavan with attack_target set to Opp.
-        let ragavan_id = add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
-            attacking: true,
-            unblocked: true,
-            attack_target: Some(opp_id),
-            ..BattlefieldState::new()
-        });
-        // The cost we test is just ReturnFromBattlefield + mana, applied directly.
-        let pred = cost_pred_unblocked_attacker();
-        let costs = vec![CostComponent::ReturnFromBattlefield(pred), CostComponent::Mana(parse_mana_cost("1U"))];
-        state.us.pool.u     = 1;
-        state.us.pool.total = 2;
-
-        let ctx = pay_costs(&costs, &mut state, 1, PlayerId::Us, ObjId::UNSET, 0);
-
-        assert_eq!(ctx.objects_moved, vec![ragavan_id], "returned attacker id in objects_moved");
-        assert_eq!(ctx.returned_attack_targets, vec![Some(opp_id)], "opp player id captured as attack target");
-        // Ragavan should now be in hand.
-        assert!(state.hand_of(PlayerId::Us).any(|c| c.id == ragavan_id), "Ragavan moved to hand");
-    }
-
     // ── Section 25: Additional costs ────────────────────────────────────────
 
     /// A spell with additional_costs requires those costs to be payable.
@@ -3155,7 +3112,12 @@
         let mut state = make_state();
         // Build a cheap spell ({B}) with an additional Life(3) cost.
         let mut def = catalog_card("Dark Ritual");
-        def.additional_costs = vec![CostComponent::Life(3)];
+        def.additional_costs = crate::ir::ability::CostBody::Ir(
+            crate::ir::action::Action::PayLife {
+                who: crate::ir::action::Who::You,
+                amount: crate::ir::expr::Expr::Num(3),
+            },
+        );
         state.catalog.insert(def.name.clone(), def.clone());
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
         state.us.pool.b = 1; state.us.pool.total = 1;
@@ -3170,7 +3132,12 @@
     fn test_additional_cost_paid_on_cast() {
         let mut state = make_state();
         let mut def = catalog_card("Dark Ritual");
-        def.additional_costs = vec![CostComponent::Life(3)];
+        def.additional_costs = crate::ir::ability::CostBody::Ir(
+            crate::ir::action::Action::PayLife {
+                who: crate::ir::action::Who::You,
+                amount: crate::ir::expr::Expr::Num(3),
+            },
+        );
         state.catalog.insert(def.name.clone(), def.clone());
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
         state.us.pool.b = 1; state.us.pool.total = 1;
@@ -3179,6 +3146,43 @@
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "Dark Ritual + Life(3) additional cost is payable at 20 life");
         assert_eq!(state.us.life, initial_life - 3, "additional Life(3) was paid");
+    }
+
+    /// Meltdown ({X}{R}) drains the announced X generic on top of its base {R}
+    /// via the IR `PayManaX` additional cost — end-to-end through `cast_spell`.
+    #[test]
+    fn test_xmana_additional_cost_drains_x_generic_on_cast() {
+        let mut state = make_state();
+        let def = catalog_card("Meltdown");
+        state.catalog.insert(def.name.clone(), def.clone());
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Meltdown");
+        // Base {R} + X=3 generic = 4 mana available.
+        state.us.pool.r = 1;
+        state.us.pool.c = 3;
+        state.us.pool.total = 4;
+
+        // chosen_x = 3 (positional arg).
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 3, 0, None);
+        assert!(result.is_some(), "Meltdown castable with {{R}} + 3 generic at X=3");
+        assert_eq!(state.us.pool.total, 0, "base {{R}} + 3 generic (XMana) fully drained");
+        let ctx = &state.objects[&result.unwrap()].spell.as_ref().unwrap().costs_paid_ctx;
+        assert_eq!(ctx.chosen_x, 3, "announced X recorded for the resolution effect");
+    }
+
+    /// Meltdown is uncastable when the pool can't cover base {R} + the announced X.
+    #[test]
+    fn test_xmana_additional_cost_blocks_cast_when_short() {
+        let mut state = make_state();
+        let def = catalog_card("Meltdown");
+        state.catalog.insert(def.name.clone(), def.clone());
+        let card_id = add_hand_card(&mut state, PlayerId::Us, "Meltdown");
+        // Only {R} + 1 generic = 2 mana, but X=3 needs 3 generic on top of {R}.
+        state.us.pool.r = 1;
+        state.us.pool.c = 1;
+        state.us.pool.total = 2;
+
+        let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 3, 0, None);
+        assert!(result.is_none(), "Meltdown blocked: not enough mana for X=3 additional cost");
     }
 
     // ── Section 26: Bitter Triumph (CostOr additional cost) ──────────────────
@@ -4482,8 +4486,8 @@
 
         // Seed materialized on the hand card so def_of works.
         // (recompute populates materialized for objects in all zones.)
-        let pred = obj_pred_from_card(pred_has_color(Color::Blue));
-        assert!(pred(ritual_id, &state),
+        let env = crate::ir::executor::BindEnv::new().with_controller(PlayerId::Us);
+        assert!(crate::ir::executor::matches(&ir_color(Color::Blue), ritual_id, &state, &env),
             "After Painter names Blue, Dark Ritual should satisfy FoW pitch predicate");
     }
 
@@ -5078,12 +5082,7 @@
         let creature_def = creature("Threat", 2, 2);
         let creature_id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, BattlefieldState::new());
         // Default mode = 0 (nontoken creature)
-        let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
-            state.objects.get(&id).map_or(false, |o| {
-                !o.is_token && state.catalog.get(o.catalog_key.as_str())
-                    .map_or(false, |d| d.is_creature())
-            })
-        });
+        let filter = ir_and(ir_not(ir_token()), ir_type(CardType::Creature));
         eff_sacrifice(PlayerId::Us, Who::Opp, filter).call(&mut state, 1, &[]);
         assert_eq!(state.objects[&creature_id].zone, CardZone::Graveyard,
             "nontoken creature should be sacrificed");
@@ -5112,10 +5111,7 @@
             counters: HashMap::new(), ci_timestamp: 0,
         });
         // Mode 1: sacrifice a token
-        let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
-            state.objects.get(&id).map_or(false, |o| o.is_token)
-        });
-        eff_sacrifice(PlayerId::Us, Who::Opp, filter).call(&mut state, 1, &[]);
+        eff_sacrifice(PlayerId::Us, Who::Opp, ir_token()).call(&mut state, 1, &[]);
         assert_eq!(state.objects[&token_id].zone, CardZone::Graveyard,
             "token should be sacrificed by mode 1");
         assert_eq!(state.objects[&nontoken_id].zone, CardZone::Battlefield,
@@ -5539,9 +5535,9 @@
 
         eff_each_may_put(
             PlayerId::Us,
-            pred_or(
-                pred_or(pred_type_eq(CardType::Artifact), pred_type_eq(CardType::Creature)),
-                pred_or(pred_type_eq(CardType::Enchantment), pred_type_eq(CardType::Land)),
+            ir_or(
+                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
+                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
             ),
         ).call(&mut state, 1, &[]);
 
@@ -5556,9 +5552,9 @@
         // No cards in hand — should not panic.
         eff_each_may_put(
             PlayerId::Us,
-            pred_or(
-                pred_or(pred_type_eq(CardType::Artifact), pred_type_eq(CardType::Creature)),
-                pred_or(pred_type_eq(CardType::Enchantment), pred_type_eq(CardType::Land)),
+            ir_or(
+                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
+                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
             ),
         ).call(&mut state, 1, &[]);
         // No assertions needed — just verifying no panic.
@@ -6564,7 +6560,7 @@
         let spec = TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+            filter: ir_type(CardType::Creature),
         };
         let targets = legal_targets(&spec, PlayerId::Opp, bolt_id, &state);
 
@@ -6588,7 +6584,7 @@
         let spec = TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+            filter: ir_type(CardType::Creature),
         };
         let targets = legal_targets(&spec, PlayerId::Opp, spell_id, &state);
 
@@ -6613,7 +6609,7 @@
         let spec = TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+            filter: ir_type(CardType::Creature),
         };
         let targets = legal_targets(&spec, PlayerId::Opp, perm_id, &state);
 
@@ -6954,12 +6950,12 @@
                     TargetSpec::ObjectInZone {
                         controller: Who::Actor,
                         zone: ZoneId::Graveyard,
-                        filter: obj_pred_from_card(pred_type_eq(CardType::Land)),
+                        filter: ir_type(CardType::Land),
                     },
                     TargetSpec::ObjectInZone {
                         controller: Who::Opp,
                         zone: ZoneId::Graveyard,
-                        filter: obj_pred_from_card(pred_type_eq(CardType::Land)),
+                        filter: ir_type(CardType::Land),
                     },
                 ]),
                 choice_spec: None,
@@ -7125,7 +7121,7 @@
         // 2 artifacts — metalcraft not met
         let ma = &opal_def.mana_abilities()[0];
         let cond = ma.condition.as_ref().expect("Mox Opal should have a condition");
-        assert!(!cond(opal_id, &state), "metalcraft should not be active with only 2 artifacts");
+        assert!(!obj_matches(cond, opal_id, &state), "metalcraft should not be active with only 2 artifacts");
     }
 
     /// With 3+ artifacts, metalcraft is active and the condition should pass.
@@ -7143,7 +7139,7 @@
         // 3 artifacts — metalcraft active
         let ma = &opal_def.mana_abilities()[0];
         let cond = ma.condition.as_ref().expect("Mox Opal should have a condition");
-        assert!(cond(opal_id, &state), "metalcraft should be active with 3 artifacts");
+        assert!(obj_matches(cond, opal_id, &state), "metalcraft should be active with 3 artifacts");
     }
 
     // ── §55: Karn, the Great Creator ──────────────────────────────────────────
@@ -7449,7 +7445,9 @@
         state.catalog = test_catalog();
 
         let def = catalog_card("Delver of Secrets");
-        let delver_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
+        // Tapped, to prove the in-place transform keeps the SAME object/bf instance.
+        let delver_id = add_perm_with_def(&mut state, PlayerId::Us, &def,
+            BattlefieldState { tapped: true, ..BattlefieldState::new() });
         // Put an instant on top of library.
         add_library_card(&mut state, PlayerId::Us, "Brainstorm");
         recompute(&mut state);
@@ -7463,8 +7461,11 @@
         let ctx = state.pending_triggers.remove(0);
         ctx.effect.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&delver_id].bf.as_ref().unwrap().active_face, 1,
-            "Delver should be on back face after transform");
+        let delver_bf = state.objects[&delver_id].bf.as_ref().unwrap();
+        assert_eq!(delver_bf.active_face, 1, "Delver should be on back face after transform");
+        // "Transform this creature" is in-place — same object/bf instance, so transient
+        // state (tapped) is preserved (contrast Tamiyo's exile-return new object).
+        assert!(delver_bf.tapped, "in-place transform preserves bf state (same object)");
 
         // Recompute should give 3/2 flying.
         recompute(&mut state);
@@ -8395,51 +8396,62 @@
     }
 
     #[test]
-    fn test_maybe_shuffle_shuffles_when_top_is_bad() {
+    fn test_shuffle_action_preserves_library() {
+        use crate::ir::action::{Action, Who};
+        use crate::ir::executor::{execute, BindEnv};
         let mut state = make_state();
         state.catalog = test_catalog();
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
         state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);  // 0.05 — below threshold
-        state.us.library_order.push_back(dd);
-        state.us.library_order.push_back(bs);
+        for id in [oracle, dd, bs] { state.us.library_order.push_back(id); }
+        let before: std::collections::HashSet<ObjId> =
+            state.us.library_order.iter().copied().collect();
 
-        wire_eval(&mut state, vec![("Thassa's Oracle", 0.05), ("Doomsday", 0.9), ("Brainstorm", 0.35)]);
+        execute(&Action::Shuffle { who: Who::You }, &mut state,
+                &BindEnv::new().with_controller(PlayerId::Us));
 
-        // Record original order.
-        let before: Vec<ObjId> = state.us.library_order.iter().copied().collect();
-
-        eff_maybe_shuffle(PlayerId::Us).call(&mut state, 0, &[]);
-
-        // Library was shuffled — same cards, potentially different order.
-        let after: Vec<ObjId> = state.us.library_order.iter().copied().collect();
-        assert_eq!(after.len(), before.len(), "shuffle preserves card count");
-        // All original cards still present.
-        for id in &before {
-            assert!(after.contains(id), "card {:?} missing after shuffle", id);
-        }
+        // The shuffle carries no agency: same multiset, same count, possibly new order.
+        let after: std::collections::HashSet<ObjId> =
+            state.us.library_order.iter().copied().collect();
+        assert_eq!(after.len(), 3, "shuffle preserves card count");
+        assert_eq!(before, after, "shuffle preserves the library multiset");
     }
 
     #[test]
-    fn test_maybe_shuffle_does_not_shuffle_when_top_is_good() {
+    fn test_may_shuffle_gated_by_strategy() {
+        use crate::ir::action::{Action, Who};
+        // "You may shuffle" decomposes to MayDo { Shuffle }: the shuffle is the
+        // effect, the "may" is a y/n strategy decision — no evaluator heuristic.
+        let may_shuffle = || Action::MayDo {
+            who: Who::You,
+            action: Box::new(Action::Shuffle { who: Who::You }),
+        };
+
         let mut state = make_state();
         state.catalog = test_catalog();
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         state.us.library_order.clear();
-        state.us.library_order.push_back(dd);     // 0.9 — above threshold
+        state.us.library_order.push_back(dd);
         state.us.library_order.push_back(oracle);
 
-        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05)]);
-
-        eff_maybe_shuffle(PlayerId::Us).call(&mut state, 0, &[]);
-
-        // No shuffle — order preserved exactly.
+        // Default strategy declines (Mode 0) → order preserved exactly.
+        eff_ir(PlayerId::Us, may_shuffle()).call(&mut state, 0, &[]);
         let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
-        assert_eq!(lib[0], dd);
-        assert_eq!(lib[1], oracle);
+        assert_eq!(lib, vec![dd, oracle], "default strategy declines the may-shuffle");
+
+        // Opt-in strategy (Mode 1) → shuffles; multiset preserved.
+        state.resolve_choice = std::sync::Arc::new(|_, req, _| match req {
+            crate::ChoiceRequest::Mode(_) => crate::ChoiceResult::Mode(1),
+            _ => crate::ChoiceResult::Mode(0),
+        });
+        eff_ir(PlayerId::Us, may_shuffle()).call(&mut state, 0, &[]);
+        let after: std::collections::HashSet<ObjId> =
+            state.us.library_order.iter().copied().collect();
+        assert_eq!(after.len(), 2, "shuffle preserves count");
+        assert!(after.contains(&dd) && after.contains(&oracle), "shuffle preserves cards");
     }
 
     #[test]
@@ -8498,51 +8510,56 @@
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Brainstorm", 0.35), ("Thassa's Oracle", 0.05)]);
 
-        // Ponder = order(3), maybe_shuffle, draw(1)
+        // Ponder = order(3), may-shuffle, draw(1). Default strategy declines the
+        // shuffle, so order puts DD on top and we draw it.
         let effect = eff_order(PlayerId::Us, 3)
-            .then(eff_maybe_shuffle(PlayerId::Us))
+            .then(eff_ir(PlayerId::Us, ponder_may_shuffle()))
             .then(eff_draw(PlayerId::Us, 1));
         effect.call(&mut state, 0, &[]);
 
         // After order: DD(0.9) on top, BS(0.35), Oracle(0.05)
-        // maybe_shuffle: top is DD(0.9) >= 0.3 → no shuffle
+        // may-shuffle: default strategy declines → no shuffle
         // draw: DD drawn into hand
         let hand: Vec<String> = state.hand_of(PlayerId::Us)
             .map(|c| c.catalog_key.clone()).collect();
         assert!(hand.contains(&"Doomsday".to_string()), "should draw DD (best card)");
     }
 
+    /// Ponder's "you may shuffle" step as an IR action (mirrors `ponder()`).
+    fn ponder_may_shuffle() -> crate::ir::action::Action {
+        use crate::ir::action::{Action, Who};
+        Action::MayDo { who: Who::You, action: Box::new(Action::Shuffle { who: Who::You }) }
+    }
+
     #[test]
-    fn test_ponder_shuffles_when_all_top3_are_bad() {
+    fn test_ponder_shuffles_when_strategy_opts_in() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        // Library: Oracle, Edge, Unearth — all score below 0.3, plus a DD deep
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let edge = add_library_card(&mut state, PlayerId::Us, "Edge of Autumn");
         let unearth = add_library_card(&mut state, PlayerId::Us, "Unearth");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);
-        state.us.library_order.push_back(edge);
-        state.us.library_order.push_back(unearth);
-        state.us.library_order.push_back(dd);
+        for id in [oracle, edge, unearth, dd] { state.us.library_order.push_back(id); }
 
         wire_eval(&mut state, vec![
             ("Thassa's Oracle", 0.05), ("Edge of Autumn", 0.1),
             ("Unearth", 0.05), ("Doomsday", 0.9),
         ]);
+        // Strategy opts into the may-shuffle (Mode 1).
+        state.resolve_choice = std::sync::Arc::new(|_, req, _| match req {
+            crate::ChoiceRequest::Mode(_) => crate::ChoiceResult::Mode(1),
+            _ => crate::ChoiceResult::Mode(0),
+        });
 
-        // After order(3): best of {Oracle:0.05, Edge:0.1, Unearth:0.05} → Edge on top (0.1)
-        // maybe_shuffle: top is Edge(0.1) < 0.3 → shuffles!
         let effect = eff_order(PlayerId::Us, 3)
-            .then(eff_maybe_shuffle(PlayerId::Us))
+            .then(eff_ir(PlayerId::Us, ponder_may_shuffle()))
             .then(eff_draw(PlayerId::Us, 1));
         effect.call(&mut state, 0, &[]);
 
-        // Should have drawn 1 card (from shuffled library)
+        // Drew 1 card from the (shuffled) library; 3 remain.
         let hand_count = state.hand_of(PlayerId::Us).count();
         assert_eq!(hand_count, 1, "should draw 1 card after ponder");
-        // Library should have 3 cards remaining
         assert_eq!(state.us.library_order.len(), 3, "3 cards left in library");
     }
 

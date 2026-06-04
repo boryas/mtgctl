@@ -70,4 +70,8 @@ pub(crate) enum GameCtx {
     DayNight,
     CityBlessing,
     RingTempted,
+    /// The spell currently being cast (`state.casting_spell`), as an object —
+    /// `ObjId::UNSET` when nothing is being cast. Used by cast-gated mana
+    /// abilities (Cavern of Souls: colored mana only for a creature spell).
+    CastingSpell,
 }

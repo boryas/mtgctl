@@ -142,19 +142,34 @@ fn walk_returns(a: &Action, env: &BindEnv, state: &SimState, out: &mut Vec<Optio
 /// Order of insertion matches schema-decision order, which matches the
 /// order in which the cost tree consumed them.
 fn build_costs_paid_ctx(schema: &CostSchema, env: &BindEnv) -> crate::CostsPaidCtx {
-    use crate::ir::expr::Value;
     let mut ctx = crate::CostsPaidCtx::default();
+    collect_objects_moved(schema, env, &mut ctx.objects_moved);
+    ctx
+}
+
+/// Walk the schema collecting every `Objects` decision's bound ids, recursing
+/// through the chosen branch of any `Branch` decision (so a discard/sacrifice
+/// inside a Choose still records its moved object).
+fn collect_objects_moved(schema: &CostSchema, env: &BindEnv, out: &mut Vec<ObjId>) {
+    use crate::ir::cost::DecisionKind;
+    use crate::ir::expr::Value;
     for d in &schema.decisions {
-        if !matches!(d.kind, crate::ir::cost::DecisionKind::Objects { .. }) {
-            continue;
-        }
-        match env.bindings.get(d.binding) {
-            Some(Value::Obj(id)) => ctx.objects_moved.push(*id),
-            Some(Value::ObjSet(ids)) => ctx.objects_moved.extend(ids.iter().copied()),
-            _ => {}
+        match &d.kind {
+            DecisionKind::Objects { .. } => match env.bindings.get(d.binding) {
+                Some(Value::Obj(id)) => out.push(*id),
+                Some(Value::ObjSet(ids)) => out.extend(ids.iter().copied()),
+                _ => {}
+            },
+            DecisionKind::Branch { branches, .. } => {
+                if let Some(Value::Num(n)) = env.bindings.get(d.binding) {
+                    if let Some(sub) = branches.get(*n as usize) {
+                        collect_objects_moved(sub, env, out);
+                    }
+                }
+            }
+            DecisionKind::Number { .. } => {}
         }
     }
-    ctx
 }
 
 // ── internals ───────────────────────────────────────────────────────────────
@@ -240,6 +255,28 @@ fn walk(
 
         Action::PayMana(_) => {
             // No announcement decision — pool is consulted at execution time.
+            Some(())
+        }
+
+        Action::PayManaX { generic } => {
+            // Constant generic = no decision (pool checked at exec like PayMana).
+            if expr_const_u32(generic).is_some() {
+                return Some(());
+            }
+            // Variable-X mana (e.g. `Expr::Ctx(Ctx::Var("$x"))`): emit an XMana
+            // Number decision under the variable's own name so the executor's
+            // `eval_expr` lookup finds the strategy's binding. The bound is the
+            // *potential* mana (CR 601.2g — what could be produced), distinct
+            // from the floating pool spent at payment time.
+            let max = state.potential_mana(who).total.max(0) as u32;
+            let binding = match generic {
+                Expr::Ctx(Ctx::Var(name)) => *name,
+                _ => idx.next_binding("xmana"),
+            };
+            schema.push(Decision {
+                binding,
+                kind: DecisionKind::Number { kind: NumberKind::XMana, max },
+            });
             Some(())
         }
 
@@ -357,30 +394,37 @@ fn walk(
             }
         }
 
-        Action::Choose { who: _, prompt: _, options } => {
-            // Build sub-schemas for each option; only options whose sub-schema
-            // exists (i.e. is payable) are listed in `payable`. Phase 1
-            // restricts Choose options to leaf actions — no nested decisions.
-            // When that limit bites a real card (Force of Will branches do
-            // qualify), we'll lift it.
+        Action::Choose { who: _, prompt: _, options, bind_as } => {
+            // Build a sub-schema per option capturing the decisions *inside*
+            // that option's action (e.g. a discard branch's "which card" pick).
+            // An option is payable iff its sub-walk succeeds. The chosen
+            // branch's sub-decisions are answered alongside the Branch pick.
+            //
+            // The sub-walks share the parent `idx` counter so generated
+            // binding names stay globally unique across branches (explicitly
+            // named decisions, e.g. MoveByChoice with `bind_as`, are unique by
+            // construction).
             let mut labels: Vec<&'static str> = Vec::with_capacity(options.len());
             let mut payable: Vec<usize> = Vec::with_capacity(options.len());
+            let mut branches: Vec<CostSchema> = Vec::with_capacity(options.len());
             for (i, opt) in options.iter().enumerate() {
                 labels.push(opt.label);
                 let mut sub = CostSchema::empty();
-                let mut sub_idx = SchemaCounter::default();
-                if walk(&opt.action, state, who, source, &mut sub, &mut sub_idx).is_some()
-                    && sub.decisions.is_empty()
-                {
+                if walk(&opt.action, state, who, source, &mut sub, idx).is_some() {
                     payable.push(i);
+                    branches.push(sub);
+                } else {
+                    // Unpayable branch — never chosen; carry an empty schema.
+                    branches.push(CostSchema::empty());
                 }
             }
             if payable.is_empty() {
                 return None;
             }
+            let binding = bind_as.unwrap_or_else(|| idx.next_binding("branch"));
             schema.push(Decision {
-                binding: idx.next_binding("branch"),
-                kind: DecisionKind::Branch { labels, payable },
+                binding,
+                kind: DecisionKind::Branch { labels, payable, branches },
             });
             Some(())
         }
@@ -422,8 +466,12 @@ fn walk(
         | Action::GrantCEToNextSpellCast { .. }
         | Action::CreateToken { .. }
         | Action::PutOnLibrary { .. }
+        | Action::Shuffle { .. }
+        | Action::Transform { .. }
+        | Action::Attach { .. }
         | Action::Search { .. }
         | Action::ForEach { .. }
+        | Action::EndSimulation { .. }
         | Action::MayDo { .. } => Some(()),
     }
 }
@@ -483,6 +531,14 @@ fn candidates_in_zone<'a>(
     }
 }
 
+/// Public feasibility check: true iff `env` answers every decision in `schema`
+/// in range (numbers within `max`, branch within `payable`, objects within
+/// candidates). Used by the additional-cost feasibility predicate, which seeds
+/// `env` with `default_announcement` + the announced X.
+pub(crate) fn validate_env(schema: &CostSchema, env: &BindEnv) -> bool {
+    validate(schema, env).is_ok()
+}
+
 fn validate(schema: &CostSchema, env: &BindEnv) -> Result<(), PayError> {
     for d in &schema.decisions {
         let v = env.bindings.get(d.binding).ok_or(PayError::MissingBinding(d.binding))?;
@@ -508,11 +564,13 @@ fn validate(schema: &CostSchema, env: &BindEnv) -> Result<(), PayError> {
                     });
                 }
             }
-            (DecisionKind::Branch { payable, .. }, Value::Num(n)) => {
+            (DecisionKind::Branch { payable, branches, .. }, Value::Num(n)) => {
                 let i = *n as usize;
                 if !payable.contains(&i) {
                     return Err(PayError::WrongBindingShape(d.binding));
                 }
+                // Only the chosen branch's nested decisions must be answered.
+                validate(&branches[i], env)?;
             }
             (DecisionKind::Number { max, .. }, Value::Num(n)) => {
                 if *n < 0 || (*n as u32) > *max {

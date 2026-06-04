@@ -96,6 +96,26 @@ fn ir_seq(actions: Vec<crate::ir::action::Action>) -> CostBody {
     CostBody::Ir(Action::Sequence(actions))
 }
 
+/// `additional_costs` shape for "as an additional cost, pay X generic mana"
+/// (Engineered Explosives, Meltdown, Prismatic Ending convergence, etc.). The
+/// X amount is the announced `chosen_x`, bound to `$x` at pay time and shared
+/// with the spell's resolution effect.
+fn ir_xmana_cost() -> CostBody {
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    CostBody::Ir(Action::PayManaX { generic: Expr::Ctx(Ctx::Var("$x")) })
+}
+
+/// `additional_costs` shape for "as an additional cost, pay X life"
+/// (Toxic Deluge, etc.). Same `$x` binding as [`ir_xmana_cost`].
+fn ir_xlife_cost() -> CostBody {
+    use crate::ir::action::{Action, Who};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    CostBody::Ir(Action::PayLife { who: Who::You, amount: Expr::Ctx(Ctx::Var("$x")) })
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Build the full card catalog used by the simulation engine.
@@ -376,10 +396,7 @@ fn ir_tap_mana(s: &str) -> crate::ir::ability::Ability {
     };
     Ability {
         kind: AbilityKind::Activated {
-            // Phase 4 step 1: TapSelf migrated to IR cost grammar. The
-            // legacy mana sub-loop still consumes a `Vec<CostComponent>` —
-            // `cost_body_to_legacy` lowers this back via `ir_cost_as_legacy`
-            // at the bridge boundary. Both shims die in Phase 6.
+            // Tap-self mana ability cost on the IR grammar.
             cost: CostBody::Ir(Action::Tap { target: Expr::Ctx(Ctx::Source) }),
             target_spec: TargetSpec::None,
             choice_spec: None,
@@ -397,11 +414,11 @@ fn ir_tap_mana(s: &str) -> crate::ir::ability::Ability {
 }
 
 /// `AbilityDef` for a fetch land: sacrifice self, pay 1 life, search → Battlefield.
-fn fetch_ability(pred: CardPredicate) -> AbilityDef {
+fn fetch_ability(filter: crate::ir::expr::Filter) -> AbilityDef {
     AbilityDef {
         costs: ir_seq(vec![act_sac_self("$fetch_self"), act_pay_life(1)]),
         ability_factory: Some(Arc::new(move |who, _| {
-            eff_fetch_search(who, pred.clone(), ZoneId::Battlefield)
+            eff_fetch_search(who, filter.clone(), ZoneId::Battlefield)
         })),
         ..Default::default()
     }
@@ -616,10 +633,10 @@ fn wasteland() -> CardDef {
     use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, Filter};
 
-    let nonbasic_land = obj_pred_from_card(pred_and(
-        pred_type_eq(CardType::Land),
-        pred_not(pred_has_supertype(Supertype::Basic)),
-    ));
+    let nonbasic_land = ir_and(
+        ir_type(CardType::Land),
+        ir_not(ir_supertype(Supertype::Basic)),
+    );
     let mut card = simple(
         "Wasteland",
         CardKind::Land(LandData::default()),
@@ -661,10 +678,10 @@ fn wasteland() -> CardDef {
 }
 
 fn karakas() -> CardDef {
-    let legend_creature = obj_pred_from_card(pred_and(
-        pred_type_eq(CardType::Creature),
-        pred_has_supertype(Supertype::Legendary),
-    ));
+    let legend_creature = ir_and(
+        ir_type(CardType::Creature),
+        ir_supertype(Supertype::Legendary),
+    );
     CardDef::new(
         "Karakas",
         CardKind::Land(LandData {
@@ -768,9 +785,9 @@ fn city_of_traitors() -> CardDef {
 
 fn polluted_delta() -> CardDef {
     simple("Polluted Delta", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_or(pred_land_subtype("island"), pred_land_subtype("swamp")),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_or(ir_subtype("island"), ir_subtype("swamp")),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -778,9 +795,9 @@ fn polluted_delta() -> CardDef {
 
 fn flooded_strand() -> CardDef {
     simple("Flooded Strand", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_land_subtype("island"),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_subtype("island"),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -788,9 +805,9 @@ fn flooded_strand() -> CardDef {
 
 fn misty_rainforest() -> CardDef {
     simple("Misty Rainforest", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_land_subtype("island"),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_subtype("island"),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -798,9 +815,9 @@ fn misty_rainforest() -> CardDef {
 
 fn scalding_tarn() -> CardDef {
     simple("Scalding Tarn", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_land_subtype("island"),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_subtype("island"),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -808,9 +825,9 @@ fn scalding_tarn() -> CardDef {
 
 fn marsh_flats() -> CardDef {
     simple("Marsh Flats", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_land_subtype("swamp"),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_subtype("swamp"),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -818,9 +835,9 @@ fn marsh_flats() -> CardDef {
 
 fn bloodstained_mire() -> CardDef {
     simple("Bloodstained Mire", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_land_subtype("swamp"),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_subtype("swamp"),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -828,9 +845,9 @@ fn bloodstained_mire() -> CardDef {
 
 fn windswept_heath() -> CardDef {
     simple("Windswept Heath", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_or(pred_land_subtype("forest"), pred_land_subtype("plains")),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_or(ir_subtype("forest"), ir_subtype("plains")),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -838,9 +855,9 @@ fn windswept_heath() -> CardDef {
 
 fn wooded_foothills() -> CardDef {
     simple("Wooded Foothills", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_or(pred_land_subtype("forest"), pred_land_subtype("mountain")),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_or(ir_subtype("forest"), ir_subtype("mountain")),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -848,9 +865,9 @@ fn wooded_foothills() -> CardDef {
 
 fn verdant_catacombs() -> CardDef {
     simple("Verdant Catacombs", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_or(pred_land_subtype("forest"), pred_land_subtype("swamp")),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_or(ir_subtype("forest"), ir_subtype("swamp")),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -858,9 +875,9 @@ fn verdant_catacombs() -> CardDef {
 
 fn arid_mesa() -> CardDef {
     simple("Arid Mesa", CardKind::Land(LandData {
-        abilities: vec![fetch_ability(pred_and(
-            pred_type_eq(CardType::Land),
-            pred_or(pred_land_subtype("plains"), pred_land_subtype("mountain")),
+        abilities: vec![fetch_ability(ir_and(
+            ir_type(CardType::Land),
+            ir_or(ir_subtype("plains"), ir_subtype("mountain")),
         ))],
         ..Default::default()
     }), vec![], Some(25))
@@ -899,15 +916,15 @@ fn cavern_of_souls() -> CardDef {
                     }),
                     // Colored mana only for creature spells of the named type (CR 106).
                     // Creature-type matching is coarsened to "is creature" since
-                    // the sim doesn't track per-card creature subtypes.
-                    condition: Some(Arc::new(|_source_id, state| {
-                        state.casting_spell
-                            .and_then(|id| state.def_of(id).or_else(|| {
-                                let key = &state.objects.get(&id)?.catalog_key;
-                                state.catalog.get(key.as_str())
-                            }))
-                            .map_or(false, |d| d.is_creature())
-                    })),
+                    // the sim doesn't track per-card creature subtypes. The
+                    // gate is "the spell being cast is a creature" — a Filter
+                    // over `GameCtx::CastingSpell`, not the source land.
+                    condition: Some(crate::ir::expr::Filter(crate::ir::expr::Expr::Contains(
+                        Box::new(crate::ir::expr::Expr::TypeLit(CardType::Creature)),
+                        Box::new(crate::ir::expr::Expr::Types(Box::new(
+                            crate::ir::expr::Expr::GameCtx(crate::ir::context::GameCtx::CastingSpell),
+                        ))),
+                    ))),
                     ..Default::default()
                 },
             ],
@@ -938,10 +955,8 @@ fn lotus_petal() -> CardDef {
     }), vec![], Some(25));
     def.abilities.push(Ability {
         kind: AbilityKind::Activated {
-            // Phase 4 step 2: SacSelf migrated to IR cost grammar. Filter is
-            // `It == Source` — the canonical "this object only" shape that
-            // `ir_cost_as_legacy` recognises and lowers back to SacSelf for
-            // the legacy bridge path.
+            // Sacrifice-self cost on the IR grammar. Filter is `It == Source`
+            // — the canonical "this object only" shape.
             cost: CostBody::Ir(Action::Sacrifice {
                 who: Who::You,
                 filter: Filter(Expr::Eq(
@@ -1079,9 +1094,9 @@ fn mox_opal() -> CardDef {
 /// directly — they never instantiate this card, so the storage shape is
 /// irrelevant to test parity.
 fn ursas_saga() -> CardDef {
-    let pred = pred_and(
-        pred_type_eq(CardType::Artifact),
-        pred_and(pred_no_colored_pips(), pred_mana_value_le(1)),
+    let pred = ir_and(
+        ir_type(CardType::Artifact),
+        ir_and(ir_colorless(), ir_mv_le(1)),
     );
     simple("Urza's Saga", CardKind::Artifact(ArtifactData {
         mana_cost: String::new(),
@@ -1103,9 +1118,9 @@ fn ursas_saga() -> CardDef {
 ///       Implemented as a `ProhibitionDef` — checked in `fire_event` before replacements.
 ///   (b) Static CE sets `castable = false` on all cards in graveyard/library zones.
 /// Sunburst: enters with a charge counter for each distinct color of mana spent to cast it.
-/// Modeled via `CostComponent::XMana` (strategy declares the intended distinct-color count
-/// as chosen_x; the engine pays that many generic mana). The ETB replacement reads
-/// `resolving_costs_ctx.chosen_x` and places that many Charge counters.
+/// Modeled via the IR `PayManaX` additional cost (strategy declares the intended
+/// distinct-color count as chosen_x; the engine pays that many generic mana). The
+/// ETB replacement reads `resolving_costs_ctx.chosen_x` and places that many Charge counters.
 /// {2}, Sacrifice: destroy each nonland permanent with MV equal to the charge count.
 /// CR 702.43 sunburst, CR 701.7 destroy.
 fn engineered_explosives() -> CardDef {
@@ -1147,9 +1162,7 @@ fn engineered_explosives() -> CardDef {
                             .and_then(|o| o.counters.get(&CounterType::Charge))
                             .copied()
                             .unwrap_or(0) as i32;
-                        let filter = obj_pred_from_card(
-                            pred_and(pred_not(pred_type_eq(CardType::Land)), pred_mana_value_eq(n)),
-                        );
+                        let filter = ir_and(ir_not(ir_type(CardType::Land)), ir_mv_eq(n));
                         state.log(t, who, format!("→ EE[{}]: destroy all nonland MV {}", n, n));
                         eff_destroy_all(who, filter).call(state, t, &[]);
                     }))
@@ -1183,7 +1196,7 @@ fn engineered_explosives() -> CardDef {
         vec![],
         vec![],
     );
-    def.additional_costs = vec![CostComponent::XMana];
+    def.additional_costs = ir_xmana_cost();
     def
 }
 
@@ -1270,13 +1283,27 @@ fn brainstorm() -> CardDef {
 
 /// Surveil 1, then draw 1. CR 701.43 (surveil).
 fn consider() -> CardDef {
-    simple("Consider", CardKind::Instant(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::Expr;
+    let mut card = simple("Consider", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| {
-            eff_surveil(who, 1).then(eff_draw(who, 1))
-        }),
+        modes: None,
         ..Default::default()
-    }), parse_colors("U", false, false), None)
+    }), parse_colors("U", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::Sequence(vec![
+                    Action::Surveil { who: IrWho::You, n: Expr::Num(1) },
+                    Action::Draw { who: IrWho::You, n: Expr::Num(1) },
+                ]),
+            }],
+        },
+        text: Some("Surveil 1, then draw a card."),
+    }];
+    card
 }
 
 /// Counter target spell. Alternate costs: bounce a blue-producing island (free),
@@ -1289,7 +1316,7 @@ fn daze() -> CardDef {
     let mut c = simple("Daze", CardKind::Instant(SpellData {
         mana_cost: "1U".to_string(),
         modes: single_mode(
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
+            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_any() },
             |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("1"))),
         ),
         ..Default::default()
@@ -1353,7 +1380,7 @@ fn force_of_negation() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Stack,
-                filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Creature))),
+                filter: ir_not(ir_type(CardType::Creature)),
             },
             |who, source_id, _x| eff_counter_and_exile(who, source_id),
         ),
@@ -1386,16 +1413,28 @@ fn force_of_negation() -> CardDef {
 /// Counter target spell. Alternate costs: exile a blue card from hand + pay 1 life (pitch),
 /// or pay {3UU} (hard cost, rare). CR 702.14 (pitch cost), CR 701.5.
 fn force_of_will() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::{Action, MoveVerb};
+    use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, ZoneKindSel};
     let mut c = simple("Force of Will", CardKind::Instant(SpellData {
         mana_cost: "3UU".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: obj_pred_from_card(pred_any()) },
-            |who, _source_id, _x| eff_counter_target(who),
-        ),
+        modes: None,
         ..Default::default()
     }), parse_colors("3UU", true, false), None);
+    c.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Stack,
+                    filter: ir_any(),
+                },
+                body: Action::Counter { target: Expr::Ctx(Ctx::Var("target")) },
+            }],
+        },
+        text: Some("Counter target spell."),
+    }];
     // Phase 4 step 5 follow-up: pitch alt cost migrated to a Sequence of
     // MoveByChoice (hand → exile) and PayLife(1).
     c.alternate_costs = vec![
@@ -1424,27 +1463,55 @@ fn force_of_will() -> CardDef {
 
 /// Add {B}{B}{B}. CR 106.3.
 fn dark_ritual() -> CardDef {
-    simple("Dark Ritual", CardKind::Instant(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, ManaSpec, Who as IrWho};
+    use crate::ir::expr::Expr;
+    let mut card = simple("Dark Ritual", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| eff_mana(who, "BBB")),
+        modes: None,
         ..Default::default()
-    }), parse_colors("B", false, false), None)
+    }), parse_colors("B", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::AddMana {
+                    who: IrWho::You,
+                    count: Expr::Num(3),
+                    spec: ManaSpec::Fixed(vec![Color::Black, Color::Black, Color::Black]),
+                },
+            }],
+        },
+        text: Some("Add {B}{B}{B}."),
+    }];
+    card
 }
 
 /// Destroy target creature with MV ≤ 3. CR 701.7.
 fn fatal_push() -> CardDef {
-    simple("Fatal Push", CardKind::Instant(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    let mut card = simple("Fatal Push", CardKind::Instant(SpellData {
         mana_cost: "B".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Battlefield,
-                filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Creature), pred_mana_value_le(3))),
-            },
-            |who, _source_id, _x| eff_destroy_target(who),
-        ),
+        modes: None,
         ..Default::default()
-    }), parse_colors("B", false, false), None)
+    }), parse_colors("B", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Battlefield,
+                    filter: ir_and(ir_type(CardType::Creature), ir_mv_le(3)),
+                },
+                body: Action::Destroy { target: Expr::Ctx(Ctx::Var("target")) },
+            }],
+        },
+        text: Some("Destroy target creature with mana value 3 or less."),
+    }];
+    card
 }
 
 /// Destroy target non-black creature. Alternate cost: pay 4 life (free spell). CR 701.7.
@@ -1457,7 +1524,7 @@ fn snuff_out() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: obj_pred_from_card(pred_and(pred_type_eq(CardType::Creature), pred_not(pred_has_color(Color::Black)))),
+                filter: ir_and(ir_type(CardType::Creature), ir_not(ir_color(Color::Black))),
             },
             |who, _source_id, _x| eff_destroy_target(who),
         ),
@@ -1486,7 +1553,7 @@ fn swords_to_plowshares() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                filter: ir_type(CardType::Creature),
             },
             |who, _source_id, _x| eff_exile_target_gain_power(who),
         ),
@@ -1503,43 +1570,70 @@ fn bitter_triumph() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: obj_pred_from_card(pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker))),
+                filter: ir_or(ir_type(CardType::Creature), ir_type(CardType::Planeswalker)),
             },
             |who, _source_id, _x| eff_destroy_target(who),
         ),
         ..Default::default()
     }), parse_colors("1B", false, false), None);
-    def.additional_costs = vec![
-        CostComponent::CostOr(vec![
-            CostComponent::DiscardCard(obj_pred_from_card(pred_any())),
-            CostComponent::Life(3),
-        ]),
-    ];
+    // "As an additional cost to cast this spell, discard a card or pay 3 life."
+    // A cost-tree Choose (CR 601.2b): the chooser commits a branch at
+    // announcement; the discard branch carries a nested object decision
+    // (which card), answered via the same BindEnv. `It != Source` excludes the
+    // spell itself, which is still in hand during the pre-cast feasibility check.
+    def.additional_costs = {
+        use crate::ir::action::{Action, ChoiceOption, MoveVerb, Who};
+        use crate::ir::context::Ctx;
+        use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+        CostBody::Ir(Action::Choose {
+            who: Who::You,
+            prompt: "Bitter Triumph: additional cost",
+            options: vec![
+                ChoiceOption {
+                    label: "discard a card",
+                    cost: None,
+                    action: Box::new(Action::MoveByChoice {
+                        who: Who::You,
+                        from: ZoneKindSel::Hand,
+                        to: ZoneKindSel::Graveyard,
+                        verb: MoveVerb::Discard,
+                        filter: Filter(Expr::Not(Box::new(Expr::Eq(
+                            Box::new(Expr::Ctx(Ctx::It)),
+                            Box::new(Expr::Ctx(Ctx::Source)),
+                        )))),
+                        count: Expr::Num(1),
+                        bind_as: Some("$bt_discard"),
+                    }),
+                },
+                ChoiceOption {
+                    label: "pay 3 life",
+                    cost: None,
+                    action: Box::new(Action::PayLife { who: Who::You, amount: Expr::Num(3) }),
+                },
+            ],
+            bind_as: Some("$bt_branch"),
+        })
+    };
     def
 }
 
 /// Destroy target creature or planeswalker with MV ≤ 3. This spell can't be countered (CR 608.2b).
 fn long_goodbye() -> CardDef {
-    CardDef::new(
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    let mut card = CardDef::new(
         "Long Goodbye",
         CardKind::Instant(SpellData {
             mana_cost: "1B".to_string(),
-            modes: single_mode(
-                TargetSpec::ObjectInZone {
-                    controller: Who::Opp,
-                    zone: ZoneId::Battlefield,
-                    filter: obj_pred_from_card(pred_and(
-                        pred_or(pred_type_eq(CardType::Creature), pred_type_eq(CardType::Planeswalker)),
-                        pred_mana_value_le(3),
-                    )),
-                },
-                |who, _source_id, _x| eff_destroy_target(who),
-            ),
+            modes: None,
             ..Default::default()
         }),
         parse_colors("1B", false, false),
         None,
-        vec![], CardLayout::Normal, None,
+        vec![], // supertypes
+        CardLayout::Normal, None,
         vec![], vec![],
         // "This spell can't be countered": ProhibitionDef active while on the stack.
         vec![ProhibitionDef {
@@ -1549,7 +1643,24 @@ fn long_goodbye() -> CardDef {
             active_when: tp_on_stack(),
         }],
         vec![],
-    )
+    );
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Battlefield,
+                    filter: ir_and(
+                        ir_or(ir_type(CardType::Creature), ir_type(CardType::Planeswalker)),
+                        ir_mv_le(3),
+                    ),
+                },
+                body: Action::Destroy { target: Expr::Ctx(Ctx::Var("target")) },
+            }],
+        },
+        text: Some("Destroy target creature or planeswalker with mana value 3 or less."),
+    }];
+    card
 }
 
 /// Choose one — each opponent sacrifices a nontoken creature (mode 0), a creature token
@@ -1562,28 +1673,19 @@ fn sheoldreds_edict() -> CardDef {
             SpellMode {
                 target_spec: TargetSpec::None,
                 factory: Arc::new(|who, _source_id, _x| {
-                    let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
-                        state.objects.get(&id).map_or(false, |o| {
-                            !o.is_token && state.catalog.get(o.catalog_key.as_str())
-                                .map_or(false, |d| d.is_creature())
-                        })
-                    });
-                    eff_sacrifice(who, Who::Opp, filter)
+                    eff_sacrifice(who, Who::Opp, ir_and(ir_not(ir_token()), ir_type(CardType::Creature)))
                 }),
             },
             SpellMode {
                 target_spec: TargetSpec::None,
                 factory: Arc::new(|who, _source_id, _x| {
-                    let filter: ObjPredicate = Arc::new(|id, state: &SimState| {
-                        state.objects.get(&id).map_or(false, |o| o.is_token)
-                    });
-                    eff_sacrifice(who, Who::Opp, filter)
+                    eff_sacrifice(who, Who::Opp, ir_token())
                 }),
             },
             SpellMode {
                 target_spec: TargetSpec::None,
                 factory: Arc::new(|who, _source_id, _x| {
-                    eff_sacrifice(who, Who::Opp, obj_pred_from_card(pred_type_eq(CardType::Planeswalker)))
+                    eff_sacrifice(who, Who::Opp, ir_type(CardType::Planeswalker))
                 }),
             },
         ])),
@@ -1599,7 +1701,7 @@ fn spell_pierce() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Stack,
-                filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Creature))),
+                filter: ir_not(ir_type(CardType::Creature)),
             },
             |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("2"))),
         ),
@@ -1657,10 +1759,10 @@ fn flusterstorm() -> CardDef {
     let target_spec = TargetSpec::ObjectInZone {
         controller: Who::Opp,
         zone: ZoneId::Stack,
-        filter: obj_pred_from_card(pred_or(
-            pred_type_eq(CardType::Instant),
-            pred_type_eq(CardType::Sorcery),
-        )),
+        filter: ir_or(
+            ir_type(CardType::Instant),
+            ir_type(CardType::Sorcery),
+        ),
     };
 
     // "Unless its controller pays {1}": the target's controller chooses. Payment
@@ -1681,6 +1783,7 @@ fn flusterstorm() -> CardDef {
                 action: Box::new(Action::Counter { target: Expr::Ctx(Ctx::Var("target")) }),
             },
         ],
+        bind_as: None,
     };
 
     // Self-cast detection: the SpellCast pattern binds `triggered_obj` to the
@@ -1763,7 +1866,7 @@ fn mindbreak_trap() -> CardDef {
             TargetSpec::Any(Box::new(TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Stack,
-                filter: obj_pred_from_card(pred_any()),
+                filter: ir_any(),
             })),
             |who, _source_id, _x| eff_exile_all_targets(who),
         ),
@@ -1795,14 +1898,14 @@ fn consign_to_memory() -> CardDef {
                 TargetSpec::ObjectInZone {
                     controller: Who::Opp,
                     zone: ZoneId::Stack,
-                    filter: obj_pred_from_card(pred_no_colored_pips()),
+                    filter: ir_colorless(),
                 },
             ]),
             |who, _source_id, _x| eff_counter_target(who),
         ),
         ..Default::default()
     }), parse_colors("U", false, false), None);
-    def.additional_costs = vec![CostComponent::Replicate(parse_mana_cost("1"))];
+    def.additional_costs = CostBody::Ir(crate::ir::action::Action::Replicate(parse_mana_cost("1")));
     def
 }
 
@@ -1816,10 +1919,10 @@ fn surgical_extraction() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Graveyard,
-                filter: obj_pred_from_card(pred_not(pred_and(
-                    pred_type_eq(CardType::Land),
-                    pred_has_supertype(Supertype::Basic),
-                ))),
+                filter: ir_not(ir_and(
+                    ir_type(CardType::Land),
+                    ir_supertype(Supertype::Basic),
+                )),
             },
             |caster, _source_id, _x| {
                 Effect(Arc::new(move |state, t, targets| {
@@ -1858,12 +1961,12 @@ fn color_hate_target_spec(c: Color) -> TargetSpec {
         TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Stack,
-            filter: obj_pred_from_card(pred_has_color(c)),
+            filter: ir_color(c),
         },
         TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_has_color(c)),
+            filter: ir_color(c),
         },
     ])
 }
@@ -1875,12 +1978,12 @@ fn any_spell_or_permanent_target() -> TargetSpec {
         TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Stack,
-            filter: obj_pred_from_card(pred_any()),
+            filter: ir_any(),
         },
         TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_any()),
+            filter: ir_any(),
         },
     ])
 }
@@ -1930,8 +2033,8 @@ fn lightning_bolt() -> CardDef {
         kind: AbilityKind::OnResolve {
             modes: vec![IrSpellMode {
                 target_spec: TargetSpec::Union(vec![
-                    TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) },
-                    TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Planeswalker)) },
+                    TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Creature) },
+                    TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Planeswalker) },
                     TargetSpec::Player(Who::Opp),
                 ]),
                 body: Action::DealDamage {
@@ -1966,7 +2069,7 @@ fn abrade() -> CardDef {
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Opp,
                         zone: ZoneId::Battlefield,
-                        filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                        filter: ir_type(CardType::Creature),
                     },
                     body: Action::DealDamage {
                         source: Expr::Ctx(Ctx::Source),
@@ -1979,7 +2082,7 @@ fn abrade() -> CardDef {
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Opp,
                         zone: ZoneId::Battlefield,
-                        filter: obj_pred_from_card(pred_type_eq(CardType::Artifact)),
+                        filter: ir_type(CardType::Artifact),
                     },
                     body: Action::Destroy { target: Expr::Ctx(Ctx::Var("target")) },
                 },
@@ -2061,7 +2164,7 @@ fn toxic_deluge() -> CardDef {
         }),
         ..Default::default()
     }), parse_colors("2B", false, false), None);
-    def.additional_costs = vec![CostComponent::XLife];
+    def.additional_costs = ir_xlife_cost();
     def
 }
 
@@ -2076,10 +2179,10 @@ fn brotherhoods_end() -> CardDef {
             SpellMode {
                 target_spec: TargetSpec::None,
                 factory: Arc::new(|caster, source_id, _x| {
-                    let filter = obj_pred_from_card(pred_or(
-                        pred_type_eq(CardType::Creature),
-                        pred_type_eq(CardType::Planeswalker),
-                    ));
+                    let filter = ir_or(
+                        ir_type(CardType::Creature),
+                        ir_type(CardType::Planeswalker),
+                    );
                     eff_damage_all(caster, 3, source_id, filter)
                 }),
             },
@@ -2087,10 +2190,10 @@ fn brotherhoods_end() -> CardDef {
             SpellMode {
                 target_spec: TargetSpec::None,
                 factory: Arc::new(|caster, _source_id, _x| {
-                    eff_destroy_all(caster, obj_pred_from_card(pred_and(
-                        pred_type_eq(CardType::Artifact),
-                        pred_mana_value_le(3),
-                    )))
+                    eff_destroy_all(caster, ir_and(
+                        ir_type(CardType::Artifact),
+                        ir_mv_le(3),
+                    ))
                 }),
             },
         ])),
@@ -2101,40 +2204,87 @@ fn brotherhoods_end() -> CardDef {
 /// Win condition: set success=true. In full rules: opponent's library and graveyard become
 /// their library; controller searches for exactly five cards. CR 101.1 (shortcut).
 fn doomsday() -> CardDef {
-    simple("Doomsday", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    // "Doomsday" is fake in this sim — resolving it signals combo success and
+    // ends the simulation (see `Action::EndSimulation`). Not a real cast.
+    let mut card = simple("Doomsday", CardKind::Sorcery(SpellData {
         mana_cost: "BBB".to_string(),
-        modes: untargeted_mode(|_who, _source_id, _x| eff_doomsday()),
+        modes: None,
         ..Default::default()
-    }), parse_colors("BBB", false, false), None)
+    }), parse_colors("BBB", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::EndSimulation { success: true },
+            }],
+        },
+        text: Some("(sim sentinel) Resolving Doomsday ends the simulation in success."),
+    }];
+    card
 }
 
 /// Look at top 5, put two in hand, rest on bottom in any order. Modeled as draw:2. CR 701.26.
 fn stock_up() -> CardDef {
-    simple("Stock Up", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::Expr;
+    let mut card = simple("Stock Up", CardKind::Sorcery(SpellData {
         mana_cost: "2U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| eff_draw(who, 2)),
+        modes: None,
         ..Default::default()
-    }), parse_colors("U", false, false), None)
+    }), parse_colors("U", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::Draw { who: IrWho::You, n: Expr::Num(2) },
+            }],
+        },
+        text: Some("Draw two cards."),
+    }];
+    card
 }
 
 /// Scry 2, then draw a card. CR 701.18 (scry), CR 701.9 (draw).
 fn preordain() -> CardDef {
-    simple("Preordain", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::Expr;
+    let mut card = simple("Preordain", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| {
-            eff_scry(who, 2).then(eff_draw(who, 1))
-        }),
+        modes: None,
         ..Default::default()
-    }), parse_colors("U", false, false), None)
+    }), parse_colors("U", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::Sequence(vec![
+                    Action::Scry { who: IrWho::You, n: Expr::Num(2) },
+                    Action::Draw { who: IrWho::You, n: Expr::Num(1) },
+                ]),
+            }],
+        },
+        text: Some("Scry 2, then draw a card."),
+    }];
+    card
 }
 
 /// Look at top 3, arrange or shuffle, then draw. CR 701.26 (library manipulation).
+/// "You may shuffle" decomposes to `MayDo { Shuffle }` — the shuffle is the
+/// effect, the "may" is a y/n strategy decision (no heuristic baked in).
 fn ponder() -> CardDef {
+    use crate::ir::action::{Action, Who as IrWho};
     simple("Ponder", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
         modes: untargeted_mode(|who, _source_id, _x| {
             eff_order(who, 3)
-                .then(eff_maybe_shuffle(who))
+                .then(eff_ir(who, Action::MayDo {
+                    who: IrWho::You,
+                    action: Box::new(Action::Shuffle { who: IrWho::You }),
+                }))
                 .then(eff_draw(who, 1))
         }),
         ..Default::default()
@@ -2147,7 +2297,7 @@ fn thoughtseize() -> CardDef {
         mana_cost: "B".to_string(),
         modes: untargeted_mode(|who, _source_id, _x| {
             eff_reveal_hand(who, Who::Opp)
-                .then(eff_discard(who, Who::Opp, 1, pred_not(pred_type_eq(CardType::Land))))
+                .then(eff_discard(who, Who::Opp, 1, ir_not(ir_type(CardType::Land))))
                 .then(eff_life_loss(who, 2))
         }),
         ..Default::default()
@@ -2155,28 +2305,64 @@ fn thoughtseize() -> CardDef {
 }
 
 /// Return target creature from your graveyard to play. CR 701.14.
+/// Reanimation modeled with the generic `Move` (graveyard → battlefield), not a
+/// dedicated reanimate primitive.
 fn unearth() -> CardDef {
-    simple("Unearth", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = simple("Unearth", CardKind::Sorcery(SpellData {
         mana_cost: "B".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone {
-                controller: Who::Actor,
-                zone: ZoneId::Graveyard,
-                filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
-            },
-            |who, _source_id, _x| eff_reanimate(who),
-        ),
+        modes: None,
         ..Default::default()
-    }), parse_colors("B", false, false), None)
+    }), parse_colors("B", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Actor,
+                    zone: ZoneId::Graveyard,
+                    filter: ir_type(CardType::Creature),
+                },
+                body: Action::Move {
+                    what: Expr::Ctx(Ctx::Var("target")),
+                    to: ZoneKindSel::Battlefield,
+                    to_owner: None,
+                    bind_as: None,
+                },
+            }],
+        },
+        text: Some("Return target creature card from your graveyard to the battlefield."),
+    }];
+    card
 }
 
 /// Target opponent discards 2 cards at random. CR 701.8.
 fn hymn_to_tourach() -> CardDef {
-    simple("Hymn to Tourach", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::Expr;
+    let mut card = simple("Hymn to Tourach", CardKind::Sorcery(SpellData {
         mana_cost: "BB".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| eff_discard(who, Who::Opp, 2, pred_any())),
+        modes: None,
         ..Default::default()
-    }), parse_colors("BB", false, false), None)
+    }), parse_colors("BB", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::Discard {
+                    who: IrWho::Opponent,
+                    count: Expr::Num(2),
+                    at_random: true,
+                    filter: None,
+                },
+            }],
+        },
+        text: Some("Target player discards two cards at random."),
+    }];
+    card
 }
 
 /// Cycling: discard this card, sacrifice a land you control → draw a card.
@@ -2195,29 +2381,63 @@ fn edge_of_autumn() -> CardDef {
 
 /// Search your library for a sorcery card, put it on top. CR 700.3, CR 701.19.
 fn personal_tutor() -> CardDef {
-    simple("Personal Tutor", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = simple("Personal Tutor", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| {
-            eff_fetch_search(who, pred_type_eq(CardType::Sorcery), ZoneId::Library)
-        }),
+        modes: None,
         ..Default::default()
-    }), parse_colors("U", false, false), None)
+    }), parse_colors("U", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::Search {
+                    who: IrWho::You,
+                    zone: ZoneKindSel::Library,
+                    filter: ir_type(CardType::Sorcery),
+                    count: Expr::Num(1),
+                    dest: ZoneKindSel::Library,
+                    shuffle: true,
+                    bind_as: None,
+                },
+            }],
+        },
+        text: Some("Search your library for a sorcery card, then shuffle."),
+    }];
+    card
 }
 
 /// Search your library for a green creature and put it onto the battlefield.
 /// X not modeled; treated as {1G} (fixed cost). CR 700.3, CR 701.19.
 fn green_suns_zenith() -> CardDef {
-    simple("Green Sun's Zenith", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::{Action, Who as IrWho};
+    use crate::ir::expr::{Expr, ZoneKindSel};
+    let mut card = simple("Green Sun's Zenith", CardKind::Sorcery(SpellData {
         mana_cost: "1G".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| {
-            eff_fetch_search(
-                who,
-                pred_and(pred_type_eq(CardType::Creature), pred_has_color(Color::Green)),
-                ZoneId::Battlefield,
-            )
-        }),
+        modes: None,
         ..Default::default()
-    }), parse_colors("1G", false, false), None)
+    }), parse_colors("1G", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: Action::Search {
+                    who: IrWho::You,
+                    zone: ZoneKindSel::Library,
+                    filter: ir_and(ir_color(Color::Green), ir_type(CardType::Creature)),
+                    count: Expr::Num(1),
+                    dest: ZoneKindSel::Battlefield,
+                    shuffle: true,
+                    bind_as: None,
+                },
+            }],
+        },
+        text: Some("Search your library for a green creature card, put it onto the battlefield, then shuffle."),
+    }];
+    card
 }
 
 /// Each player may put an artifact, creature, enchantment, or land card from their
@@ -2226,9 +2446,9 @@ fn show_and_tell() -> CardDef {
     simple("Show and Tell", CardKind::Sorcery(SpellData {
         mana_cost: "2U".to_string(),
         modes: untargeted_mode(|who, _source_id, _x| {
-            eff_each_may_put(who, pred_or(
-                pred_or(pred_type_eq(CardType::Artifact), pred_type_eq(CardType::Creature)),
-                pred_or(pred_type_eq(CardType::Enchantment), pred_type_eq(CardType::Land)),
+            eff_each_may_put(who, ir_or(
+                ir_or(ir_type(CardType::Artifact), ir_type(CardType::Creature)),
+                ir_or(ir_type(CardType::Enchantment), ir_type(CardType::Land)),
             ))
         }),
         ..Default::default()
@@ -2277,7 +2497,7 @@ fn sneak_attack() -> CardDef {
                 choice_spec: Some(ChoiceSpec {
                     controller: Who::Actor,
                     zone: ZoneId::Hand,
-                    filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                    filter: ir_type(CardType::Creature),
                 }),
                 ability_factory: Some(Arc::new(|who, _source_id| {
                     Effect(Arc::new(move |state, t, targets| {
@@ -2308,7 +2528,7 @@ fn sneak_attack() -> CardDef {
                         });
 
                         // Delayed trigger: at the beginning of the next end step, sacrifice this creature.
-                        let sac_pred: ObjPredicate = Arc::new(move |id, _state| id == creature_id);
+                        let sac_pred = ir_obj(creature_id);
                         state.trigger_instances.push(TriggerInstance {
                             source_id: creature_id,
                             controller: who,
@@ -2432,7 +2652,7 @@ fn kaito_bane_of_nightmares() -> CardDef {
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Opp,
                         zone: ZoneId::Battlefield,
-                        filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                        filter: ir_type(CardType::Creature),
                     },
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
@@ -2525,7 +2745,7 @@ fn stoneforge_mystic() -> CardDef {
         choice_spec: Some(ChoiceSpec {
             controller: Who::Actor,
             zone: ZoneId::Hand,
-            filter: obj_pred_from_card(pred_has_subtype("Equipment")),
+            filter: ir_subtype("Equipment"),
         }),
         ability_factory: Some(Arc::new(|who, _source_id| {
             Effect(Arc::new(move |state, t, targets| {
@@ -2555,7 +2775,7 @@ fn stoneforge_mystic() -> CardDef {
                             source_name: "Stoneforge Mystic".into(),
                             controller,
                             target_spec: TargetSpec::None,
-                            effect: eff_fetch_search(controller, pred_has_subtype("Equipment"), ZoneId::Hand),
+                            effect: eff_fetch_search(controller, ir_subtype("Equipment"), ZoneId::Hand),
                         });
                     }
                 }
@@ -2590,8 +2810,8 @@ fn orcish_bowmasters() -> CardDef {
 
     // Shared body: "deal 1 damage to any target; amass Orc 1".
     let any_target = TargetSpec::Union(vec![
-        TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) },
-        TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Planeswalker)) },
+        TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Creature) },
+        TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Planeswalker) },
         TargetSpec::Player(Who::Opp),
     ]);
     // Amass Orcs 1 decomposed:
@@ -2864,7 +3084,7 @@ fn dauthi_voidwalker() -> CardDef {
             choice_spec: Some(ChoiceSpec {
                 controller: Who::Opp,
                 zone: ZoneId::Exile,
-                filter: pred_has_counter(CounterType::Void),
+                filter: ir_has_counter(CounterType::Void),
             }),
             body: Action::ApplyCE {
                 target: Expr::Ctx(Ctx::Var("target")),
@@ -3010,10 +3230,7 @@ fn phelia_exuberant_shepherd() -> CardDef {
     data.keywords.insert(Keyword::Flash);
 
     // Nonland permanent, not this Phelia itself ("up to one other").
-    let nonland_other: ObjPredicate = Arc::new(|id, state| {
-        state.def_of(id).map_or(false, |d|
-            !d.types.iter().any(|t| *t == CardType::Land))
-    });
+    let nonland_other = ir_not(ir_type(CardType::Land));
     let nonland_other_for_filter = nonland_other.clone();
     let target_spec = TargetSpec::Union(vec![
         TargetSpec::ObjectInZone {
@@ -3241,10 +3458,7 @@ fn tamiyo_inquisitive_student() -> CardDef {
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Actor,
                         zone: ZoneId::Graveyard,
-                        filter: cost_pred_or(
-                            obj_pred_from_card(pred_type_eq(CardType::Instant)),
-                            obj_pred_from_card(pred_type_eq(CardType::Sorcery)),
-                        ),
+                        filter: ir_or(ir_type(CardType::Instant), ir_type(CardType::Sorcery)),
                     },
                     timing: ActivationTiming::Sorcery,
                     ..Default::default()
@@ -3791,16 +4005,12 @@ fn cori_steel_cutter() -> CardDef {
                 target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Actor,
                     zone: ZoneId::Battlefield,
-                    filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                    filter: ir_type(CardType::Creature),
                 },
                 ability_factory: Some(Arc::new(|who, source_id| {
-                    Effect(Arc::new(move |state, t, targets| {
+                    Effect(Arc::new(move |state, _t, targets| {
                         let Some(&creature_id) = targets.first() else { return };
-                        if let Some(bf) = state.permanent_bf_mut(source_id) {
-                            bf.attached_to = Some(creature_id);
-                        }
-                        let name = state.permanent_name(creature_id).unwrap_or_default();
-                        state.log(t, who, format!("Equip Cori-Steel Cutter → {}", name));
+                        do_attach(state, who, source_id, creature_id);
                     }))
                 })),
                 timing: ActivationTiming::Sorcery,
@@ -3829,11 +4039,7 @@ fn cori_steel_cutter() -> CardDef {
                             let f = Arc::clone(&state.resolve_choice);
                             let choice = f(source_id, &ChoiceRequest::MayAttach, state);
                             if matches!(choice, ChoiceResult::Bool(true)) {
-                                if let Some(bf) = state.permanent_bf_mut(source_id) {
-                                    bf.attached_to = Some(token_id);
-                                }
-                                state.log(t, controller,
-                                    "Cori-Steel Cutter attached to Monk Token".to_string());
+                                do_attach(state, controller, source_id, token_id);
                             }
                         })),
                     });
@@ -3922,16 +4128,12 @@ fn batterskull() -> CardDef {
                     target_spec: TargetSpec::ObjectInZone {
                         controller: Who::Actor,
                         zone: ZoneId::Battlefield,
-                        filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                        filter: ir_type(CardType::Creature),
                     },
                     ability_factory: Some(Arc::new(|who, source_id| {
-                        Effect(Arc::new(move |state, t, targets| {
+                        Effect(Arc::new(move |state, _t, targets| {
                             let Some(&creature_id) = targets.first() else { return };
-                            if let Some(bf) = state.permanent_bf_mut(source_id) {
-                                bf.attached_to = Some(creature_id);
-                            }
-                            let name = state.permanent_name(creature_id).unwrap_or_default();
-                            state.log(t, who, format!("Equip Batterskull → {}", name));
+                            do_attach(state, who, source_id, creature_id);
                         }))
                     })),
                     timing: ActivationTiming::Sorcery,
@@ -3953,11 +4155,7 @@ fn batterskull() -> CardDef {
                             target_spec: TargetSpec::None,
                             effect: Effect(Arc::new(move |state, t, _targets| {
                                 let token_id = do_create_token("Phyrexian Germ", controller, state, t);
-                                if let Some(bf) = state.permanent_bf_mut(source_id) {
-                                    bf.attached_to = Some(token_id);
-                                }
-                                state.log(t, controller,
-                                    "Batterskull → created Phyrexian Germ and attached".to_string());
+                                do_attach(state, controller, source_id, token_id);
                             })),
                         });
                     }
@@ -4024,12 +4222,12 @@ fn meteor_sword() -> CardDef {
         TargetSpec::ObjectInZone {
             controller: Who::Actor,
             zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_any()),
+            filter: ir_any(),
         },
         TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Battlefield,
-            filter: obj_pred_from_card(pred_any()),
+            filter: ir_any(),
         },
     ]);
     CardDef::new(
@@ -4043,16 +4241,12 @@ fn meteor_sword() -> CardDef {
                 target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Actor,
                     zone: ZoneId::Battlefield,
-                    filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                    filter: ir_type(CardType::Creature),
                 },
                 ability_factory: Some(Arc::new(|who, source_id| {
-                    Effect(Arc::new(move |state, t, targets| {
+                    Effect(Arc::new(move |state, _t, targets| {
                         let Some(&creature_id) = targets.first() else { return };
-                        if let Some(bf) = state.permanent_bf_mut(source_id) {
-                            bf.attached_to = Some(creature_id);
-                        }
-                        let name = state.permanent_name(creature_id).unwrap_or_default();
-                        state.log(t, who, format!("Equip Meteor Sword → {}", name));
+                        do_attach(state, who, source_id, creature_id);
                     }))
                 })),
                 timing: ActivationTiming::Sorcery,
@@ -4107,16 +4301,12 @@ fn pre_war_formalwear() -> CardDef {
                 target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Actor,
                     zone: ZoneId::Battlefield,
-                    filter: obj_pred_from_card(pred_type_eq(CardType::Creature)),
+                    filter: ir_type(CardType::Creature),
                 },
                 ability_factory: Some(Arc::new(|who, source_id| {
-                    Effect(Arc::new(move |state, t, targets| {
+                    Effect(Arc::new(move |state, _t, targets| {
                         let Some(&creature_id) = targets.first() else { return };
-                        if let Some(bf) = state.permanent_bf_mut(source_id) {
-                            bf.attached_to = Some(creature_id);
-                        }
-                        let name = state.permanent_name(creature_id).unwrap_or_default();
-                        state.log(t, who, format!("Equip Pre-War Formalwear → {}", name));
+                        do_attach(state, who, source_id, creature_id);
                     }))
                 })),
                 timing: ActivationTiming::Sorcery,
@@ -4137,20 +4327,15 @@ fn pre_war_formalwear() -> CardDef {
                             target_spec: TargetSpec::ObjectInZone {
                                 controller: Who::Actor,
                                 zone: ZoneId::Graveyard,
-                                filter: obj_pred_from_card(pred_and(
-                                    pred_type_eq(CardType::Creature),
-                                    pred_mana_value_le(3),
-                                )),
+                                filter: ir_and(
+                                    ir_type(CardType::Creature),
+                                    ir_mv_le(3),
+                                ),
                             },
                             effect: Effect(Arc::new(move |state, t, targets| {
                                 let Some(&target_id) = targets.first() else { return };
                                 change_zone(target_id, ZoneId::Battlefield, state, t, controller);
-                                if let Some(bf) = state.permanent_bf_mut(source_id) {
-                                    bf.attached_to = Some(target_id);
-                                }
-                                let name = state.permanent_name(target_id).unwrap_or_default();
-                                state.log(t, controller,
-                                    format!("Pre-War Formalwear → reanimated {} and attached", name));
+                                do_attach(state, controller, source_id, target_id);
                             })),
                         });
                     }
@@ -4256,11 +4441,7 @@ fn cryptic_coat() -> CardDef {
                             target_spec: TargetSpec::None,
                             effect: Effect(Arc::new(move |state, t, _targets| {
                                 let token_id = do_create_token("Mysterious Creature", controller, state, t);
-                                if let Some(bf) = state.permanent_bf_mut(source_id) {
-                                    bf.attached_to = Some(token_id);
-                                }
-                                state.log(t, controller,
-                                    "Cryptic Coat → cloaked top of library and attached".to_string());
+                                do_attach(state, controller, source_id, token_id);
                             })),
                         });
                     }
@@ -4426,10 +4607,10 @@ fn fury() -> CardDef {
             etb_self_trigger("Fury", TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: obj_pred_from_card(pred_or(
-                    pred_type_eq(CardType::Creature),
-                    pred_type_eq(CardType::Planeswalker),
-                )),
+                filter: ir_or(
+                    ir_type(CardType::Creature),
+                    ir_type(CardType::Planeswalker),
+                ),
             }, |source_id, controller| eff_damage_target(controller, 4, source_id)),
             // Evoke sacrifice: if an alternate cost was used, sacrifice on ETB (CR 702.74).
             TriggerDef {
@@ -4438,7 +4619,7 @@ fn fury() -> CardDef {
                         if *id == source_id && *ctlr == controller
                             && state.resolving_costs_ctx.alt_cost_index.is_some()
                         {
-                            let sac_pred: ObjPredicate = Arc::new(move |id, _state| id == source_id);
+                            let sac_pred = ir_obj(source_id);
                             pending.push(TriggerContext {
                                 source_name: "Fury (evoke)".into(),
                                 controller,
@@ -4585,7 +4766,7 @@ fn emrakul_the_aeons_torn() -> CardDef {
         vec![],
     );
     def.counterable = false;
-    def.protection_from = vec![obj_pred_colored_spell()];
+    def.protection_from = vec![ir_colored_spell()];
     def
 }
 
@@ -4623,7 +4804,7 @@ fn brazen_borrower() -> CardDef {
                 TargetSpec::ObjectInZone {
                     controller: Who::Opp,
                     zone: ZoneId::Battlefield,
-                    filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Land))),
+                    filter: ir_not(ir_type(CardType::Land)),
                 },
                 |who, _source_id, _x| eff_bounce_target(who),
             ),
@@ -4772,12 +4953,10 @@ fn delver_of_secrets() -> CardDef {
                         source_name: "Delver of Secrets".into(),
                         controller,
                         target_spec: TargetSpec::None,
-                        effect: Effect(Arc::new(move |state, t, _| {
-                            if let Some(bf) = state.objects.get_mut(&source_id).and_then(|c| c.bf.as_mut()) {
-                                bf.active_face = 1;
-                            }
-                            state.log(t, controller, "Delver of Secrets transforms → Insectile Aberration".to_string());
-                        })),
+                        // "Transform this creature" — literal in-place flip (CR 701.28).
+                        effect: eff_ir(controller, crate::ir::action::Action::Transform {
+                            target: crate::ir::expr::Expr::ObjLit(source_id),
+                        }),
                     });
                 }
             }),
@@ -4796,8 +4975,8 @@ fn unholy_heat() -> CardDef {
         mana_cost: "R".to_string(),
         modes: single_mode(
             TargetSpec::Union(vec![
-                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Creature)) },
-                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: obj_pred_from_card(pred_type_eq(CardType::Planeswalker)) },
+                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Creature) },
+                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Planeswalker) },
             ]),
             |who, source_id, _x| {
                 Effect(Arc::new(move |state, t, targets| {
@@ -4851,9 +5030,7 @@ fn meltdown() -> CardDef {
             TargetSpec::None,
             |who, _source_id, chosen_x| {
                 let x = chosen_x as i32;
-                let filter = obj_pred_from_card(
-                    pred_and(pred_type_eq(CardType::Artifact), pred_mana_value_le(x)),
-                );
+                let filter = ir_and(ir_type(CardType::Artifact), ir_mv_le(x));
                 Effect(Arc::new(move |state, t, _targets| {
                     state.log(t, who, format!("Meltdown (X={}): destroy all artifacts MV ≤ {}", x, x));
                     eff_destroy_all(who, filter.clone()).call(state, t, &[]);
@@ -4862,7 +5039,7 @@ fn meltdown() -> CardDef {
         ),
         ..Default::default()
     }), parse_colors("R", false, false), None);
-    def.additional_costs = vec![CostComponent::XMana];
+    def.additional_costs = ir_xmana_cost();
     def
 }
 
@@ -4875,7 +5052,7 @@ fn rough_tumble() -> CardDef {
     let tumble = simple("Tumble", CardKind::Sorcery(SpellData {
         mana_cost: "5R".to_string(),
         modes: untargeted_mode(|who, source_id, _x| {
-            let filter = obj_pred_from_card(pred_has_keyword(Keyword::Flying));
+            let filter = ir_keyword(Keyword::Flying);
             eff_damage_all(who, 6, source_id, filter)
         }),
         ..Default::default()
@@ -4886,7 +5063,7 @@ fn rough_tumble() -> CardDef {
         CardKind::Sorcery(SpellData {
             mana_cost: "1R".to_string(),
             modes: untargeted_mode(|who, source_id, _x| {
-                let filter = obj_pred_from_card(pred_not(pred_has_keyword(Keyword::Flying)));
+                let filter = ir_not(ir_keyword(Keyword::Flying));
                 eff_damage_all(who, 2, source_id, filter)
             }),
             ..Default::default()
@@ -4916,7 +5093,7 @@ fn prismatic_ending() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Battlefield,
-                filter: obj_pred_from_card(pred_not(pred_type_eq(CardType::Land))),
+                filter: ir_not(ir_type(CardType::Land)),
             },
             |who, _source_id, chosen_x| {
                 let converge = chosen_x as i32 + 1;
@@ -4936,7 +5113,7 @@ fn prismatic_ending() -> CardDef {
         ),
         ..Default::default()
     }), parse_colors("W", false, false), None);
-    def.additional_costs = vec![CostComponent::XMana];
+    def.additional_costs = ir_xmana_cost();
     def
 }
 

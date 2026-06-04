@@ -139,7 +139,7 @@ fn enumerate_mana_taps(
         let requires_tap = ma.costs.requires_tap_self();
         if requires_tap && plan.tapped.contains(&source_id) { continue; }
         // Check condition predicate (e.g. Metalcraft for Mox Opal).
-        if ma.condition.as_ref().map_or(false, |cond| !cond(source_id, state)) { continue; }
+        if ma.condition.as_ref().map_or(false, |cond| !obj_matches(cond, source_id, state)) { continue; }
         // One action per producible color, or one colorless action.
         if ma.produces.is_empty() {
             actions.push(PlanAction::TapForMana { source_id, ability_index: idx, color: None });

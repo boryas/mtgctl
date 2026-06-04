@@ -86,12 +86,6 @@ pub(crate) trait Strategy {
         pick_targets(spec, legal, state)
     }
 
-    /// 601.2h: choose which permanent to sacrifice/discard/etc. Default: first valid.
-    fn choose_cost_payment(&mut self, _state: &SimState, _cost: &CostComponent,
-                           candidates: &[ObjId]) -> Option<ObjId> {
-        candidates.first().copied()
-    }
-
     /// Phase 3 cost-IR: announcement-time decision plan for an IR cost tree.
     ///
     /// Returns a `BindEnv` answering every `Decision` in `schema`. Replaces the
@@ -1379,7 +1373,7 @@ fn spell_is_affordable(
     };
     // Use strategy default X=3 for XLife cost affordability check.
     let default_x = 3u32;
-    base_payable && can_pay_costs(&def.additional_costs, state, who, card_id, false, default_x)
+    base_payable && can_pay_additional_ir_cost(state, who, card_id, &def.additional_costs, default_x)
 }
 
 
@@ -1446,7 +1440,7 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
             if ma.timing == ActivationTiming::Sorcery && !state.stack.is_empty() { continue; }
             if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
             if ma.costs.requires_tap_self() && !untapped { continue; }
-            if ma.condition.as_ref().map_or(false, |cond| !cond(*perm_id, state)) { continue; }
+            if ma.condition.as_ref().map_or(false, |cond| !obj_matches(cond, *perm_id, state)) { continue; }
             let crate::ir::ability::CostBody::Ir(action) = &ma.costs;
             if crate::ir::cost_exec::build_schema(action, state, who, *perm_id).is_none() { continue; }
             actions.push(LegalAction::ActivateManaAbility { source_id: *perm_id, ability_index: idx });
@@ -1525,9 +1519,20 @@ fn p_card_in_hand(library_size: usize, hand_size: i32, copies: usize) -> f64 {
 pub(crate) fn default_announcement(
     schema: &crate::ir::cost::CostSchema,
 ) -> crate::ir::executor::BindEnv {
+    let mut env = crate::ir::executor::BindEnv::new();
+    fill_default_announcement(schema, &mut env);
+    env
+}
+
+/// Fill `env` with default answers for every decision in `schema`, recursing
+/// into the first-payable branch of any `Branch` decision so a chosen Choose
+/// option's nested decisions (e.g. a discard pick) are also answered.
+fn fill_default_announcement(
+    schema: &crate::ir::cost::CostSchema,
+    env: &mut crate::ir::executor::BindEnv,
+) {
     use crate::ir::cost::{DecisionKind, NumberKind};
     use crate::ir::expr::Value;
-    let mut env = crate::ir::executor::BindEnv::new();
     for d in &schema.decisions {
         match &d.kind {
             DecisionKind::Objects { candidates, count } => {
@@ -1540,9 +1545,12 @@ pub(crate) fn default_announcement(
                 };
                 env.bindings.insert(d.binding, value);
             }
-            DecisionKind::Branch { payable, .. } => {
-                let i = *payable.first().unwrap_or(&0) as i64;
-                env.bindings.insert(d.binding, Value::Num(i));
+            DecisionKind::Branch { payable, branches, .. } => {
+                let i = *payable.first().unwrap_or(&0);
+                env.bindings.insert(d.binding, Value::Num(i as i64));
+                if let Some(sub) = branches.get(i) {
+                    fill_default_announcement(sub, env);
+                }
             }
             DecisionKind::Number { kind, max } => {
                 let default = match kind {
@@ -1553,5 +1561,4 @@ pub(crate) fn default_announcement(
             }
         }
     }
-    env
 }

@@ -29,24 +29,24 @@ primitives. *Effect context* = the verb appears as a spell/ability effect;
 | *Counter* (701.5)          | ✓      | ~counter_one(id, state, t, actor)~ · ~eff_counter_target(caster)~ · ~eff_counter_and_exile~                                                |
 | *Create* token (701.6)     | ✓      | ~eff_enter_permanent(controller, catalog_key)~ with ~is_token: true~ on the ~GameObject~                                                   |
 | *Destroy* (701.7)          | ✓      | ~destroy_one(id, state, t, actor)~ · ~eff_destroy_target(caster)~ · ~eff_destroy_all(caster, filter)~                                      |
-| *Discard* — cost (701.8)   | ✓      | ~CostComponent::DiscardSelf~ · ~CostComponent::DiscardCard(ObjPredicate)~                                                                  |
+| *Discard* — cost (701.8)   | ✓      | ~Action::MoveByChoice { from: Hand, to: Graveyard, verb: Discard }~ (in ~CostBody::Ir~)                                                     |
 | *Discard* — effect         | ✓      | ~change_zone(id, ZoneId::Graveyard, ...)~ (no dedicated ~eff_discard~ yet; same end state)                                                 |
 | *Draw* (701.—)             | ✓      | ~eff_draw(who, n)~ · ~sim_draw~ — fires ~GameEvent::Draw~ through the full pipeline                                                        |
 | *Exile* — effect (701.11)  | ✓      | ~eff_exile_target(caster)~ · ~change_zone(id, ZoneId::Exile, ...)~                                                                         |
-| *Exile* — cost             | ✓      | ~CostComponent::ExileFromHand(ObjPredicate)~ (pitch costs, delve exile)                                                                    |
-| *Mill* (701.13)            | ~      | No dedicated primitive; use ~change_zone(top_of_library_id, ZoneId::Graveyard, ...)~                                                       |
+| *Exile* — cost             | ✓      | ~Action::MoveByChoice { from: Hand, to: Exile, verb: Exile }~ (pitch costs; FoW/FoN ~$pitch~)                                               |
+| *Mill* (701.13)            | ✓      | ~Action::Mill~                                                                                                                             |
 | *Return* to hand           | ✓      | ~eff_bounce_target(caster)~ · ~change_zone(id, ZoneId::Hand, ...)~                                                                         |
 | *Return* to battlefield    | ✓      | ~eff_reanimate(actor)~ · ~change_zone(id, ZoneId::Battlefield, ...)~                                                                       |
-| *Sacrifice* — cost (701.17) | ✓     | ~CostComponent::SacSelf~ · ~CostComponent::SacPermanent(ObjPredicate)~                                                                     |
+| *Sacrifice* — cost (701.17) | ✓     | ~Action::Sacrifice~ / ~Action::MoveByChoice { to: Graveyard, verb: Sacrifice }~ (in ~CostBody::Ir~)                                         |
 | *Search* (701.19)          | ✓      | ~eff_fetch_search(who, CardPredicate, to_zone)~ — searches library, puts card in ~to_zone~                                                 |
 | *Surveil* (701.30)         | ✓      | ~eff_surveil(who, n)~ — calls ~state.surveil_choice~ per card (strategy callback)                                                          |
-| *Tap* — cost (701.21)      | ✓      | ~CostComponent::TapSelf~ · ~CostComponent::TapPermanent(ObjPredicate)~                                                                     |
+| *Tap* — cost (701.21)      | ✓      | ~Action::Tap { target: Source }~ (in ~CostBody::Ir~)                                                                                       |
 | *Amass* (701.31)           | ✓      | Decomposed in IR: ~IfThen~ (no army? ~CreateToken~) + ~ForEach { PutCounters +1/+1 }~ — see [[*Amass (CR 701.44)][orcish_bowmasters]]      |
-| *Transform* (701.34)       | ~      | ~bf.active_face = 1~ (flip) — no event fired; used for Tamiyo front→back                                                                   |
-| *Scry* (701.18)            | ✗      | Not implemented; similar to Surveil — add ~eff_scry(who, n)~ when needed                                                                   |
+| *Transform* (701.34)       | ✓      | ~Action::Transform { target }~ in-place flip (Delver) + ~Transformed~ event. "Exile, return transformed" (Tamiyo) = ~Sequence([Exile, Move→bf, Transform])~ (new object) |
+| *Scry* (701.18)            | ✓      | ~Action::Scry~ · ~eff_scry(who, n)~ (legacy closure)                                                                                       |
 | *Fight* (701.12)           | ✗      | Not implemented                                                                                                                            |
-| *Attach* (701.3)           | ✗      | Not implemented (no equipment/aura mechanics)                                                                                              |
-| *Shuffle* (701.20)         | ✗      | Library order not tracked; ~eff_fetch_search~ implicitly shuffles (no shuffle step)                                                        |
+| *Attach* (701.3)           | ✓      | ~Action::Attach { what, to }~ sets ~attached_to~ + fires ~BecameAttached~. Equip/Living-Weapon/ETB-attach all use it; detach via ~change_zone~ on LTB |
+| *Shuffle* (701.20)         | ✓      | ~Action::Shuffle { who }~ — zero-agency effect; "you may shuffle" = ~MayDo { Shuffle }~ (Ponder). ~Search.shuffle~ flag = fetch convenience |
 | *Investigate* (701.25)     | ~      | ~eff_create_clue(controller)~ (internal helper, not a named primitive)                                                                     |
 | *Double* (701.9)           | ✗      | Not implemented (double P/T, life, or mana — L7 CE or ~eff_mana~ extension)                                                                |
 | *Exchange* (701.10)        | ✗      | Not implemented                                                                                                                            |
@@ -412,7 +412,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 |----------------+---------------------------------------+----------------------------------------------------------------------------|
 | Delve          | Murktide Regent                       | ~data.delve = true~                                                        |
 | Storm          | Flusterstorm                          | Self-cast trigger creates ~StackAbility~ copies                             |
-| Replicate      | Consign to Memory                     | ~CostComponent::Replicate~                                                 |
+| Replicate      | Consign to Memory                     | ~Action::Replicate(ManaCost)~ (in ~CostBody::Ir~ additional cost)          |
 | Ward           | Hexing Squelcher                      | ~ward_pay_or_counter~ helper                                               |
 | Protection     | Emrakul                               | ~protection_from: vec![obj_pred_colored_spell()]~                          |
 | Annihilator 6  | Emrakul                               | Stored as keyword; *not functionally modeled*                              |

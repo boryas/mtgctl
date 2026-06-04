@@ -30,6 +30,9 @@ pub(crate) enum Expr {
     Controller(Box<Expr>),       // PlayerId
     Owner(Box<Expr>),            // PlayerId
     ZoneOf(Box<Expr>),           // ZoneId
+    ZoneLit(crate::ZoneId),      // a zone literal, for `ZoneOf(It) == ZoneLit(z)`
+    ObjLit(crate::ObjId),        // an object-id literal, for `It == ObjLit(id)` exclusion
+    IsToken(Box<Expr>),          // Bool — true iff `obj` is a token
     CountersOn(Box<Expr>, CounterType), // i64
     Name(Box<Expr>),             // String
 

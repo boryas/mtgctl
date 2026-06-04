@@ -188,6 +188,53 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::Transform { target } => {
+            let id = expect_obj(eval_expr(target, state, env));
+            // Only a permanent can transform; off-battlefield is a no-op.
+            let Some(cur_face) = state.permanent_bf(id).map(|bf| bf.active_face) else {
+                return ExecResult::Ok;
+            };
+            let new_face = 1 - cur_face; // DFCs have exactly two faces (CR 712.2)
+            let controller = state.objects.get(&id).map(|o| o.controller).unwrap_or(actor);
+            // Starting loyalty if the new face is a planeswalker (CR 711.3c).
+            let new_loyalty = state.def_of(id).and_then(|d| {
+                let face = if new_face == 1 { d.back.as_deref() } else { Some(d) };
+                face.and_then(|fd| match &fd.kind {
+                    crate::CardKind::Planeswalker(p) => Some(p.loyalty),
+                    _ => None,
+                })
+            });
+            if let Some(bf) = state.permanent_bf_mut(id) {
+                bf.active_face = new_face;
+                if let Some(loy) = new_loyalty {
+                    bf.loyalty = loy;
+                }
+            }
+            let name = state.objects.get(&id).map(|o| o.catalog_key.clone()).unwrap_or_default();
+            state.log(t, controller, format!("{} transforms", name));
+            crate::fire_event(crate::GameEvent::Transformed { id, controller }, state, t, controller);
+            ExecResult::Ok
+        }
+
+        Action::Attach { what, to } => {
+            let attachment = expect_obj(eval_expr(what, state, env));
+            let target = expect_obj(eval_expr(to, state, env));
+            let controller = state.objects.get(&attachment).map(|o| o.controller).unwrap_or(actor);
+            if let Some(bf) = state.permanent_bf_mut(attachment) {
+                bf.attached_to = Some(target);
+            } else {
+                return ExecResult::Ok; // attachment not on the battlefield; no-op
+            }
+            let aname = state.objects.get(&attachment).map(|o| o.catalog_key.clone()).unwrap_or_default();
+            let tname = state.permanent_name(target).unwrap_or_default();
+            state.log(t, controller, format!("{} attached to {}", aname, tname));
+            crate::fire_event(
+                crate::GameEvent::BecameAttached { attachment, target, controller },
+                state, t, controller,
+            );
+            ExecResult::Ok
+        }
+
         Action::Exile { target, bind_as } => {
             let v = eval_expr(target, state, env);
             if let Value::Obj(id) = v {
@@ -218,6 +265,12 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             for id in top {
                 change_zone(id, ZoneId::Graveyard, state, t, who);
             }
+            ExecResult::Ok
+        }
+
+        Action::Shuffle { who } => {
+            let who = resolve_who(who, state, env, actor);
+            state.shuffle_library(who);
             ExecResult::Ok
         }
 
@@ -510,9 +563,26 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
-        Action::Choose { who, prompt: _, options } => {
+        Action::Choose { who, prompt: _, options, bind_as } => {
             let who = resolve_who(who, state, env, actor);
             let src = env.source.unwrap_or(ObjId::default());
+            // Cost context (CR 601.2b): the branch was pre-decided at
+            // announcement and lives in the BindEnv under `bind_as`. Run the
+            // chosen option's action against the *same* env so its nested cost
+            // decisions (e.g. which card to discard) resolve. The effect-
+            // resolution path below (resolve_choice) is used only when there
+            // is no pre-bound branch.
+            if let Some(name) = bind_as {
+                if let Some(crate::ir::expr::Value::Num(i)) = env.get(name).cloned() {
+                    if let Some(opt) = options.get(i as usize) {
+                        if let Some(c) = &opt.cost {
+                            let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
+                            let _ = crate::pay_ir_cost(state, t, who, src, c, &mut no_strat);
+                        }
+                        return execute_mut(&opt.action, state, env);
+                    }
+                }
+            }
             // Filter out options whose cost the chooser cannot pay (CR 118.4).
             // Free options (cost = None) always remain legal.
             let legal: Vec<usize> = options
@@ -810,6 +880,22 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::PayManaX { generic } => {
+            // Variable-X generic mana payment. The cost (`ManaCost{generic:n}`)
+            // is built from the announced amount, then drained from the pool —
+            // three distinct things: the demand (mc), the resource (pool), and
+            // the announced scalar (n). Same pool/ManaShortage protocol as
+            // `PayMana`.
+            let n = expect_num(eval_expr(generic, state, env)).max(0) as i32;
+            let mc = crate::ManaCost { generic: n, ..crate::ManaCost::default() };
+            let player = state.player_mut(actor);
+            if !player.pool.can_pay(&mc) {
+                return ExecResult::ManaShortage(remaining_mana(&player.pool, &mc));
+            }
+            player.pool.spend(&mc);
+            ExecResult::Ok
+        }
+
         Action::LoyaltyAdjust(n) => {
             let source_id = match env.source {
                 Some(id) => id,
@@ -827,6 +913,20 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         // copies after the spell lands on the stack. Outside a cost context
         // this is a no-op (legacy `CostComponent::Replicate` behaved the same).
         Action::Replicate(_) => ExecResult::Ok,
+
+        // Doomsday sentinel: end the simulation with the given outcome. Peers
+        // through the layers (this is a sim signal, not an MTG effect) —
+        // records pre-DD life, applies the sim's Doomsday life accounting, and
+        // sets the terminal `success` flag. Mirrors the former `eff_doomsday`.
+        Action::EndSimulation { success } => {
+            if *success {
+                let life = state.player(crate::PlayerId::Us).life;
+                state.life_before_dd = Some(life);
+                state.player_mut(crate::PlayerId::Us).life = life / 2;
+                state.success = true;
+            }
+            ExecResult::Ok
+        }
     }
 }
 
@@ -1053,6 +1153,12 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         Expr::ZoneOf(e) => {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Zone(zone_id_of_obj(state, o).unwrap_or(ZoneId::Library))
+        }
+        Expr::ZoneLit(z) => Value::Zone(*z),
+        Expr::ObjLit(id) => Value::Obj(*id),
+        Expr::IsToken(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Bool(state.objects.get(&o).map_or(false, |obj| obj.is_token))
         }
         Expr::CountersOn(e, kind) => {
             let o = expect_obj(eval_expr(e, state, env));
@@ -1497,7 +1603,7 @@ fn eval_ctx(c: &Ctx, _state: &SimState, env: &BindEnv) -> Value {
     }
 }
 
-fn eval_game_ctx(g: &GameCtx, _state: &SimState) -> Value {
+fn eval_game_ctx(g: &GameCtx, state: &SimState) -> Value {
     // Layer C designations not yet wired into SimState — Monarch/Initiative/
     // DayNight/CityBlessing/RingTempted land with their host cards. Return
     // a neutral default; tests referring to these will set it up explicitly.
@@ -1507,6 +1613,7 @@ fn eval_game_ctx(g: &GameCtx, _state: &SimState) -> Value {
         GameCtx::DayNight => Value::Unit,
         GameCtx::CityBlessing => Value::Bool(false),
         GameCtx::RingTempted => Value::Num(0),
+        GameCtx::CastingSpell => Value::Obj(state.casting_spell.unwrap_or(ObjId::UNSET)),
     }
 }
 
@@ -1910,6 +2017,9 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
             out.push(Axis::Zone);
             walk_reads(e, out);
         }
+        Expr::ZoneLit(_) => {}
+        Expr::ObjLit(_) => {}
+        Expr::IsToken(e) => walk_reads(e, out),
         Expr::CountersOn(e, _) => {
             out.push(Axis::Counters);
             walk_reads(e, out);
@@ -2451,21 +2561,11 @@ pub(crate) fn ir_activated_as_mana_ability_legacy(
             }))
         });
 
-    // Lower `activation_condition` to `Option<ObjPredicate>` for the legacy
-    // affordability gate (e.g. Mox Opal metalcraft).
-    let cond_pred: Option<crate::ObjPredicate> = activation_condition.as_ref().map(|expr| {
-        let expr = expr.clone();
-        let pred: crate::ObjPredicate = std::sync::Arc::new(move |source_id, state| {
-            let controller = state
-                .objects
-                .get(&source_id)
-                .map(|o| o.controller)
-                .unwrap_or(PlayerId::Us);
-            let env = BindEnv::new().with_source(source_id).with_controller(controller);
-            matches!(eval_expr(&expr, state, &env), Value::Bool(true))
-        });
-        pred
-    });
+    // The activation gate (e.g. Mox Opal metalcraft) is just the IR condition
+    // Expr wrapped as a `Filter` — checked via `obj_matches` at the legacy
+    // affordability sites.
+    let cond_pred: Option<crate::ir::expr::Filter> =
+        activation_condition.as_ref().map(|expr| crate::ir::expr::Filter(expr.clone()));
 
     Some(crate::ManaAbility {
         source_zone,

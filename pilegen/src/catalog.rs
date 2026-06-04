@@ -147,45 +147,6 @@ pub(crate) enum ActivationTiming {
     Sorcery,
 }
 
-/// A single component of an activation or spell cost.
-///
-/// `CostAnd` / `CostOr` are combinators that mirror CR 118 semantics:
-/// - `CostAnd`: all sub-costs must be paid (CR 118.9 — multiple additional costs).
-/// - `CostOr`: player chooses exactly one payable branch (CR 118.9 modal costs,
-///   e.g. Bitter Triumph's "pay 3 life OR discard a card").
-///   Strategy always picks the first affordable branch.
-#[derive(Clone)]
-#[allow(dead_code)]
-pub(crate) enum CostComponent {
-    Mana(ManaCost),
-    TapSelf,
-    SacSelf,                              // sacrifice the source from battlefield
-    DiscardSelf,                          // discard the source from hand
-    ExileSelf,                            // exile the source (hand → exile; e.g. Simian Spirit Guide)
-    DiscardHand,                          // discard entire hand (Lion's Eye Diamond)
-    Life(i32),
-    SacPermanent(ObjPredicate),          // sacrifice another permanent from battlefield
-    DiscardCard(ObjPredicate),           // discard another card from hand
-    ExileFromHand(ObjPredicate),         // exile another card from hand (pitch costs)
-    ReturnFromBattlefield(ObjPredicate), // return another permanent from battlefield to hand
-    TapPermanent(ObjPredicate),          // tap another permanent (Kappa Cannoneer et al.)
-    LoyaltyAdjust(i32),                   // +/- loyalty; also marks pw_activated_this_turn
-    /// All sub-costs must be paid (explicit AND).
-    CostAnd(Vec<CostComponent>),
-    /// Exactly one payable sub-cost branch is paid (OR — player's choice).
-    CostOr(Vec<CostComponent>),
-    /// Optional additional cost paid 0+ times at cast time; each payment creates a
-    /// copy of the spell on the stack (CR 702.58). Tracked via `CostsPaidCtx::replicate_count`.
-    /// `can_pay` is always true (0 payments is valid). Payment logic lives in `cast_spell`.
-    Replicate(ManaCost),
-    /// Variable life payment: "as an additional cost, pay X life" where X is strategy-chosen.
-    /// `can_pay` checks `life >= chosen_x`; payment records `chosen_x` in `CostsPaidCtx`.
-    XLife,
-    /// Variable generic-mana payment: "pay X generic mana" where X is strategy-chosen.
-    /// Models sunburst (Engineered Explosives): spend X mana of different colors.
-    /// `can_pay` checks `total_mana >= chosen_x`; payment spends X generic and records chosen_x.
-    XMana,
-}
 
 /// Factory for a spell effect: takes (controller, source_id, chosen_x) and returns the resolved `Effect`.
 /// `chosen_x` is the strategy-chosen X value; 0 for spells without an X cost.
@@ -223,7 +184,7 @@ pub(crate) struct ChoiceSpec {
     /// Zone the chosen object must be in.
     pub(crate) zone: ZoneId,
     /// Predicate the chosen object must satisfy.
-    pub(crate) filter: ObjPredicate,
+    pub(crate) filter: crate::ir::expr::Filter,
 }
 
 /// Enumerate valid choices for a `ChoiceSpec` from the perspective of `controller`.
@@ -241,7 +202,10 @@ pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: 
             };
             zone_match && (o.owner == target_who || o.controller == target_who)
         })
-        .filter(|o| (spec.filter)(o.id, state))
+        .filter(|o| {
+            let env = crate::ir::executor::BindEnv::new().with_controller(controller);
+            crate::ir::executor::matches(&spec.filter, o.id, state, &env)
+        })
         .map(|o| o.id)
         .collect()
 }
@@ -373,7 +337,7 @@ pub(crate) struct ManaAbility {
     pub(crate) produces: Vec<Color>,
     pub(crate) produces_count: usize,
     pub(crate) make_effect: ManaEffectFactory,
-    pub(crate) condition: Option<ObjPredicate>,
+    pub(crate) condition: Option<crate::ir::expr::Filter>,
     /// False when a CE prevents activation (e.g. Karn, Null Rod).
     /// Reset to true each recompute. Checked by collect_legal_actions and mana sub-loop.
     pub(crate) activatable: bool,
@@ -787,8 +751,10 @@ pub struct CardDef {
     /// Checked by `fire_triggers` for each active battlefield object.
     pub(crate) granted_trigger_defs: Vec<TriggerCheckFn>,
     /// Costs that must always be paid in addition to the chosen base/alternative cost.
-    /// Per CR 118.9d these apply regardless of which cost path is taken.
-    pub(crate) additional_costs: Vec<CostComponent>,
+    /// Per CR 118.9d these apply regardless of which cost path is taken. Single-
+    /// variant `CostBody::Ir(Action)`; X-cost amounts use `Expr::Ctx(Ctx::Var("$x"))`
+    /// bound to the announced `chosen_x` at pay time.
+    pub(crate) additional_costs: crate::ir::ability::CostBody,
     /// False iff this spell can't be countered (CR 608.2b). Checked at resolution by
     /// `eff_counter_target`; the spell is still a legal target for counterspells.
     /// Modifiable by continuous effects.
@@ -810,7 +776,7 @@ pub struct CardDef {
     /// if any returns true, the source cannot target, damage, or block this object.
     /// Uses `ObjPredicate` — the predicate can inspect the source's CardDef, zone,
     /// controller, etc. via the uniform id model.
-    pub(crate) protection_from: Vec<ObjPredicate>,
+    pub(crate) protection_from: Vec<crate::ir::expr::Filter>,
     /// Data-based IR abilities (Stage 3 dual-pathway: coexists with the
     /// closure-based fields above). When non-empty, the engine dispatches
     /// this card's behavior through the IR executor.
@@ -1067,7 +1033,7 @@ impl CardDef {
             prohibition_defs,
             static_ability_defs,
             granted_trigger_defs: vec![],
-            additional_costs: vec![],
+            additional_costs: crate::ir::ability::CostBody::empty(),
             counterable: true,
             casting_cost_modifier: 0,
             castable: false,
@@ -1190,7 +1156,7 @@ pub(crate) fn parse_colors(mana_cost: &str, blue: bool, black: bool) -> Vec<Colo
 pub(crate) fn recruiter_check(event: &GameEvent, source_id: ObjId, controller: PlayerId, _state: &SimState, pending: &mut Vec<TriggerContext>) {
     if let GameEvent::ZoneChange { id, to: ZoneId::Battlefield, controller: ctlr, .. } = event {
         if *id == source_id && *ctlr == controller {
-            let pred = pred_and(pred_type_eq(CardType::Creature), pred_toughness_le(2));
+            let pred = ir_and(ir_type(CardType::Creature), ir_toughness_le(2));
             pending.push(TriggerContext {
                 source_name: "Recruiter of the Guard".into(),
                 controller,
@@ -1242,10 +1208,27 @@ pub(crate) fn tamiyo_check(event: &GameEvent, source_id: ObjId, controller: Play
                 source_name: "Tamiyo, Inquisitive Student".into(),
                 controller,
                 target_spec: TargetSpec::None,
-                effect: Effect(std::sync::Arc::new(move |state, t, _targets| {
-                    // Guard: only flip if still on front face (active_face == 0).
+                effect: Effect(std::sync::Arc::new(move |state, _t, _targets| {
+                    // Only transform if still on the front face.
                     if state.permanent_bf(source_id).map_or(true, |bf| bf.active_face != 0) { return; }
-                    do_flip_tamiyo(source_id, controller, state, t);
+                    // "Exile Tamiyo, then return her transformed" — a genuinely new
+                    // object (CR 712 / 701.28): exile, re-enter the battlefield (fresh,
+                    // summoning-sick), then flip to the back face. `Transform` sets the
+                    // planeswalker's starting loyalty.
+                    use crate::ir::action::Action;
+                    use crate::ir::expr::{Expr, ZoneKindSel};
+                    let seq = Action::Sequence(vec![
+                        Action::Exile { target: Expr::ObjLit(source_id), bind_as: None },
+                        Action::Move {
+                            what: Expr::ObjLit(source_id),
+                            to: ZoneKindSel::Battlefield,
+                            to_owner: None,
+                            bind_as: None,
+                        },
+                        Action::Transform { target: Expr::ObjLit(source_id) },
+                    ]);
+                    let env = crate::ir::executor::BindEnv::new().with_controller(controller);
+                    crate::ir::executor::execute(&seq, state, &env);
                 })),
             });
         }

@@ -420,7 +420,7 @@ mod parity {
     use super::*;
     use crate::catalog::{ArtifactData, CreatureData, LandData, LandTypes, BasicLandType};
     use crate::{
-        predicates as P, CardDef, CardKind, CardLayout, CardType, CardZone, Color,
+        CardDef, CardKind, CardLayout, CardType, CardZone, Color,
         CounterType, GameObject, Keyword, ObjId, PlayerId, PlayerState, SimState,
         Supertype,
     };
@@ -487,7 +487,7 @@ mod parity {
                      CardLayout::Normal, None, vec![], vec![], vec![], vec![])
     }
 
-    /// Build the IR equivalent of `obj_pred_from_card(pred_type_eq(t))`.
+    /// Build the IR equivalent of `pred_type_eq(t)`.
     fn ir_type_is(t: CardType) -> Filter {
         Filter(Expr::Contains(
             Box::new(Expr::TypeLit(t)),
@@ -565,187 +565,6 @@ mod parity {
         ))
     }
 
-    fn assert_parity(
-        label: &str,
-        state: &SimState,
-        id: ObjId,
-        closure_pred: impl Fn(ObjId, &SimState) -> bool,
-        ir_filter: &Filter,
-    ) {
-        let env = BindEnv::new();
-        let closure_ans = closure_pred(id, state);
-        let ir_ans = matches(ir_filter, id, state, &env);
-        assert_eq!(
-            closure_ans, ir_ans,
-            "parity mismatch for {label} on obj {:?}: closure={}, ir={}",
-            id, closure_ans, ir_ans
-        );
-    }
-
-    #[test]
-    fn type_predicates() {
-        let mut s = make_empty_state();
-        let cid = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Grizzly Bears", "{1}{G}", vec![Color::Green], 2, 2,
-                          false, &[], &["Bear"]));
-        let iid = insert_with_def(&mut s, PlayerId::Us, make_island("Island"));
-        let eid = insert_with_def(&mut s, PlayerId::Us, make_equipment("Sword", "{2}"));
-
-        let closure_creature = P::obj_pred_from_card(P::pred_type_eq(CardType::Creature));
-        let ir = ir_type_is(CardType::Creature);
-        for (label, id) in [("bear", cid), ("island", iid), ("sword", eid)] {
-            assert_parity(label, &s, id, |i, st| closure_creature(i, st), &ir);
-        }
-    }
-
-    #[test]
-    fn supertype_color_subtype_predicates() {
-        let mut s = make_empty_state();
-        let bear = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Grizzly Bears", "{1}{G}", vec![Color::Green], 2, 2,
-                          false, &[], &["Bear"]));
-        let dragon = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Thundermaw Hellkite", "{3}{R}{R}", vec![Color::Red], 5, 5,
-                          true, &[Keyword::Flying, Keyword::Haste], &["Dragon"]));
-        let sword = insert_with_def(&mut s, PlayerId::Us, make_equipment("Sword", "{2}"));
-
-        // Legendary
-        let closure = P::obj_pred_from_card(P::pred_has_supertype(Supertype::Legendary));
-        let ir = ir_has_supertype(Supertype::Legendary);
-        for (l, id) in [("bear", bear), ("dragon", dragon)] {
-            assert_parity(l, &s, id, |i, st| closure(i, st), &ir);
-        }
-
-        // Red
-        let closure = P::obj_pred_from_card(P::pred_has_color(Color::Red));
-        let ir = ir_has_color(Color::Red);
-        for (l, id) in [("bear", bear), ("dragon", dragon)] {
-            assert_parity(l, &s, id, |i, st| closure(i, st), &ir);
-        }
-
-        // subtype "Equipment"
-        let closure = P::obj_pred_from_card(P::pred_has_subtype("Equipment"));
-        let ir = ir_has_subtype("Equipment");
-        for (l, id) in [("bear", bear), ("sword", sword), ("dragon", dragon)] {
-            assert_parity(l, &s, id, |i, st| closure(i, st), &ir);
-        }
-
-        // subtype "Dragon"
-        let closure = P::obj_pred_from_card(P::pred_has_subtype("Dragon"));
-        let ir = ir_has_subtype("Dragon");
-        for (l, id) in [("bear", bear), ("dragon", dragon)] {
-            assert_parity(l, &s, id, |i, st| closure(i, st), &ir);
-        }
-    }
-
-    #[test]
-    fn mana_value_and_toughness_predicates() {
-        let mut s = make_empty_state();
-        let bear = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Bear", "{1}{G}", vec![Color::Green], 2, 2, false, &[], &[]));
-        let dragon = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Dragon", "{3}{R}{R}", vec![Color::Red], 5, 5, false, &[], &[]));
-
-        for n in [2, 3, 5] {
-            let closure = P::obj_pred_from_card(P::pred_mana_value_le(n));
-            let ir = ir_mana_value_le(n);
-            for (l, id) in [("bear", bear), ("dragon", dragon)] {
-                assert_parity(&format!("mv<={n} {l}"), &s, id, |i, st| closure(i, st), &ir);
-            }
-
-            let closure = P::obj_pred_from_card(P::pred_mana_value_eq(n));
-            let ir = ir_mana_value_eq(n);
-            for (l, id) in [("bear", bear), ("dragon", dragon)] {
-                assert_parity(&format!("mv=={n} {l}"), &s, id, |i, st| closure(i, st), &ir);
-            }
-
-            let closure = P::obj_pred_from_card(P::pred_toughness_le(n));
-            let ir = ir_toughness_le(n);
-            for (l, id) in [("bear", bear), ("dragon", dragon)] {
-                assert_parity(&format!("tough<={n} {l}"), &s, id, |i, st| closure(i, st), &ir);
-            }
-        }
-    }
-
-    #[test]
-    fn keyword_predicate() {
-        let mut s = make_empty_state();
-        let bear = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Bear", "{1}{G}", vec![Color::Green], 2, 2, false, &[], &[]));
-        let dragon = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Dragon", "{3}{R}{R}", vec![Color::Red], 5, 5, false,
-                          &[Keyword::Flying, Keyword::Haste], &[]));
-
-        for kw in [Keyword::Flying, Keyword::Haste, Keyword::Trample] {
-            let closure = P::obj_pred_from_card(P::pred_has_keyword(kw));
-            let ir = ir_has_keyword(kw);
-            for (l, id) in [("bear", bear), ("dragon", dragon)] {
-                assert_parity(&format!("{:?} {l}", kw), &s, id, |i, st| closure(i, st), &ir);
-            }
-        }
-    }
-
-    #[test]
-    fn land_subtype_predicate() {
-        let mut s = make_empty_state();
-        let island = insert_with_def(&mut s, PlayerId::Us, make_island("Island"));
-        let bear = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Bear", "{1}{G}", vec![Color::Green], 2, 2, false, &[], &[]));
-
-        let closure = P::obj_pred_from_card(P::pred_land_subtype("island"));
-        let ir = ir_land_subtype("island");
-        for (l, id) in [("island", island), ("bear", bear)] {
-            assert_parity(l, &s, id, |i, st| closure(i, st), &ir);
-        }
-    }
-
-    #[test]
-    fn counter_predicate() {
-        let mut s = make_empty_state();
-        let bear = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Bear", "{1}{G}", vec![Color::Green], 2, 2, false, &[], &[]));
-        // stamp a Void counter on bear
-        s.objects.get_mut(&bear).unwrap().counters.insert(CounterType::Void, 1);
-        let dragon = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Dragon", "{3}{R}{R}", vec![Color::Red], 5, 5, false, &[], &[]));
-
-        let closure = P::pred_has_counter(CounterType::Void);
-        let ir = ir_has_counter(CounterType::Void);
-        for (l, id) in [("bear", bear), ("dragon", dragon)] {
-            assert_parity(l, &s, id, |i, st| closure(i, st), &ir);
-        }
-    }
-
-    #[test]
-    fn predicate_composition() {
-        // AND / OR / NOT parity: build a compound predicate both ways.
-        let mut s = make_empty_state();
-        let bear = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Bear", "{1}{G}", vec![Color::Green], 2, 2, false, &[], &[]));
-        let dragon = insert_with_def(&mut s, PlayerId::Us,
-            make_creature("Dragon", "{3}{R}{R}", vec![Color::Red], 5, 5, false,
-                          &[Keyword::Flying], &[]));
-
-        // (creature AND mv<=3)
-        let closure = P::obj_pred_from_card(P::pred_and(
-            P::pred_type_eq(CardType::Creature),
-            P::pred_mana_value_le(3),
-        ));
-        let ir = Filter(Expr::And(
-            Box::new(ir_type_is(CardType::Creature).0),
-            Box::new(ir_mana_value_le(3).0),
-        ));
-        for (l, id) in [("bear", bear), ("dragon", dragon)] {
-            assert_parity(&format!("and {l}"), &s, id, |i, st| closure(i, st), &ir);
-        }
-
-        // NOT flying
-        let closure = P::obj_pred_from_card(P::pred_not(P::pred_has_keyword(Keyword::Flying)));
-        let ir = Filter(Expr::Not(Box::new(ir_has_keyword(Keyword::Flying).0)));
-        for (l, id) in [("bear", bear), ("dragon", dragon)] {
-            assert_parity(&format!("!flying {l}"), &s, id, |i, st| closure(i, st), &ir);
-        }
-    }
 
     #[test]
     fn scoped_binder_enumeration() {
@@ -1231,6 +1050,30 @@ mod execute_parity {
         assert_eq!(baseline_lib, ir_lib);
     }
 
+    #[test]
+    fn attach_sets_attached_to_and_detaches_on_ltb() {
+        // Action::Attach is type-agnostic — it points attached_to at whatever is on the
+        // battlefield. Two permanents stand in for attachment/host here.
+        let mut s = make_state();
+        let equip = insert_obj(&mut s, PlayerId::Us, make_creature("Sword", "{1}", 0, 0));
+        let host = insert_obj(&mut s, PlayerId::Us, make_creature("Bear", "{G}", 2, 2));
+        put_on_bf(&mut s, equip);
+        put_on_bf(&mut s, host);
+
+        execute(
+            &Action::Attach { what: Expr::ObjLit(equip), to: Expr::ObjLit(host) },
+            &mut s,
+            &BindEnv::new().with_controller(PlayerId::Us),
+        );
+        assert_eq!(s.objects[&equip].bf.as_ref().unwrap().attached_to, Some(host),
+            "Attach sets attached_to");
+
+        // Host leaves the battlefield → the attachment detaches (CR 704.5q).
+        crate::change_zone(host, crate::ZoneId::Graveyard, &mut s, 0, PlayerId::Us);
+        assert_eq!(s.objects[&equip].bf.as_ref().unwrap().attached_to, None,
+            "attachment detaches when its host leaves");
+    }
+
     // ── Control flow ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1348,7 +1191,7 @@ mod execute_parity {
         E::eff_sacrifice(
             PlayerId::Us,
             crate::effects::Who::Actor,
-            std::sync::Arc::new(|_id, _s| true),
+            Filter(Expr::Bool(true)),
         )
         .call(&mut closure_state, 0, &[]);
 
@@ -1550,6 +1393,7 @@ mod execute_parity {
                         }),
                     },
                 ],
+                bind_as: None,
             },
             &mut s,
             &BindEnv::new().with_controller(PlayerId::Us),
@@ -1928,69 +1772,34 @@ mod cost_phase1 {
         match d {
             DecisionKind::Objects { count, candidates } =>
                 format!("Objects(count={}, candidates={})", count, candidates.len()),
-            DecisionKind::Branch { labels, payable } =>
+            DecisionKind::Branch { labels, payable, .. } =>
                 format!("Branch(labels={}, payable={})", labels.len(), payable.len()),
             DecisionKind::Number { kind, max } =>
                 format!("Number({:?}, max={})", kind, max),
         }
     }
 
-    // ── Equivalence: PayLife(n) — IR cost path vs legacy ────────────────────
-    //
-    // Independent-implementation cross-check: paying 2 life via the IR cost
-    // executor and via the legacy `pay_costs` path drives the same change in
-    // `state.player.life`.
+    // ── PayLife(n) via the IR cost path ─────────────────────────────────────
 
     #[test]
     fn equiv_pay_life_2() {
-        // Legacy path: pay_costs(&[CostComponent::Life(2)], ...).
-        let mut legacy_state = make_state();
-        let start = legacy_state.life_of(PlayerId::Us);
-        crate::pay_costs(
-            &[crate::CostComponent::Life(2)],
-            &mut legacy_state,
-            0,
-            PlayerId::Us,
-            ObjId::UNSET,
-            0,
-        );
-
-        // IR path: cost = PayLife(2). build_schema (no decisions) + pay.
         let mut ir_state = make_state();
+        let start = ir_state.life_of(PlayerId::Us);
         let cost = Action::PayLife { who: Who::You, amount: Expr::Num(2) };
         let schema = build_schema(&cost, &ir_state, PlayerId::Us, ObjId::UNSET).expect("payable");
         let env = BindEnv::new().with_controller(PlayerId::Us);
         pay(&cost, &schema, &env, &mut ir_state, 0, PlayerId::Us, ObjId::UNSET)
             .expect("pay should succeed");
-
-        assert_eq!(legacy_state.life_of(PlayerId::Us), start - 2);
         assert_eq!(ir_state.life_of(PlayerId::Us), start - 2);
-        assert_eq!(legacy_state.life_of(PlayerId::Us), ir_state.life_of(PlayerId::Us));
     }
 
-    // ── Equivalence: TapSelf — IR cost vs legacy ───────────────────────────
+    // ── TapSelf via the IR cost path ───────────────────────────────────────
 
     #[test]
     fn equiv_tap_self() {
-        let setup = || {
-            let mut s = make_state();
-            let id = insert_obj(&mut s, PlayerId::Us, make_creature("X", "{G}", 1, 1));
-            put_on_bf(&mut s, id);
-            (s, id)
-        };
-
-        let (mut legacy_state, legacy_id) = setup();
-        crate::pay_costs(
-            &[crate::CostComponent::TapSelf],
-            &mut legacy_state,
-            0,
-            PlayerId::Us,
-            legacy_id,
-            0,
-        );
-        assert!(legacy_state.permanent_bf(legacy_id).unwrap().tapped);
-
-        let (mut ir_state, ir_id) = setup();
+        let mut ir_state = make_state();
+        let ir_id = insert_obj(&mut ir_state, PlayerId::Us, make_creature("X", "{G}", 1, 1));
+        put_on_bf(&mut ir_state, ir_id);
         let cost = Action::Tap { target: Expr::Ctx(Ctx::Source) };
         let schema = build_schema(&cost, &ir_state, PlayerId::Us, ir_id).expect("payable");
         assert_eq!(schema.decisions.len(), 0);
@@ -2043,10 +1852,8 @@ mod cost_phase1 {
 // Life(n), CostAnd-of-the-above).
 mod playable_phase2 {
     use super::cost_phase1::{insert_obj, make_creature, make_state};
-    use crate::ir::action::Action;
-    use crate::ir::cost::DecisionKind;
-    use crate::playable::{enumerate_playable, legacy_cost_as_ir, PlayableKind};
-    use crate::{parse_mana_cost, CardZone, CostComponent, ObjId, PlayerId};
+    use crate::playable::{enumerate_playable, PlayableKind};
+    use crate::{CardZone, ObjId, PlayerId};
 
     fn move_to_hand(state: &mut crate::SimState, id: ObjId, _owner: PlayerId) {
         state.set_card_zone(id, CardZone::Hand { known: true });
@@ -2105,69 +1912,6 @@ mod playable_phase2 {
         assert_eq!(schema.decisions.len(), 0);
     }
 
-    // ── legacy_cost_as_ir ──────────────────────────────────────────────────
-
-    #[test]
-    fn shim_translates_tap_self() {
-        let action = legacy_cost_as_ir(&[CostComponent::TapSelf]).expect("translatable");
-        assert!(matches!(action, Action::Tap { .. }));
-    }
-
-    #[test]
-    fn shim_translates_life_constant() {
-        let action = legacy_cost_as_ir(&[CostComponent::Life(2)]).expect("translatable");
-        match action {
-            Action::PayLife { .. } => {}
-            _ => panic!("expected PayLife"),
-        }
-    }
-
-    #[test]
-    fn shim_translates_xlife_to_var_x() {
-        let action = legacy_cost_as_ir(&[CostComponent::XLife]).expect("translatable");
-        match action {
-            Action::PayLife { .. } => {}
-            _ => panic!("expected PayLife with Var amount"),
-        }
-    }
-
-    #[test]
-    fn shim_sequences_multiple_components() {
-        let comps = vec![
-            CostComponent::TapSelf,
-            CostComponent::Mana(parse_mana_cost("U")),
-        ];
-        let action = legacy_cost_as_ir(&comps).expect("translatable");
-        match action {
-            Action::Sequence(v) => assert_eq!(v.len(), 2),
-            _ => panic!("expected Sequence of 2"),
-        }
-    }
-
-    #[test]
-    fn shim_returns_none_for_object_targeted_costs() {
-        // ReturnFromBattlefield uses ObjPredicate (closure-based) — outside
-        // the shim's scope. Phase 4 migrates these per-card.
-        let comps = vec![CostComponent::ReturnFromBattlefield(std::sync::Arc::new(
-            |_id, _state| true,
-        ))];
-        assert!(legacy_cost_as_ir(&comps).is_none());
-    }
-
-    #[test]
-    fn shim_translates_xlife_yields_xlife_decision_in_schema() {
-        // Putting it together: legacy XLife cost translated by the shim →
-        // schema must surface a single XLife Number decision.
-        let s = make_state();
-        let action = legacy_cost_as_ir(&[CostComponent::XLife]).expect("translatable");
-        let schema = crate::ir::cost_exec::build_schema(&action, &s, PlayerId::Us, ObjId::UNSET)
-            .expect("payable");
-        assert_eq!(schema.decisions.len(), 1);
-        assert!(matches!(
-            schema.decisions[0].kind,
-            DecisionKind::Number { .. }
-        ));
-    }
 }
 
 mod cost_phase3 {
@@ -2269,6 +2013,11 @@ mod cost_phase3 {
                 kind: DecisionKind::Branch {
                     labels: vec!["a", "b", "c"],
                     payable: vec![1, 2],
+                    branches: vec![
+                        crate::ir::cost::CostSchema::empty(),
+                        crate::ir::cost::CostSchema::empty(),
+                        crate::ir::cost::CostSchema::empty(),
+                    ],
                 },
             }],
         };
@@ -2311,25 +2060,19 @@ mod cost_phase3 {
     }
 }
 
-// Phase 4 step 1 — TapSelf migrated to IR cost grammar.
+// Phase 4 — per-card IR cost storage regression guards.
 //
-// The migrated card storage shape changes from `CostBody::Legacy(...)` to
-// `CostBody::Ir(Action::Tap { target: Source })`, but the runtime path is
-// preserved by the `ir_cost_as_legacy` reverse shim used at the legacy
-// bridge boundary. These tests guard that:
-//   1. The reverse shim correctly lowers `Action::Tap { target: Source }`
-//      back to `vec![CostComponent::TapSelf]`.
-//   2. `cost_body_to_legacy` round-trips both `Legacy` and `Ir` storage.
-//   3. The migrated `ir_tap_mana` storage is `Ir(_)` (regression guard for
-//      accidental reverts).
-//   4. Basic lands built with `ir_tap_mana` still produce mana when their
-//      mana ability is activated end-to-end (CR 605.3b sub-loop).
+// Now that the cost sub-language is fully on the IR (no `CostComponent`,
+// no `Legacy` variant), these tests pin the stored cost shape of migrated
+// cards so accidental reverts are caught:
+//   1. Activated-ability costs (Lotus Petal sac, EE `{2}, Sac ~`).
+//   2. Alternate costs (Daze bounce, FoN/FoW pitch, Snuff Out pay-life).
+//   3. Basic lands' mana ability still produces mana end-to-end (CR 605.3b).
 mod cost_phase4 {
     use crate::ir::ability::CostBody;
     use crate::ir::action::Action;
     use crate::ir::context::Ctx;
     use crate::ir::expr::Expr;
-    use crate::CostComponent;
 
     #[test]
     fn lotus_petal_storage_is_ir_sacrifice() {
@@ -2582,10 +2325,7 @@ mod cost_phase4 {
     #[test]
     fn ir_tap_mana_storage_is_ir() {
         // Regression guard: an island built via the basic_land factory uses
-        // `ir_tap_mana`, whose cost should now be `CostBody::Ir(_)`. If this
-        // test starts failing because someone reverted the migration, the
-        // bridges will silently still work (cost_body_to_legacy handles both),
-        // but the IR-cost coverage budget shrinks.
+        // `ir_tap_mana`, whose cost is `CostBody::Ir(_)` (the only variant).
         let cat = crate::card_defs::build_catalog();
         let island = cat.get("Island").expect("Island in catalog");
         let ability = island
@@ -2606,5 +2346,144 @@ mod cost_phase4 {
             matches!(action, Action::Tap { target: Expr::Ctx(Ctx::Source) }),
             "Island mana ability cost is Action::Tap {{ target: Source }}"
         );
+    }
+}
+
+// ── Phase 6: XMana (PayManaX) + nested-Choose cost schema ────────────────────
+//
+// The last cost sub-language migrated off `CostComponent`. `PayManaX` is the
+// variable-X mana payment (mirror of `PayLife { amount: Expr }`); the nested
+// Choose schema lets a cost-tree branch carry its own object decision (e.g.
+// Bitter Triumph's "discard a card or pay 3 life").
+mod cost_xmana {
+    use super::cost_phase1::make_state;
+    use crate::ir::action::{Action, ChoiceOption, MoveVerb, Who};
+    use crate::ir::context::Ctx;
+    use crate::ir::cost::{DecisionKind, NumberKind};
+    use crate::ir::cost_exec::{build_schema, pay};
+    use crate::ir::executor::BindEnv;
+    use crate::ir::expr::{Expr, Filter, Value, ZoneKindSel};
+    use crate::{ObjId, PlayerId};
+
+    #[test]
+    fn pay_mana_x_var_emits_xmana_decision_bounded_by_potential() {
+        let mut s = make_state();
+        s.player_mut(PlayerId::Us).pool.c = 4;
+        s.player_mut(PlayerId::Us).pool.total = 4;
+        let cost = Action::PayManaX { generic: Expr::Ctx(Ctx::Var("$x")) };
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        assert_eq!(schema.decisions.len(), 1, "X mana emits exactly one decision");
+        assert_eq!(schema.decisions[0].binding, "$x", "decision keyed by the variable's own name");
+        match &schema.decisions[0].kind {
+            DecisionKind::Number { kind: NumberKind::XMana, max } => {
+                assert_eq!(*max, 4, "bound is the potential mana total (the resource)");
+            }
+            _ => panic!("expected an XMana Number decision"),
+        }
+    }
+
+    #[test]
+    fn pay_mana_x_constant_emits_no_decision() {
+        let s = make_state();
+        let cost = Action::PayManaX { generic: Expr::Num(2) };
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        assert_eq!(schema.decisions.len(), 0, "constant generic = pool checked at exec, no decision");
+    }
+
+    #[test]
+    fn pay_mana_x_drains_pool_by_bound_amount() {
+        let mut s = make_state();
+        s.player_mut(PlayerId::Us).pool.c = 5;
+        s.player_mut(PlayerId::Us).pool.total = 5;
+        let cost = Action::PayManaX { generic: Expr::Ctx(Ctx::Var("$x")) };
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        let mut env = BindEnv::new().with_controller(PlayerId::Us);
+        env.bindings.insert("$x", Value::Num(3));
+        pay(&cost, &schema, &env, &mut s, 0, PlayerId::Us, ObjId::UNSET).expect("pay ok");
+        assert_eq!(s.player(PlayerId::Us).pool.total, 2, "the paid amount (3) is drained from the pool");
+    }
+
+    // Bitter-Triumph-shaped cost: Choose([ discard-a-card | pay 3 life ]).
+    fn bitter_choice() -> Action {
+        Action::Choose {
+            who: Who::You,
+            prompt: "bt",
+            options: vec![
+                ChoiceOption {
+                    label: "discard a card",
+                    cost: None,
+                    action: Box::new(Action::MoveByChoice {
+                        who: Who::You,
+                        from: ZoneKindSel::Hand,
+                        to: ZoneKindSel::Graveyard,
+                        verb: MoveVerb::Discard,
+                        filter: Filter(Expr::Bool(true)),
+                        count: Expr::Num(1),
+                        bind_as: Some("$bt_discard"),
+                    }),
+                },
+                ChoiceOption {
+                    label: "pay 3 life",
+                    cost: None,
+                    action: Box::new(Action::PayLife { who: Who::You, amount: Expr::Num(3) }),
+                },
+            ],
+            bind_as: Some("$bt_branch"),
+        }
+    }
+
+    #[test]
+    fn nested_choose_branch_carries_discard_object_decision() {
+        // Hand has a card → discard branch is payable and its sub-schema holds
+        // the "which card" Objects decision under the branch.
+        use super::cost_phase1::{insert_obj, make_creature};
+        let mut s = make_state();
+        let card = insert_obj(&mut s, PlayerId::Us, make_creature("Spare", "1", 1, 1));
+        s.set_card_zone(card, crate::CardZone::Hand { known: true });
+
+        let schema = build_schema(&bitter_choice(), &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        assert_eq!(schema.decisions.len(), 1);
+        match &schema.decisions[0].kind {
+            DecisionKind::Branch { payable, branches, .. } => {
+                assert_eq!(payable, &vec![0, 1], "both branches payable with a card in hand");
+                assert_eq!(branches[0].decisions.len(), 1, "discard branch carries one object decision");
+                assert_eq!(branches[1].decisions.len(), 0, "pay-life branch carries no decision");
+            }
+            _ => panic!("expected a Branch decision"),
+        }
+    }
+
+    #[test]
+    fn nested_choose_discard_branch_executes_chosen_card() {
+        use super::cost_phase1::{insert_obj, make_creature};
+        let mut s = make_state();
+        let card = insert_obj(&mut s, PlayerId::Us, make_creature("Spare", "1", 1, 1));
+        s.set_card_zone(card, crate::CardZone::Hand { known: true });
+        let start_life = s.life_of(PlayerId::Us);
+
+        let cost = bitter_choice();
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable");
+        // Default plan: first payable branch (discard) + first candidate card.
+        let env = crate::strategy::default_announcement(&schema);
+        let ctx = pay(&cost, &schema, &env, &mut s, 0, PlayerId::Us, ObjId::UNSET).expect("pay ok");
+        assert!(matches!(s.objects[&card].zone, crate::CardZone::Graveyard), "chosen card discarded");
+        assert_eq!(s.life_of(PlayerId::Us), start_life, "discard branch taken → no life paid");
+        assert_eq!(ctx.objects_moved, vec![card], "discarded card recorded in objects_moved");
+    }
+
+    #[test]
+    fn nested_choose_falls_back_to_life_when_hand_empty() {
+        // Empty hand → discard branch unpayable; only the life branch remains.
+        let mut s = make_state();
+        let start_life = s.life_of(PlayerId::Us);
+        let cost = bitter_choice();
+        let schema = build_schema(&cost, &s, PlayerId::Us, ObjId::UNSET).expect("payable via life");
+        match &schema.decisions[0].kind {
+            DecisionKind::Branch { payable, .. } => assert_eq!(payable, &vec![1], "only pay-life payable"),
+            _ => panic!("expected Branch"),
+        }
+        let env = crate::strategy::default_announcement(&schema);
+        pay(&cost, &schema, &env, &mut s, 0, PlayerId::Us, ObjId::UNSET).expect("pay ok");
+        assert_eq!(s.life_of(PlayerId::Us), start_life - 3, "fell back to paying 3 life");
     }
 }

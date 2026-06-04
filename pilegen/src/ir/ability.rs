@@ -256,6 +256,22 @@ impl CostBody {
         let CostBody::Ir(a) = self;
         first_pay_mana(a)
     }
+
+    /// True iff this cost contains a variable-X payment — a `PayLife` or
+    /// `PayManaX` whose amount is not a compile-time constant. Used by the
+    /// announce step to decide whether to ask the strategy for an X value
+    /// (CR 601.2b).
+    pub(crate) fn has_x_cost(&self) -> bool {
+        let CostBody::Ir(a) = self;
+        action_has_x_cost(a)
+    }
+
+    /// The replicate cost (CR 702.58), if this cost contains a `Replicate`.
+    /// `cast_spell` uses it to push spell copies for each extra payment.
+    pub(crate) fn replicate_mana_cost(&self) -> Option<crate::ManaCost> {
+        let CostBody::Ir(a) = self;
+        action_replicate_cost(a)
+    }
 }
 
 fn action_includes_sac_source(a: &Action) -> bool {
@@ -344,6 +360,40 @@ fn first_pay_mana(a: &Action) -> Option<crate::ManaCost> {
         MayDo { action, .. } => first_pay_mana(action),
         ForEach { body, .. } => first_pay_mana(body),
         Choose { options, .. } => options.iter().find_map(|o| first_pay_mana(&o.action)),
+        _ => None,
+    }
+}
+
+fn action_has_x_cost(a: &Action) -> bool {
+    use crate::ir::action::Action::*;
+    use crate::ir::expr::Expr;
+    // X = a payment amount that is not a literal — the variable announced at
+    // CR 601.2b. Constants (`Expr::Num`) are fixed costs, not X.
+    let is_variable = |e: &Expr| !matches!(e, Expr::Num(_));
+    match a {
+        PayLife { amount, .. } => is_variable(amount),
+        PayManaX { generic } => is_variable(generic),
+        Sequence(actions) => actions.iter().any(action_has_x_cost),
+        IfThen { then, else_, .. } => {
+            action_has_x_cost(then) || else_.as_ref().map_or(false, |e| action_has_x_cost(e))
+        }
+        MayDo { action, .. } => action_has_x_cost(action),
+        ForEach { body, .. } => action_has_x_cost(body),
+        Choose { options, .. } => options.iter().any(|o| action_has_x_cost(&o.action)),
+        _ => false,
+    }
+}
+
+fn action_replicate_cost(a: &Action) -> Option<crate::ManaCost> {
+    use crate::ir::action::Action::*;
+    match a {
+        Replicate(mc) => Some(mc.clone()),
+        Sequence(actions) => actions.iter().find_map(action_replicate_cost),
+        IfThen { then, else_, .. } => action_replicate_cost(then)
+            .or_else(|| else_.as_ref().and_then(|e| action_replicate_cost(e))),
+        MayDo { action, .. } => action_replicate_cost(action),
+        ForEach { body, .. } => action_replicate_cost(body),
+        Choose { options, .. } => options.iter().find_map(|o| action_replicate_cost(&o.action)),
         _ => None,
     }
 }

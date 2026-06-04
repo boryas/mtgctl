@@ -97,6 +97,14 @@ pub(crate) enum Action {
         who: Who,
         count: Expr,
     },
+    /// Shuffle `who`'s library into a random order. CR 701.20. The randomisation
+    /// itself carries no player agency, so there is no decision here — "you *may*
+    /// shuffle" is `MayDo { Shuffle }`, and "search, then shuffle" composes
+    /// `Search { shuffle: false }` with this (the `Search.shuffle` flag is a
+    /// convenience for the common fetch case).
+    Shuffle {
+        who: Who,
+    },
 
     // ── stack / casting ──────────────────────────────────────────────────
     Counter {
@@ -157,15 +165,33 @@ pub(crate) enum Action {
     // ── tap / untap ──────────────────────────────────────────────────────
     /// Tap a permanent. CR 701.20a. Universal primitive — used by direct
     /// effects ("tap target permanent"), replacement bodies that compose
-    /// "enters tapped" as `Sequence([Move, Tap])`, and (eventually) cost
-    /// payment. The cost-payment path still routes through
-    /// `CostComponent::TapSelf` until the cost sub-language is unified.
+    /// "enters tapped" as `Sequence([Move, Tap])`, and cost payment
+    /// (e.g. a tap-self mana ability).
     Tap {
         target: Expr,
     },
     /// Untap a permanent. CR 701.21a. Symmetric with `Tap`.
     Untap {
         target: Expr,
+    },
+    /// Transform a double-faced permanent *in place* — flip to its other face
+    /// (CR 712.4 / 701.28). Same object; if the new face is a planeswalker it
+    /// gains its printed starting loyalty (CR 711.3c). Fires `Transformed`.
+    /// Used for literal "transform ~" cards (Delver). "Exile, then return
+    /// transformed" (Tamiyo) is *not* this — it's a new object, modeled as
+    /// `Sequence([Exile, Move→bf, Transform])`.
+    Transform {
+        target: Expr,
+    },
+    /// Attach `what` (an Equipment or Aura) to permanent `to` (CR 701.3 /
+    /// 702.6). Sets `what.attached_to = to` and fires `BecameAttached` so
+    /// "whenever ~ becomes equipped/enchanted" triggers can react. Generic
+    /// across the equip ability, Living Weapon's auto-attach, and Aura ETB.
+    /// Detachment is not a separate action — `change_zone` clears `attached_to`
+    /// when either object leaves the battlefield (CR 704.5q).
+    Attach {
+        what: Expr,
+        to: Expr,
     },
 
     // ── destruction / targeting ──────────────────────────────────────────
@@ -237,6 +263,12 @@ pub(crate) enum Action {
         who: Who,
         prompt: &'static str,
         options: Vec<ChoiceOption>,
+        /// Cost-context binding (CR 601.2b). When `Some(name)` and the
+        /// `BindEnv` holds a `Branch` answer under `name`, the executor takes
+        /// the pre-decided option and runs its action against the same env (so
+        /// the option's nested cost decisions resolve). When `None` — the
+        /// effect-resolution case — the chooser is asked via `resolve_choice`.
+        bind_as: Option<&'static str>,
     },
 
     // ── scheduling ───────────────────────────────────────────────────────
@@ -309,6 +341,17 @@ pub(crate) enum Action {
     /// control back to the strategy to activate more mana.
     PayMana(crate::ManaCost),
 
+    /// Drain `generic` generic mana from the controller's pool, where the
+    /// amount is computed at announcement time — the variable-X mana payment
+    /// (CR 601.2b). Symmetric with `PayLife { amount: Expr }`. When `generic`
+    /// is `Expr::Ctx(Ctx::Var("$x"))` the schema emits an `XMana` decision and
+    /// the executor spends whatever the strategy bound. Pool-based like
+    /// `PayMana`: a shortfall yields `ManaShortage` and the cost driver yields
+    /// to the strategy to make more mana.
+    PayManaX {
+        generic: Expr,
+    },
+
     // ── planeswalker loyalty ─────────────────────────────────────────────
     /// Activate-cost adjustment to the source's loyalty (CR 606.5). Sets
     /// `pw_activated_this_turn` so each planeswalker activates at most once
@@ -321,6 +364,19 @@ pub(crate) enum Action {
     /// extra payment creates a copy of the spell on the stack. Only valid
     /// inside a cast cost tree (not an arbitrary effect body).
     Replicate(crate::ManaCost),
+
+    // ── simulation control ────────────────────────────────────────────────
+    /// Mark the simulation's terminal success state. NOT an MTG effect — in
+    /// this engine "Doomsday" is a sentinel that signals the combo resolved
+    /// and the simulation should end (consumed by `is_game_over` and the
+    /// board snapshot). The executor peers through the layers on purpose:
+    /// it records pre-resolution life (`life_before_dd`), applies the sim's
+    /// Doomsday life accounting, and sets `state.success`. This is the one
+    /// deliberate exception to "Actions are composable MTG primitives" — the
+    /// card it models is itself fake.
+    EndSimulation {
+        success: bool,
+    },
 
     // ── library placement ────────────────────────────────────────────────
     /// Move `count` cards from zone `from` (owned by `who`) onto their

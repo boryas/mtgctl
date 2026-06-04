@@ -1,155 +1,121 @@
 use super::*;
 
-// ── CardPredicate ─────────────────────────────────────────────────────────────
+// ── IR Filter combinators ─────────────────────────────────────────────────────
+//
+// One filter language. An IR `Filter(Expr)` is the inspectable, no-closure form
+// of "does this object match?" — the same question `CardPredicate`/`ObjPredicate`
+// answered. Evaluated by `ir::executor::matches(filter, id, state, env)`, which
+// falls back to the catalog for unmaterialized library cards, so these work for
+// targeting, search (library), CE conditions, and cost filters alike.
+//
+// Composable so card filters read declaratively: a green creature is
+// `ir_and(ir_color(Green), ir_type(Creature))`.
 
-/// A composable predicate over a `CardDef`. Used to express targeting filters
-/// without string dispatch.
-pub(crate) type CardPredicate = std::sync::Arc<dyn Fn(&CardDef) -> bool + Send + Sync>;
+use crate::ir::context::Ctx;
+use crate::ir::expr::{Expr, Filter};
 
-/// Always returns true.
-pub(crate) fn pred_any() -> CardPredicate {
-    std::sync::Arc::new(|_| true)
+fn it() -> Expr { Expr::Ctx(Ctx::It) }
+
+/// Matches everything.
+pub(crate) fn ir_any() -> Filter { Filter(Expr::Bool(true)) }
+
+/// `type ∈ Types(It)`.
+pub(crate) fn ir_type(t: CardType) -> Filter {
+    Filter(Expr::Contains(Box::new(Expr::TypeLit(t)), Box::new(Expr::Types(Box::new(it())))))
 }
 
-
-/// True iff the card's primary type equals `t`.
-pub(crate) fn pred_type_eq(t: CardType) -> CardPredicate {
-    std::sync::Arc::new(move |d| d.types.contains(&t))
+/// `supertype ∈ Supertypes(It)` (e.g. Basic, Legendary, Snow).
+pub(crate) fn ir_supertype(s: Supertype) -> Filter {
+    Filter(Expr::Contains(Box::new(Expr::SupertypeLit(s)), Box::new(Expr::Supertypes(Box::new(it())))))
 }
 
-/// True iff the card has supertype `s`.
-pub(crate) fn pred_has_supertype(s: Supertype) -> CardPredicate {
-    std::sync::Arc::new(move |d| d.supertypes.contains(&s))
+/// `subtype ∈ Subtypes(It)` — covers creature/artifact/spell subtypes AND land
+/// types (island, swamp, …), which `Subtypes(It)` surfaces lowercased.
+pub(crate) fn ir_subtype(s: &str) -> Filter {
+    Filter(Expr::Contains(Box::new(Expr::SubtypeLit(s.to_string())), Box::new(Expr::Subtypes(Box::new(it())))))
 }
 
-/// True iff the card is a land with the given land subtype (island, swamp, …).
-pub(crate) fn pred_land_subtype(subtype: &'static str) -> CardPredicate {
-    use crate::catalog::BasicLandType;
-    let kind = match subtype {
-        "plains"   => Some(BasicLandType::Plains),
-        "island"   => Some(BasicLandType::Island),
-        "swamp"    => Some(BasicLandType::Swamp),
-        "mountain" => Some(BasicLandType::Mountain),
-        "forest"   => Some(BasicLandType::Forest),
-        _          => None,
-    };
-    std::sync::Arc::new(move |d| {
-        kind.map_or(false, |k| d.as_land().map_or(false, |l| l.land_types.contains(k)))
-    })
+/// A token.
+pub(crate) fn ir_token() -> Filter { Filter(Expr::IsToken(Box::new(it()))) }
+
+/// Exactly the object with id `id` (`It == ObjLit(id)`).
+pub(crate) fn ir_obj(id: ObjId) -> Filter {
+    Filter(Expr::Eq(Box::new(it()), Box::new(Expr::ObjLit(id))))
 }
 
-/// True iff the card contains the given color.
-pub(crate) fn pred_has_color(c: Color) -> CardPredicate {
-    std::sync::Arc::new(move |d| d.colors.contains(&c))
+/// Evaluate a `Filter` against object `id` with `It`/`Source` = `id` and the
+/// controller bound to `id`'s controller. The standard way to check a filter
+/// that gates on a specific object (ability conditions, protection sources).
+pub(crate) fn obj_matches(filter: &Filter, id: ObjId, state: &SimState) -> bool {
+    let controller = state.objects.get(&id).map(|o| o.controller).unwrap_or(PlayerId::Us);
+    let env = crate::ir::executor::BindEnv::new().with_source(id).with_controller(controller);
+    crate::ir::executor::matches(filter, id, state, &env)
 }
 
-/// True iff the card's mana value is ≤ `n`.
-pub(crate) fn pred_mana_value_le(n: i32) -> CardPredicate {
-    std::sync::Arc::new(move |d| mana_value(d.mana_cost()) <= n)
+/// `color ∈ Colors(It)`.
+pub(crate) fn ir_color(c: Color) -> Filter {
+    Filter(Expr::Contains(Box::new(Expr::ColorLit(c)), Box::new(Expr::Colors(Box::new(it())))))
 }
 
-/// True iff the card's mana value equals `n`.
-pub(crate) fn pred_mana_value_eq(n: i32) -> CardPredicate {
-    std::sync::Arc::new(move |d| mana_value(d.mana_cost()) == n)
+/// `ZoneOf(It) == z` — the zone an object is in. Fundamental: "target creature"
+/// is `ir_and(ir_zone(Battlefield), ir_type(Creature))`, "counter target spell"
+/// is `ir_and(ir_zone(Stack), …)`, graveyard targeting is `ir_zone(Graveyard)`.
+pub(crate) fn ir_zone(z: ZoneId) -> Filter {
+    Filter(Expr::Eq(Box::new(Expr::ZoneOf(Box::new(it()))), Box::new(Expr::ZoneLit(z))))
 }
 
-/// True iff the card is a creature with toughness ≤ `n`.
-pub(crate) fn pred_toughness_le(n: i32) -> CardPredicate {
-    std::sync::Arc::new(move |d| d.as_creature().map_or(false, |c| c.toughness() <= n))
+/// Colorless (no colored pips): `|Colors(It)| == 0`.
+pub(crate) fn ir_colorless() -> Filter {
+    Filter(Expr::Eq(Box::new(Expr::Count(Box::new(Expr::Colors(Box::new(it()))))), Box::new(Expr::Num(0))))
 }
 
-/// True iff the card is a creature with the given keyword.
-pub(crate) fn pred_has_keyword(kw: Keyword) -> CardPredicate {
-    std::sync::Arc::new(move |d| d.as_creature().map_or(false, |c| c.keywords.contains(kw)))
+/// `keyword ∈ Keywords(It)`.
+pub(crate) fn ir_keyword(kw: Keyword) -> Filter {
+    Filter(Expr::Contains(Box::new(Expr::KeywordLit(kw)), Box::new(Expr::Keywords(Box::new(it())))))
 }
 
-/// True iff the card's mana cost has no colored pips (generic/colorless only).
-#[allow(dead_code)] // used by Urza's Saga search (search plan, not yet implemented)
-pub(crate) fn pred_no_colored_pips() -> CardPredicate {
-    std::sync::Arc::new(|d| d.colors.is_empty())
+/// `Mv(It) <= n`.
+pub(crate) fn ir_mv_le(n: i32) -> Filter {
+    Filter(Expr::Le(Box::new(Expr::Mv(Box::new(it()))), Box::new(Expr::Num(n as i64))))
 }
 
-/// True iff the card has the given subtype (e.g. "Equipment", "Ninja", "adventure").
-pub(crate) fn pred_has_subtype(subtype: &'static str) -> CardPredicate {
-    std::sync::Arc::new(move |d| d.has_subtype(subtype))
+/// `Mv(It) == n`.
+pub(crate) fn ir_mv_eq(n: i32) -> Filter {
+    Filter(Expr::Eq(Box::new(Expr::Mv(Box::new(it()))), Box::new(Expr::Num(n as i64))))
 }
 
-/// Logical AND of two predicates.
-pub(crate) fn pred_and(a: CardPredicate, b: CardPredicate) -> CardPredicate {
-    std::sync::Arc::new(move |d| a(d) && b(d))
+/// A creature with `Toughness(It) <= n`.
+pub(crate) fn ir_toughness_le(n: i32) -> Filter {
+    ir_and(
+        ir_type(CardType::Creature),
+        Filter(Expr::Le(Box::new(Expr::Toughness(Box::new(it()))), Box::new(Expr::Num(n as i64)))),
+    )
 }
 
-/// Logical OR of two predicates.
-pub(crate) fn pred_or(a: CardPredicate, b: CardPredicate) -> CardPredicate {
-    std::sync::Arc::new(move |d| a(d) || b(d))
+/// Has at least one counter of the given type.
+pub(crate) fn ir_has_counter(ct: CounterType) -> Filter {
+    Filter(Expr::Gt(Box::new(Expr::CountersOn(Box::new(it()), ct)), Box::new(Expr::Num(0))))
 }
 
-/// Logical NOT of a predicate.
-pub(crate) fn pred_not(p: CardPredicate) -> CardPredicate {
-    std::sync::Arc::new(move |d| !p(d))
+/// A colored spell on the stack — protection-source filter (Emrakul).
+pub(crate) fn ir_colored_spell() -> Filter {
+    ir_and(ir_zone(ZoneId::Stack), ir_not(ir_colorless()))
 }
 
-// ── ObjPredicate ──────────────────────────────────────────────────────────────
-
-/// A state-aware predicate over a game object: takes the candidate object id and
-/// current state; can inspect both the card def and battlefield state.
-/// Used for cost payment filters, choice enumeration, and `ObjectInZone` targeting.
-pub(crate) type ObjPredicate = std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>;
-
-/// Lift a `CardPredicate` into an `ObjPredicate`.
-/// Falls back to catalog lookup for non-battlefield objects (hand, graveyard, etc.)
-/// where the materialized view is not populated.
-pub(crate) fn obj_pred_from_card(p: CardPredicate) -> ObjPredicate {
-    std::sync::Arc::new(move |id, state| {
-        if let Some(d) = state.def_of(id) {
-            p(d)
-        } else if let Some(obj) = state.objects.get(&id) {
-            state.catalog.get(obj.catalog_key.as_str()).map_or(false, |d| p(d))
-        } else {
-            false
-        }
-    })
+/// Conjunction.
+pub(crate) fn ir_and(a: Filter, b: Filter) -> Filter {
+    Filter(Expr::And(Box::new(a.0), Box::new(b.0)))
 }
 
-/// True iff the object has at least one counter of the given type.
-pub(crate) fn pred_has_counter(ct: CounterType) -> ObjPredicate {
-    std::sync::Arc::new(move |id, state| {
-        state.objects.get(&id)
-            .map_or(false, |o| o.counters.get(&ct).copied().unwrap_or(0) > 0)
-    })
+/// Disjunction.
+pub(crate) fn ir_or(a: Filter, b: Filter) -> Filter {
+    Filter(Expr::Or(Box::new(a.0), Box::new(b.0)))
 }
 
-/// Logical AND of two obj predicates.
-#[allow(dead_code)]
-pub(crate) fn cost_pred_and(a: ObjPredicate, b: ObjPredicate) -> ObjPredicate {
-    std::sync::Arc::new(move |id, state| a(id, state) && b(id, state))
+/// Negation.
+pub(crate) fn ir_not(a: Filter) -> Filter {
+    Filter(Expr::Not(Box::new(a.0)))
 }
-
-/// Logical OR of two obj predicates.
-#[allow(dead_code)]
-pub(crate) fn cost_pred_or(a: ObjPredicate, b: ObjPredicate) -> ObjPredicate {
-    std::sync::Arc::new(move |id, state| a(id, state) || b(id, state))
-}
-
-/// Logical NOT of an obj predicate.
-#[allow(dead_code)]
-pub(crate) fn cost_pred_not(p: ObjPredicate) -> ObjPredicate {
-    std::sync::Arc::new(move |id, state| !p(id, state))
-}
-
-/// True iff the object is a land.
-#[allow(dead_code)]
-pub(crate) fn cost_pred_land() -> ObjPredicate {
-    obj_pred_from_card(pred_type_eq(CardType::Land))
-}
-
-/// True iff the object is a permanent on the battlefield that is attacking and unblocked.
-pub(crate) fn cost_pred_unblocked_attacker() -> ObjPredicate {
-    std::sync::Arc::new(|id, state| {
-        state.permanent_bf(id).map_or(false, |bf| bf.attacking && bf.unblocked)
-    })
-}
-
 
 // ── Protection ───────────────────────────────────────────────────────────────
 
@@ -159,9 +125,8 @@ pub(crate) fn is_protected_from(target_id: ObjId, source_id: ObjId, state: &SimS
     let target_def = state.def_of(target_id)
         .or_else(|| state.objects.get(&target_id)
             .and_then(|o| state.catalog.get(o.catalog_key.as_str())));
-    target_def.map_or(false, |td| {
-        td.protection_from.iter().any(|pred| pred(source_id, state))
-    })
+    let prots = target_def.map(|td| td.protection_from.clone()).unwrap_or_default();
+    prots.iter().any(|f| obj_matches(f, source_id, state))
 }
 
 /// CR 702.11b: a permanent with hexproof can't be the target of spells or abilities
@@ -174,19 +139,6 @@ pub(crate) fn is_hexproof_from(target_id: ObjId, source_controller: PlayerId, st
             CardKind::Creature(c) => c.keywords.contains(Keyword::Hexproof),
             _ => false,
         }
-    })
-}
-
-/// Protection predicate: source is a colored spell (on the stack with ≥1 color).
-/// Used by Emrakul, the Aeons Torn.
-pub(crate) fn obj_pred_colored_spell() -> ObjPredicate {
-    std::sync::Arc::new(|source_id, state| {
-        let obj = state.objects.get(&source_id);
-        let is_spell = obj.map_or(false, |o| o.zone == CardZone::Stack);
-        let is_colored = state.def_of(source_id)
-            .or_else(|| obj.and_then(|o| state.catalog.get(o.catalog_key.as_str())))
-            .map_or(false, |d| !d.colors.is_empty());
-        is_spell && is_colored
     })
 }
 
@@ -208,7 +160,7 @@ pub(crate) enum TargetSpec {
     Player(Who),
     /// Any game object in `zone` controlled by `controller` matching `filter`.
     /// Covers permanents (Battlefield), spells (Stack), and cards in graveyard/library.
-    ObjectInZone { controller: Who, zone: ZoneId, filter: ObjPredicate },
+    ObjectInZone { controller: Who, zone: ZoneId, filter: Filter },
     /// Any one of several sub-specs is a legal target (e.g. "any target" = creature | planeswalker | player).
     Union(Vec<TargetSpec>),
     /// An ability on the stack (Zone=Stack, StackObjectType=Ability) controlled by `controller`,
@@ -269,13 +221,15 @@ pub(crate) fn exclude_from_target_spec(spec: &TargetSpec, exclude_id: ObjId) -> 
         TargetSpec::None => TargetSpec::None,
         TargetSpec::Player(w) => TargetSpec::Player(*w),
         TargetSpec::ObjectInZone { controller, zone, filter } => {
-            let inner = filter.clone();
+            // "another target X" = the original filter AND `It != exclude_id`.
+            let not_excluded = ir_not(Filter(Expr::Eq(
+                Box::new(it()),
+                Box::new(Expr::ObjLit(exclude_id)),
+            )));
             TargetSpec::ObjectInZone {
                 controller: *controller,
                 zone: *zone,
-                filter: std::sync::Arc::new(move |id, state| {
-                    id != exclude_id && inner(id, state)
-                }),
+                filter: ir_and(filter.clone(), not_excluded),
             }
         }
         TargetSpec::Union(specs) => TargetSpec::Union(
@@ -296,6 +250,9 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
         TargetSpec::Player(who) => vec![state.player_id(who.resolve(controller))],
         TargetSpec::ObjectInZone { controller: who, zone, filter } => {
             let target_who = who.resolve(controller);
+            let env = crate::ir::executor::BindEnv::new()
+                .with_controller(controller)
+                .with_source(source_id);
             objects_in_zone(zone, target_who, state)
                 .filter(|&id| {
                     if *zone == ZoneId::Stack {
@@ -307,7 +264,7 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
                     if is_protected_from(id, source_id, state) { return false; }
                     // CR 702.11b: hexproof prevents opponent targeting.
                     if is_hexproof_from(id, controller, state) { return false; }
-                    filter(id, state)
+                    crate::ir::executor::matches(filter, id, state, &env)
                 })
                 .collect()
         }

@@ -495,6 +495,13 @@ pub(crate) enum GameEvent {
     /// Fired in `sim_play_land` after the zone change. Distinguishes the once-per-turn
     /// land play from hand vs. lands entering via fetch, reanimate, etc.
     LandPlayed { id: ObjId, controller: PlayerId },
+    /// A permanent transformed in place (CR 712.4). Fired by `Action::Transform`
+    /// after the face flip so triggers can react ("whenever ~ transforms").
+    Transformed { id: ObjId, controller: PlayerId },
+    /// An Equipment/Aura became attached to a permanent (CR 702.6). Fired by
+    /// `Action::Attach` so "whenever ~ becomes equipped/enchanted" triggers fire.
+    /// `attachment` is the equipment/aura; `target` is the permanent it attached to.
+    BecameAttached { attachment: ObjId, target: ObjId, controller: PlayerId },
     // Future variants: DamageDealt, SpellResolved, AbilityActivated,
     //                  CounterChanged, LifeChanged, TokenCreated.
 }
@@ -1086,28 +1093,6 @@ struct AnnounceChoice {
     chosen_x: u32,
 }
 
-/// Accumulated state during the cast sub-machine (CR 601.2a-i).
-#[allow(dead_code)]
-struct CastContext {
-    card_id: ObjId,
-    face: SpellFace,
-    caster: PlayerId,
-    chosen_mode: usize,
-    alt_cost: Option<AlternateCost>,
-    chosen_x: u32,
-    chosen_targets: Vec<ObjId>,
-    total_cost: Option<TotalCost>,
-    costs_paid_ctx: CostsPaidCtx,
-}
-
-/// Computed total cost after modifications (CR 601.2f).
-/// Phase 4 will use this for strategy-driven mana activation.
-#[allow(dead_code)]
-struct TotalCost {
-    mana: ManaCost,
-    additional: Vec<CostComponent>,
-}
-
 /// A mana ability the strategy can activate during ActivateMana.
 #[derive(Clone)]
 pub(crate) struct ManaAbilityOption {
@@ -1246,7 +1231,7 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
             if ma.timing != ActivationTiming::Default { continue; } // non-default timing excluded from mana sub-loop
             if !matches!(ma.source_zone, SourceZone::Battlefield) { continue; }
             if ma_requires_tap(ma) && bf.tapped { continue; }
-            if ma.condition.as_ref().map_or(false, |cond| !cond(card.id, state)) { continue; }
+            if ma.condition.as_ref().map_or(false, |cond| !obj_matches(cond, card.id, state)) { continue; }
             options.push(ManaAbilityOption {
                 source_id: card.id,
                 ability_index: idx,
@@ -1306,7 +1291,7 @@ pub(crate) fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) ->
                     && ma.timing == ActivationTiming::Default // exclude LED, instant-only abilities
                     && matches!(ma.source_zone, SourceZone::Battlefield)
                     && (!ma_requires_tap(ma) || !bf.tapped)
-                    && ma.condition.as_ref().map_or(true, |cond| cond(*id, state))
+                    && ma.condition.as_ref().map_or(true, |cond| obj_matches(cond, *id, state))
                     && color.map_or(true, |c| ma.produces.contains(&c))
             })?;
             Some((*id, idx, ma.produces_count))
@@ -1445,6 +1430,71 @@ pub(crate) fn pay_ir_cost(
     for _attempt in 0..8 {
         match crate::ir::cost_exec::pay(action, &schema, &env, state, t, who, source) {
             Ok(ctx) => return Some(ctx),
+            Err(crate::ir::cost::PayError::ManaShortage(rem)) => {
+                let Some(s) = strategy.as_deref_mut() else { return None };
+                run_mana_loop(state, t, who, &rem, s);
+            }
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Bind the announced X (`chosen_x`) into `env` under `$x`, overriding whatever
+/// the strategy proposed. Additional-cost XLife/XMana payments read this — the
+/// value is announced once at CR 601.2b and shared with the spell's resolution
+/// effect, so the cost layer consumes it rather than re-deciding it. Harmless
+/// for costs with no `$x` decision (the extra binding is ignored).
+fn bind_announced_x(env: &mut crate::ir::executor::BindEnv, chosen_x: u32) {
+    env.bindings.insert("$x", crate::ir::expr::Value::Num(chosen_x as i64));
+}
+
+/// Feasibility of a spell's additional IR cost (CR 118.9d) given the announced
+/// `chosen_x`. Replaces the legacy `can_pay_costs(&def.additional_costs, …)`.
+/// Returns true iff the cost is structurally payable and the announced X is in
+/// range (e.g. enough potential mana for XMana, enough life for XLife).
+pub(crate) fn can_pay_additional_ir_cost(
+    state: &SimState,
+    who: PlayerId,
+    source: ObjId,
+    cost: &crate::ir::ability::CostBody,
+    chosen_x: u32,
+) -> bool {
+    let crate::ir::ability::CostBody::Ir(action) = cost;
+    let Some(schema) = crate::ir::cost_exec::build_schema(action, state, who, source) else {
+        return false;
+    };
+    let mut env = crate::strategy::default_announcement(&schema);
+    bind_announced_x(&mut env, chosen_x);
+    crate::ir::cost_exec::validate_env(&schema, &env)
+}
+
+/// Pay a spell's additional IR cost (CR 118.9d). Like `pay_ir_cost` but
+/// pre-binds the announced `chosen_x` so XLife/XMana pay exactly the value
+/// shared with the resolution effect. Records `chosen_x` in the returned
+/// `CostsPaidCtx`.
+fn pay_additional_ir_cost(
+    state: &mut SimState,
+    t: u8,
+    who: PlayerId,
+    source: ObjId,
+    cost: &crate::ir::ability::CostBody,
+    chosen_x: u32,
+    strategy: &mut Option<&mut dyn Strategy>,
+) -> Option<CostsPaidCtx> {
+    let crate::ir::ability::CostBody::Ir(action) = cost;
+    let schema = crate::ir::cost_exec::build_schema(action, state, who, source)?;
+    let mut env = match strategy.as_deref_mut() {
+        Some(s) => s.propose_announcement(state, source, &schema),
+        None => crate::strategy::default_announcement(&schema),
+    };
+    bind_announced_x(&mut env, chosen_x);
+    for _attempt in 0..8 {
+        match crate::ir::cost_exec::pay(action, &schema, &env, state, t, who, source) {
+            Ok(mut ctx) => {
+                ctx.chosen_x = chosen_x;
+                return Some(ctx);
+            }
             Err(crate::ir::cost::PayError::ManaShortage(rem)) => {
                 let Some(s) = strategy.as_deref_mut() else { return None };
                 run_mana_loop(state, t, who, &rem, s);
@@ -1868,7 +1918,7 @@ impl SimState {
                 let bf_mas: Vec<_> = mas.iter()
                     .filter(|ma| matches!(ma.source_zone, SourceZone::Battlefield))
                     .filter(|ma| ma.timing == ActivationTiming::Default)
-                    .filter(|ma| ma.condition.as_ref().map_or(true, |cond| cond(card_id, self)))
+                    .filter(|ma| ma.condition.as_ref().map_or(true, |cond| obj_matches(cond, card_id, self)))
                     .cloned().collect();
                 accumulate_source_potential(&bf_mas, bf.tapped, &mut p);
             }
@@ -2698,221 +2748,6 @@ fn sim_draw(state: &mut SimState, who: PlayerId, t: u8, is_natural: bool) {
     fire_event(ev, state, t, who);
 }
 
-// ── Unified cost check / pay ──────────────────────────────────────────────────
-
-/// Returns true iff every component of `costs` can be paid by `who`.
-/// `source_id` is used to resolve `SacSelf` and `DiscardSelf`.
-fn can_pay_single_cost(
-    cost: &CostComponent,
-    state: &SimState,
-    who: PlayerId,
-    source_id: ObjId,
-    source_untapped: bool,
-    chosen_x: u32,
-) -> bool {
-    match cost {
-        CostComponent::Mana(mc) => state.potential_mana(who).can_pay(mc),
-        CostComponent::TapSelf => source_untapped,
-        CostComponent::SacSelf => state.permanent_bf(source_id).is_some(),
-        CostComponent::DiscardSelf => state.hand_of(who).any(|c| c.id == source_id),
-        CostComponent::ExileSelf => state.hand_of(who).any(|c| c.id == source_id),
-        CostComponent::DiscardHand => true, // discarding 0 cards is valid
-        CostComponent::Life(n) => state.player(who).life > *n,
-        CostComponent::XLife => state.player(who).life >= chosen_x as i32,
-        CostComponent::XMana => state.potential_mana(who).total >= chosen_x as i32,
-        CostComponent::SacPermanent(pred) => {
-            state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
-        }
-        CostComponent::DiscardCard(pred) | CostComponent::ExileFromHand(pred) => {
-            state.hand_of(who).any(|c| c.id != source_id && pred(c.id, state))
-        }
-        CostComponent::ReturnFromBattlefield(pred) => {
-            state.permanents_of(who).any(|c| c.bf.is_some() && pred(c.id, state))
-        }
-        CostComponent::TapPermanent(pred) => {
-            state.permanents_of(who).any(|c| {
-                c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state)
-            })
-        }
-        CostComponent::LoyaltyAdjust(n) => {
-            state.permanent_bf(source_id).map_or(false, |bf| {
-                !bf.pw_activated_this_turn && (*n >= 0 || bf.loyalty + n > 0)
-            })
-        }
-        CostComponent::CostAnd(parts) => {
-            can_pay_costs(parts, state, who, source_id, source_untapped, chosen_x)
-        }
-        CostComponent::CostOr(parts) => {
-            parts.iter().any(|branch| can_pay_single_cost(branch, state, who, source_id, source_untapped, chosen_x))
-        }
-        CostComponent::Replicate(_) => true, // optional; 0 payments always valid
-    }
-}
-
-pub(crate) fn can_pay_costs(
-    costs: &[CostComponent],
-    state: &SimState,
-    who: PlayerId,
-    source_id: ObjId,
-    source_untapped: bool,
-    chosen_x: u32,
-) -> bool {
-    costs.iter().all(|cost| can_pay_single_cost(cost, state, who, source_id, source_untapped, chosen_x))
-}
-
-/// Executes a single cost component, mutating state.
-/// Caller must have checked `can_pay_costs` first.
-fn pay_single_cost(
-    cost: &CostComponent,
-    state: &mut SimState,
-    t: u8,
-    who: PlayerId,
-    source_id: ObjId,
-    ctx: &mut CostsPaidCtx,
-    chosen_x: u32,
-) {
-    match cost {
-        CostComponent::Mana(mc) => {
-            state.player_mut(who).pool.spend(mc);
-        }
-        CostComponent::TapSelf => {
-            if let Some(bf) = state.permanent_bf_mut(source_id) {
-                bf.tapped = true;
-            }
-        }
-        CostComponent::SacSelf => {
-            state.set_card_zone(source_id, CardZone::Graveyard);
-        }
-        CostComponent::DiscardSelf => {
-            state.set_card_zone(source_id, CardZone::Graveyard);
-        }
-        CostComponent::ExileSelf => {
-            state.set_card_zone(source_id, CardZone::Exile { on_adventure: false });
-        }
-        CostComponent::DiscardHand => {
-            let hand_ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
-            for id in hand_ids {
-                state.set_card_zone(id, CardZone::Graveyard);
-                ctx.objects_moved.push(id);
-            }
-        }
-        CostComponent::Life(n) => {
-            state.lose_life(who, *n);
-        }
-        CostComponent::SacPermanent(pred) => {
-            // Prefer permanents without mana abilities; fall back to any match.
-            let target = state.permanents_of(who)
-                .filter(|c| c.bf.is_some() && pred(c.id, state))
-                .min_by_key(|c| {
-                    let has_mana = state.def_of(c.id)
-                        .map_or(false, |d| !d.mana_abilities().is_empty());
-                    has_mana as u8
-                })
-                .map(|c| c.id);
-            if let Some(id) = target {
-                state.set_card_zone(id, CardZone::Graveyard);
-                ctx.objects_moved.push(id);
-            }
-        }
-        CostComponent::DiscardCard(pred) => {
-            let target = state.hand_of(who)
-                .find(|c| c.id != source_id && pred(c.id, state))
-                .map(|c| c.id);
-            if let Some(id) = target {
-                state.set_card_zone(id, CardZone::Graveyard);
-                ctx.objects_moved.push(id);
-            }
-        }
-        CostComponent::ExileFromHand(pred) => {
-            let target = state.hand_of(who)
-                .find(|c| c.id != source_id && pred(c.id, state))
-                .map(|c| c.id);
-            if let Some(id) = target {
-                state.set_card_zone(id, CardZone::Exile { on_adventure: false });
-                ctx.objects_moved.push(id);
-            }
-        }
-        CostComponent::ReturnFromBattlefield(pred) => {
-            let target = state.permanents_of(who)
-                .find(|c| c.bf.is_some() && pred(c.id, state))
-                .map(|c| (c.id, c.catalog_key.clone(), c.bf.as_ref().and_then(|bf| bf.attack_target)));
-            if let Some((id, name, attack_target)) = target {
-                if let Some(card) = state.objects.get_mut(&id) {
-                    card.zone = CardZone::Hand { known: false };
-                    card.bf = None;
-                }
-                state.combat_attackers.retain(|&a| a != id);
-                state.combat_blocks.retain(|(a, _)| *a != id);
-                state.log(t, who, format!("→ return {} to hand (cost)", name));
-                ctx.objects_moved.push(id);
-                ctx.returned_attack_targets.push(attack_target);
-            }
-        }
-        CostComponent::TapPermanent(pred) => {
-            let target = state.permanents_of(who)
-                .find(|c| c.bf.as_ref().map_or(false, |bf| !bf.tapped) && pred(c.id, state))
-                .map(|c| c.id);
-            if let Some(id) = target {
-                if let Some(bf) = state.permanent_bf_mut(id) {
-                    bf.tapped = true;
-                }
-            }
-        }
-        CostComponent::LoyaltyAdjust(n) => {
-            if let Some(bf) = state.permanent_bf_mut(source_id) {
-                bf.loyalty += n;
-                bf.pw_activated_this_turn = true;
-            }
-        }
-        CostComponent::CostAnd(parts) => {
-            for part in parts {
-                pay_single_cost(part, state, t, who, source_id, ctx, chosen_x);
-            }
-        }
-        CostComponent::CostOr(parts) => {
-            // Strategy picks the first payable branch (greedy).
-            let source_untapped = state.permanent_bf(source_id).map_or(true, |bf| !bf.tapped);
-            if let Some(branch) = parts.iter().find(|branch| {
-                can_pay_single_cost(branch, state, who, source_id, source_untapped, chosen_x)
-            }) {
-                pay_single_cost(branch, state, t, who, source_id, ctx, chosen_x);
-            }
-        }
-        CostComponent::XLife => {
-            state.player_mut(who).life -= chosen_x as i32;
-            ctx.chosen_x = chosen_x;
-        }
-        CostComponent::XMana => {
-            let mc = ManaCost { generic: chosen_x as i32, ..ManaCost::default() };
-            state.player_mut(who).pool.spend(&mc);
-            ctx.chosen_x = chosen_x;
-        }
-        CostComponent::Replicate(_) => {
-            // No-op: replicate payment and copy-pushing are handled in cast_spell
-            // after the spell has been placed on the stack (we need stack context).
-        }
-    }
-}
-
-/// Executes every component of `costs`, mutating state.
-/// Caller must have checked `can_pay_costs` first.
-/// For `SacPermanent` and `ReturnFromBattlefield`, prefers permanents without mana
-/// abilities to preserve mana sources where possible.
-/// Returns a `CostsPaidCtx` recording which objects moved during payment.
-pub(crate) fn pay_costs(
-    costs: &[CostComponent],
-    state: &mut SimState,
-    t: u8,
-    who: PlayerId,
-    source_id: ObjId,
-    chosen_x: u32,
-) -> CostsPaidCtx {
-    let mut ctx = CostsPaidCtx::default();
-    for cost in costs {
-        pay_single_cost(cost, state, t, who, source_id, &mut ctx, chosen_x);
-    }
-    ctx
-}
 
 /// Log the ability activation and pay its costs via the unified `pay_costs` function.
 /// Returns a `CostsPaidCtx` with the objects moved during payment.
@@ -2958,34 +2793,6 @@ fn pay_ability_cost(
     ctx
 }
 
-/// Build a human-readable description of a cost list for log messages.
-fn describe_costs(costs: &[CostComponent]) -> Vec<String> {
-    costs.iter().map(|c| match c {
-        CostComponent::Mana(mc) => mc.display(),
-        CostComponent::TapSelf => "tap".to_string(),
-        CostComponent::SacSelf => "sac self".to_string(),
-        CostComponent::DiscardSelf => "discard self".to_string(),
-        CostComponent::ExileSelf => "exile self".to_string(),
-        CostComponent::DiscardHand => "discard hand".to_string(),
-        CostComponent::Life(n) => format!("-{} life", n),
-        CostComponent::SacPermanent(_) => "sac permanent".to_string(),
-        CostComponent::DiscardCard(_) => "discard card".to_string(),
-        CostComponent::ExileFromHand(_) => "exile blue".to_string(),
-        CostComponent::ReturnFromBattlefield(_) => "bounce land".to_string(),
-        CostComponent::TapPermanent(_) => "tap permanent".to_string(),
-        CostComponent::LoyaltyAdjust(n) => format!("loyalty {}", n),
-        CostComponent::CostAnd(parts) => describe_costs(parts).join(", "),
-        CostComponent::CostOr(parts) => {
-            let branches: Vec<String> = parts.iter()
-                .map(|b| describe_costs(std::slice::from_ref(b)).join(", "))
-                .collect();
-            format!("({})", branches.join(" OR "))
-        }
-        CostComponent::Replicate(mc) => format!("replicate {}", mc.display()),
-        CostComponent::XLife => "pay X life".to_string(),
-        CostComponent::XMana => "pay X mana".to_string(),
-    }).collect()
-}
 
 /// Cast a spell: pay its cost, choose any permanent target, remove from library, log,
 /// and return the card's ObjId (now on the stack).
@@ -3128,7 +2935,7 @@ fn cast_spell(
     if alt_cost.is_none() && !mana_is_usable {
         return None;
     }
-    if !can_pay_costs(&def.additional_costs, state, who, card_id, false, chosen_x) {
+    if !can_pay_additional_ir_cost(state, who, card_id, &def.additional_costs, chosen_x) {
         return None;
     }
 
@@ -3153,10 +2960,13 @@ fn cast_spell(
     // Pay additional costs (CR 118.9d: apply regardless of which cost path was taken).
     // `chosen_x` is passed so XLife additional costs pay the strategy-chosen amount.
     if !def.additional_costs.is_empty() {
-        let add_ctx = pay_costs(&def.additional_costs, state, t, who, card_id, chosen_x);
-        costs_ctx.objects_moved.extend(add_ctx.objects_moved);
-        costs_ctx.returned_attack_targets.extend(add_ctx.returned_attack_targets);
-        costs_ctx.chosen_x = add_ctx.chosen_x;
+        if let Some(add_ctx) =
+            pay_additional_ir_cost(state, t, who, card_id, &def.additional_costs, chosen_x, &mut strategy)
+        {
+            costs_ctx.objects_moved.extend(add_ctx.objects_moved);
+            costs_ctx.returned_attack_targets.extend(add_ctx.returned_attack_targets);
+            costs_ctx.chosen_x = add_ctx.chosen_x;
+        }
     }
     costs_ctx.chosen_mode = chosen_mode;
     costs_ctx.alt_cost_index = alt_cost_idx;
@@ -3199,9 +3009,7 @@ fn cast_spell(
     }
 
     // Replicate (CR 702.58): for each time the replicate cost was paid, push a copy.
-    let rep_cost = def.additional_costs.iter().find_map(|c| {
-        if let CostComponent::Replicate(mc) = c { Some(mc.clone()) } else { None }
-    });
+    let rep_cost = def.additional_costs.replicate_mana_cost();
     if let Some(rep_mc) = rep_cost {
         // Count other valid targets for copies (different from the original target).
         let original_targets = chosen_targets.to_vec();
@@ -3573,23 +3381,6 @@ pub(crate) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
     new_id
 }
 
-fn do_flip_tamiyo(source_id: ObjId, controller: PlayerId, state: &mut SimState, t: u8) {
-    // Read the back-face starting loyalty from the front-face materialized def.
-    // The front face is still current in materialized at the moment the trigger resolves
-    // (active_face == 0). `back` carries the printed PW data for the flipped face.
-    let loyalty = state.def_of(source_id)
-        .and_then(|d| d.back.as_ref())
-        .and_then(|b| if let CardKind::Planeswalker(ref p) = b.kind { Some(p.loyalty) } else { None })
-        .unwrap_or(2);
-    // Set active_face = 1. catalog_key is intentionally NOT changed — recompute substitutes
-    // the back-face kind into the materialized def whenever active_face == 1.
-    if let Some(bf) = state.objects.get_mut(&source_id).and_then(|c| c.bf.as_mut()) {
-        bf.loyalty = loyalty;
-        bf.active_face = 1;
-    }
-    state.log(t, controller, format!("Tamiyo flips → Tamiyo, Seasoned Scholar [loyalty: {}]", loyalty));
-}
-
 /// Pop and resolve the top item of the stack.
 ///
 /// If the top id is in `state.objects` it is a spell: runs its effect and moves the card to
@@ -3714,8 +3505,7 @@ fn run_cast_submachine(
             .map(|n| (0..n).collect())
             .unwrap_or_else(|| vec![0]),
         available_alt_costs: def.alternate_costs().to_vec(),
-        has_x_cost: def.additional_costs.iter()
-            .any(|c| matches!(c, CostComponent::XLife | CostComponent::XMana)),
+        has_x_cost: def.additional_costs.has_x_cost(),
     };
     let ann = strategy.announce(state, card_id, &options);
     let chosen_mode = ann.chosen_mode;

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use super::*;
+use crate::ir::expr::Filter;
 
 /// Actor-relative player reference used in effect primitives.
 /// `Actor` = the spell's controller; `Opp` = their opponent.
@@ -43,6 +44,31 @@ impl Effect {
 }
 
 // ── Effect primitives ─────────────────────────────────────────────────────────
+
+/// Run a self-contained IR `Action` with `who` as the acting controller, as a
+/// legacy closure `Effect`. The transitional bridge that lets a still-closure
+/// spell body compose IR primitives (`MayDo`, `Shuffle`, …) instead of
+/// re-implementing them as bespoke closures.
+pub(crate) fn eff_ir(who: PlayerId, action: crate::ir::action::Action) -> Effect {
+    Effect(Arc::new(move |state, _t, _targets| {
+        let env = crate::ir::executor::BindEnv::new().with_controller(who);
+        crate::ir::executor::execute(&action, state, &env);
+    }))
+}
+
+/// Closure-side convenience: attach `what` to `to` via the IR `Action::Attach`,
+/// controlled by `who`. Used by still-closure equip abilities / Living Weapon so
+/// the `attached_to` write + `BecameAttached` event live in one place.
+pub(crate) fn do_attach(state: &mut SimState, who: PlayerId, what: ObjId, to: ObjId) {
+    let env = crate::ir::executor::BindEnv::new().with_controller(who);
+    crate::ir::executor::execute(
+        &crate::ir::action::Action::Attach {
+            what: crate::ir::expr::Expr::ObjLit(what),
+            to: crate::ir::expr::Expr::ObjLit(to),
+        },
+        state, &env,
+    );
+}
 
 /// Draw `n` cards for `who`.
 pub(crate) fn eff_draw(who: PlayerId, n: usize) -> Effect {
@@ -108,6 +134,7 @@ pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
         }
     }))
 }
+
 
 /// Scry N: look at top N cards of `who`'s library. For each, if the evaluator scores
 /// it above threshold (0.3), keep on top; otherwise put on bottom.
@@ -189,26 +216,6 @@ pub(crate) fn eff_order(who: PlayerId, n: usize) -> Effect {
     }))
 }
 
-/// Maybe-shuffle: if the top card of `who`'s library scores below threshold (0.3),
-/// shuffle the whole library. Used by Ponder after ordering top 3 — if even the best
-/// arrangement is bad, shuffle for a fresh random draw instead.
-pub(crate) fn eff_maybe_shuffle(who: PlayerId) -> Effect {
-    Effect(Arc::new(move |state, _t, _targets| {
-        let eval = Arc::clone(&state.evaluate_card);
-        let top_id = match who {
-            PlayerId::Us  => state.us.library_order.front().copied(),
-            PlayerId::Opp => state.opp.library_order.front().copied(),
-        };
-        if let Some(id) = top_id {
-            let score = eval(who, id, state);
-            if score < 0.3 {
-                state.shuffle_library(who);
-                state.log(0, who, "Ponder → shuffles".to_string());
-            }
-        }
-    }))
-}
-
 /// `who` loses `n` life, with a log line.
 pub(crate) fn eff_life_loss(who: PlayerId, n: i32) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
@@ -254,10 +261,11 @@ pub(crate) fn eff_damage_target(caster: PlayerId, n: i32, source_id: ObjId) -> E
 
 /// Deal `n` damage to every permanent on the battlefield matching `filter`.
 /// Protection from the source prevents the damage (checked per-permanent).
-pub(crate) fn eff_damage_all(caster: PlayerId, n: i32, source_id: ObjId, filter: ObjPredicate) -> Effect {
+pub(crate) fn eff_damage_all(caster: PlayerId, n: i32, source_id: ObjId, filter: Filter) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
+        let env = crate::ir::executor::BindEnv::new().with_controller(caster).with_source(source_id);
         let hits: Vec<ObjId> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Battlefield && filter(o.id, state))
+            .filter(|o| o.zone == CardZone::Battlefield && crate::ir::executor::matches(&filter, o.id, state, &env))
             .map(|o| o.id)
             .collect();
         for id in hits {
@@ -273,11 +281,12 @@ pub(crate) fn eff_damage_all(caster: PlayerId, n: i32, source_id: ObjId, filter:
 /// Force `who` to sacrifice one permanent matching `filter`, chosen via `state.sacrifice_choice`.
 /// Models "sacrifice a [X] of your choice" (CR 701.16). The sacrificing player decides;
 /// the effect moves the chosen permanent to the graveyard. No-ops if no match exists.
-pub(crate) fn eff_sacrifice(caster: PlayerId, who: Who, filter: ObjPredicate) -> Effect {
+pub(crate) fn eff_sacrifice(caster: PlayerId, who: Who, filter: Filter) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
         let target_who = who.resolve(caster);
+        let env = crate::ir::executor::BindEnv::new().with_controller(target_who);
         let candidates: Vec<ObjId> = state.permanents_of(target_who)
-            .filter(|o| o.bf.is_some() && filter(o.id, state))
+            .filter(|o| o.bf.is_some() && crate::ir::executor::matches(&filter, o.id, state, &env))
             .map(|o| o.id)
             .collect();
         if candidates.is_empty() { return; }
@@ -308,10 +317,11 @@ pub(crate) fn eff_destroy_target(caster: PlayerId) -> Effect {
 /// `eff_destroy_target` route through `destroy_one`; indestructibility added there
 /// will apply to both. Use for "destroy each" oracle text; sacrifice and 0-toughness
 /// SBAs bypass indestructible and must use `change_zone` directly instead.
-pub(crate) fn eff_destroy_all(caster: PlayerId, filter: ObjPredicate) -> Effect {
+pub(crate) fn eff_destroy_all(caster: PlayerId, filter: Filter) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
+        let env = crate::ir::executor::BindEnv::new().with_controller(caster);
         let to_destroy: Vec<ObjId> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Battlefield && filter(o.id, state))
+            .filter(|o| o.zone == CardZone::Battlefield && crate::ir::executor::matches(&filter, o.id, state, &env))
             .map(|o| o.id)
             .collect();
         for id in to_destroy {
@@ -366,15 +376,13 @@ pub(crate) fn eff_bounce_target(caster: PlayerId) -> Effect {
     }))
 }
 
-/// Doomsday resolution: halve life (rounded up), then set success.
-/// Library + graveyard contents remain in place as the "pool" for pile selection;
-/// the simulation stops here so the viewer can see what's available.
-pub(crate) fn eff_doomsday() -> Effect {
-    Effect(Arc::new(|state, _t, _targets| {
-        let life = state.player(PlayerId::Us).life;
-        state.life_before_dd = Some(life);
-        state.player_mut(PlayerId::Us).life = life / 2;
-        state.success = true;
+/// Move the card in `targets[0]` onto the Battlefield.
+/// Target selection happens in the strategy layer via `choose_spell_target`.
+pub(crate) fn eff_reanimate(actor: PlayerId) -> Effect {
+    Effect(Arc::new(move |state, t, targets| {
+        if let Some(&id) = targets.first() {
+            change_zone(id, ZoneId::Battlefield, state, t, actor);
+        }
     }))
 }
 
@@ -400,14 +408,14 @@ pub(crate) fn eff_reveal_hand(caster: PlayerId, target: Who) -> Effect {
 }
 
 /// Discard `n` random cards from `target`'s hand matching `filter`.
-pub(crate) fn eff_discard(caster: PlayerId, target: Who, n: usize, filter: CardPredicate) -> Effect {
-    let discard_pred = filter;
+pub(crate) fn eff_discard(caster: PlayerId, target: Who, n: usize, filter: Filter) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
         use rand::Rng;
         let target_who = target.resolve(caster);
+        let env = crate::ir::executor::BindEnv::new().with_controller(target_who);
         for _ in 0..n {
             let candidates: Vec<ObjId> = state.hand_of(target_who)
-                .filter(|c| state.def_of(c.id).map_or(true, |d| discard_pred(d)))
+                .filter(|c| crate::ir::executor::matches(&filter, c.id, state, &env))
                 .map(|c| c.id)
                 .collect();
             if candidates.is_empty() { break; }
@@ -563,32 +571,20 @@ pub(crate) fn eff_counter_and_exile(caster: PlayerId, source_id: ObjId) -> Effec
     }))
 }
 
-/// Move the card in `targets[0]` onto the Battlefield.
-/// Target selection happens in the strategy layer via `choose_spell_target`.
-pub(crate) fn eff_reanimate(actor: PlayerId) -> Effect {
-    Effect(Arc::new(move |state, t, targets| {
-        if let Some(&id) = targets.first() {
-            change_zone(id, ZoneId::Battlefield, state, t, actor);
-        }
-    }))
-}
 
 /// Search `who`'s library for a card matching `predicate` and move it to `dest`.
 /// `predicate` and `dest` are built at load time — no string dispatch at simulation time.
 pub(crate) fn eff_fetch_search(
     who: PlayerId,
-    predicate: CardPredicate,
+    predicate: Filter,
     dest: ZoneId,
 ) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
         use rand::Rng;
-        // Library cards have no materialized state; fall back to catalog for the predicate check.
+        // `matches` falls back to the catalog for unmaterialized library cards.
+        let env = crate::ir::executor::BindEnv::new().with_controller(who);
         let candidates: Vec<ObjId> = state.library_of(who)
-            .filter(|c| {
-                state.def_of(c.id)
-                    .or_else(|| state.catalog.get(c.catalog_key.as_str()))
-                    .map_or(false, |d| predicate(d))
-            })
+            .filter(|c| crate::ir::executor::matches(&predicate, c.id, state, &env))
             .map(|c| c.id)
             .collect();
         if !candidates.is_empty() {
@@ -605,17 +601,14 @@ pub(crate) fn eff_fetch_search(
 /// Each player may put a card matching `filter` from their hand onto the battlefield.
 /// Both choices are collected before either placement, so the placements are simultaneous
 /// (CR 101.4 — "each" effects are simultaneous; no triggers fire between them).
-pub(crate) fn eff_each_may_put(caster: PlayerId, filter: CardPredicate) -> Effect {
+pub(crate) fn eff_each_may_put(caster: PlayerId, filter: Filter) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
         let f = std::sync::Arc::clone(&state.resolve_choice);
         let mut to_place: Vec<(ObjId, PlayerId)> = Vec::new();
         for &player in &[caster, caster.opp()] {
+            let env = crate::ir::executor::BindEnv::new().with_controller(player);
             let candidates: Vec<ObjId> = state.hand_of(player)
-                .filter(|c| {
-                    state.def_of(c.id)
-                        .or_else(|| state.catalog.get(c.catalog_key.as_str()))
-                        .map_or(false, |d| filter(d))
-                })
+                .filter(|c| crate::ir::executor::matches(&filter, c.id, state, &env))
                 .map(|c| c.id)
                 .collect();
             if candidates.is_empty() { continue; }

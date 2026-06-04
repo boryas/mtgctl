@@ -317,6 +317,47 @@ Tracks the generality and composability of the IR vocabulary over time. See
 [[file:CARD_INDEX.org::*Mechanic → IR Decomposition][Mechanic → IR Decomposition]] for
 the canonical mapping from MTG mechanics to IR primitives.
 
+** Principle: the filter space is the materialized game state
+
+The ~Filter~/~Expr~ space should, *in principle*, be able to project **every axis
+of the materialized game state** — because that is how Magic works (CR 109.3
+characteristics + zone/player/global state, any of which a filter may reference).
+The target is every axis of materialized *state* (card characteristics *plus*
+player/global state: life, hand size, "controls N artifacts", monarch, the spell
+being cast), not just card characteristics. It is finite and enumerable, so the
+space is exhaustible in principle. **Filter-completeness is downstream of
+state-modelling completeness:** you can filter exactly what the engine chooses to
+materialise.
+
+Because filters are pure queries over the one materialised, effects-applied view
+("reads see all writes"), they respect CEs/replacements for free. The invariant:
+*the only legitimate reason a filter cannot be written is missing state
+vocabulary — never missing compute.* No closures.
+
+This makes "can't express it as a projection of materialised state" a two-way
+bug detector:
+1. *Needs an escape-hatch closure* → either (a) the state is real but unmodelled
+   — add the ~Expr~ projection (this is what ~ZoneLit~ / ~IsToken~ /
+   ~GameCtx::CastingSpell~ were), or (b) it is not actually a filter — it is an
+   action or context masquerading as a characteristic test.
+2. *Reads the printed/catalog value instead of the materialised view* → a CE bug
+   ("target red creature" means red *now*, post-layers; read ~Colors(It)~ →
+   ~card_def_of~, never ~CardDef.colors~).
+
+Subtleties: filters are unary over *(object, context)* — "another creature",
+"equipped by me", "It != Source" need a reference frame (Source / controller /
+triggering event), supplied via the ~obj_matches~ env contract; and some axes are
+*temporal* (died this turn, spells cast this turn), living in the event
+log / per-turn accumulators, so "materialised state" means snapshot **+** history.
+
+*Read/write mirror — a concrete completeness criterion for this census:* the state
+axes are the spine. ~Expr~ *reads* an axis; ~CEMod~ *writes* it. For a real
+characteristic you usually want both (test a colour and change a colour; test a
+type and add a type). Auditing "is the filter space complete" is the same as "is
+the CE space complete": enumerate the materialised state's fields and check each
+has a projection (~Expr~) and, where the rules allow, a modifier (~CEMod~). Any
+axis with one and not the other is an asymmetry worth a second look.
+
 ** Discipline rules
 
 1. *No mechanic-named Action/CEMod/Expr variants.* Names describe *structural*
@@ -355,6 +396,11 @@ the canonical mapping from MTG mechanics to IR primitives.
 
 *** 2026-04-25 — Stage 4 Phase 1 (ManaAbility IR migration)
 
+*SUPERSEDED (see 2026-06-03 below): ~AbilityKind::Mana~ and ~ProducesSpec~ were
+later deleted — mana production folded into ~AbilityKind::Activated~ +
+~Action::AddMana~, with a structural ~is_mana_ability~ detector replacing the
+variant. Kept as a point-in-time record.*
+
 One new ~AbilityKind~ variant (~Mana~) and one supporting enum (~ProducesSpec~ —
 ~Fixed(Vec<Color>)~ / ~AnyOneColor~) cover ~33 cards in this batch. ~Mana~ takes
 ~cost~, ~produces~, ~produces_count~, ~on_activate: Option<Action>~,
@@ -387,6 +433,87 @@ Decomposition depth of hardest mechanic this round: Ancient Tomb's
 composition in the bridge — depth 2.
 
 Next census round due after Phase 2 (fetch lands).
+
+*** 2026-06-03 — Catch-up snapshot (mana fold-in → replacements → Search → cost-IR complete)
+
+Census lapsed ~6 weeks; the 2026-04-25 entry was the last. Rather than narrate
+each batch, this entry re-snapshots the *live* vocabulary (source of truth = the
+enums) and records the standing breadth gaps.
+
+**Corrections to prior entries.** ~AbilityKind::Mana~ + ~ProducesSpec~ (deleted).
+Mana production is now ~Action::AddMana { who, count, spec: ManaSpec::Fixed(Vec<Color>)
+| AnyOneColor }~ inside an ordinary ~AbilityKind::Activated~ body; CR 605.1a
+stack-bypass is detected *structurally* via ~is_mana_ability~ (target_spec == None
+&& body produces mana), not a variant. This reverses the 2026-04-25 "Mana is the
+honest split" conclusion — the structural detector removed the need for the variant.
+
+**Live vocabulary.**
+- ~Action~ (43, incl. ~Noop~): Move · Search · Return · Discard · Mill · Shuffle · Counter ·
+  OfferCast · CopySpell · Draw · DealDamage · PayLife · GainLife · PutCounters ·
+  RemoveCounters · Tap · Untap · Transform · Attach · Destroy · Exile · Sacrifice · MoveByChoice · ApplyCE ·
+  Sequence · IfThen · MayDo · ForEach · Choose · ScheduleDelayedTrigger ·
+  GrantCEToNextSpellCast · Scry · Surveil · Reveal · Look · CreateToken · AddMana ·
+  PayMana · PayManaX · LoyaltyAdjust · Replicate · PutOnLibrary.
+- ~AbilityKind~ (6): Triggered · Replacement · Prohibition · Static · Activated ·
+  OnResolve — the complete reactive/static/activated/resolution taxonomy.
+- ~Expr~ (~70): full object/player/combat/set/arithmetic/binding read surface.
+- ~CEMod~ (~30): CR 613 layer coverage (types/colors/PT/keywords/subtypes,
+  grant/copy abilities, cost mods, cast permissions, protection, step skips).
+
+**Folded in since Phase 1.**
+- *Replacements:* ~EventMod~ / ~ReplacementBody::ModifyEvent~ deleted;
+  ~ReplacementBody::Replace(Action)~ (+ ~Prevent~) is the only structural variant.
+  Body reads the matched event via ~Ctx::Var("triggered_obj")~. Added universal
+  ~Action::Tap~ / ~Untap~.
+- *Fetch lands:* ~Action::Search~ (library → zone, strategy picks).
+- *Cost sub-language fully on IR* (plan ~inherited-kindling-neumann.md~). New:
+  ~Action::PayManaX { generic: Expr }~ — variable-X *generic* mana, the mirror of
+  ~PayLife { amount: Expr }~. ~Action::Choose~ gained ~bind_as~ + ~DecisionKind::Branch.branches~
+  so a cost-tree branch can carry its own object decision (Bitter Triumph). ~CostComponent~,
+  ~pay_costs~/~can_pay_costs~ and the legacy-cost shims deleted; ~CardDef.additional_costs~
+  is now ~CostBody~.
+
+**Reuse / health.** No single-use structural variants spotted in the cost layer.
+~MoveByChoice~ (with the ~MoveVerb~ tag) *absorbed* the Sacrifice/Discard/Return/
+Exile-from-zone cost shapes — a merge, not proliferation. ~Choose~ now serves both
+effect resolution (~resolve_choice~ callback) and cost context (~bind_as~ + BindEnv) —
+one primitive, two drivers.
+
+**Breadth gaps — the standing "cannot yet express" list.**
+1. *Split stack* (see Known seams): spells in ~objects~, abilities in ~abilities~;
+   "counter any spell or ability" still needs a Union of TargetSpecs. *Only structural gap left.*
+
+*RESOLVED 2026-06-04 — Shuffle.* ~Action::Shuffle { who }~ added: a zero-agency effect
+(randomisation is not a choice). "You may shuffle" decomposes to ~MayDo { Shuffle }~ —
+the ~eff_maybe_shuffle~ closure (which baked the may-decision into an evaluator threshold)
+is deleted; Ponder now composes ~MayDo { Shuffle }~ via the ~eff_ir~ bridge. The
+~Search.shuffle~ flag remains as a fetch-path convenience. *Every effect verb now has an
+IR home.*
+
+*RESOLVED 2026-06-04 — Transform / DFC.* ~Action::Transform { target }~ = in-place face
+flip (CR 712.4); sets the new face's printed loyalty if it's a planeswalker; fires the new
+~GameEvent::Transformed~ so triggers can react. Delver uses it directly. *Tamiyo is modeled
+honestly as a new object* — "exile, then return transformed" = ~Sequence([Exile, Move→bf,
+Transform])~, which re-enters a fresh, summoning-sick permanent (tests assert in-place
+preserves bf state vs. exile-return resets it). ~do_flip_tamiyo~ and both ad-hoc
+~bf.active_face = 1~ writes are deleted.
+
+*RESOLVED 2026-06-04 — Attachment.* ~Action::Attach { what, to }~ sets ~attached_to~ and
+fires the new ~GameEvent::BecameAttached~ (so "whenever ~ becomes equipped/enchanted"
+triggers are expressible). The read side was already generic (CEMods filter on
+~bf.attached_to~). All 8 hand-rolled ~bf.attached_to = Some(_)~ writes across the 5
+equipment cards (equip ability, Living Weapon, ETB-attach) now route through it via the
+~do_attach~ closure bridge. Detachment needs no action — ~change_zone~ clears ~attached_to~
+on LTB (CR 704.5q). Reconfigure/move-equipment not yet needed.
+
+**Not a breadth gap.** ~28 instant/sorcery bodies still on legacy ~eff_*~ closures
+(the ~SpellFactory~ path) — mechanical translation, every verb has an IR home.
+~IrSpellMode~ (~17 cards) proves spell bodies can be IR. New: ~eff_ir(who, action)~
+bridges a self-contained IR ~Action~ into a still-closure body — the migration adapter.
+
+Next: only the split-stack seam remains structurally open. Per-card ~eff_*~ →
+~IrSpellMode~ translation continues opportunistically. Census review due every 20 cards /
+on any new structural variant.
 
 * Known seams
 

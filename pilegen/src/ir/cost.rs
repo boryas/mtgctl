@@ -42,10 +42,15 @@ pub(crate) enum DecisionKind {
     },
     /// Pick one of several `labels` (typically the labels of `ChoiceOption`s).
     /// `payable` is the subset of indices whose branch is actually payable —
-    /// the strategy MUST pick from that subset.
+    /// the strategy MUST pick from that subset. `branches[i]` is the
+    /// sub-schema of decisions *inside* option `i`'s action (e.g. the
+    /// "which card to discard" pick of a discard branch); once the chooser
+    /// commits to index `i`, only `branches[i]`'s decisions must be answered.
+    /// Unpayable branches carry an empty sub-schema.
     Branch {
         labels: Vec<&'static str>,
         payable: Vec<usize>,
+        branches: Vec<CostSchema>,
     },
     /// Pick a non-negative integer in `0..=max`. Used by X-costs and
     /// replicate-count.
