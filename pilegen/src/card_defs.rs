@@ -1316,7 +1316,7 @@ fn daze() -> CardDef {
     let mut c = simple("Daze", CardKind::Instant(SpellData {
         mana_cost: "1U".to_string(),
         modes: single_mode(
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_any() },
+            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_spell() },
             |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("1"))),
         ),
         ..Default::default()
@@ -1380,7 +1380,7 @@ fn force_of_negation() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Stack,
-                filter: ir_not(ir_type(CardType::Creature)),
+                filter: ir_and(ir_spell(), ir_not(ir_type(CardType::Creature))),
             },
             |who, source_id, _x| eff_counter_and_exile(who, source_id),
         ),
@@ -1701,7 +1701,7 @@ fn spell_pierce() -> CardDef {
             TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Stack,
-                filter: ir_not(ir_type(CardType::Creature)),
+                filter: ir_and(ir_spell(), ir_not(ir_type(CardType::Creature))),
             },
             |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("2"))),
         ),
@@ -1710,7 +1710,7 @@ fn spell_pierce() -> CardDef {
 }
 
 /// Counter target activated or triggered ability. (Mana abilities can't be targeted.)
-/// Mana abilities never go on the stack (CR 605.3a), so `AbilityOnStack` already excludes them.
+/// Mana abilities never go on the stack (CR 605.3a), so `ir_ability()` already excludes them.
 fn stifle() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::Action;
@@ -1725,9 +1725,10 @@ fn stifle() -> CardDef {
     card.abilities = vec![Ability {
         kind: AbilityKind::OnResolve {
             modes: vec![IrSpellMode {
-                target_spec: TargetSpec::AbilityOnStack {
+                target_spec: TargetSpec::ObjectInZone {
                     controller: Who::Opp,
-                    ability_type: AbilityType::Any,
+                    zone: ZoneId::Stack,
+                    filter: ir_ability(),
                 },
                 body: Action::Counter { target: Expr::Ctx(Ctx::Var("target")) },
             }],
@@ -1866,7 +1867,7 @@ fn mindbreak_trap() -> CardDef {
             TargetSpec::Any(Box::new(TargetSpec::ObjectInZone {
                 controller: Who::Opp,
                 zone: ZoneId::Stack,
-                filter: ir_any(),
+                filter: ir_spell(),
             })),
             |who, _source_id, _x| eff_exile_all_targets(who),
         ),
@@ -1893,14 +1894,14 @@ fn consign_to_memory() -> CardDef {
     let mut def = simple("Consign to Memory", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
         modes: single_mode(
-            TargetSpec::Union(vec![
-                TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered },
-                TargetSpec::ObjectInZone {
-                    controller: Who::Opp,
-                    zone: ZoneId::Stack,
-                    filter: ir_colorless(),
-                },
-            ]),
+            TargetSpec::ObjectInZone {
+                controller: Who::Opp,
+                zone: ZoneId::Stack,
+                filter: ir_or(
+                    ir_triggered_ability(),
+                    ir_and(ir_spell(), ir_colorless()),
+                ),
+            },
             |who, _source_id, _x| eff_counter_target(who),
         ),
         ..Default::default()
@@ -1978,7 +1979,7 @@ fn any_spell_or_permanent_target() -> TargetSpec {
         TargetSpec::ObjectInZone {
             controller: Who::Opp,
             zone: ZoneId::Stack,
-            filter: ir_any(),
+            filter: ir_spell(),
         },
         TargetSpec::ObjectInZone {
             controller: Who::Opp,

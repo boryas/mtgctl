@@ -190,10 +190,10 @@ State-aware predicate over any game object. Renamed from ~CostPredicate~; now al
 ([[file:predicates.rs][predicates.rs]]) — declarative target description.
 - ~None~ — no target required.
 - ~Player(Who)~ — a player.
-- ~ObjectInZone { controller, zone, filter: ObjPredicate }~ — cards/spells in a zone.
-  For ~zone=Stack~, only reaches spell objects (not abilities — see [[*Known seams][Known seams]]).
-- ~AbilityOnStack { controller, ability_type: AbilityType }~ — triggered/activated abilities.
-  ~AbilityType~: ~Any | Triggered | Activated~.
+- ~ObjectInZone { controller, zone, filter: Filter }~ — any object in a zone, spells
+  AND abilities included (everything on the stack is a ~GameObject~). "Counter target
+  spell" = ~filter: ir_spell()~; "counter target ability" = ~ir_ability()~; "spell or
+  ability" = one ~ir_or(...)~. (There is no longer an ~AbilityOnStack~ variant.)
 - ~Union(Vec<TargetSpec>)~ — logical OR; use to express "A or B" targets.
 
 ** ~ChoiceSpec~
@@ -456,7 +456,8 @@ honest split" conclusion — the structural detector removed the need for the va
   PayMana · PayManaX · LoyaltyAdjust · Replicate · PutOnLibrary.
 - ~AbilityKind~ (6): Triggered · Replacement · Prohibition · Static · Activated ·
   OnResolve — the complete reactive/static/activated/resolution taxonomy.
-- ~Expr~ (~70): full object/player/combat/set/arithmetic/binding read surface.
+- ~Expr~ (~72): full object/player/combat/set/arithmetic/binding read surface
+  (incl. ~IsAbility~ / ~AbilityIsTriggered~ — the stack-object kind axes).
 - ~CEMod~ (~30): CR 613 layer coverage (types/colors/PT/keywords/subtypes,
   grant/copy abilities, cost mods, cast permissions, protection, step skips).
 
@@ -480,8 +481,19 @@ effect resolution (~resolve_choice~ callback) and cost context (~bind_as~ + Bind
 one primitive, two drivers.
 
 **Breadth gaps — the standing "cannot yet express" list.**
-1. *Split stack* (see Known seams): spells in ~objects~, abilities in ~abilities~;
-   "counter any spell or ability" still needs a Union of TargetSpecs. *Only structural gap left.*
+*None.* All structural gaps are closed (see RESOLVED notes below). Remaining work is
+per-card depth (the ~28 ~eff_*~ spell bodies) and optional representational tightening
+(the ~bf~/~spell~/~ability~ optionals → a ~role~ enum; see "object model" note).
+
+*RESOLVED 2026-06-04 — Split stack (object-model unification).* Abilities on the stack
+are now card-less ~GameObject~ s in ~state.objects~ (zone=Stack, ~ability=Some~), not a
+separate ~state.abilities~ map. ~ObjectInZone { zone: Stack }~ reaches every stack object,
+so ~TargetSpec::AbilityOnStack~ + ~AbilityType~ are deleted: "counter spell" = ~ir_spell()~
+(on-stack ∧ not-ability), "counter ability" = ~ir_ability()~, "spell or ability" = one
+~ir_or~. New ~Expr::IsAbility~ / ~AbilityIsTriggered~ project the stack-object kind. A
+resolved/countered ability ceases to exist by removal (CR 608.2m), *not* a zone SBA — the
+704.5 "ceases to exist" SBAs cover only tokens (704.5d) and copies (704.5e). The universal
+Object:Zone model (tokens already proved it — 704.5d) now covers abilities too.
 
 *RESOLVED 2026-06-04 — Shuffle.* ~Action::Shuffle { who }~ added: a zero-agency effect
 (randomisation is not a choice). "You may shuffle" decomposes to ~MayDo { Shuffle }~ —
@@ -511,23 +523,19 @@ on LTB (CR 704.5q). Reconfigure/move-equipment not yet needed.
 ~IrSpellMode~ (~17 cards) proves spell bodies can be IR. New: ~eff_ir(who, action)~
 bridges a self-contained IR ~Action~ into a still-closure body — the migration adapter.
 
-Next: only the split-stack seam remains structurally open. Per-card ~eff_*~ →
-~IrSpellMode~ translation continues opportunistically. Census review due every 20 cards /
-on any new structural variant.
+Next: no structural gaps remain. Per-card ~eff_*~ → ~IrSpellMode~ translation continues
+opportunistically. Census review due every 20 cards / on any new structural variant.
 
 * Known seams
 
-*Split stack representation.* Spells live in ~state.objects~ (zone = Stack); triggered
-and activated abilities live in ~state.abilities~. These are separate maps with different
-predicate languages: ~CardPredicate~ operates on ~CardDef~ and can only reach ~objects~,
-so ~ObjectInZone { zone: Stack }~ cannot target abilities. This is why ~AbilityOnStack~
-exists as a distinct ~TargetSpec~ variant rather than falling out of ~ObjectInZone~.
+*Split stack — RESOLVED 2026-06-04.* Abilities on the stack are now card-less
+~GameObject~ s in ~state.objects~ (zone=Stack, ~ability: Some(AbilityState)~); the separate
+~state.abilities~ map and ~StackAbility~ are deleted. ~ObjectInZone { zone: Stack }~ reaches
+every stack object, so the one ~Filter~ language covers it: ~ir_spell()~ (on-stack ∧
+not-ability), ~ir_ability()~, ~ir_triggered_ability()~. ~TargetSpec::AbilityOnStack~ +
+~AbilityType~ are gone; "counter spell or ability" is a single ~ir_or~ filter, no ~Union~.
 
-Consequence: any card that counters "any spell or ability" (e.g. Disallow) requires
-~Union([ObjectInZone { Stack, pred_any() }, AbilityOnStack { Any }])~ — it cannot be
-expressed as a single ~ObjectInZone~.
-
-Future fix: unify the stack so both spells and abilities are ~GameObject~ s in ~objects~,
-distinguished by a field (e.g. ~stack_kind: StackKind::Spell | StackKind::Ability { is_triggered }~).
-~ObjectInZone { zone: Stack }~ would then reach everything, and ~AbilityOnStack~ becomes
-expressible as ~ObjectInZone~ with an ~is_ability~ predicate.
+Object-model note: ~GameObject~ now carries three per-zone payload optionals
+(~bf~/~spell~/~ability~). The remaining (optional, behavior-free) tightening is to collapse
+them into one ~role: ObjectRole~ enum so illegal states are unrepresentable — deferred
+pending a thoughtful trait/interface design.

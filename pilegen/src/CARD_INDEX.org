@@ -434,7 +434,7 @@ Pattern: fires on ~EnteredStep { DeclareAttackers, active_player }~, gated by ~p
 | Flusterstorm       | Instant/sorcery                      | ~eff_counter_unless_pays~ ({1}) + storm copies                                                          |
 | Mindbreak Trap     | Any number                           | ~eff_exile_all_targets~ (exiles, doesn't counter)                                                       |
 | Consign to Memory  | Triggered ability or colorless       | ~eff_counter_target~                                                                                    |
-| Stifle             | Activated or triggered ability       | ~eff_counter_target~; ~AbilityOnStack { Any }~ (mana abilities never hit stack — CR 605.3a)             |
+| Stifle             | Activated or triggered ability       | ~eff_counter_target~; ~ObjectInZone { Stack, ir_ability() }~ (mana abilities never hit stack — CR 605.3a) |
 
 ** Destroy (CR 701.7)
 

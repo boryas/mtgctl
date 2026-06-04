@@ -33,6 +33,8 @@ pub(crate) enum Expr {
     ZoneLit(crate::ZoneId),      // a zone literal, for `ZoneOf(It) == ZoneLit(z)`
     ObjLit(crate::ObjId),        // an object-id literal, for `It == ObjLit(id)` exclusion
     IsToken(Box<Expr>),          // Bool — true iff `obj` is a token
+    IsAbility(Box<Expr>),        // Bool — true iff `obj` is a card-less ability on the stack
+    AbilityIsTriggered(Box<Expr>), // Bool — true iff `obj` is a *triggered* ability (vs activated)
     CountersOn(Box<Expr>, CounterType), // i64
     Name(Box<Expr>),             // String
 

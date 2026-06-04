@@ -404,7 +404,7 @@ pub(crate) struct AbilityState {
     pub(crate) effect: Effect,
     pub(crate) chosen_targets: Vec<ObjId>,
     pub(crate) costs_paid_ctx: CostsPaidCtx,
-    /// True iff triggered (vs. activated). Used by `TargetSpec::AbilityOnStack`.
+    /// True iff triggered (vs. activated). Projected by `Expr::AbilityIsTriggered`.
     pub(crate) is_triggered: bool,
     /// False iff "can't be countered" (CR 608.2b) — checked at resolution; the
     /// ability is still a legal target for counter effects.
@@ -2014,13 +2014,6 @@ impl SimState {
     /// "can't be countered" is enforced at resolution, not targeting (CR 608.2b).
     pub(crate) fn stack_item_is_counterable(&self, id: ObjId) -> bool {
         self.objects.get(&id).map_or(false, |o| o.zone == CardZone::Stack)
-    }
-
-    /// Iterate over all abilities (card-less stack objects) currently on the stack.
-    pub(crate) fn abilities_on_stack(&self) -> impl Iterator<Item = (ObjId, &GameObject)> {
-        self.objects.iter()
-            .filter(|(_, o)| o.ability.is_some())
-            .map(|(&id, o)| (id, o))
     }
 
     /// Place an ability (a card-less stack object) on the stack. `id` must be freshly

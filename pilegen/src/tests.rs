@@ -3336,18 +3336,18 @@
         assert!(!state.objects.contains_key(&ab_id), "countered ability ceases to exist (removed from objects)");
     }
 
-    /// `AbilityOnStack::Triggered` legal_targets enumerates opponent triggered abilities.
+    /// `ir_triggered_ability()` legal_targets enumerates opponent triggered abilities.
     #[test]
     fn test_triggered_ability_on_stack_legal_targets() {
         let mut state = make_state();
         let ab_id = push_opp_triggered_ability(&mut state);
 
-        let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered };
+        let spec = TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_triggered_ability() };
         let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
         assert!(targets.contains(&ab_id), "opp triggered ability should be a legal target");
     }
 
-    /// Activated abilities (is_triggered=false) are not matched by `AbilityOnStack::Triggered`.
+    /// Activated abilities (is_triggered=false) are not matched by `ir_triggered_ability()`.
     #[test]
     fn test_activated_ability_not_a_trigger_target() {
         let mut state = make_state();
@@ -3361,9 +3361,9 @@
             choice_spec: None,
         });
 
-        let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Triggered };
+        let spec = TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_triggered_ability() };
         let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
-        assert!(!targets.contains(&ab_id), "activated ability should not match AbilityOnStack::Triggered");
+        assert!(!targets.contains(&ab_id), "activated ability should not match ir_triggered_ability()");
     }
 
 
@@ -3423,7 +3423,7 @@
         assert!(!state.objects.contains_key(&ab_id), "countered ability ceases to exist (removed from objects)");
     }
 
-    /// Stifle's TargetSpec (`AbilityType::Any`) lists both activated and triggered abilities
+    /// Stifle's TargetSpec (`ir_ability()`) lists both activated and triggered abilities
     /// as legal targets — what distinguishes it from Consign to Memory.
     #[test]
     fn test_stifle_targets_activated_or_triggered() {
@@ -3441,10 +3441,26 @@
             choice_spec: None,
         });
 
-        let spec = TargetSpec::AbilityOnStack { controller: Who::Opp, ability_type: AbilityType::Any };
+        let spec = TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_ability() };
         let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
         assert!(targets.contains(&trig_id), "triggered ability is a legal Stifle target");
         assert!(targets.contains(&act_id), "activated ability is a legal Stifle target");
+    }
+
+    /// Regression (Phase C): now that abilities are objects with zone==Stack, a
+    /// "counter target spell" filter (`ir_spell()`) must list only spells — never an
+    /// ability. The inverse of Stifle/Consign.
+    #[test]
+    fn test_counter_spell_filter_excludes_abilities() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let ab_id = push_opp_triggered_ability(&mut state);
+        let spell_id = push_colorless_spell_for_opp(&mut state);
+
+        let spec = TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_spell() };
+        let targets = legal_targets(&spec, PlayerId::Us, ObjId(0), &state);
+        assert!(targets.contains(&spell_id), "a spell is a legal counter-spell target");
+        assert!(!targets.contains(&ab_id), "an ability is NOT a legal counter-spell target");
     }
 
     // ── Section 57: Stoneforge Mystic (Equipment subtype + tutor + put-from-hand) ──

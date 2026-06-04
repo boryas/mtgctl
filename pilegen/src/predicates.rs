@@ -99,7 +99,22 @@ pub(crate) fn ir_has_counter(ct: CounterType) -> Filter {
 
 /// A colored spell on the stack — protection-source filter (Emrakul).
 pub(crate) fn ir_colored_spell() -> Filter {
-    ir_and(ir_zone(ZoneId::Stack), ir_not(ir_colorless()))
+    ir_and(ir_spell(), ir_not(ir_colorless()))
+}
+
+/// A card-less ability on the stack (activated or triggered). Mana abilities never
+/// reach the stack (CR 605.3a), so on the stack this matches exactly the abilities a
+/// counter can target.
+pub(crate) fn ir_ability() -> Filter { Filter(Expr::IsAbility(Box::new(it()))) }
+
+/// A *triggered* ability (false for activated abilities and for non-abilities).
+pub(crate) fn ir_triggered_ability() -> Filter { Filter(Expr::AbilityIsTriggered(Box::new(it()))) }
+
+/// A spell: a card or copy on the stack — i.e. on the stack and NOT a card-less
+/// ability (CR 111.1). The proper counterpart to `ir_ability()`; use this (not a bare
+/// `ir_zone(Stack)`) for "counter target spell" so abilities aren't wrongly matched.
+pub(crate) fn ir_spell() -> Filter {
+    ir_and(ir_zone(ZoneId::Stack), ir_not(ir_ability()))
 }
 
 /// Conjunction.
@@ -142,15 +157,6 @@ pub(crate) fn is_hexproof_from(target_id: ObjId, source_controller: PlayerId, st
     })
 }
 
-/// Which kind of ability a `TargetSpec::AbilityOnStack` matches.
-#[derive(Clone)]
-#[allow(dead_code)]
-pub(crate) enum AbilityType {
-    Any,
-    Triggered,
-    Activated,
-}
-
 /// Declarative description of what targets a spell or ability may choose from.
 /// Used both to enumerate legal choices and to re-validate at resolution.
 #[derive(Clone)]
@@ -163,10 +169,6 @@ pub(crate) enum TargetSpec {
     ObjectInZone { controller: Who, zone: ZoneId, filter: Filter },
     /// Any one of several sub-specs is a legal target (e.g. "any target" = creature | planeswalker | player).
     Union(Vec<TargetSpec>),
-    /// An ability on the stack (Zone=Stack, StackObjectType=Ability) controlled by `controller`,
-    /// optionally filtered by `ability_type` (Triggered / Activated / Any).
-    /// Abilities don't have a `CardDef` so they can't be reached via `ObjectInZone`.
-    AbilityOnStack { controller: Who, ability_type: AbilityType },
     /// Composable "any number of targets" wrapper (CR 107.1c).
     /// `legal_targets` delegates to the inner spec; `pick_targets` returns all legal targets
     /// instead of applying the single-target heuristic.
@@ -235,9 +237,6 @@ pub(crate) fn exclude_from_target_spec(spec: &TargetSpec, exclude_id: ObjId) -> 
         TargetSpec::Union(specs) => TargetSpec::Union(
             specs.iter().map(|s| exclude_from_target_spec(s, exclude_id)).collect(),
         ),
-        TargetSpec::AbilityOnStack { controller, ability_type } => {
-            TargetSpec::AbilityOnStack { controller: *controller, ability_type: ability_type.clone() }
-        }
         TargetSpec::Any(inner) => TargetSpec::Any(Box::new(exclude_from_target_spec(inner, exclude_id))),
     }
 }
@@ -280,21 +279,6 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
                 }
             }
             result
-        }
-        TargetSpec::AbilityOnStack { controller: who, ability_type } => {
-            let target_who = who.resolve(controller);
-            let target_who_id = state.player_id(target_who);
-            state.abilities_on_stack()
-                .filter(|(_, obj)| {
-                    let ab = obj.ability.as_ref().expect("ability object carries a payload");
-                    state.player_id(obj.owner) == target_who_id && match ability_type {
-                        AbilityType::Any       => true,
-                        AbilityType::Triggered => ab.is_triggered,
-                        AbilityType::Activated => !ab.is_triggered,
-                    }
-                })
-                .map(|(id, _)| id)
-                .collect()
         }
         TargetSpec::Any(inner) => legal_targets(inner, controller, source_id, state),
     }

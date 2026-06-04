@@ -1156,6 +1156,16 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Bool(state.objects.get(&o).map_or(false, |obj| obj.is_token))
         }
+        Expr::IsAbility(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Bool(state.objects.get(&o).map_or(false, |obj| obj.ability.is_some()))
+        }
+        Expr::AbilityIsTriggered(e) => {
+            let o = expect_obj(eval_expr(e, state, env));
+            Value::Bool(state.objects.get(&o)
+                .and_then(|obj| obj.ability.as_ref())
+                .map_or(false, |a| a.is_triggered))
+        }
         Expr::CountersOn(e, kind) => {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Num(
@@ -2021,6 +2031,8 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
         Expr::ZoneLit(_) => {}
         Expr::ObjLit(_) => {}
         Expr::IsToken(e) => walk_reads(e, out),
+        Expr::IsAbility(e) => walk_reads(e, out),
+        Expr::AbilityIsTriggered(e) => walk_reads(e, out),
         Expr::CountersOn(e, _) => {
             out.push(Axis::Counters);
             walk_reads(e, out);
