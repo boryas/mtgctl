@@ -5677,6 +5677,28 @@
             "Daze should counter when opponent can't pay 1");
     }
 
+    /// "Counter unless pays" lets the payer activate mana abilities during the
+    /// choice: with an untapped land and an empty pool, the opponent auto-taps it
+    /// to pay the tax (default strategy always pays if possible), so the spell is
+    /// NOT countered. Exercises mana-ability timing during resolution-time payment.
+    #[test]
+    fn test_daze_pays_by_tapping_land() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        // Opponent: an untapped Island (empty pool) + a spell on the stack.
+        let island = add_perm_with_def(&mut state, PlayerId::Opp, &catalog_card("Island"), BattlefieldState::new());
+        recompute(&mut state);
+        let spell_id = push_stack_spell(&mut state, PlayerId::Opp, "Ponder");
+
+        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))
+            .call(&mut state, 1, &[spell_id]);
+
+        assert_eq!(state.objects[&spell_id].zone, CardZone::Stack,
+            "Daze should NOT counter — opponent taps a land to pay the {{1}} tax");
+        assert!(state.objects[&island].bf.as_ref().unwrap().tapped,
+            "the Island was tapped to produce the mana");
+    }
+
     // ── §50: Flusterstorm / Storm trigger ──────────────────────────────────────
 
     #[test]
