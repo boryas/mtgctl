@@ -5063,22 +5063,52 @@ fn delver_of_secrets() -> CardDef {
 /// Unholy Heat — {R} Instant. Deals 2 damage to target creature or planeswalker.
 /// Delirium — deals 6 damage instead if ≥4 card types in graveyard.
 fn unholy_heat() -> CardDef {
-    simple("Unholy Heat", CardKind::Instant(SpellData {
-        mana_cost: "R".to_string(),
-        modes: single_mode(
-            TargetSpec::Union(vec![
-                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Creature) },
-                TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Planeswalker) },
-            ]),
-            |who, source_id, _x| {
-                Effect(Arc::new(move |state, t, targets| {
-                    let dmg = if gy_card_type_count(who, state) >= 4 { 6 } else { 2 };
-                    eff_damage_target(who, dmg, source_id).call(state, t, targets);
-                }))
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
+
+    // Delirium: four or more card types among cards in your graveyard
+    // (CR 700.5) — `Count` of the deduped type-union over your graveyard.
+    let delirium = Expr::Ge(
+        Box::new(Expr::Count(Box::new(Expr::Types(Box::new(Expr::AllObjects {
+            zone: ZoneSel::Scoped {
+                zone_kind: ZoneKindSel::Graveyard,
+                owner: Box::new(Expr::Ctx(Ctx::Controller)),
             },
-        ),
+            bind: "g",
+            filter: Box::new(Expr::Bool(true)),
+        }))))),
+        Box::new(Expr::Num(4)),
+    );
+    let damage = |n: i64| Action::DealDamage {
+        source: Expr::Ctx(Ctx::Source),
+        target: Expr::Ctx(Ctx::Var("target")),
+        amount: Expr::Num(n),
+    };
+
+    let mut card = simple("Unholy Heat", CardKind::Instant(SpellData {
+        mana_cost: "R".to_string(),
+        modes: None,
         ..Default::default()
-    }), parse_colors("R", false, false), None)
+    }), parse_colors("R", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::Union(vec![
+                    TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Creature) },
+                    TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Battlefield, filter: ir_type(CardType::Planeswalker) },
+                ]),
+                body: Action::IfThen {
+                    cond: delirium,
+                    then: Box::new(damage(6)),
+                    else_: Some(Box::new(damage(2))),
+                },
+            }],
+        },
+        text: Some("Unholy Heat deals 2 damage to target creature or planeswalker. Delirium — 6 damage instead if there are four or more card types among cards in your graveyard."),
+    }];
+    card
 }
 
 // ── Price of Progress ────────────────────────────────────────────────────────

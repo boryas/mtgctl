@@ -1090,8 +1090,16 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
 
         // property projections over object refs
         Expr::Types(e) => {
-            let o = expect_obj(eval_expr(e, state, env));
-            Value::TypeSet(types_of_obj(state, o))
+            // A single object → its types; an `ObjSet` → the deduped union of all
+            // members' types. The latter powers aggregate reads like delirium:
+            // `Count(Types(your graveyard)) ≥ 4`.
+            let mut out: Vec<CardType> = Vec::new();
+            for id in obj_ids_of(eval_expr(e, state, env)) {
+                for ty in types_of_obj(state, id) {
+                    if !out.contains(&ty) { out.push(ty); }
+                }
+            }
+            Value::TypeSet(out)
         }
         Expr::Supertypes(e) => {
             let o = expect_obj(eval_expr(e, state, env));
