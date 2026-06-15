@@ -2233,37 +2233,67 @@ fn toxic_deluge() -> CardDef {
     def
 }
 
+/// "For each permanent on the battlefield matching `filter`, run `body`."
+/// `body` refers to the current match as `Ctx::Var("v")`. The board-wide
+/// counterpart to a targeted effect — used by sweeper sorceries (Rough //
+/// Tumble, Brotherhood's End). Protection/indestructibility live in the leaf
+/// primitives (`DealDamage` / `Destroy`), so this stays a pure iteration.
+fn ir_for_each_on_battlefield(filter: crate::ir::expr::Filter, body: crate::ir::action::Action) -> crate::ir::action::Action {
+    use crate::ir::action::Action;
+    use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
+    Action::ForEach {
+        over: Expr::AllObjects {
+            zone: ZoneSel::Global(ZoneKindSel::Battlefield),
+            bind: "it",
+            filter: Box::new(filter.0),
+        },
+        bind: "v",
+        body: Box::new(body),
+    }
+}
+
 /// Brotherhood's End — {1}{R}{R} sorcery. Choose one:
 /// • Deal 3 damage to each creature and each planeswalker.
 /// • Destroy all artifacts with mana value 3 or less.
 fn brotherhoods_end() -> CardDef {
-    simple("Brotherhood's End", CardKind::Sorcery(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+
+    let mut card = simple("Brotherhood's End", CardKind::Sorcery(SpellData {
         mana_cost: "1RR".to_string(),
-        modes: Some(SpellModes::modal(vec![
-            // Mode 0: 3 damage to each creature and each planeswalker
-            SpellMode {
-                target_spec: TargetSpec::None,
-                factory: Arc::new(|caster, source_id, _x| {
-                    let filter = ir_or(
-                        ir_type(CardType::Creature),
-                        ir_type(CardType::Planeswalker),
-                    );
-                    eff_damage_all(caster, 3, source_id, filter)
-                }),
-            },
-            // Mode 1: destroy all artifacts with mana value 3 or less
-            SpellMode {
-                target_spec: TargetSpec::None,
-                factory: Arc::new(|caster, _source_id, _x| {
-                    eff_destroy_all(caster, ir_and(
-                        ir_type(CardType::Artifact),
-                        ir_mv_le(3),
-                    ))
-                }),
-            },
-        ])),
+        modes: None,
         ..Default::default()
-    }), parse_colors("1RR", false, false), None)
+    }), parse_colors("1RR", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![
+                // Mode 0: 3 damage to each creature and each planeswalker.
+                IrSpellMode {
+                    target_spec: TargetSpec::None,
+                    body: ir_for_each_on_battlefield(
+                        ir_or(ir_type(CardType::Creature), ir_type(CardType::Planeswalker)),
+                        Action::DealDamage {
+                            source: Expr::Ctx(Ctx::Source),
+                            target: Expr::Ctx(Ctx::Var("v")),
+                            amount: Expr::Num(3),
+                        },
+                    ),
+                },
+                // Mode 1: destroy all artifacts with mana value 3 or less.
+                IrSpellMode {
+                    target_spec: TargetSpec::None,
+                    body: ir_for_each_on_battlefield(
+                        ir_and(ir_type(CardType::Artifact), ir_mv_le(3)),
+                        Action::Destroy { target: Expr::Ctx(Ctx::Var("v")) },
+                    ),
+                },
+            ],
+        },
+        text: Some("Choose one — 3 damage to each creature and planeswalker; or destroy each artifact with mana value 3 or less."),
+    }];
+    card
 }
 
 /// Win condition: set success=true. In full rules: opponent's library and graveyard become
@@ -5114,24 +5144,18 @@ fn rough_tumble() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::Action;
     use crate::ir::context::Ctx;
-    use crate::ir::expr::{Expr, Filter, ZoneKindSel, ZoneSel};
+    use crate::ir::expr::{Expr, Filter};
 
-    // "deals `n` damage to each creature matching `flying_filter`" — a ForEach
-    // over the battlefield, dealing damage per match. Protection is enforced by
-    // the `DealDamage` primitive (CR 702.16e), so no per-card check is needed.
-    let damage_each = |n: i64, flying_filter: Filter| Action::ForEach {
-        over: Expr::AllObjects {
-            zone: ZoneSel::Global(ZoneKindSel::Battlefield),
-            bind: "it",
-            filter: Box::new(ir_and(ir_type(CardType::Creature), flying_filter).0),
-        },
-        bind: "v",
-        body: Box::new(Action::DealDamage {
+    // "deals `n` damage to each creature matching `flying_filter`". Protection is
+    // enforced by the `DealDamage` primitive (CR 702.16e), so no per-card check.
+    let damage_each = |n: i64, flying_filter: Filter| ir_for_each_on_battlefield(
+        ir_and(ir_type(CardType::Creature), flying_filter),
+        Action::DealDamage {
             source: Expr::Ctx(Ctx::Source),
             target: Expr::Ctx(Ctx::Var("v")),
             amount: Expr::Num(n),
-        }),
-    };
+        },
+    );
 
     let mut tumble = simple("Tumble", CardKind::Sorcery(SpellData {
         mana_cost: "5R".to_string(),

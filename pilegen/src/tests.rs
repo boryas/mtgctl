@@ -7066,8 +7066,7 @@
 
         let be_def = catalog_card("Brotherhood's End");
         // Mode 0: damage to creatures/planeswalkers
-        let mode = be_def.spell_modes().unwrap().get(0).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&be_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[]);
 
         // Bear (2/2): 3 damage is lethal — but we haven't run SBAs yet, just check damage.
@@ -7088,8 +7087,7 @@
 
         let be_def = catalog_card("Brotherhood's End");
         // Mode 1: destroy artifacts with MV ≤ 3
-        let mode = be_def.spell_modes().unwrap().get(1).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&be_def, PlayerId::Us, ObjId::UNSET, 0, 1).1;
         effect.call(&mut state, 1, &[]);
 
         assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
