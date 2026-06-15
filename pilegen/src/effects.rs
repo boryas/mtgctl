@@ -56,6 +56,30 @@ pub(crate) fn eff_ir(who: PlayerId, action: crate::ir::action::Action) -> Effect
     }))
 }
 
+/// Like `eff_ir`, but for a *targeted* ability/trigger body: binds the source
+/// object and `targets[0]` as `Ctx::Var("target")` (a player or object) so the
+/// IR `Action` can reference its target. The bridge for porting targeted ETB
+/// triggers / activated abilities to IR without leaving the closure trigger
+/// plumbing — mirrors the binding `build_spell_effect` does for spell bodies.
+/// An untargeted body (no `targets`) still gets `source`/`controller` bound.
+pub(crate) fn eff_ir_targeted(who: PlayerId, source_id: ObjId, action: crate::ir::action::Action) -> Effect {
+    Effect(Arc::new(move |state, _t, targets| {
+        use crate::ir::expr::Value;
+        let mut env = crate::ir::executor::BindEnv::new()
+            .with_source(source_id)
+            .with_controller(who);
+        if let Some(&tgt) = targets.first() {
+            let v = if tgt == state.us.id || tgt == state.opp.id {
+                Value::Player(state.who_pid(tgt))
+            } else {
+                Value::Obj(tgt)
+            };
+            env = env.with_var("target", v);
+        }
+        crate::ir::executor::execute(&action, state, &env);
+    }))
+}
+
 /// Closure-side convenience: attach `what` to `to` via the IR `Action::Attach`,
 /// controlled by `who`. Used by still-closure equip abilities / Living Weapon so
 /// the `attached_to` write + `BecameAttached` event live in one place.
@@ -233,9 +257,11 @@ pub(crate) fn eff_mana(who: PlayerId, spec: impl Into<String>) -> Effect {
     }))
 }
 
-/// Deal `n` damage to the permanent in `targets[0]`. SBAs handle lethal-damage destruction.
 /// Deal `n` damage to a target — creature, planeswalker, or player (CR 120.2).
 /// `source_id` identifies the damage source for protection checks (CR 702.16b).
+/// Test-only now — card damage effects use the IR `Action::DealDamage` primitive
+/// (which is also protection-aware); kept for direct-call test scaffolding.
+#[allow(dead_code)]
 pub(crate) fn eff_damage_target(caster: PlayerId, n: i32, source_id: ObjId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         let Some(&id) = targets.first() else { return; };
@@ -285,26 +311,13 @@ pub(crate) fn destroy_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
     change_zone(id, ZoneId::Graveyard, state, t, actor);
 }
 
+/// Destroy the permanent in `targets[0]`. Test-only now — card "destroy target"
+/// effects use the IR `Action::Destroy` primitive (which also routes through
+/// `destroy_one`); kept for direct-call test scaffolding.
+#[allow(dead_code)]
 pub(crate) fn eff_destroy_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {
         if let Some(&id) = targets.first() {
-            destroy_one(id, state, t, caster);
-        }
-    }))
-}
-
-/// Destroy every permanent on the battlefield matching `filter`. Both this and
-/// `eff_destroy_target` route through `destroy_one`; indestructibility added there
-/// will apply to both. Use for "destroy each" oracle text; sacrifice and 0-toughness
-/// SBAs bypass indestructible and must use `change_zone` directly instead.
-pub(crate) fn eff_destroy_all(caster: PlayerId, filter: Filter) -> Effect {
-    Effect(Arc::new(move |state, t, _targets| {
-        let env = crate::ir::executor::BindEnv::new().with_controller(caster);
-        let to_destroy: Vec<ObjId> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Battlefield && crate::ir::executor::matches(&filter, o.id, state, &env))
-            .map(|o| o.id)
-            .collect();
-        for id in to_destroy {
             destroy_one(id, state, t, caster);
         }
     }))

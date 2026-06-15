@@ -85,9 +85,10 @@ pub(crate) fn ir_mv_le_expr(e: Expr) -> Filter {
     Filter(Expr::Le(Box::new(Expr::Mv(Box::new(it()))), Box::new(e)))
 }
 
-/// `Mv(It) == n`.
-pub(crate) fn ir_mv_eq(n: i32) -> Filter {
-    Filter(Expr::Eq(Box::new(Expr::Mv(Box::new(it()))), Box::new(Expr::Num(n as i64))))
+/// `Mv(It) == e` — the runtime-bounded MV-equality filter (e.g. Engineered
+/// Explosives: nonland permanents whose MV equals its charge counters).
+pub(crate) fn ir_mv_eq_expr(e: Expr) -> Filter {
+    Filter(Expr::Eq(Box::new(Expr::Mv(Box::new(it()))), Box::new(e)))
 }
 
 /// A creature with `Toughness(It) <= n`.

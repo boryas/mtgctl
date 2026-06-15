@@ -1186,16 +1186,17 @@ fn engineered_explosives() -> CardDef {
                     },
                 ])),
                 ability_factory: Some(Arc::new(|who, source_id| {
-                    Effect(Arc::new(move |state, t, _targets| {
-                        // EE has been sacrificed; zone-independent counters persist in objects map.
-                        let n = state.objects.get(&source_id)
-                            .and_then(|o| o.counters.get(&CounterType::Charge))
-                            .copied()
-                            .unwrap_or(0) as i32;
-                        let filter = ir_and(ir_not(ir_type(CardType::Land)), ir_mv_eq(n));
-                        state.log(t, who, format!("→ EE[{}]: destroy all nonland MV {}", n, n));
-                        eff_destroy_all(who, filter).call(state, t, &[]);
-                    }))
+                    // EE has been sacrificed; its charge counters persist in the
+                    // objects map, read via `CountersOn(Source)`. Destroy each
+                    // nonland permanent whose MV equals that count.
+                    eff_ir_targeted(who, source_id, ir_for_each_on_battlefield(
+                        ir_and(
+                            ir_not(ir_type(CardType::Land)),
+                            ir_mv_eq_expr(Expr::CountersOn(
+                                Box::new(Expr::Ctx(Ctx::Source)), CounterType::Charge)),
+                        ),
+                        Action::Destroy { target: Expr::Ctx(Ctx::Var("v")) },
+                    ))
                 })),
                 ..Default::default()
             }],
@@ -4327,6 +4328,9 @@ fn batterskull() -> CardDef {
 /// "Equipped creature gets +3/+3."
 /// "Equip {3}"
 fn meteor_sword() -> CardDef {
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
     let any_permanent_target = TargetSpec::Union(vec![
         TargetSpec::ObjectInZone {
             controller: Who::Actor,
@@ -4367,7 +4371,8 @@ fn meteor_sword() -> CardDef {
         vec![], CardLayout::Normal, None,
         // ETB: destroy target permanent.
         vec![etb_self_trigger("Meteor Sword", any_permanent_target,
-            |_source_id, controller| eff_destroy_target(controller))],
+            |source_id, controller| eff_ir_targeted(controller, source_id,
+                Action::Destroy { target: Expr::Ctx(Ctx::Var("target")) }))],
         vec![], vec![],
         // Static: equipped creature gets +3/+3 (L7).
         vec![Arc::new(move |source_id, controller| ContinuousInstance {
@@ -4703,6 +4708,9 @@ fn simian_spirit_guide() -> CardDef {
 /// ETB: deals 4 damage divided as you choose among any number of target creatures
 /// and/or planeswalkers. Evoke — Exile a red card from your hand. CR 702.74, 702.4.
 fn fury() -> CardDef {
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
     let mut data = CreatureData::new("3RR", 3, 3);
     data.keywords = Keywords::from_slice(&[Keyword::DoubleStrike]);
     let mut c = CardDef::new(
@@ -4720,7 +4728,11 @@ fn fury() -> CardDef {
                     ir_type(CardType::Creature),
                     ir_type(CardType::Planeswalker),
                 ),
-            }, |source_id, controller| eff_damage_target(controller, 4, source_id)),
+            }, |source_id, controller| eff_ir_targeted(controller, source_id, Action::DealDamage {
+                source: Expr::Ctx(Ctx::Source),
+                target: Expr::Ctx(Ctx::Var("target")),
+                amount: Expr::Num(4),
+            })),
             // Evoke sacrifice: if an alternate cost was used, sacrifice on ETB (CR 702.74).
             TriggerDef {
                 check: Arc::new(|event, source_id, controller, state, pending| {

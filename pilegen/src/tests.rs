@@ -3820,6 +3820,56 @@
         assert_eq!(eq.toughness(), 1 + 3, "base 1 + Meteor Sword +3");
     }
 
+    /// Fury's ETB triggered ability deals 4 damage to a target creature (IR body
+    /// via `eff_ir_targeted` + protection-aware `DealDamage`).
+    #[test]
+    fn test_fury_etb_deals_4_to_target() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Fury".into(), catalog_card("Fury"));
+
+        let victim = add_default_perm(&mut state, PlayerId::Opp, "Murktide Regent");
+        recompute(&mut state);
+
+        eff_enter_permanent(PlayerId::Us, "Fury").call(&mut state, 1, &[]);
+        let ctx = state.pending_triggers.pop().expect("Fury ETB trigger queued");
+        assert_eq!(ctx.source_name, "Fury");
+        ctx.effect.call(&mut state, 1, &[victim]);
+
+        assert_eq!(state.permanent_bf(victim).unwrap().damage, 4,
+            "Fury ETB should deal 4 damage to its target");
+    }
+
+    /// Engineered Explosives destroys each nonland permanent whose mana value
+    /// equals its charge counters, read via `CountersOn(Source)` after sacrifice
+    /// (IR `ForEach` + `Destroy`).
+    #[test]
+    fn test_engineered_explosives_destroys_nonland_at_charge_mv() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        state.catalog.insert("Engineered Explosives".into(), catalog_card("Engineered Explosives"));
+
+        let mv2 = add_default_perm(&mut state, PlayerId::Opp, "Null Rod");     // artifact MV 2
+        let mv0 = add_default_perm(&mut state, PlayerId::Opp, "Lotus Petal");  // artifact MV 0
+        let land = add_default_perm(&mut state, PlayerId::Opp, "Island");      // land (nonland filter spares it)
+        recompute(&mut state);
+
+        // EE entered with X=2, then sacrificed; its charge counters persist in the
+        // objects map and are read at resolution.
+        let ee_id = add_default_perm(&mut state, PlayerId::Us, "Engineered Explosives");
+        change_zone(ee_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
+        state.objects.get_mut(&ee_id).unwrap().counters.insert(CounterType::Charge, 2);
+
+        let def = catalog_card("Engineered Explosives");
+        let ability = match &def.kind { CardKind::Artifact(a) => &a.abilities[0], _ => panic!("EE is an artifact") };
+        let factory = ability.ability_factory.as_ref().unwrap().clone();
+        factory(PlayerId::Us, ee_id).call(&mut state, 1, &[]);
+
+        assert_eq!(state.objects[&mv2].zone, CardZone::Graveyard, "MV 2 artifact destroyed (matches 2 charges)");
+        assert_eq!(state.objects[&mv0].zone, CardZone::Battlefield, "MV 0 artifact survives");
+        assert_eq!(state.objects[&land].zone, CardZone::Battlefield, "land survives (nonland filter)");
+    }
+
     // ── Section 60: Quantum Riddler (ETB draw + Warp alt cost + delayed exile) ──
 
     /// ETB trigger fires with `TargetSpec::None` and draws a card for Quantum Riddler's
