@@ -5564,6 +5564,17 @@
 
     // ── §49: Spell Pierce / tax counters ──────────────────────────────────────
 
+    /// Drive the IR "counter target spell unless its controller pays `cost`"
+    /// resolution body (Daze / Spell Pierce / Flusterstorm share it) against
+    /// `target`, as the counterspell controlled by `caster`.
+    fn run_counter_unless_pays(state: &mut SimState, caster: PlayerId, target: ObjId, cost: &str) {
+        let body = crate::card_defs::counter_unless_pays_body(parse_mana_cost(cost));
+        let env = crate::ir::executor::BindEnv::new()
+            .with_controller(caster)
+            .with_var("target", crate::ir::expr::Value::Obj(target));
+        crate::ir::executor::execute(&body, state, &env);
+    }
+
     #[test]
     fn test_counter_unless_pays_counters_when_opp_cannot_pay() {
         let mut state = make_state();
@@ -5589,8 +5600,7 @@
         });
         state.stack.push(spell_id);
 
-        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("2")))
-            .call(&mut state, 1, &[spell_id]);
+        run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "2");
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
             "spell should be countered when opponent can't pay 2");
@@ -5636,8 +5646,7 @@
         });
         state.stack.push(spell_id);
 
-        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("2")))
-            .call(&mut state, 1, &[spell_id]);
+        run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "2");
 
         assert!(state.stack.contains(&spell_id),
             "spell should remain on stack when opponent pays 2");
@@ -5670,8 +5679,7 @@
         state.stack.push(spell_id);
 
         // Daze: counter unless pays {1}
-        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))
-            .call(&mut state, 1, &[spell_id]);
+        run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
             "Daze should counter when opponent can't pay 1");
@@ -5690,8 +5698,7 @@
         recompute(&mut state);
         let spell_id = push_stack_spell(&mut state, PlayerId::Opp, "Ponder");
 
-        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))
-            .call(&mut state, 1, &[spell_id]);
+        run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Stack,
             "Daze should NOT counter — opponent taps a land to pay the {{1}} tax");
@@ -5742,7 +5749,9 @@
             zone: CardZone::Stack,
             is_token: false,
             spell: Some(SpellState {
-                effect: Some(eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))),
+                // Storm copies are built from the catalog def, not this object's
+                // effect; the original's effect is irrelevant to this trigger test.
+                effect: None,
                 chosen_targets: vec![spell_a],
                 is_back_face: false,
                 costs_paid_ctx: CostsPaidCtx::default(),
@@ -5850,8 +5859,7 @@
         state.stack.push(spell_id);
 
         // A storm copy's effect is the same as the original: counter unless pays {1}.
-        eff_counter_unless_pays(PlayerId::Us, crate::ir::action::Action::PayMana(parse_mana_cost("1")))
-            .call(&mut state, 1, &[spell_id]);
+        run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
         assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
             "storm copy should counter spell when opponent can't pay 1");

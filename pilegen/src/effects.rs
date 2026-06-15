@@ -620,40 +620,6 @@ pub(crate) fn eff_each_may_put(caster: PlayerId, filter: Filter) -> Effect {
     }))
 }
 
-/// Counter target spell unless its controller pays `cost` (CR 700.2).
-/// Reuses `ChoiceRequest::WardPayment` for the pay-or-decline decision.
-pub(crate) fn eff_counter_unless_pays(caster: PlayerId, cost: crate::ir::action::Action) -> Effect {
-    Effect(Arc::new(move |state, t, targets| {
-        if let Some(&spell_id) = targets.first() {
-            let spell_controller = state.objects.get(&spell_id)
-                .map(|o| o.controller)
-                .unwrap_or(caster.opp());
-            // Combined feasibility: build_schema covers object/decision
-            // shapes; potential_mana covers PayMana (which emits no
-            // schema decision). Without both, an empty pool would pass
-            // the check and `pay_ir_cost` would silently fail later.
-            let schema_ok = crate::ir::cost_exec::build_schema(&cost, state, spell_controller, spell_id).is_some();
-            let mana_ok = match crate::ir::ability::first_pay_mana_in_action(&cost) {
-                Some(mc) => state.potential_mana(spell_controller).can_pay(&mc),
-                None => true,
-            };
-            let can_pay = schema_ok && mana_ok;
-            let will_pay = can_pay && {
-                let f = std::sync::Arc::clone(&state.resolve_choice);
-                matches!(f(spell_id, &ChoiceRequest::WardPayment { cost: cost.clone() }, state), ChoiceResult::Bool(true))
-            };
-            if will_pay {
-                let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
-                let _ = crate::pay_ir_cost(state, t, spell_controller, spell_id, &cost, &mut no_strat);
-                let name = state.objects.get(&spell_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
-                state.log(t, spell_controller, format!("→ pays tax for {}", name));
-            } else {
-                counter_one(spell_id, state, t, caster);
-            }
-        }
-    }))
-}
-
 /// Placeholder for Atraxa, Grand Unifier's ETB: reveal top 10, for each card type
 /// you may put one into your hand. Real implementation needs per-type strategy choices
 /// over actual revealed cards; for now just silently move `n` library cards to hand

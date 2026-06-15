@@ -360,6 +360,37 @@ fn untargeted_mode(
     single_mode(TargetSpec::None, factory)
 }
 
+/// IR resolution body for "counter target spell/ability unless its controller
+/// pays `cost`" (Daze, Spell Pierce). The spell's controller is offered a choice:
+/// pay the tax (the spell then resolves normally — `Noop`), or decline (the spell
+/// is countered). The `Choose` executor filters the pay option out when it's
+/// unaffordable, and the default strategy takes the first legal option — i.e. pay
+/// whenever possible. Mana abilities are auto-tapped during the resolution-time
+/// payment (see `pay_ir_cost`).
+pub(crate) fn counter_unless_pays_body(cost: ManaCost) -> crate::ir::action::Action {
+    use crate::ir::action::{Action, ChoiceOption, Who as IrWho};
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    let target = || Expr::Ctx(Ctx::Var("target"));
+    Action::Choose {
+        who: IrWho::Player(Expr::Controller(Box::new(target()))),
+        prompt: "Pay the tax or be countered",
+        options: vec![
+            ChoiceOption {
+                label: "pay",
+                cost: Some(Box::new(Action::PayMana(cost))),
+                action: Box::new(Action::Noop),
+            },
+            ChoiceOption {
+                label: "be countered",
+                cost: None,
+                action: Box::new(Action::Counter { target: target() }),
+            },
+        ],
+        bind_as: None,
+    }
+}
+
 fn color_to_mana_char(c: Color) -> &'static str {
     match c {
         Color::White => "W", Color::Blue => "U", Color::Black => "B",
@@ -1310,17 +1341,24 @@ fn consider() -> CardDef {
 /// or pay {1U} (20% probability). CR 701.5.
 /// "Counter target spell unless its controller pays {1}."
 fn daze() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::{Action, MoveVerb};
     use crate::ir::context::Ctx;
     use crate::ir::expr::{Expr, Filter, ZoneKindSel};
     let mut c = simple("Daze", CardKind::Instant(SpellData {
         mana_cost: "1U".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_spell() },
-            |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("1"))),
-        ),
+        modes: None,
         ..Default::default()
     }), parse_colors("1U", true, false), None);
+    c.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone { controller: Who::Opp, zone: ZoneId::Stack, filter: ir_spell() },
+                body: counter_unless_pays_body(parse_mana_cost("1")),
+            }],
+        },
+        text: Some("Counter target spell unless its controller pays {1}."),
+    }];
     // Phase 4 step 5 (alt-cost migration): "Return an Island you control to
     // its owner's hand." First card to actually flow through `pay_ir_cost`
     // at runtime. The schema decision is bound to "$daze_island" and the
@@ -1732,18 +1770,26 @@ fn sheoldreds_edict() -> CardDef {
 
 /// Counter target noncreature spell unless its controller pays {2}. CR 700.2.
 fn spell_pierce() -> CardDef {
-    simple("Spell Pierce", CardKind::Instant(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    let mut card = simple("Spell Pierce", CardKind::Instant(SpellData {
         mana_cost: "U".to_string(),
-        modes: single_mode(
-            TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Stack,
-                filter: ir_and(ir_spell(), ir_not(ir_type(CardType::Creature))),
-            },
-            |who, _source_id, _x| eff_counter_unless_pays(who, crate::ir::action::Action::PayMana(parse_mana_cost("2"))),
-        ),
+        modes: None,
         ..Default::default()
-    }), parse_colors("U", true, false), None)
+    }), parse_colors("U", true, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::ObjectInZone {
+                    controller: Who::Opp,
+                    zone: ZoneId::Stack,
+                    filter: ir_and(ir_spell(), ir_not(ir_type(CardType::Creature))),
+                },
+                body: counter_unless_pays_body(parse_mana_cost("2")),
+            }],
+        },
+        text: Some("Counter target noncreature spell unless its controller pays {2}."),
+    }];
+    card
 }
 
 /// Counter target activated or triggered ability. (Mana abilities can't be targeted.)
@@ -1789,7 +1835,7 @@ fn stifle() -> CardDef {
 ///   event log pushes *before* triggers fire).
 fn flusterstorm() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, EventPattern, IrSpellMode, TriggerSpec};
-    use crate::ir::action::{Action, ChoiceOption, Who as IrWho};
+    use crate::ir::action::Action;
     use crate::ir::context::Ctx;
     use crate::ir::event_log::Window;
     use crate::ir::expr::{EventFilter, Expr, Filter, ZoneKindSel};
@@ -1803,26 +1849,8 @@ fn flusterstorm() -> CardDef {
         ),
     };
 
-    // "Unless its controller pays {1}": the target's controller chooses. Payment
-    // option becomes unavailable (CR 118.4) when they can't pay — then the
-    // counter option is their only legal choice and the counter resolves.
-    let on_resolve_body = Action::Choose {
-        who: IrWho::Player(Expr::Controller(Box::new(Expr::Ctx(Ctx::Var("target"))))),
-        prompt: "Flusterstorm",
-        options: vec![
-            ChoiceOption {
-                label: "Pay {1}",
-                cost: Some(Box::new(Action::PayMana(parse_mana_cost("1")))),
-                action: Box::new(Action::Noop),
-            },
-            ChoiceOption {
-                label: "Be countered",
-                cost: None,
-                action: Box::new(Action::Counter { target: Expr::Ctx(Ctx::Var("target")) }),
-            },
-        ],
-        bind_as: None,
-    };
+    // "Counter unless its controller pays {1}" — shared with Daze / Spell Pierce.
+    let on_resolve_body = counter_unless_pays_body(parse_mana_cost("1"));
 
     // Self-cast detection: the SpellCast pattern binds `triggered_obj` to the
     // cast card_id. Self-trigger ⇔ triggered_obj == Ctx::Source. Also require
