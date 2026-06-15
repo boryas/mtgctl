@@ -1607,7 +1607,10 @@ pub(crate) fn build_spell_effect(
                     use crate::ir::expr::Value;
                     let mut env = BindEnv::new()
                         .with_source(source_id)
-                        .with_controller(who);
+                        .with_controller(who)
+                        // The announced X for this spell (CR 601.2b), so resolution
+                        // bodies can read it as `Ctx::Var("x")` (e.g. Meltdown's MV ≤ X).
+                        .with_var("x", Value::Num(chosen_x as i64));
                     if let Some(&tgt) = targets.first() {
                         let v = if tgt == state.us.id || tgt == state.opp.id {
                             Value::Player(state.who_pid(tgt))

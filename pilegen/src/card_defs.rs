@@ -5116,22 +5116,31 @@ fn price_of_progress() -> CardDef {
 
 /// Meltdown — {X}{R} Sorcery. "Destroy each artifact with mana value X or less."
 fn meltdown() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+
     let mut def = simple("Meltdown", CardKind::Sorcery(SpellData {
         mana_cost: "R".to_string(),
-        modes: single_mode(
-            TargetSpec::None,
-            |who, _source_id, chosen_x| {
-                let x = chosen_x as i32;
-                let filter = ir_and(ir_type(CardType::Artifact), ir_mv_le(x));
-                Effect(Arc::new(move |state, t, _targets| {
-                    state.log(t, who, format!("Meltdown (X={}): destroy all artifacts MV ≤ {}", x, x));
-                    eff_destroy_all(who, filter.clone()).call(state, t, &[]);
-                }))
-            },
-        ),
+        modes: None,
         ..Default::default()
     }), parse_colors("R", false, false), None);
     def.additional_costs = ir_xmana_cost();
+    def.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                // Destroy each artifact whose mana value is ≤ the announced X
+                // (bound as `Ctx::Var("x")` by `build_spell_effect`).
+                body: ir_for_each_on_battlefield(
+                    ir_and(ir_type(CardType::Artifact), ir_mv_le_expr(Expr::Ctx(Ctx::Var("x")))),
+                    Action::Destroy { target: Expr::Ctx(Ctx::Var("v")) },
+                ),
+            }],
+        },
+        text: Some("Destroy each artifact with mana value X or less."),
+    }];
     def
 }
 

@@ -76,7 +76,13 @@ pub(crate) fn ir_keyword(kw: Keyword) -> Filter {
 
 /// `Mv(It) <= n`.
 pub(crate) fn ir_mv_le(n: i32) -> Filter {
-    Filter(Expr::Le(Box::new(Expr::Mv(Box::new(it()))), Box::new(Expr::Num(n as i64))))
+    ir_mv_le_expr(Expr::Num(n as i64))
+}
+
+/// `Mv(It) <= e` — like `ir_mv_le` but the bound is a runtime `Expr`, e.g. an
+/// announced X bound under `Ctx::Var("x")` (Meltdown: "MV X or less").
+pub(crate) fn ir_mv_le_expr(e: Expr) -> Filter {
+    Filter(Expr::Le(Box::new(Expr::Mv(Box::new(it()))), Box::new(e)))
 }
 
 /// `Mv(It) == n`.
