@@ -185,6 +185,30 @@ pub(crate) trait Strategy {
     }
 }
 
+/// A do-nothing strategy: no attacks/blocks, never mulligans, and the trait's
+/// default decisions everywhere else (e.g. `choose_mana_ability` = `auto_tap_plan`,
+/// `choose_targets` = `pick_targets`). Used as the `SimState::with_strategy`
+/// fallback when a player has no strategy installed (tests / uninitialized
+/// state), so resolution-time decisions always have *some* policy to consult.
+pub(crate) struct DefaultStrategy {
+    player_id: PlayerId,
+}
+
+impl DefaultStrategy {
+    pub(crate) fn new(player_id: PlayerId) -> Self {
+        DefaultStrategy { player_id }
+    }
+}
+
+impl Strategy for DefaultStrategy {
+    fn declare_attackers(&mut self, _state: &SimState) -> Vec<(ObjId, Option<ObjId>)> { Vec::new() }
+    fn declare_blockers(&mut self, _state: &SimState) -> Vec<(ObjId, ObjId)> { Vec::new() }
+    fn take_mulligan(&mut self, _state: &SimState, _mulligans_taken: u32) -> bool { false }
+    fn player_id(&self) -> PlayerId { self.player_id }
+    fn plan_gap(&self, _state: &SimState) -> TargetGap { TargetGap::default() }
+    fn card_fills(&self, _card_id: ObjId, _gap: &TargetGap, _state: &SimState) -> f64 { 0.0 }
+}
+
 // ── Decision logging helpers ─────────────────────────────────────────────────
 
 /// Summarize a hand's category composition for logging. Returns e.g. "(M=2 T=1 I=1 S=2 ?=1)".

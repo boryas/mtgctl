@@ -1601,6 +1601,12 @@ struct PlayerState {
     no_max_hand_size: bool,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
     library_order: std::collections::VecDeque<ObjId>,
+    /// This player's decision policy. `None` until installed at sim init. The engine
+    /// reaches it only via `SimState::with_strategy` (which falls back to
+    /// `DefaultStrategy`), so a player's agency is never shortcut in engine code.
+    /// (Phase 1 of folding the threaded `strategies` map onto the players.)
+    #[allow(dead_code)] // read starting Phase 2 (the strategies-map removal sweep)
+    strategy: Option<Box<dyn Strategy>>,
 }
 
 impl PlayerState {
@@ -1616,6 +1622,7 @@ impl PlayerState {
             life_lost_this_turn: 0,
             no_max_hand_size: false,
             library_order: std::collections::VecDeque::new(),
+            strategy: None,
         }
     }
 
@@ -1893,6 +1900,31 @@ impl SimState {
 
     fn player_mut(&mut self, who: PlayerId) -> &mut PlayerState {
         match who { PlayerId::Us => &mut self.us, PlayerId::Opp => &mut self.opp }
+    }
+
+    /// Run `f` with player `p`'s `Strategy` and an immutable view of the whole
+    /// state. The strategy is moved out for the duration (breaking the
+    /// self-borrow: a strategy lives *on* the state it must observe), then put
+    /// back; a `DefaultStrategy` stands in if none is installed. This is the
+    /// single channel through which engine code reaches a player's decisions —
+    /// resolution included — so player agency is never shortcut inline.
+    #[allow(dead_code)] // call sites land in Phase 2 (strategies-map removal sweep)
+    pub(crate) fn with_strategy<R>(
+        &mut self,
+        p: PlayerId,
+        f: impl FnOnce(&mut dyn crate::strategy::Strategy, &SimState) -> R,
+    ) -> R {
+        match self.player_mut(p).strategy.take() {
+            Some(mut s) => {
+                let r = f(&mut *s, &*self);
+                self.player_mut(p).strategy = Some(s);
+                r
+            }
+            None => {
+                let mut s = crate::strategy::DefaultStrategy::new(p);
+                f(&mut s, &*self)
+            }
+        }
     }
 
     /// Resolve a PlayerId to its stable ObjId.
