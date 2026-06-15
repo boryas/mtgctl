@@ -1162,7 +1162,6 @@ mod execute_parity {
     // ── Agency actions ───────────────────────────────────────────────────────
 
     use crate::ir::expr::Filter;
-    use crate::{ChoiceRequest, ChoiceResult};
     use rand::SeedableRng;
 
     fn seeded_rng(seed: u64) -> Box<dyn rand::RngCore + Send> {
@@ -1179,9 +1178,8 @@ mod execute_parity {
             let b = insert_obj(&mut s, PlayerId::Us, make_creature("B", "{G}", 2, 2));
             put_on_bf(&mut s, a);
             put_on_bf(&mut s, b);
-            s.sacrifice_choice = std::sync::Arc::new(|_who, cands, _state| {
-                cands.iter().min_by_key(|id| id.0).copied()
-            });
+            s.set_strategy(PlayerId::Us,
+                Box::new(crate::strategy::TestStrategy::new(PlayerId::Us).sacrifice_min_id()));
             (s, a, b)
         };
 
@@ -1229,7 +1227,8 @@ mod execute_parity {
             insert_obj(&mut s, PlayerId::Us, make_creature("A", "{G}", 1, 1));
             insert_obj(&mut s, PlayerId::Us, make_creature("B", "{G}", 1, 1));
             insert_obj(&mut s, PlayerId::Us, make_creature("C", "{G}", 1, 1));
-            s.surveil_choice = std::sync::Arc::new(|_id, _s| true);
+            s.set_strategy(PlayerId::Us,
+                Box::new(crate::strategy::TestStrategy::new(PlayerId::Us).surveil(true)));
             s
         };
 
@@ -1332,10 +1331,8 @@ mod execute_parity {
     fn may_do_respects_strategy_yes() {
         let mut s = make_state();
         let start = s.life_of(PlayerId::Us);
-        s.resolve_choice = std::sync::Arc::new(|_src, req, _s| match req {
-            ChoiceRequest::Mode(_) => ChoiceResult::Mode(1),
-            _ => ChoiceResult::Mode(0),
-        });
+        s.set_strategy(PlayerId::Us,
+            Box::new(crate::strategy::TestStrategy::new(PlayerId::Us).mode(1)));
         execute(
             &Action::MayDo {
                 who: Who::You,
@@ -1367,10 +1364,8 @@ mod execute_parity {
     fn choose_picks_strategy_index() {
         let mut s = make_state();
         let start = s.life_of(PlayerId::Us);
-        s.resolve_choice = std::sync::Arc::new(|_src, req, _s| match req {
-            ChoiceRequest::Mode(_) => ChoiceResult::Mode(1),
-            _ => ChoiceResult::Mode(0),
-        });
+        s.set_strategy(PlayerId::Us,
+            Box::new(crate::strategy::TestStrategy::new(PlayerId::Us).mode(1)));
         execute(
             &Action::Choose {
                 who: Who::You,

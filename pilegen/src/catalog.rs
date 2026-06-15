@@ -1458,9 +1458,8 @@ pub(crate) fn build_tamiyo_minus_three(who: PlayerId, source_id: ObjId) -> Effec
         state.log(t, who, format!("{} −3: return {} to hand", source_name, card_name));
         if is_green {
             // "Add one mana of any color" — use strategy color choice.
-            let f = std::sync::Arc::clone(&state.resolve_choice);
             let ChoiceResult::Color(chosen) =
-                f(source_id, &ChoiceRequest::Color, state) else { return };
+                state.with_strategy(who, |s, st| s.resolve_choice(source_id, &ChoiceRequest::Color, st)) else { return };
             let spec = match chosen {
                 Color::White => "W",
                 Color::Blue  => "U",

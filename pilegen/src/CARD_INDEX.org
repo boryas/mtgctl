@@ -39,7 +39,7 @@ primitives. *Effect context* = the verb appears as a spell/ability effect;
 | *Return* to battlefield    | ✓      | ~eff_reanimate(actor)~ · ~change_zone(id, ZoneId::Battlefield, ...)~                                                                       |
 | *Sacrifice* — cost (701.17) | ✓     | ~Action::Sacrifice~ / ~Action::MoveByChoice { to: Graveyard, verb: Sacrifice }~ (in ~CostBody::Ir~)                                         |
 | *Search* (701.19)          | ✓      | ~eff_fetch_search(who, CardPredicate, to_zone)~ — searches library, puts card in ~to_zone~                                                 |
-| *Surveil* (701.30)         | ✓      | ~eff_surveil(who, n)~ — calls ~state.surveil_choice~ per card (strategy callback)                                                          |
+| *Surveil* (701.30)         | ✓      | ~eff_surveil(who, n)~ — calls ~Strategy::surveil_choice~ per card (via ~with_strategy~)                                                     |
 | *Tap* — cost (701.21)      | ✓      | ~Action::Tap { target: Source }~ (in ~CostBody::Ir~)                                                                                       |
 | *Amass* (701.31)           | ✓      | Decomposed in IR: ~IfThen~ (no army? ~CreateToken~) + ~ForEach { PutCounters +1/+1 }~ — see [[*Amass (CR 701.44)][orcish_bowmasters]]      |
 | *Transform* (701.34)       | ✓      | ~Action::Transform { target }~ in-place flip (Delver) + ~Transformed~ event. "Exile, return transformed" (Tamiyo) = ~Sequence([Exile, Move→bf, Transform])~ (new object) |

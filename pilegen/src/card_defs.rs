@@ -920,9 +920,8 @@ fn arid_mesa() -> CardDef {
 /// {T}: Add one mana of any color (TODO: restrict to spells of the named type; mana is uncounterable).
 fn cavern_of_souls() -> CardDef {
     let repl = etb_self_replacement(|source_id, id, controller, state, t| {
-        let f = Arc::clone(&state.resolve_choice);
         let ChoiceResult::CreatureType(chosen_type) =
-            f(source_id, &ChoiceRequest::CreatureType, state) else { return };
+            state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::CreatureType, st)) else { return };
         if let Some(bf) = state.permanent_bf_mut(id) {
             bf.etb_choice = Some(ChoiceResult::CreatureType(chosen_type.clone()));
         }
@@ -3567,9 +3566,8 @@ fn tamiyo_inquisitive_student() -> CardDef {
 /// CR 613.4 (color-changing effects apply at layer 5).
 fn painters_servant() -> CardDef {
     let repl = etb_self_replacement(|source_id, id, controller, state, _t| {
-        let f = Arc::clone(&state.resolve_choice);
         let ChoiceResult::Color(chosen) =
-            f(source_id, &ChoiceRequest::Color, state) else { return };
+            state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::Color, st)) else { return };
         if let Some(bf) = state.permanent_bf_mut(id) {
             bf.etb_choice = Some(ChoiceResult::Color(chosen));
         }
@@ -3644,10 +3642,9 @@ fn disruptor_flute() -> CardDef {
         Some(40),
         vec![], CardLayout::Normal, None,
         vec![],  // no trigger_defs
-        vec![etb_self_replacement(|source_id, id, _controller, state, _t| {
-            let f = Arc::clone(&state.resolve_choice);
+        vec![etb_self_replacement(|source_id, id, controller, state, _t| {
             let ChoiceResult::CardName(chosen) =
-                f(source_id, &ChoiceRequest::CardName, state) else { return };
+                state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::CardName, st)) else { return };
             if let Some(bf) = state.permanent_bf_mut(id) {
                 bf.etb_choice = Some(ChoiceResult::CardName(chosen.clone()));
             }
@@ -4102,8 +4099,7 @@ fn cori_steel_cutter() -> CardDef {
                         effect: Effect(Arc::new(move |state, t, _targets| {
                             let token_id = do_create_token("Monk Token", controller, state, t);
                             // "You may attach this Equipment to it."
-                            let f = Arc::clone(&state.resolve_choice);
-                            let choice = f(source_id, &ChoiceRequest::MayAttach, state);
+                            let choice = state.with_strategy(controller, |s, st| s.resolve_choice(source_id, &ChoiceRequest::MayAttach, st));
                             if matches!(choice, ChoiceResult::Bool(true)) {
                                 do_attach(state, controller, source_id, token_id);
                             }

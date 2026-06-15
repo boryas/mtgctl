@@ -393,7 +393,6 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::Sacrifice { who, filter, count, bind_as: _ } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(count, state, env)) as usize;
-            let cb = std::sync::Arc::clone(&state.sacrifice_choice);
             for _ in 0..n {
                 let candidates: Vec<ObjId> = state
                     .permanents_of(who)
@@ -403,7 +402,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 if candidates.is_empty() {
                     break;
                 }
-                if let Some(id) = cb(who, &candidates, state) {
+                let chosen = state.with_strategy(who, |s, st| s.sacrifice_choice(who, &candidates, st));
+                if let Some(id) = chosen {
                     change_zone(id, ZoneId::Graveyard, state, t, actor);
                 } else {
                     break;
@@ -495,12 +495,11 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         Action::Surveil { who, n } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(n, state, env)) as usize;
-            let cb = std::sync::Arc::clone(&state.surveil_choice);
             for _ in 0..n {
                 let Some(id) = state.library_of(who).next().map(|o| o.id) else {
                     break;
                 };
-                if cb(id, state) {
+                if state.with_strategy(who, |s, st| s.surveil_choice(id, st)) {
                     change_zone(id, ZoneId::Graveyard, state, t, who);
                 }
             }
@@ -548,9 +547,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
 
         Action::MayDo { who, action } => {
             let who = resolve_who(who, state, env, actor);
-            let cb = std::sync::Arc::clone(&state.resolve_choice);
             let src = env.source.unwrap_or(ObjId::default());
-            let choice = cb(src, &ChoiceRequest::Mode(2), state);
+            let choice = state.with_strategy(who, |s, st| s.resolve_choice(src, &ChoiceRequest::Mode(2), st));
             let said_yes = matches!(choice, ChoiceResult::Mode(1));
             if said_yes {
                 let sub_env = env.clone().with_controller(who);
@@ -600,10 +598,10 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             if legal.is_empty() {
                 return ExecResult::Ok;
             }
-            let cb = std::sync::Arc::clone(&state.resolve_choice);
-            let choice = cb(src, &ChoiceRequest::Mode(legal.len()), state);
+            let nlegal = legal.len();
+            let choice = state.with_strategy(who, |s, st| s.resolve_choice(src, &ChoiceRequest::Mode(nlegal), st));
             let picked = match choice {
-                ChoiceResult::Mode(i) if i < legal.len() => legal[i],
+                ChoiceResult::Mode(i) if i < nlegal => legal[i],
                 _ => legal[0],
             };
             // Pay the option's cost (if any) before running its action.

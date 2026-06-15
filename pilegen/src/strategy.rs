@@ -169,6 +169,35 @@ pub(crate) trait Strategy {
     /// How much does this card close the current gap? Higher = more useful.
     fn card_fills(&self, card_id: ObjId, gap: &TargetGap, state: &SimState) -> f64;
 
+    /// A typed, non-object choice during resolution (CR 601.2 / 700): choose a
+    /// color, name a creature type / card, pick a mode, pay a ward tax,
+    /// may-put-on-battlefield, may-attach. Reached per-player via `with_strategy`.
+    fn resolve_choice(&mut self, _source: ObjId, req: &ChoiceRequest, _state: &SimState) -> ChoiceResult {
+        match req {
+            ChoiceRequest::Color                    => ChoiceResult::Color(Color::Blue),
+            ChoiceRequest::CreatureType             => ChoiceResult::CreatureType("Wizard".to_string()),
+            ChoiceRequest::CardName                 => ChoiceResult::CardName(String::new()),
+            ChoiceRequest::Mode(_)                  => ChoiceResult::Mode(0),
+            ChoiceRequest::WardPayment {..}         => ChoiceResult::Bool(true),
+            ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
+            ChoiceRequest::MayAttach                => ChoiceResult::Bool(true),
+        }
+    }
+
+    /// Surveil (CR 701.30): true = put in graveyard, false = keep on top.
+    /// Default: bin cards the evaluator scores below threshold (delegates to
+    /// `state.evaluate_card`, matching the old run_game install).
+    fn surveil_choice(&mut self, id: ObjId, state: &SimState) -> bool {
+        let who = self.player_id();
+        let eval = std::sync::Arc::clone(&state.evaluate_card);
+        eval(who, id, state) < 0.3
+    }
+
+    /// Forced sacrifice (CR 701.16): pick which permanent to sacrifice. Default: first.
+    fn sacrifice_choice(&mut self, _who: PlayerId, candidates: &[ObjId], _state: &SimState) -> Option<ObjId> {
+        candidates.first().copied()
+    }
+
     /// Drain accumulated decision-log entries. Called by the engine after each
     /// strategy invocation; entries are appended to `SimState::decision_log`.
     fn drain_decisions(&mut self) -> Vec<String> { Vec::new() }
@@ -207,6 +236,87 @@ impl Strategy for DefaultStrategy {
     fn player_id(&self) -> PlayerId { self.player_id }
     fn plan_gap(&self, _state: &SimState) -> TargetGap { TargetGap::default() }
     fn card_fills(&self, _card_id: ObjId, _gap: &TargetGap, _state: &SimState) -> f64 { 0.0 }
+}
+
+// ── TestStrategy (test-only) ───────────────────────────────────────────────────
+
+/// A configurable test-player strategy: a real `Strategy` impl whose
+/// resolution-time decisions (typed choices, surveil, may-do, sacrifice) are set
+/// by data via the builder, with every other decision falling back to the trait
+/// defaults (no attacks/blocks, never mulligans). Tests `set_strategy` one of
+/// these on the relevant player to force a specific choice — the same mechanism
+/// the engine uses, rather than mutating a global callback. Shared by both
+/// `tests.rs` and `ir/tests.rs`.
+#[cfg(test)]
+pub(crate) struct TestStrategy {
+    player_id: PlayerId,
+    color: Option<Color>,
+    card_name: Option<String>,
+    /// Forces `Mode(n)` for MayDo/Choose decisions; None → trait default (Mode 0).
+    mode: Option<usize>,
+    /// MayPutOnBattlefield: put the first candidate instead of declining.
+    put_first_candidate: bool,
+    /// Surveil: Some(true) = mill, Some(false) = keep, None = evaluator default.
+    surveil: Option<bool>,
+    /// Forced sacrifice: pick the smallest-`ObjId` candidate (deterministic
+    /// regardless of HashMap iteration order); false → trait default (first).
+    sacrifice_min_id: bool,
+}
+
+#[cfg(test)]
+impl TestStrategy {
+    pub(crate) fn new(player_id: PlayerId) -> Self {
+        TestStrategy {
+            player_id, color: None, card_name: None, mode: None,
+            put_first_candidate: false, surveil: None, sacrifice_min_id: false,
+        }
+    }
+    pub(crate) fn color(mut self, c: Color) -> Self { self.color = Some(c); self }
+    pub(crate) fn card_name(mut self, n: impl Into<String>) -> Self { self.card_name = Some(n.into()); self }
+    pub(crate) fn mode(mut self, m: usize) -> Self { self.mode = Some(m); self }
+    pub(crate) fn put_first_candidate(mut self) -> Self { self.put_first_candidate = true; self }
+    pub(crate) fn surveil(mut self, mill: bool) -> Self { self.surveil = Some(mill); self }
+    pub(crate) fn sacrifice_min_id(mut self) -> Self { self.sacrifice_min_id = true; self }
+}
+
+#[cfg(test)]
+impl Strategy for TestStrategy {
+    fn declare_attackers(&mut self, _s: &SimState) -> Vec<(ObjId, Option<ObjId>)> { Vec::new() }
+    fn declare_blockers(&mut self, _s: &SimState) -> Vec<(ObjId, ObjId)> { Vec::new() }
+    fn take_mulligan(&mut self, _s: &SimState, _m: u32) -> bool { false }
+    fn player_id(&self) -> PlayerId { self.player_id }
+    fn plan_gap(&self, _s: &SimState) -> TargetGap { TargetGap::default() }
+    fn card_fills(&self, _i: ObjId, _g: &TargetGap, _s: &SimState) -> f64 { 0.0 }
+
+    fn resolve_choice(&mut self, source: ObjId, req: &ChoiceRequest, state: &SimState) -> ChoiceResult {
+        match req {
+            ChoiceRequest::Color if self.color.is_some() =>
+                ChoiceResult::Color(self.color.unwrap()),
+            ChoiceRequest::CardName if self.card_name.is_some() =>
+                ChoiceResult::CardName(self.card_name.clone().unwrap()),
+            ChoiceRequest::Mode(_) if self.mode.is_some() =>
+                ChoiceResult::Mode(self.mode.unwrap()),
+            ChoiceRequest::MayPutOnBattlefield { candidates } if self.put_first_candidate =>
+                ChoiceResult::OptionalObject(candidates.first().copied()),
+            // Anything unset falls back to the trait default policy.
+            _ => DefaultStrategy::new(self.player_id).resolve_choice(source, req, state),
+        }
+    }
+
+    fn surveil_choice(&mut self, id: ObjId, state: &SimState) -> bool {
+        match self.surveil {
+            Some(mill) => mill,
+            None => DefaultStrategy::new(self.player_id).surveil_choice(id, state),
+        }
+    }
+
+    fn sacrifice_choice(&mut self, who: PlayerId, candidates: &[ObjId], state: &SimState) -> Option<ObjId> {
+        if self.sacrifice_min_id {
+            candidates.iter().min_by_key(|id| id.0).copied()
+        } else {
+            DefaultStrategy::new(self.player_id).sacrifice_choice(who, candidates, state)
+        }
+    }
 }
 
 // ── Decision logging helpers ─────────────────────────────────────────────────

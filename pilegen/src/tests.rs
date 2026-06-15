@@ -1647,6 +1647,8 @@
         assert_eq!(out, vec![7], "no trample → fallback piles excess onto last blocker");
     }
 
+    use strategy::TestStrategy;
+
     // ── Strategy callbacks: order_blockers + assign_combat_damage ────────────
 
     /// Test scaffolding: a Doomsday-strategy wrapper that lets a test override
@@ -4402,15 +4404,7 @@
     /// fires, resolve_choice picks a color, and the ContinuousInstance is registered.
     /// Calls recompute() so materialized views reflect the new CE immediately.
     fn etb_painter(state: &mut SimState, who: PlayerId, chosen_color: Color) -> ObjId {
-        state.resolve_choice = std::sync::Arc::new(move |_, req, _| match req {
-            ChoiceRequest::Color             => ChoiceResult::Color(chosen_color),
-            ChoiceRequest::CreatureType      => ChoiceResult::CreatureType("Wizard".to_string()),
-            ChoiceRequest::CardName          => ChoiceResult::CardName(String::new()),
-            ChoiceRequest::Mode(_)           => ChoiceResult::Mode(0),
-            ChoiceRequest::WardPayment {..}  => ChoiceResult::Bool(true),
-            ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
-            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
-        });
+        state.set_strategy(who, Box::new(TestStrategy::new(who).color(chosen_color)));
         let id = state.alloc_id();
         let def = catalog_card("Painter's Servant");
         state.objects.insert(id, GameObject {
@@ -4514,15 +4508,7 @@
 
     /// Helper: ETB Disruptor Flute naming the given card name.
     fn etb_flute(state: &mut SimState, who: PlayerId, chosen_name: &'static str) -> ObjId {
-        state.resolve_choice = std::sync::Arc::new(move |_, req, _| match req {
-            ChoiceRequest::Color             => ChoiceResult::Color(Color::Blue),
-            ChoiceRequest::CreatureType      => ChoiceResult::CreatureType("Wizard".to_string()),
-            ChoiceRequest::CardName          => ChoiceResult::CardName(chosen_name.to_string()),
-            ChoiceRequest::Mode(_)           => ChoiceResult::Mode(0),
-            ChoiceRequest::WardPayment {..}  => ChoiceResult::Bool(true),
-            ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
-            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
-        });
+        state.set_strategy(who, Box::new(TestStrategy::new(who).card_name(chosen_name)));
         let id = state.alloc_id();
         let def = catalog_card("Disruptor Flute");
         state.objects.insert(id, GameObject {
@@ -4620,11 +4606,11 @@
 
     #[test]
     fn test_surveil_land_etb_mills_when_choice_true() {
-        // Override surveil_choice to always mill. ETB a surveil land; top library card
+        // Surveiling player always mills. ETB a surveil land; top library card
         // should end up in the graveyard. Land itself should enter tapped.
         let mut state = make_state();
         state.catalog = test_catalog();
-        state.surveil_choice = std::sync::Arc::new(|_, _| true);
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).surveil(true)));
 
         // Put a known card on top of Us's library.
         let top_id = {
@@ -4674,10 +4660,10 @@
 
     #[test]
     fn test_surveil_land_etb_keeps_when_choice_false() {
-        // Override surveil_choice to always keep. Library card stays in library.
+        // Surveiling player always keeps. Library card stays in library.
         let mut state = make_state();
         state.catalog = test_catalog();
-        state.surveil_choice = std::sync::Arc::new(|_, _| false);
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).surveil(false)));
 
         let top_id = {
             let def = catalog_card("Brainstorm");
@@ -5507,23 +5493,8 @@
         let mut state = make_state();
         state.catalog = test_catalog();
         let creature_id = add_hand_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        // Override resolve_choice: caster puts creature, opp declines.
-        let cid = creature_id;
-        state.resolve_choice = std::sync::Arc::new(move |_, req, _| match req {
-            ChoiceRequest::MayPutOnBattlefield { ref candidates } => {
-                if candidates.contains(&cid) {
-                    ChoiceResult::OptionalObject(Some(cid))
-                } else {
-                    ChoiceResult::OptionalObject(None)
-                }
-            }
-            ChoiceRequest::Color           => ChoiceResult::Color(Color::Blue),
-            ChoiceRequest::CreatureType    => ChoiceResult::CreatureType("Wizard".to_string()),
-            ChoiceRequest::CardName        => ChoiceResult::CardName(String::new()),
-            ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
-            ChoiceRequest::WardPayment {..} => ChoiceResult::Bool(true),
-            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
-        });
+        // Caster puts its only candidate (the creature); opp has none → declines.
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).put_first_candidate()));
 
         eff_each_may_put(
             PlayerId::Us,
@@ -5605,16 +5576,8 @@
         let island_def = catalog_card("Island");
         add_perm_with_def(&mut state, PlayerId::Opp, &island_def, BattlefieldState::new());
         add_perm_with_def(&mut state, PlayerId::Opp, &island_def, BattlefieldState::new());
-        // Strategy: always pay.
-        state.resolve_choice = std::sync::Arc::new(|_, req, _| match req {
-            ChoiceRequest::WardPayment {..} => ChoiceResult::Bool(true),
-            ChoiceRequest::Color           => ChoiceResult::Color(Color::Blue),
-            ChoiceRequest::CreatureType    => ChoiceResult::CreatureType("Wizard".to_string()),
-            ChoiceRequest::CardName        => ChoiceResult::CardName(String::new()),
-            ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
-            ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
-            ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
-        });
+        // No strategy override needed: the opp's default `resolve_choice` returns
+        // Mode(0) for a Choose, picking the first legal option ("pay") when payable.
         // Opponent spell on the stack.
         let spell_id = state.alloc_id();
         state.objects.insert(spell_id, GameObject {
@@ -7238,7 +7201,7 @@
         // DRC on battlefield; cast a noncreature spell → surveil 1 trigger fires.
         let mut state = make_state();
         state.catalog = test_catalog();
-        state.surveil_choice = std::sync::Arc::new(|_, _| true); // always mill
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).surveil(true))); // always mill
 
         // Put a known card on top of library.
         let top_id = {
@@ -7290,7 +7253,7 @@
         // DRC on battlefield; cast a creature spell → no surveil trigger.
         let mut state = make_state();
         state.catalog = test_catalog();
-        state.surveil_choice = std::sync::Arc::new(|_, _| true);
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).surveil(true)));
 
         let top_id = {
             let id = state.alloc_id();
@@ -8473,10 +8436,7 @@
         assert_eq!(lib, vec![dd, oracle], "default strategy declines the may-shuffle");
 
         // Opt-in strategy (Mode 1) → shuffles; multiset preserved.
-        state.resolve_choice = std::sync::Arc::new(|_, req, _| match req {
-            crate::ChoiceRequest::Mode(_) => crate::ChoiceResult::Mode(1),
-            _ => crate::ChoiceResult::Mode(0),
-        });
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).mode(1)));
         eff_ir(PlayerId::Us, may_shuffle()).call(&mut state, 0, &[]);
         let after: std::collections::HashSet<ObjId> =
             state.us.library_order.iter().copied().collect();
@@ -8577,10 +8537,7 @@
             ("Unearth", 0.05), ("Doomsday", 0.9),
         ]);
         // Strategy opts into the may-shuffle (Mode 1).
-        state.resolve_choice = std::sync::Arc::new(|_, req, _| match req {
-            crate::ChoiceRequest::Mode(_) => crate::ChoiceResult::Mode(1),
-            _ => crate::ChoiceResult::Mode(0),
-        });
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).mode(1)));
 
         let effect = eff_order(PlayerId::Us, 3)
             .then(eff_ir(PlayerId::Us, ponder_may_shuffle()))
@@ -8637,13 +8594,9 @@
         state.us.library_order.push_back(oracle);
         state.us.library_order.push_back(dd);
 
-        // Wire surveil_choice to use evaluator (mill if < 0.3)
         wire_eval(&mut state, vec![("Thassa's Oracle", 0.05), ("Doomsday", 0.9)]);
-        let eval = Arc::clone(&state.evaluate_card);
-        state.surveil_choice = Arc::new(move |card_id, state| {
-            let who = state.objects.get(&card_id).map(|o| o.owner).unwrap_or(PlayerId::Us);
-            eval(who, card_id, state) < 0.3
-        });
+        // No override: the default surveil policy already bins cards the
+        // evaluator scores below 0.3 (delegates to `state.evaluate_card`).
 
         // Consider = surveil(1), draw(1)
         let effect = eff_surveil(PlayerId::Us, 1).then(eff_draw(PlayerId::Us, 1));
@@ -8672,11 +8625,8 @@
         state.us.library_order.push_back(oracle);
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05)]);
-        let eval = Arc::clone(&state.evaluate_card);
-        state.surveil_choice = Arc::new(move |card_id, state| {
-            let who = state.objects.get(&card_id).map(|o| o.owner).unwrap_or(PlayerId::Us);
-            eval(who, card_id, state) < 0.3
-        });
+        // No override: the default surveil policy already bins cards the
+        // evaluator scores below 0.3 (delegates to `state.evaluate_card`).
 
         let effect = eff_surveil(PlayerId::Us, 1).then(eff_draw(PlayerId::Us, 1));
         effect.call(&mut state, 0, &[]);

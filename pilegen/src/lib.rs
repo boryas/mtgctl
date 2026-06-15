@@ -618,9 +618,10 @@ pub(crate) struct ReplacementInstance {
 pub(crate) enum Color { White, Blue, Black, Red, Green }
 
 /// A typed choice that an effect needs to make at resolution/ETB time.
-/// Passed to `SimState.resolve_choice`; the installed closure returns a `ChoiceResult`.
-/// This covers decisions that are not targets (`TargetSpec`) and not object selections
-/// (`ChoiceSpec`) — specifically, choices over abstract typed values.
+/// Passed to `Strategy::resolve_choice` (reached per-player via `with_strategy`);
+/// the strategy returns a `ChoiceResult`. This covers decisions that are not
+/// targets (`TargetSpec`) and not object selections (`ChoiceSpec`) —
+/// specifically, choices over abstract typed values.
 #[derive(Clone)]
 pub(crate) enum ChoiceRequest {
     /// Choose one of the five colors (e.g. Painter's Servant ETB).
@@ -644,7 +645,7 @@ pub(crate) enum ChoiceRequest {
     MayAttach,
 }
 
-/// The value returned by `SimState.resolve_choice` for a given `ChoiceRequest`.
+/// The value returned by `Strategy::resolve_choice` for a given `ChoiceRequest`.
 #[derive(Clone)]
 pub(crate) enum ChoiceResult {
     Color(Color),
@@ -1692,26 +1693,6 @@ pub struct SimState {
     /// Effects access this directly via `state.rng`. Strategy functions receive their
     /// own rng parameter so their randomness remains independently injectable for tests.
     pub(crate) rng: Box<dyn rand::RngCore + Send>,
-    /// Strategy callback for effects that need a typed, non-object choice at resolution/ETB
-    /// time (e.g. "choose a color", "name a creature type"). Effects clone this Arc out before
-    /// calling it with `&*state` to avoid a double-borrow of `state`.
-    /// Default: Blue / "Wizard" / "" — suitable for the Doomsday vs. Painter heuristic.
-    /// Override in tests to force specific choices.
-    pub(crate) resolve_choice:
-        std::sync::Arc<dyn Fn(ObjId, &ChoiceRequest, &SimState) -> ChoiceResult + Send + Sync>,
-    /// Strategy callback for surveil: given the ObjId of the card being surveiled,
-    /// return `true` to put it in the graveyard, `false` to keep it on top.
-    /// Effects clone this Arc out before calling it with `&*state` (same double-borrow idiom).
-    /// Default: coin flip. Override in tests to force deterministic outcomes.
-    pub(crate) surveil_choice:
-        std::sync::Arc<dyn Fn(ObjId, &SimState) -> bool + Send + Sync>,
-    /// Strategy callback for forced sacrifice: given the player who must sacrifice and the
-    /// list of candidate ObjIds matching the effect's filter, returns the chosen id.
-    /// Used by `eff_sacrifice` (e.g. Sheoldred's Edict, Liliana of the Veil).
-    /// Effects clone this Arc before calling with `&*state` (same double-borrow idiom).
-    /// Default: first candidate. Override in tests or per-strategy for smarter selection.
-    pub(crate) sacrifice_choice:
-        std::sync::Arc<dyn Fn(PlayerId, &[ObjId], &SimState) -> Option<ObjId> + Send + Sync>,
     /// Universal card evaluator: scores a card's value for `who` given current game state.
     /// Used by generic effect primitives (put_back, scry, order) to make strategy-driven
     /// card selection decisions. Higher = more valuable to keep.
@@ -1765,17 +1746,6 @@ impl SimState {
             event_log: crate::ir::event_log::EventLog::new(),
             catalog: HashMap::new(),
             rng: Box::new(rand::rngs::StdRng::from_entropy()),
-            resolve_choice: std::sync::Arc::new(|_, req, _| match req {
-                ChoiceRequest::Color           => ChoiceResult::Color(Color::Blue),
-                ChoiceRequest::CreatureType    => ChoiceResult::CreatureType("Wizard".to_string()),
-                ChoiceRequest::CardName        => ChoiceResult::CardName(String::new()),
-                ChoiceRequest::Mode(_)         => ChoiceResult::Mode(0),
-                ChoiceRequest::WardPayment {..} => ChoiceResult::Bool(true),
-                ChoiceRequest::MayPutOnBattlefield {..} => ChoiceResult::OptionalObject(None),
-                ChoiceRequest::MayAttach => ChoiceResult::Bool(true),
-            }),
-            surveil_choice: std::sync::Arc::new(|_, _| rand::thread_rng().gen_bool(0.5)),
-            sacrifice_choice: std::sync::Arc::new(|_, candidates, _| candidates.first().copied()),
             evaluate_card: std::sync::Arc::new(|_, _, _| 0.5),
         };
         s.us.id = s.alloc_id();
@@ -4302,18 +4272,6 @@ pub fn simulate_game(
                 opp_card_fills(card_id, &gap, state, who)
             }
         }
-    });
-
-    // Wire surveil_choice to use the evaluator: mill low-value cards, keep high-value.
-    let surveil_eval = Arc::clone(&state.evaluate_card);
-    state.surveil_choice = Arc::new(move |card_id, state| {
-        // Determine who owns this card to evaluate from their perspective.
-        let who = state.objects.get(&card_id)
-            .map(|o| o.owner)
-            .unwrap_or(PlayerId::Us);
-        let score = surveil_eval(who, card_id, state);
-        // true = graveyard (mill), false = keep on top. Mill if below threshold.
-        score < 0.3
     });
 
     // Install each player's decision policy on the player itself (composed

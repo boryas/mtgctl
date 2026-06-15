@@ -80,7 +80,7 @@ pub(crate) fn eff_draw(who: PlayerId, n: usize) -> Effect {
 }
 
 /// Surveil N for `who`. For each of the top N cards of their library, calls
-/// `state.surveil_choice` to decide keep-on-top or put-in-graveyard.
+/// `Strategy::surveil_choice` (via `with_strategy`) to decide keep-on-top or put-in-graveyard.
 /// Reveal step is a no-op (hidden information is not modeled).
 /// TODO: surveil N>1 for Kaito, Bane of Nightmares 0 ability (passes N cards as a batch).
 pub(crate) fn eff_surveil(who: PlayerId, n: usize) -> Effect {
@@ -88,8 +88,7 @@ pub(crate) fn eff_surveil(who: PlayerId, n: usize) -> Effect {
         for _ in 0..n {
             let top = state.library_of(who).next().map(|o| o.id);
             if let Some(id) = top {
-                let f = std::sync::Arc::clone(&state.surveil_choice);
-                if f(id, state) {
+                if state.with_strategy(who, |s, st| s.surveil_choice(id, st)) {
                     change_zone(id, ZoneId::Graveyard, state, t, who);
                 }
             }
@@ -278,7 +277,7 @@ pub(crate) fn eff_damage_all(caster: PlayerId, n: i32, source_id: ObjId, filter:
     }))
 }
 
-/// Force `who` to sacrifice one permanent matching `filter`, chosen via `state.sacrifice_choice`.
+/// Force `who` to sacrifice one permanent matching `filter`, chosen via `Strategy::sacrifice_choice`.
 /// Models "sacrifice a [X] of your choice" (CR 701.16). The sacrificing player decides;
 /// the effect moves the chosen permanent to the graveyard. No-ops if no match exists.
 pub(crate) fn eff_sacrifice(caster: PlayerId, who: Who, filter: Filter) -> Effect {
@@ -290,8 +289,8 @@ pub(crate) fn eff_sacrifice(caster: PlayerId, who: Who, filter: Filter) -> Effec
             .map(|o| o.id)
             .collect();
         if candidates.is_empty() { return; }
-        let f = Arc::clone(&state.sacrifice_choice);
-        if let Some(id) = f(target_who, &candidates, &*state) {
+        let chosen = state.with_strategy(target_who, |s, st| s.sacrifice_choice(target_who, &candidates, st));
+        if let Some(id) = chosen {
             let name = state.objects.get(&id).map(|o| o.catalog_key.clone()).unwrap_or_default();
             state.log(t, caster, format!("→ {} sacrificed", name));
             change_zone(id, ZoneId::Graveyard, state, t, caster);
@@ -592,7 +591,6 @@ pub(crate) fn eff_fetch_search(
 /// (CR 101.4 — "each" effects are simultaneous; no triggers fire between them).
 pub(crate) fn eff_each_may_put(caster: PlayerId, filter: Filter) -> Effect {
     Effect(Arc::new(move |state, t, _targets| {
-        let f = std::sync::Arc::clone(&state.resolve_choice);
         let mut to_place: Vec<(ObjId, PlayerId)> = Vec::new();
         for &player in &[caster, caster.opp()] {
             let env = crate::ir::executor::BindEnv::new().with_controller(player);
@@ -602,7 +600,8 @@ pub(crate) fn eff_each_may_put(caster: PlayerId, filter: Filter) -> Effect {
                 .collect();
             if candidates.is_empty() { continue; }
             let req = ChoiceRequest::MayPutOnBattlefield { candidates };
-            if let ChoiceResult::OptionalObject(Some(id)) = f(ObjId(0), &req, state) {
+            let decision = state.with_strategy(player, |s, st| s.resolve_choice(ObjId(0), &req, st));
+            if let ChoiceResult::OptionalObject(Some(id)) = decision {
                 // Validate the chosen id is actually in the candidate set.
                 if let ChoiceRequest::MayPutOnBattlefield { ref candidates } = req {
                     if candidates.contains(&id) {
@@ -656,8 +655,9 @@ pub(crate) fn ward_pay_or_counter(
     };
     let can_pay = schema_ok && mana_ok;
     let will_pay = can_pay && {
-        let f = std::sync::Arc::clone(&state.resolve_choice);
-        matches!(f(ward_source, &ChoiceRequest::WardPayment { cost: cost.clone() }, state), ChoiceResult::Bool(true))
+        let decision = state.with_strategy(targeting_caster, |s, st|
+            s.resolve_choice(ward_source, &ChoiceRequest::WardPayment { cost: cost.clone() }, st));
+        matches!(decision, ChoiceResult::Bool(true))
     };
     if will_pay {
         let mut no_strat: Option<&mut dyn crate::strategy::Strategy> = None;
