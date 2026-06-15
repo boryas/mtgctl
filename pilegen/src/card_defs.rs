@@ -5116,30 +5116,36 @@ fn unholy_heat() -> CardDef {
 /// Price of Progress — {1}{R} Instant. Deals damage to each player equal to
 /// twice the number of nonbasic lands that player controls.
 fn price_of_progress() -> CardDef {
-    simple("Price of Progress", CardKind::Instant(SpellData {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+
+    let mut card = simple("Price of Progress", CardKind::Instant(SpellData {
         mana_cost: "1R".to_string(),
-        modes: single_mode(
-            TargetSpec::None,
-            |who, source_id, _x| {
-                Effect(Arc::new(move |state, t, _targets| {
-                    for &pid in &[PlayerId::Us, PlayerId::Opp] {
-                        let nonbasics = state.permanents_of(pid)
-                            .filter(|obj| {
-                                state.def_of(obj.id)
-                                    .map_or(false, |d| d.types.contains(&CardType::Land) && !d.supertypes.contains(&Supertype::Basic))
-                            })
-                            .count();
-                        let dmg = (nonbasics * 2) as i32;
-                        if dmg > 0 {
-                            // Player damage (same path as eff_damage_target for players).
-                            eff_damage_target(who, dmg, source_id).call(state, t, &[state.player_id(pid)]);
-                        }
-                    }
-                }))
-            },
-        ),
+        modes: None,
         ..Default::default()
-    }), parse_colors("R", false, false), None)
+    }), parse_colors("R", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                // "Each player takes 2 × the nonbasic lands they control" is
+                // exactly: each nonbasic land deals 2 to its controller. Summing
+                // per controller reproduces the total without a ForEach-over-players.
+                body: ir_for_each_on_battlefield(
+                    ir_and(ir_type(CardType::Land), ir_not(ir_supertype(Supertype::Basic))),
+                    Action::DealDamage {
+                        source: Expr::Ctx(Ctx::Source),
+                        target: Expr::Controller(Box::new(Expr::Ctx(Ctx::Var("v")))),
+                        amount: Expr::Num(2),
+                    },
+                ),
+            }],
+        },
+        text: Some("Price of Progress deals damage to each player equal to twice the number of nonbasic lands they control."),
+    }];
+    card
 }
 
 // ── Meltdown ─────────────────────────────────────────────────────────────────
