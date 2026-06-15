@@ -1601,11 +1601,10 @@ struct PlayerState {
     no_max_hand_size: bool,
     /// Ordered library: front = top of deck. Draw pops from front, shuffle randomizes.
     library_order: std::collections::VecDeque<ObjId>,
-    /// This player's decision policy. `None` until installed at sim init. The engine
-    /// reaches it only via `SimState::with_strategy` (which falls back to
-    /// `DefaultStrategy`), so a player's agency is never shortcut in engine code.
-    /// (Phase 1 of folding the threaded `strategies` map onto the players.)
-    #[allow(dead_code)] // read starting Phase 2 (the strategies-map removal sweep)
+    /// This player's decision policy (composed `Player { state, strategy }`). `None`
+    /// until installed at sim init. The engine reaches it only via
+    /// `SimState::with_strategy` (which falls back to `DefaultStrategy`), so a
+    /// player's agency is never shortcut in engine code.
     strategy: Option<Box<dyn Strategy>>,
 }
 
@@ -1908,21 +1907,31 @@ impl SimState {
     /// back; a `DefaultStrategy` stands in if none is installed. This is the
     /// single channel through which engine code reaches a player's decisions —
     /// resolution included — so player agency is never shortcut inline.
-    #[allow(dead_code)] // call sites land in Phase 2 (strategies-map removal sweep)
+    /// Install player `p`'s decision policy (the composed Player { state, strategy }).
+    pub(crate) fn set_strategy(&mut self, p: PlayerId, s: Box<dyn crate::strategy::Strategy>) {
+        self.player_mut(p).strategy = Some(s);
+    }
+
     pub(crate) fn with_strategy<R>(
         &mut self,
         p: PlayerId,
-        f: impl FnOnce(&mut dyn crate::strategy::Strategy, &SimState) -> R,
+        f: impl FnOnce(&mut dyn crate::strategy::Strategy, &mut SimState) -> R,
     ) -> R {
+        // Move the strategy out so it and the rest of `self` are disjoint — `f`
+        // gets both `&mut Strategy` and `&mut SimState` (needed by the cast/
+        // activate submachines), with no self-borrow. Restored afterward.
+        // Re-entrant `with_strategy(p)` for the same `p` while it's held out
+        // falls back to `DefaultStrategy`; the engine never nests same-player
+        // decisions, so that doesn't arise in practice.
         match self.player_mut(p).strategy.take() {
             Some(mut s) => {
-                let r = f(&mut *s, &*self);
+                let r = f(&mut *s, self);
                 self.player_mut(p).strategy = Some(s);
                 r
             }
             None => {
                 let mut s = crate::strategy::DefaultStrategy::new(p);
-                f(&mut s, &*self)
+                f(&mut s, self)
             }
         }
     }
@@ -3440,7 +3449,6 @@ fn resolve_top_of_stack(
     state: &mut SimState,
     t: u8,
     _ap: PlayerId,
-    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     let id = state.stack.pop().unwrap();
     let is_ability = state.objects.get(&id).map_or(false, |o| o.ability.is_some());
@@ -3454,10 +3462,8 @@ fn resolve_top_of_stack(
         let mut effect_targets = ability.chosen_targets.clone();
         if let Some(ref spec) = ability.choice_spec {
             let choices = enumerate_choices(spec, controller, state);
-            if let Some(strategy) = strategies.get_mut(&controller) {
-                if let Some(chosen) = strategy.choose_for_effect(id, &choices, state) {
-                    effect_targets.insert(0, chosen);
-                }
+            if let Some(chosen) = state.with_strategy(controller, |s, st| s.choose_for_effect(id, &choices, st)) {
+                effect_targets.insert(0, chosen);
             }
         }
         // Make costs_paid_ctx visible to the effect closure (e.g. ninjutsu reads attack_target).
@@ -3694,7 +3700,6 @@ fn handle_priority_round(
     state: &mut SimState,
     t: u8,
     ap: PlayerId,
-    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     let nap = ap.opp();
     let mut priority_holder = ap;
@@ -3702,15 +3707,17 @@ fn handle_priority_round(
 
     loop {
         let queued = std::mem::take(&mut state.pending_triggers);
-        push_triggers(queued, state, strategies);
+        push_triggers(queued, state);
         check_state_based_actions(state, t);
         if state.done() { break; }
 
         let who = priority_holder;
-        let strategy = strategies.get_mut(&who).unwrap();
         let legal = strategy::collect_legal_actions(state, who);
-        let chosen = strategy.choose_action(state, ap, &legal);
-        state.decision_log.append(&mut strategy.drain_decisions());
+        let (chosen, decisions) = state.with_strategy(who, |s, st| {
+            let c = s.choose_action(st, ap, &legal);
+            (c, s.drain_decisions())
+        });
+        state.decision_log.extend(decisions);
 
         match chosen {
             LegalAction::Pass => {
@@ -3719,7 +3726,7 @@ fn handle_priority_round(
                     if state.stack.is_empty() {
                         break;
                     } else {
-                        resolve_top_of_stack(state, t, ap, strategies);
+                        resolve_top_of_stack(state, t, ap);
                         assert_engine_invariants(state, "post-resolve");
                         priority_holder = ap;
                         last_passer = None;
@@ -3751,9 +3758,9 @@ fn handle_priority_round(
                     last_passer = Some(who);
                     priority_holder = if who == ap { nap } else { ap };
                 } else {
-                    let strategy = strategies.get_mut(&who).unwrap();
-                    if let Some(cid) = run_cast_submachine(state, t, who, card_id, face,
-                                                           strategy.as_mut()) {
+                    let result = state.with_strategy(who, |s, st|
+                        run_cast_submachine(st, t, who, card_id, face, s));
+                    if let Some(cid) = result {
                         state.player_mut(who).spells_cast_this_turn += 1;
                         state.stack.push(cid);
                         priority_holder = if who == ap { nap } else { ap };
@@ -3772,9 +3779,8 @@ fn handle_priority_round(
                 let ab = state.def_of(source_id)
                     .and_then(|d| d.abilities().get(ability_index).cloned())
                     .unwrap_or_default();
-                let strategy = strategies.get_mut(&who).unwrap();
-                run_activate_submachine(state, t, who, source_id, &ab,
-                                       strategy.as_mut());
+                state.with_strategy(who, |s, st|
+                    run_activate_submachine(st, t, who, source_id, &ab, s));
                 priority_holder = if who == ap { nap } else { ap };
                 last_passer = None;
             }
@@ -3787,7 +3793,8 @@ fn handle_priority_round(
 
         // Drain any decisions logged during cast/activate submachines.
         for p in [PlayerId::Us, PlayerId::Opp] {
-            state.decision_log.append(&mut strategies.get_mut(&p).unwrap().drain_decisions());
+            let d = state.with_strategy(p, |s, _| s.drain_decisions());
+            state.decision_log.extend(d);
         }
 
         if state.done() {
@@ -3810,7 +3817,6 @@ fn do_combat_damage_pass(
     state: &mut SimState,
     t: u8,
     ap: PlayerId,
-    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
     step: DamageStepKind,
 ) {
     if state.combat_attackers.is_empty() { return; }
@@ -3877,9 +3883,9 @@ fn do_combat_damage_pass(
             }).collect();
 
             // Strategy chooses the assignment; validator ensures CR 510.1c.
-            let raw = strategies.get_mut(&ap).unwrap()
-                .assign_combat_damage(state, atk_id, &blockers, atk_pow,
-                                      &lethal_per_blocker, atk_trample);
+            let raw = state.with_strategy(ap, |s, st|
+                s.assign_combat_damage(st, atk_id, &blockers, atk_pow,
+                                       &lethal_per_blocker, atk_trample));
             let assignment = validate_assignment(
                 &raw, &lethal_per_blocker, atk_pow, atk_trample);
 
@@ -3984,7 +3990,6 @@ fn do_step(
     ap: PlayerId,
     step: &Step,
     on_play: bool,
-    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     // Ensure materialized state is current at the start of every step.
     // Strategy calls (declare_attackers, declare_blockers) and combat damage run against
@@ -4045,7 +4050,7 @@ fn do_step(
         }
         StepKind::DeclareAttackers => {
             // Strategy decides who attacks and what each attacker targets.
-            let decisions = strategies.get_mut(&ap).unwrap().declare_attackers(state);
+            let decisions = state.with_strategy(ap, |s, st| s.declare_attackers(st));
             // Apply: mark each attacker on the battlefield. CR 702.20: vigilance skips the tap.
             for &(atk_id, target) in &decisions {
                 let vigilant = creature_has_keyword(atk_id, Keyword::Vigilance, state);
@@ -4082,7 +4087,7 @@ fn do_step(
         StepKind::DeclareBlockers => {
             let nap = ap.opp();
             // Strategy decides which blockers to assign.
-            let blocks = strategies.get_mut(&ap.opp()).unwrap().declare_blockers(state);
+            let blocks = state.with_strategy(ap.opp(), |s, st| s.declare_blockers(st));
             // Engine validation: drop illegal blocks (protection, etc.) as a safety net.
             let blocks: Vec<(ObjId, ObjId)> = blocks.into_iter()
                 .filter(|&(atk_id, blk_id)| !is_protected_from(atk_id, blk_id, state))
@@ -4103,7 +4108,7 @@ fn do_step(
                 if !seen.insert(a) { continue; }
                 let bs = by_atk.remove(&a).unwrap_or_default();
                 let final_order = if bs.len() >= 2 {
-                    let chosen = strategies.get_mut(&ap).unwrap().order_blockers(state, a, &bs);
+                    let chosen = state.with_strategy(ap, |s, st| s.order_blockers(st, a, &bs));
                     // Validate: must be a permutation of `bs`. Fall back to declaration order if not.
                     let in_set: std::collections::HashSet<ObjId> = bs.iter().copied().collect();
                     let out_set: std::collections::HashSet<ObjId> = chosen.iter().copied().collect();
@@ -4126,10 +4131,10 @@ fn do_step(
             }
         }
         StepKind::FirstStrikeCombatDamage => {
-            do_combat_damage_pass(state, t, ap, strategies, DamageStepKind::FirstStrike);
+            do_combat_damage_pass(state, t, ap, DamageStepKind::FirstStrike);
         }
         StepKind::CombatDamage => {
-            do_combat_damage_pass(state, t, ap, strategies, DamageStepKind::Regular);
+            do_combat_damage_pass(state, t, ap, DamageStepKind::Regular);
         }
         StepKind::EndCombat => {
             state.combat_attackers.clear();
@@ -4161,7 +4166,7 @@ fn do_step(
     }
 
     if step.prio {
-        handle_priority_round(state, t, ap, strategies);
+        handle_priority_round(state, t, ap);
     }
     // Mana pool drains at the end of every step.
     state.us.pool.drain();
@@ -4178,7 +4183,6 @@ fn do_phase(
     ap: PlayerId,
     phase: &Phase,
     on_play: bool,
-    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     for step in &phase.steps {
         // CR 510.5: the first-strike combat damage step occurs only when at least
@@ -4188,7 +4192,7 @@ fn do_phase(
         {
             continue;
         }
-        do_step(state, t, ap, step, on_play, strategies);
+        do_step(state, t, ap, step, on_play);
         if state.done() {
             return;
         }
@@ -4197,7 +4201,7 @@ fn do_phase(
         state.current_phase = Some(TurnPosition::Phase(phase.kind));
         let phase_ev = GameEvent::EnteredPhase { phase: phase.kind };
         fire_event(phase_ev, state, t, ap);
-        handle_priority_round(state, t, ap, strategies);
+        handle_priority_round(state, t, ap);
         assert_engine_invariants(state, "phase-end");
         // Mana pool drains at the end of the main phase.
         state.us.pool.drain();
@@ -4214,24 +4218,23 @@ fn do_turn(
     t: u8,
     ap: PlayerId,
     on_play: bool,
-    strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>,
 ) {
     state.current_turn = t;
     state.current_ap = state.player_id(ap);
     state.event_log.mark_turn_start();
-    do_phase(state, t, ap, &beginning_phase(), on_play, strategies);
+    do_phase(state, t, ap, &beginning_phase(), on_play);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &main_phase(), on_play, strategies);
+    do_phase(state, t, ap, &main_phase(), on_play);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &combat_phase(), on_play, strategies);
+    do_phase(state, t, ap, &combat_phase(), on_play);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &post_combat_main_phase(), on_play, strategies);
+    do_phase(state, t, ap, &post_combat_main_phase(), on_play);
     if state.done() { return; }
 
-    do_phase(state, t, ap, &end_phase(), on_play, strategies);
+    do_phase(state, t, ap, &end_phase(), on_play);
 }
 
 
@@ -4321,10 +4324,10 @@ pub fn simulate_game(
         score < 0.3
     });
 
-    let mut strategies: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::from([
-        (PlayerId::Us,  Box::new(DoomsdayStrategy::new(dd_matchup)) as Box<dyn Strategy>),
-        (PlayerId::Opp, Box::new(GenericOppStrategy::new(opp_matchup))    as Box<dyn Strategy>),
-    ]);
+    // Install each player's decision policy on the player itself (composed
+    // Player { state, strategy }); the engine reaches it via `with_strategy`.
+    state.set_strategy(PlayerId::Us, Box::new(DoomsdayStrategy::new(dd_matchup)));
+    state.set_strategy(PlayerId::Opp, Box::new(GenericOppStrategy::new(opp_matchup)));
 
     // Deal opening hands with mulligan decisions (London mulligan).
     let mut mulligans = [0u32; 2];
@@ -4332,12 +4335,11 @@ pub fn simulate_game(
         for _ in 0..7 { sim_draw(&mut state, who, 0, false); }
         loop {
             let taken = mulligans[i];
-            let strat = strategies.get_mut(&who).unwrap();
-            if !strat.take_mulligan(&state, taken) {
-                state.decision_log.append(&mut strat.drain_decisions());
-                break;
-            }
-            state.decision_log.append(&mut strat.drain_decisions());
+            let (take, decisions) = state.with_strategy(who, |s, st| {
+                (s.take_mulligan(st, taken), s.drain_decisions())
+            });
+            state.decision_log.extend(decisions);
+            if !take { break; }
             mulligans[i] += 1;
             // Return hand to library via set_card_zone (maintains library_order).
             let hand_ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
@@ -4351,8 +4353,7 @@ pub fn simulate_game(
         // London bottom: put N cards from hand to bottom of library (N = mulligans taken).
         let n = mulligans[i] as usize;
         if n > 0 {
-            let strat = strategies.get(&who).unwrap();
-            let to_bottom = strat.london_bottom(&state, n);
+            let to_bottom = state.with_strategy(who, |s, st| s.london_bottom(st, n));
             for id in to_bottom {
                 state.set_card_zone(id, CardZone::Library);
                 // set_card_zone pushes to back of library_order — that's already "bottom". Good.
@@ -4383,15 +4384,15 @@ pub fn simulate_game(
 
     for t in 1..=MAX_TURNS {
         if !on_play {
-            do_turn(&mut state, t, PlayerId::Opp, on_play, &mut strategies);
+            do_turn(&mut state, t, PlayerId::Opp, on_play);
             if state.done() { break; }
         }
         {
-            do_turn(&mut state, t, PlayerId::Us, on_play, &mut strategies);
+            do_turn(&mut state, t, PlayerId::Us, on_play);
             if state.done() { break; }
         }
         if on_play {
-            do_turn(&mut state, t, PlayerId::Opp, on_play, &mut strategies);
+            do_turn(&mut state, t, PlayerId::Opp, on_play);
             if state.done() { break; }
         }
     }

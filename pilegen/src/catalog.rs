@@ -1363,13 +1363,13 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
 
 /// Push a vec of `TriggerContext`s onto the stack as triggered ability items.
 /// Target selection goes through the controller's strategy (CR 601.2c).
-pub(crate) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState,
-                            strategies: &mut HashMap<PlayerId, Box<dyn Strategy>>) {
+pub(crate) fn push_triggers(triggers: Vec<TriggerContext>, state: &mut SimState) {
     for ctx in triggers {
         let all_targets = legal_targets(&ctx.target_spec, ctx.controller, ObjId(0), state);
-        let chosen_targets = strategies.get_mut(&ctx.controller)
-            .map(|s| s.choose_targets(state, ObjId(0), &all_targets, &ctx.target_spec))
-            .unwrap_or_else(|| pick_targets(&ctx.target_spec, &all_targets, state));
+        // DefaultStrategy::choose_targets falls back to pick_targets, matching the
+        // old `unwrap_or_else(pick_targets)`.
+        let chosen_targets = state.with_strategy(ctx.controller, |s, st|
+            s.choose_targets(st, ObjId(0), &all_targets, &ctx.target_spec));
         let ab_id = state.alloc_id();
         state.insert_stack_ability(ab_id, ctx.source_name.clone(), ctx.controller, crate::AbilityState {
             effect: ctx.effect.clone(),

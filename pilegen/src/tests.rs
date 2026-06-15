@@ -9,15 +9,13 @@
         let opp = PlayerState::new("opp_deck");
         let mut s = SimState::new(us, opp);
         s.rng = Box::new(rand::rngs::StdRng::seed_from_u64(42));
+        // Install the same strategies the engine functions used to receive via the
+        // threaded map (now folded onto the players); tests reach them via with_strategy.
+        s.set_strategy(PlayerId::Us, Box::new(strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default())));
+        s.set_strategy(PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default())));
         s
     }
 
-    fn make_strategies() -> HashMap<PlayerId, Box<dyn strategy::Strategy>> {
-        HashMap::from([
-            (PlayerId::Us,  Box::new(strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
-            (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default()))   as Box<dyn strategy::Strategy>),
-        ])
-    }
 
     fn test_catalog() -> std::collections::HashMap<String, CardDef> {
         super::card_defs::build_catalog()
@@ -234,7 +232,7 @@
         state.us.spells_cast_this_turn = 2;
 
         let step = Step { kind: StepKind::Untap, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(!state.permanent_bf(land_id).unwrap().tapped, "land should be untapped");
         assert!(!state.permanent_bf(ragavan_id).unwrap().tapped, "permanent should be untapped");
@@ -251,7 +249,7 @@
 
         let step = Step { kind: StepKind::Draw, prio: false };
         // on_play=true, t=1, ap=PlayerId::Us → this_player_on_play=true → skip
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.hand_size(PlayerId::Us), initial_hand, "no draw on the play turn 1");
     }
@@ -264,7 +262,7 @@
 
         let step = Step { kind: StepKind::Draw, prio: false };
         // on_play=false → this_player_on_play=false → no skip
-        do_step(&mut state, 1, PlayerId::Us, &step, false, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, false);
 
         assert_eq!(state.hand_size(PlayerId::Us), initial_hand + 1, "should draw one card");
     }
@@ -278,7 +276,7 @@
         });
 
         let step = Step { kind: StepKind::Cleanup, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.permanent_bf(rag_id).unwrap().damage, 0);
     }
@@ -295,7 +293,7 @@
         let catalog = vec![ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.combat_attackers.contains(&ragavan_id), "should attack");
         assert!(state.permanent_bf(ragavan_id).unwrap().tapped, "attacker should be tapped");
@@ -315,7 +313,7 @@
         let catalog = vec![attacker_def, blocker_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.combat_attackers.is_empty(), "should not attack into 3/3");
     }
@@ -330,7 +328,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.combat_attackers.is_empty(), "sickness prevents attack");
     }
@@ -351,7 +349,7 @@
         let catalog = vec![atk_def, blk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.combat_blocks.len(), 1);
         assert_eq!(state.combat_blocks[0], (ragavan_id, mosscoat_id));
@@ -372,7 +370,7 @@
         let catalog = vec![atk_def, blk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.combat_blocks.is_empty(), "should not chump block");
     }
@@ -391,7 +389,7 @@
         let catalog = vec![atk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_life - 2);
     }
@@ -413,7 +411,7 @@
         let catalog = vec![atk_def, blk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_life, "blocked — no player damage");
     }
@@ -434,7 +432,7 @@
         let catalog = vec![atk_def, blk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: true };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.permanents_of(PlayerId::Us).count() == 0, "attacker should die");
         assert!(state.permanents_of(PlayerId::Opp).count() == 0, "blocker should die");
@@ -458,7 +456,7 @@
         let catalog = vec![atk_def, blk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::CombatDamage, prio: true };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.permanents_of(PlayerId::Us).count() == 0, "attacker dies");
         assert!(state.permanents_of(PlayerId::Opp).count() > 0, "blocker survives");
@@ -473,7 +471,7 @@
         state.combat_blocks = vec![(dummy_id, dummy_id2)];
 
         let step = Step { kind: StepKind::EndCombat, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.combat_attackers.is_empty());
         assert!(state.combat_blocks.is_empty());
@@ -493,7 +491,7 @@
         let initial_hand = state.hand_size(PlayerId::Us);
 
         // t=2, on_play=false → draw fires (this_player_on_play=false)
-        do_phase(&mut state, 2, PlayerId::Us, &beginning_phase(), false, &mut make_strategies());
+        do_phase(&mut state, 2, PlayerId::Us, &beginning_phase(), false);
 
         assert!(!state.permanent_bf(island_id).unwrap().tapped, "land should be untapped");
         assert_eq!(state.hand_size(PlayerId::Us), initial_hand + 1, "should have drawn one card");
@@ -502,7 +500,7 @@
     #[test]
     fn test_combat_phase_full_cycle() {
         let mut state = make_state();
-        do_phase(&mut state, 1, PlayerId::Us, &combat_phase(), true, &mut make_strategies());
+        do_phase(&mut state, 1, PlayerId::Us, &combat_phase(), true);
 
         assert!(state.combat_attackers.is_empty());
         assert!(state.combat_blocks.is_empty());
@@ -514,7 +512,7 @@
     fn test_priority_round_both_pass_empty_stack() {
         let mut state = make_state();
         // current_phase is "" (not "Main") → both players pass immediately
-        handle_priority_round(&mut state, 1, PlayerId::Us, &mut make_strategies());
+        handle_priority_round(&mut state, 1, PlayerId::Us);
 
         assert_eq!(state.us.life, 20);
         assert_eq!(state.opp.life, 20);
@@ -990,7 +988,7 @@
         let catalog = vec![murktide_def, blocker_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.combat_attackers.contains(&murktide_id),
             "6/6 Murktide should attack into a 5-power blocker");
@@ -1052,7 +1050,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.permanent_bf(atk_id).unwrap().attacking, "declared attacker gets attacking=true");
     }
@@ -1072,7 +1070,7 @@
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.permanent_bf(attacker_id).unwrap().unblocked, "unblocked attacker gets unblocked=true");
     }
@@ -1093,7 +1091,7 @@
         let catalog = vec![atk_def, blk_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(!state.permanent_bf(ragavan_id).unwrap().unblocked, "blocked attacker stays unblocked=false");
         assert_eq!(state.combat_blocks.len(), 1, "blocker declared");
@@ -1110,7 +1108,7 @@
         state.combat_attackers = vec![ninja_id];
 
         let step = Step { kind: StepKind::EndCombat, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(!state.permanent_bf(ninja_id).unwrap().attacking, "attacking cleared at EndCombat");
         assert!(!state.permanent_bf(ninja_id).unwrap().unblocked, "unblocked cleared at EndCombat");
@@ -1210,7 +1208,7 @@
         let mut entered = false;
         for _seed in 0u64..20 {
             let mut state = make_fresh_state();
-            handle_priority_round(&mut state, 1, PlayerId::Us, &mut make_strategies());
+            handle_priority_round(&mut state, 1, PlayerId::Us);
             if state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Brazen Borrower") {
                 assert!(!state.on_adventure_of(PlayerId::Us).any(|c| c.catalog_key == "Brazen Borrower"), "removed from on_adventure");
                 assert!(!state.exile_of(PlayerId::Us).any(|c| c.catalog_key == "Brazen Borrower"), "removed from exile");
@@ -1246,7 +1244,7 @@
         let catalog = vec![flyer, ground];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.combat_blocks.is_empty(), "ground creature cannot block a flyer");
     }
@@ -1268,7 +1266,7 @@
         let catalog = vec![flyer_atk, flyer_blk];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.combat_blocks.len(), 1, "flyer can block flyer");
         assert_eq!(state.combat_blocks[0], (murktide_id, subtlety_id));
@@ -1291,7 +1289,7 @@
         let catalog = vec![flyer, ground];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         // Murktide's toughness (3) > relevant blocking power (0 — Troll can't block flyer).
         assert!(state.combat_attackers.contains(&murktide_id),
@@ -1320,7 +1318,7 @@
         });
 
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         let bf = state.permanent_bf(id).expect("on battlefield");
         assert!(bf.attacking, "should be declared as attacker");
@@ -1339,7 +1337,7 @@
         });
 
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         let bf = state.permanent_bf(id).expect("on battlefield");
         assert!(bf.attacking && bf.tapped, "non-vigilance attacker taps when attacking");
@@ -1362,7 +1360,7 @@
         state.combat_attackers = vec![id];
 
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_opp - 3, "opponent loses 3");
         assert_eq!(state.us.life, initial_us + 3, "lifelink gains 3");
@@ -1386,7 +1384,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.us.life, initial_us + 3,
             "lifelink: 3 damage to blocker → 3 life gained");
@@ -1410,7 +1408,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_opp + 2,
             "lifelink blocker gains 2 from damage to attacker");
@@ -1436,7 +1434,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_opp - 3,
             "trample: 5-power attacker assigns 2 to 2/2 blocker, 3 spill to player");
@@ -1460,7 +1458,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_opp,
             "trample: 2-power attacker into 4/4 blocker leaves nothing for the player");
@@ -1484,7 +1482,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_opp, "no trample → no spillover");
     }
@@ -1508,7 +1506,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: true };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Troll"),
             "deathtouch: 5/5 blocker dies to 1 damage from a deathtouch attacker");
@@ -1531,7 +1529,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: true };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Big"),
             "deathtouch blocker kills the 7/7 attacker");
@@ -1555,7 +1553,7 @@
         state.combat_blocks = vec![(atk, blk)];
 
         let step = Step { kind: StepKind::CombatDamage, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.opp.life, initial_opp - 4,
             "trample+deathtouch: 1 to 4/4 blocker is lethal, 4 spills to player");
@@ -1579,7 +1577,7 @@
         state.combat_attackers = vec![atk];
 
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.combat_blocks.len(), 1,
             "reach can block a flyer");
@@ -1602,7 +1600,7 @@
         add_default_perm(&mut state, PlayerId::Opp, "Giant Spider");
 
         let step = Step { kind: StepKind::DeclareAttackers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(!state.combat_attackers.contains(&atk),
             "flying attacker should avoid attacking into a reach blocker that outclasses it");
@@ -1704,15 +1702,12 @@
         let b = add_default_perm(&mut state, PlayerId::Opp, "SmallB");
         state.combat_attackers = vec![atk];
 
-        let mut strats: HashMap<PlayerId, Box<dyn strategy::Strategy>> = HashMap::from([
-            (PlayerId::Us, Box::new(ProgrammableStrat {
-                inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
-                // Force order [b, a] so the engine should swap from the (a, b) declaration order.
-                ordered: std::cell::RefCell::new(Some(vec![b, a])),
-                assignment: std::cell::RefCell::new(None),
-            }) as Box<dyn strategy::Strategy>),
-            (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
-        ]);
+        state.set_strategy(PlayerId::Us, Box::new(ProgrammableStrat {
+            inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
+            // Force order [b, a] so the engine should swap from the (a, b) declaration order.
+            ordered: std::cell::RefCell::new(Some(vec![b, a])),
+            assignment: std::cell::RefCell::new(None),
+        }));
         // Pre-populate combat_blocks via DeclareBlockers — the opp's declare_blockers will pick
         // both creatures since neither is too small to chump-block productively. Bypass that and
         // inject the blocks then run the order step manually by calling do_step on DeclareBlockers
@@ -1733,10 +1728,10 @@
             fn plan_gap(&self, _s: &SimState) -> strategy::TargetGap { strategy::TargetGap::default() }
             fn card_fills(&self, _i: ObjId, _g: &strategy::TargetGap, _s: &SimState) -> f64 { 0.0 }
         }
-        strats.insert(PlayerId::Opp, Box::new(FixedBlocker { atk, blocks: vec![a, b] }));
+        state.set_strategy(PlayerId::Opp, Box::new(FixedBlocker { atk, blocks: vec![a, b] }));
 
         let step = Step { kind: StepKind::DeclareBlockers, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut strats);
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert_eq!(state.combat_blocks, vec![(atk, b), (atk, a)],
             "attacker's order_blockers([b, a]) should win over opp's (a, b) declaration order");
@@ -1764,17 +1759,14 @@
 
         // Strategy assigns lethal (2) to A then dumps the rest (3) on B — same total, legal under
         // CR 510.1c since A got lethal first.
-        let mut strats: HashMap<PlayerId, Box<dyn strategy::Strategy>> = HashMap::from([
-            (PlayerId::Us, Box::new(ProgrammableStrat {
-                inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
-                ordered: std::cell::RefCell::new(None),
-                assignment: std::cell::RefCell::new(Some(vec![2, 3])),
-            }) as Box<dyn strategy::Strategy>),
-            (PlayerId::Opp, Box::new(strategy::GenericOppStrategy::new(strategy::MatchupInfo::default())) as Box<dyn strategy::Strategy>),
-        ]);
+        state.set_strategy(PlayerId::Us, Box::new(ProgrammableStrat {
+            inner: strategy::DoomsdayStrategy::new(strategy::MatchupInfo::default()),
+            ordered: std::cell::RefCell::new(None),
+            assignment: std::cell::RefCell::new(Some(vec![2, 3])),
+        }));
 
         let step = Step { kind: StepKind::CombatDamage, prio: true };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut strats);
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         // Both bears should have died (A took 2, B took 3 — both ≥ toughness).
         assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "BearA"));
@@ -1802,7 +1794,7 @@
         // First-strike pass: attacker deals 2; blocker (no FS) deals nothing.
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         check_state_based_actions(&mut state, 1);
         // Blocker died; attacker is unscathed.
         assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Grizzly Bears"),
@@ -1812,7 +1804,7 @@
         // Regular pass: dead blocker → no return damage. Attacker (FS only) doesn't strike again.
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         check_state_based_actions(&mut state, 1);
         let bf = state.permanent_bf(atk).expect("FS attacker survives");
         assert_eq!(bf.damage, 0, "FS attacker took no return damage");
@@ -1832,10 +1824,10 @@
 
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
 
         assert_eq!(state.opp.life, initial_opp - 6,
             "double strike: 3 power × 2 hits = 6 damage to player");
@@ -1862,13 +1854,13 @@
         // FS pass: only the FS knight strikes.
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         assert_eq!(state.opp.life, initial_opp - 1,
             "FS pass deals 1 damage from the knight only; bear waits for regular");
         // Regular pass: both deal damage (FS knight does NOT strike again).
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         assert_eq!(state.opp.life, initial_opp - 1 - 2,
             "regular pass deals 2 from the bear only (knight has FS, not DS)");
     }
@@ -1894,7 +1886,7 @@
         // FS pass: 2 to blocker (lethal), 2 trample to player.
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         check_state_based_actions(&mut state, 1);
         assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Bear"),
             "blocker dies in FS pass");
@@ -1903,7 +1895,7 @@
         // Regular pass: blocker is dead, attacker still 'blocked' but trample dumps all to player.
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         assert_eq!(state.opp.life, initial_opp - 2 - 4,
             "regular pass: dead blocker → trample spills full 4 to player");
     }
@@ -1927,11 +1919,11 @@
 
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         check_state_based_actions(&mut state, 1);
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
 
         assert_eq!(state.opp.life, initial_opp,
             "no trample, dead blocker → second strike deals no damage to player");
@@ -1953,12 +1945,12 @@
         // still does its job and the FS step's predicate skips cleanly.
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         assert_eq!(state.opp.life, initial_opp,
             "FS pass with no FS/DS source deals no damage");
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
-                true, &mut make_strategies());
+                true);
         assert_eq!(state.opp.life, initial_opp - 2,
             "regular pass: plain bear deals its 2 once");
     }
@@ -2238,7 +2230,7 @@
         let catalog = vec![atk_def, creature("Wall", 0, 4)];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         do_step(&mut state, 1, PlayerId::Opp, &Step { kind: StepKind::DeclareAttackers, prio: true },
-            true, &mut make_strategies());
+            true);
 
         let dragon_id = state.permanents_of(PlayerId::Opp).find(|p| p.catalog_key == "Dragon").map(|p| p.id).unwrap();
         // The -1 comes from a ContinuousInstance (L7), not bf.power_mod.
@@ -2263,7 +2255,7 @@
 
         // Untap step for PlayerId::Us should expire the floating trigger watcher.
         let step = Step { kind: StepKind::Untap, prio: false };
-        do_step(&mut state, 2, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 2, PlayerId::Us, &step, true);
 
         assert!(state.trigger_instances.is_empty(), "Floating trigger expires at controller's next Untap");
     }
@@ -2326,7 +2318,7 @@
         assert_eq!(c.power(), 2, "CI applies -1 before Cleanup");
 
         let step = Step { kind: StepKind::Cleanup, prio: false };
-        do_step(&mut state, 1, PlayerId::Opp, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Opp, &step, true);
 
         // After Cleanup: CI removed, effective power restored to 3.
         recompute(&mut state);
@@ -2454,8 +2446,7 @@
             counters: HashMap::new(), ci_timestamp: 0,
         });
         state.stack.push(id);
-        let mut no_strats: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::new();
-        resolve_top_of_stack(&mut state, 1, PlayerId::Us, &mut no_strats);
+        resolve_top_of_stack(&mut state, 1, PlayerId::Us);
         let log = state.log.join("\n");
         assert!(log.contains("Brainstorm resolves"), "should log 'resolves'");
         assert!(!log.contains("countered"), "resolving an instant must not produce 'countered' in the log");
@@ -3764,11 +3755,10 @@
         // Stack order bottom→top: X, Y, FoN, FoW.
         state.stack.extend([x_id, y_id, fon_id, fow_id]);
 
-        let mut no_strats: HashMap<PlayerId, Box<dyn Strategy>> = HashMap::new();
         // FoW resolves: counters X → X to graveyard; FoW itself to graveyard.
-        resolve_top_of_stack(&mut state, 1, PlayerId::Us, &mut no_strats);
+        resolve_top_of_stack(&mut state, 1, PlayerId::Us);
         // FoN resolves: scoped RE installed, counters Y → Y intercepted to exile; FoN to graveyard.
-        resolve_top_of_stack(&mut state, 1, PlayerId::Us, &mut no_strats);
+        resolve_top_of_stack(&mut state, 1, PlayerId::Us);
 
         assert!(state.stack.is_empty(), "stack should be empty");
         assert_eq!(state.objects[&x_id].zone, CardZone::Graveyard, "X countered by FoW → graveyard");
@@ -6887,7 +6877,7 @@
 
         // Run cleanup step — should remove the EndOfTurn LatentSpellMod.
         let step = Step { kind: StepKind::Cleanup, prio: false };
-        do_step(&mut state, 1, PlayerId::Us, &step, true, &mut make_strategies());
+        do_step(&mut state, 1, PlayerId::Us, &step, true);
 
         assert!(state.latent_spell_mods.is_empty(),
             "Mistrise Village LatentSpellMod should expire at end of turn");
@@ -9366,13 +9356,12 @@
         // phantom targets long after the permanent had entered the battlefield.
         let mut state = make_state();
         state.catalog = test_catalog();
-        let mut strategies = make_strategies();
         state.current_turn = 2;
         state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
 
         add_permanent_spell_on_stack(&mut state, PlayerId::Opp, "Murktide Regent");
         recompute(&mut state);
-        resolve_top_of_stack(&mut state, 2, PlayerId::Opp, &mut strategies);
+        resolve_top_of_stack(&mut state, 2, PlayerId::Opp);
 
         // Stack should be empty and no objects should have zone == Stack.
         assert!(state.stack.is_empty(), "stack list should be empty after resolution");
@@ -9391,14 +9380,13 @@
         // with an empty stack, Opp's Force of Will must NOT appear in legal actions.
         let mut state = make_state();
         state.catalog = test_catalog();
-        let mut strategies = make_strategies();
         state.current_turn = 2;
         state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
 
         // Resolve a Us creature spell (simulating a prior turn).
         add_permanent_spell_on_stack(&mut state, PlayerId::Us, "Murktide Regent");
         recompute(&mut state);
-        resolve_top_of_stack(&mut state, 2, PlayerId::Us, &mut strategies);
+        resolve_top_of_stack(&mut state, 2, PlayerId::Us);
 
         // Now set up opp's turn with FoW in hand and an empty stack.
         state.current_turn = 4;
@@ -9497,8 +9485,7 @@
         }
         recompute(&mut state);
 
-        let mut strategies = make_strategies();
-        handle_priority_round(&mut state, 1, PlayerId::Us, &mut strategies);
+        handle_priority_round(&mut state, 1, PlayerId::Us);
 
         assert!(state.stack.is_empty(),
             "stack should be empty after priority round with no spells cast");
@@ -9515,7 +9502,6 @@
         // This is the multi-spell version of test_resolved_permanent_does_not_leave_stale_stack_object.
         let mut state = make_state();
         state.catalog = test_catalog();
-        let mut strategies = make_strategies();
         state.current_turn = 3;
         state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
 
@@ -9524,7 +9510,7 @@
         for name in &names {
             add_permanent_spell_on_stack(&mut state, PlayerId::Opp, name);
             recompute(&mut state);
-            resolve_top_of_stack(&mut state, 3, PlayerId::Opp, &mut strategies);
+            resolve_top_of_stack(&mut state, 3, PlayerId::Opp);
         }
 
         assert!(state.stack.is_empty(),
