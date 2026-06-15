@@ -2053,33 +2053,41 @@ fn any_spell_or_permanent_target() -> TargetSpec {
     ])
 }
 
-/// Modal effect: counter if target is on the stack, destroy if on the battlefield.
-/// Used by REB/BEB where the color restriction is on targeting (not the effect).
-fn counter_or_destroy(who: PlayerId) -> Effect {
-    Effect(Arc::new(move |state, t, targets| {
-        let Some(&id) = targets.first() else { return };
-        if state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Stack) {
-            eff_counter_target(who).call(state, t, targets);
-        } else {
-            eff_destroy_target(who).call(state, t, targets);
-        }
-    }))
+/// IR body: counter `target` if it's on the stack (a spell), otherwise destroy
+/// it (CR 701.5/701.7). Used by REB/BEB, where the color restriction lives on the
+/// target spec rather than the effect. `target` is bound as `Ctx::Var("target")`.
+fn ir_counter_or_destroy() -> crate::ir::action::Action {
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    let target = || Expr::Ctx(Ctx::Var("target"));
+    Action::IfThen {
+        cond: Expr::Eq(
+            Box::new(Expr::ZoneOf(Box::new(target()))),
+            Box::new(Expr::ZoneLit(ZoneId::Stack)),
+        ),
+        then: Box::new(Action::Counter { target: target() }),
+        else_: Some(Box::new(Action::Destroy { target: target() })),
+    }
 }
 
-/// Modal effect: counter/destroy only if target is the given color; otherwise fizzles.
-/// Used by Pyroblast/Hydroblast where ANY spell/permanent can be targeted but the
-/// effect only applies "if it's [color]" (CR 608.2b — legal target, effect doesn't apply).
-fn counter_or_destroy_if_color(who: PlayerId, c: Color) -> Effect {
-    Effect(Arc::new(move |state, t, targets| {
-        let Some(&id) = targets.first() else { return };
-        let is_color = state.def_of(id).map_or(false, |d| d.colors.contains(&c));
-        if !is_color { return; }
-        if state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Stack) {
-            eff_counter_target(who).call(state, t, targets);
-        } else {
-            eff_destroy_target(who).call(state, t, targets);
-        }
-    }))
+/// IR body: counter-or-destroy `target`, but only if it's the given color.
+/// Pyroblast/Hydroblast may target any spell/permanent; the effect applies only
+/// "if it's [color]" (CR 608.2b — a legal target whose effect simply doesn't
+/// apply otherwise). Colors are read materialized, so Painter's Servant naming a
+/// color makes a once-off-color permanent a valid victim.
+fn ir_counter_or_destroy_if_color(c: Color) -> crate::ir::action::Action {
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::Expr;
+    Action::IfThen {
+        cond: Expr::Contains(
+            Box::new(Expr::ColorLit(c)),
+            Box::new(Expr::Colors(Box::new(Expr::Ctx(Ctx::Var("target"))))),
+        ),
+        then: Box::new(ir_counter_or_destroy()),
+        else_: None,
+    }
 }
 
 /// Lightning Bolt deals 3 damage to any target. CR 120.2.
@@ -2158,41 +2166,50 @@ fn abrade() -> CardDef {
     card
 }
 
-fn red_elemental_blast() -> CardDef {
-    simple("Red Elemental Blast", CardKind::Instant(SpellData {
-        mana_cost: "R".to_string(),
-        modes: single_mode(color_hate_target_spec(Color::Blue), |who, _source_id, _x| counter_or_destroy(who)),
+/// Helper: an `Instant` whose only resolution body is `body`, targeting `target_spec`.
+fn ir_instant(name: &str, mana_cost: &str, target_spec: TargetSpec,
+              body: crate::ir::action::Action, text: &'static str) -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    let mut card = simple(name, CardKind::Instant(SpellData {
+        mana_cost: mana_cost.to_string(),
+        modes: None,
         ..Default::default()
-    }), parse_colors("R", false, false), None)
+    }), parse_colors(mana_cost, false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve { modes: vec![IrSpellMode { target_spec, body }] },
+        text: Some(text),
+    }];
+    card
 }
 
-/// Choose one — Counter target spell if it's blue; or destroy target permanent if it's blue.
+/// Counter target blue spell, or destroy target blue permanent. CR 701.5, 701.7.
+fn red_elemental_blast() -> CardDef {
+    ir_instant("Red Elemental Blast", "R", color_hate_target_spec(Color::Blue),
+        ir_counter_or_destroy(),
+        "Counter target blue spell, or destroy target blue permanent.")
+}
+
+/// Counter target spell if it's blue; or destroy target permanent if it's blue.
 /// Targets any opp spell/permanent; effect fizzles if the target is not blue. CR 701.5, 701.7.
 fn pyroblast() -> CardDef {
-    simple("Pyroblast", CardKind::Instant(SpellData {
-        mana_cost: "R".to_string(),
-        modes: single_mode(any_spell_or_permanent_target(), |who, _source_id, _x| counter_or_destroy_if_color(who, Color::Blue)),
-        ..Default::default()
-    }), parse_colors("R", false, false), None)
+    ir_instant("Pyroblast", "R", any_spell_or_permanent_target(),
+        ir_counter_or_destroy_if_color(Color::Blue),
+        "Choose one — Counter target spell if it's blue; or destroy target permanent if it's blue.")
 }
 
-/// Choose one — Counter target red spell; or destroy target red permanent. CR 701.5, 701.7.
+/// Counter target red spell, or destroy target red permanent. CR 701.5, 701.7.
 fn blue_elemental_blast() -> CardDef {
-    simple("Blue Elemental Blast", CardKind::Instant(SpellData {
-        mana_cost: "U".to_string(),
-        modes: single_mode(color_hate_target_spec(Color::Red), |who, _source_id, _x| counter_or_destroy(who)),
-        ..Default::default()
-    }), parse_colors("U", false, false), None)
+    ir_instant("Blue Elemental Blast", "U", color_hate_target_spec(Color::Red),
+        ir_counter_or_destroy(),
+        "Counter target red spell, or destroy target red permanent.")
 }
 
-/// Choose one — Counter target spell if it's red; or destroy target red permanent.
+/// Counter target spell if it's red; or destroy target permanent if it's red.
 /// Targets any opp spell/permanent; effect fizzles if the target is not red. CR 701.5, 701.7.
 fn hydroblast() -> CardDef {
-    simple("Hydroblast", CardKind::Instant(SpellData {
-        mana_cost: "U".to_string(),
-        modes: single_mode(any_spell_or_permanent_target(), |who, _source_id, _x| counter_or_destroy_if_color(who, Color::Red)),
-        ..Default::default()
-    }), parse_colors("U", false, false), None)
+    ir_instant("Hydroblast", "U", any_spell_or_permanent_target(),
+        ir_counter_or_destroy_if_color(Color::Red),
+        "Choose one — Counter target spell if it's red; or destroy target permanent if it's red.")
 }
 
 // ── Sorceries ─────────────────────────────────────────────────────────────────

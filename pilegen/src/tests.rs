@@ -4326,8 +4326,7 @@
         let target_id = push_stack_spell(&mut state, PlayerId::Opp, "Brainstorm");
 
         let reb_def = catalog_card("Red Elemental Blast");
-        let mode = reb_def.spell_modes().unwrap().get(0).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&reb_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(!state.stack.contains(&target_id), "blue spell should be countered off the stack");
@@ -4342,8 +4341,7 @@
         let sea_id = add_default_perm(&mut state, PlayerId::Opp, "Underground Sea");
 
         let reb_def = catalog_card("Red Elemental Blast");
-        let mode = reb_def.spell_modes().unwrap().get(0).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&reb_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[sea_id]);
 
         assert_eq!(state.objects[&sea_id].zone, CardZone::Graveyard, "blue permanent destroyed");
@@ -4357,8 +4355,7 @@
         let target_id = push_stack_spell(&mut state, PlayerId::Opp, "Dark Ritual");
 
         let pyro_def = catalog_card("Pyroblast");
-        let mode = pyro_def.spell_modes().unwrap().get(0).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&pyro_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(state.stack.contains(&target_id), "non-blue spell survives Pyroblast");
@@ -4372,8 +4369,7 @@
         let target_id = push_stack_spell(&mut state, PlayerId::Opp, "Brainstorm");
 
         let pyro_def = catalog_card("Pyroblast");
-        let mode = pyro_def.spell_modes().unwrap().get(0).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&pyro_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(!state.stack.contains(&target_id), "blue spell countered by Pyroblast");
@@ -4391,8 +4387,7 @@
         let blue_id = push_stack_spell(&mut state, PlayerId::Opp, "Brainstorm");
 
         let hydro_def = catalog_card("Hydroblast");
-        let mode = hydro_def.spell_modes().unwrap().get(0).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&hydro_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[blue_id]);
 
         assert!(state.stack.contains(&blue_id), "Hydroblast fizzles on non-red target");
@@ -4447,10 +4442,9 @@
         assert!(colors.contains(&Color::Blue),
             "Painter naming Blue should give Blue to Lotus Petal; got {:?}", colors);
 
-        // Pyroblast's effect: counter_or_destroy_if_color(Blue). Petal is on battlefield.
+        // Pyroblast's effect: counter-or-destroy if blue. Petal is on battlefield.
         let pyro_def = catalog_card("Pyroblast");
-        let mode = pyro_def.spell_modes().unwrap().get(0).unwrap();
-        let effect = (mode.factory)(PlayerId::Us, ObjId(0), 0);
+        let effect = build_spell_effect(&pyro_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[petal_id]);
 
         assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
