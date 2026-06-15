@@ -316,7 +316,7 @@ fn objects_in_zone<'a>(
     };
     state.objects.values()
         .filter(move |o| {
-            let zone_match = match &o.zone {
+            let zone_match = match &o.zone() {
                 Zone::Hand { .. } => matches!(zone_card, Zone::Hand { .. }),
                 z => z == &zone_card,
             };

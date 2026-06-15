@@ -420,7 +420,7 @@ mod parity {
     use super::*;
     use crate::catalog::{ArtifactData, CreatureData, LandData, LandTypes, BasicLandType};
     use crate::{
-        CardDef, CardKind, CardLayout, CardType, Zone, Color,
+        CardDef, CardKind, CardLayout, CardType, Color,
         CounterType, GameObject, Keyword, ObjId, PlayerId, PlayerState, SimState,
         Supertype,
     };
@@ -438,18 +438,16 @@ mod parity {
         state.objects.insert(
             id,
             GameObject {
-                id,
-                catalog_key: def.name.clone(),
-                owner,
-                controller: owner,
-                zone: Zone::Battlefield,
-                is_token: false,
-                spell: None,
-                bf: None,
-                ability: None, materialized: Some(def.clone()),
-                counters: HashMap::new(),
-                ci_timestamp: 0,
-            },
+            id,
+            catalog_key: def.name.clone(),
+            owner,
+            controller: owner,
+            is_token: false,
+            materialized: Some(def.clone()),
+            counters: HashMap::new(),
+            ci_timestamp: 0,
+            role: crate::ObjectRole::Battlefield(crate::BattlefieldState::new()),
+        },
         );
         state.catalog.entry(def.name.clone()).or_insert(def);
         id
@@ -682,18 +680,16 @@ mod execute_parity {
         state.objects.insert(
             id,
             GameObject {
-                id,
-                catalog_key: def.name.clone(),
-                owner,
-                controller: owner,
-                zone: Zone::Library,
-                is_token: false,
-                spell: None,
-                bf: None,
-                ability: None, materialized: Some(def.clone()),
-                counters: HashMap::new(),
-                ci_timestamp: 0,
-            },
+            id,
+            catalog_key: def.name.clone(),
+            owner,
+            controller: owner,
+            is_token: false,
+            materialized: Some(def.clone()),
+            counters: HashMap::new(),
+            ci_timestamp: 0,
+            role: crate::ObjectRole::Library,
+        },
         );
         state.catalog.entry(def.name.clone()).or_insert(def);
         // default: freshly-allocated objects land in library_order for the player
@@ -704,7 +700,7 @@ mod execute_parity {
     fn put_on_bf(state: &mut SimState, id: ObjId) {
         state.set_card_zone(id, Zone::Battlefield);
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.bf = Some(crate::BattlefieldState {
+            obj.role = crate::ObjectRole::Battlefield(crate::BattlefieldState {
                 tapped: false,
                 damage: 0,
                 entered_this_turn: false,
@@ -850,8 +846,8 @@ mod execute_parity {
                 .with_var("tgt", Value::Obj(i_id)),
         );
 
-        let c_dmg = closure_state.objects.get(&c_id).and_then(|o| o.bf.as_ref()).map(|bf| bf.damage);
-        let i_dmg = ir_state.objects.get(&i_id).and_then(|o| o.bf.as_ref()).map(|bf| bf.damage);
+        let c_dmg = closure_state.objects.get(&c_id).and_then(|o| o.bf()).map(|bf| bf.damage);
+        let i_dmg = ir_state.objects.get(&i_id).and_then(|o| o.bf()).map(|bf| bf.damage);
         assert_eq!(c_dmg, Some(2));
         assert_eq!(i_dmg, Some(2));
     }
@@ -879,8 +875,8 @@ mod execute_parity {
                 .with_var("t", Value::Obj(i_id)),
         );
 
-        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone);
-        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone);
+        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone());
+        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone());
         assert!(matches!(c_zone, Some(Zone::Graveyard)));
         assert_eq!(c_zone, i_zone);
     }
@@ -908,8 +904,8 @@ mod execute_parity {
                 .with_var("t", Value::Obj(i_id)),
         );
 
-        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone);
-        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone);
+        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone());
+        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone());
         assert!(matches!(c_zone, Some(Zone::Exile { .. })));
         assert!(matches!(i_zone, Some(Zone::Exile { .. })));
     }
@@ -941,8 +937,8 @@ mod execute_parity {
                 .with_var("t", Value::Obj(i_id)),
         );
 
-        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone);
-        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone);
+        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone());
+        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone());
         assert!(matches!(c_zone, Some(Zone::Hand { .. })));
         assert!(matches!(i_zone, Some(Zone::Hand { .. })));
     }
@@ -1065,12 +1061,12 @@ mod execute_parity {
             &mut s,
             &BindEnv::new().with_controller(PlayerId::Us),
         );
-        assert_eq!(s.objects[&equip].bf.as_ref().unwrap().attached_to, Some(host),
+        assert_eq!(s.objects[&equip].bf().unwrap().attached_to, Some(host),
             "Attach sets attached_to");
 
         // Host leaves the battlefield → the attachment detaches (CR 704.5q).
         crate::change_zone(host, crate::ZoneId::Graveyard, &mut s, 0, PlayerId::Us);
-        assert_eq!(s.objects[&equip].bf.as_ref().unwrap().attached_to, None,
+        assert_eq!(s.objects[&equip].bf().unwrap().attached_to, None,
             "attachment detaches when its host leaves");
     }
 
@@ -1154,9 +1150,9 @@ mod execute_parity {
             &BindEnv::new().with_controller(PlayerId::Us),
         );
 
-        assert_eq!(s.objects.get(&a).unwrap().bf.as_ref().unwrap().damage, 1);
-        assert_eq!(s.objects.get(&b).unwrap().bf.as_ref().unwrap().damage, 1);
-        assert_eq!(s.objects.get(&land).unwrap().bf.as_ref().unwrap().damage, 0);
+        assert_eq!(s.objects.get(&a).unwrap().bf().unwrap().damage, 1);
+        assert_eq!(s.objects.get(&b).unwrap().bf().unwrap().damage, 1);
+        assert_eq!(s.objects.get(&land).unwrap().bf().unwrap().damage, 0);
     }
 
     // ── Agency actions ───────────────────────────────────────────────────────
@@ -1210,11 +1206,11 @@ mod execute_parity {
 
         // Both paths should have sacrificed the smallest-id candidate (a).
         assert!(matches!(
-            closure_state.objects.get(&a1).unwrap().zone,
+            closure_state.objects.get(&a1).unwrap().zone(),
             Zone::Graveyard
         ));
         assert!(matches!(
-            ir_state.objects.get(&a2).unwrap().zone,
+            ir_state.objects.get(&a2).unwrap().zone(),
             Zone::Graveyard
         ));
     }
@@ -1316,13 +1312,13 @@ mod execute_parity {
         // Closure path: stack empty, spell in graveyard.
         assert!(closure_state.stack.is_empty());
         assert!(matches!(
-            closure_state.objects.get(&spell1).unwrap().zone,
+            closure_state.objects.get(&spell1).unwrap().zone(),
             Zone::Graveyard
         ));
         // IR path: same.
         assert!(ir_state.stack.is_empty());
         assert!(matches!(
-            ir_state.objects.get(&spell3).unwrap().zone,
+            ir_state.objects.get(&spell3).unwrap().zone(),
             Zone::Graveyard
         ));
     }
@@ -1440,7 +1436,7 @@ mod execute_parity {
             &env,
         );
         assert!(matches!(
-            s.objects.get(&id).unwrap().zone,
+            s.objects.get(&id).unwrap().zone(),
             Zone::Hand { .. }
         ));
     }
@@ -1464,7 +1460,7 @@ mod execute_parity {
             &env,
         );
         assert_eq!(
-            s.objects.get(&id).unwrap().zone,
+            s.objects.get(&id).unwrap().zone(),
             Zone::Hand { known: true }
         );
     }
@@ -1529,7 +1525,7 @@ mod execute_parity {
         assert_eq!(in_hand.len(), 1);
         assert!(in_hand[0] == a || in_hand[0] == b);
         assert!(!matches!(
-            s.objects.get(&land).unwrap().zone,
+            s.objects.get(&land).unwrap().zone(),
             Zone::Hand { .. }
         ));
     }
@@ -1578,13 +1574,15 @@ mod cost_phase1 {
     pub(super) fn insert_obj(state: &mut SimState, owner: PlayerId, def: CardDef) -> ObjId {
         let id = state.alloc_id();
         state.objects.insert(id, GameObject {
-            id, catalog_key: def.name.clone(),
-            owner, controller: owner,
-            zone: Zone::Library,
-            is_token: false, spell: None, bf: None,
-            ability: None, materialized: Some(def.clone()),
+            id,
+            catalog_key: def.name.clone(),
+            owner,
+            controller: owner,
+            is_token: false,
+            materialized: Some(def.clone()),
             counters: HashMap::new(),
             ci_timestamp: 0,
+            role: crate::ObjectRole::Library,
         });
         state.catalog.entry(def.name.clone()).or_insert(def);
         state.player_mut(owner).library_order.push_back(id);
@@ -1594,7 +1592,7 @@ mod cost_phase1 {
     pub(super) fn put_on_bf(state: &mut SimState, id: ObjId) {
         state.set_card_zone(id, Zone::Battlefield);
         if let Some(obj) = state.objects.get_mut(&id) {
-            obj.bf = Some(BattlefieldState {
+            obj.role = crate::ObjectRole::Battlefield(BattlefieldState {
                 tapped: false, damage: 0, entered_this_turn: false,
                 counters: 0, power_mod: 0, toughness_mod: 0, loyalty: 0,
                 pw_activated_this_turn: false, attacking: false,
@@ -2238,7 +2236,7 @@ mod cost_phase4 {
         // `pay_ir_cost`. Asserts pool drained by 2, EE in graveyard,
         // and `CostsPaidCtx.objects_moved` contains the EE id.
         use crate::ir::ability::CostBody;
-        use crate::{BattlefieldState, Zone, PlayerId};
+        use crate::{Zone, PlayerId};
         use super::cost_phase1::{insert_obj, make_state};
 
         let mut state = make_state();
@@ -2248,7 +2246,7 @@ mod cost_phase4 {
         let ee_id = insert_obj(&mut state, PlayerId::Us, ee_def.clone());
         // Move EE to battlefield and give it a `bf` slot.
         state.set_card_zone(ee_id, Zone::Battlefield);
-        state.objects.get_mut(&ee_id).unwrap().bf = Some(BattlefieldState::new());
+        state.objects.get_mut(&ee_id).unwrap().role = crate::ObjectRole::Battlefield(crate::BattlefieldState::new());
         // Fill the pool with {2}.
         state.player_mut(PlayerId::Us).pool.c = 2;
         state.player_mut(PlayerId::Us).pool.total = 2;
@@ -2264,7 +2262,7 @@ mod cost_phase4 {
             .expect("pay_ir_cost succeeds for EE");
 
         assert_eq!(state.player(PlayerId::Us).pool.total, 0, "pool drained by 2");
-        assert!(matches!(state.objects[&ee_id].zone, Zone::Graveyard),
+        assert!(matches!(state.objects[&ee_id].zone(), Zone::Graveyard),
             "EE moved to graveyard");
         assert_eq!(ctx.objects_moved, vec![ee_id],
             "CostsPaidCtx.objects_moved records the sacrificed EE");
@@ -2461,7 +2459,7 @@ mod cost_xmana {
         // Default plan: first payable branch (discard) + first candidate card.
         let env = crate::strategy::default_announcement(&schema);
         let ctx = pay(&cost, &schema, &env, &mut s, 0, PlayerId::Us, ObjId::UNSET).expect("pay ok");
-        assert!(matches!(s.objects[&card].zone, crate::Zone::Graveyard), "chosen card discarded");
+        assert!(matches!(s.objects[&card].zone(), crate::Zone::Graveyard), "chosen card discarded");
         assert_eq!(s.life_of(PlayerId::Us), start_life, "discard branch taken → no life paid");
         assert_eq!(ctx.objects_moved, vec![card], "discarded card recorded in objects_moved");
     }

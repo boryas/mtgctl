@@ -152,7 +152,7 @@ pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
         let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
         for id in remaining {
             if let Some(card) = state.objects.get_mut(&id) {
-                card.zone = Zone::Hand { known: false };
+                card.set_zone(Zone::Hand { known: false });
             }
         }
     }))
@@ -292,7 +292,7 @@ pub(crate) fn eff_sacrifice(caster: PlayerId, who: Who, filter: Filter) -> Effec
         let target_who = who.resolve(caster);
         let env = crate::ir::executor::BindEnv::new().with_controller(target_who);
         let candidates: Vec<ObjId> = state.permanents_of(target_who)
-            .filter(|o| o.bf.is_some() && crate::ir::executor::matches(&filter, o.id, state, &env))
+            .filter(|o| o.bf().is_some() && crate::ir::executor::matches(&filter, o.id, state, &env))
             .map(|o| o.id)
             .collect();
         if candidates.is_empty() { return; }
@@ -364,7 +364,7 @@ pub(crate) fn eff_reveal_hand(caster: PlayerId, target: Who) -> Effect {
             .collect();
         for id in &ids {
             if let Some(card) = state.objects.get_mut(id) {
-                card.zone = Zone::Hand { known: true };
+                card.set_zone(Zone::Hand { known: true });
             }
         }
         if !names.is_empty() {
@@ -406,14 +406,12 @@ pub(crate) fn eff_enter_permanent(
             catalog_key: card_name.clone(),
             owner,
             controller: owner,
-            zone: Zone::Battlefield,
             is_token: false,
-            spell: None,
-            bf: Some(BattlefieldState {
+            role: ObjectRole::Battlefield(BattlefieldState {
                 entered_this_turn: true,
                 ..BattlefieldState::new()
             }),
-            ability: None, materialized: None,
+            materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
         fire_event(
@@ -456,9 +454,9 @@ pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
             }
         }
         // Check counterable property before removing (CR 608.2b).
-        let is_ability = state.objects.get(&id).map_or(false, |o| o.ability.is_some());
+        let is_ability = state.objects.get(&id).map_or(false, |o| o.ability().is_some());
         let can_counter = if is_ability {
-            state.objects.get(&id).and_then(|o| o.ability.as_ref())
+            state.objects.get(&id).and_then(|o| o.ability())
                 .map_or(true, |ab| ab.counterable)
         } else if state.objects.contains_key(&id) {
             state.def_of(id)
@@ -483,20 +481,17 @@ pub(crate) fn counter_one(id: ObjId, state: &mut SimState, t: u8, actor: PlayerI
             let name = state.objects[&id].catalog_key.clone();
             state.log(t, actor, format!("→ {} countered", name));
             change_zone(id, ZoneId::Graveyard, state, t, actor);
-            // `change_zone` doesn't clear spell state; do it here so countered
-            // spells don't carry stale SpellState in the graveyard (or exile).
-            if let Some(card) = state.objects.get_mut(&id) {
-                card.spell = None;
-            }
+            // `change_zone` → `set_zone(Graveyard)` already drops the spell payload,
+            // so the countered spell carries no stale `SpellState` in the graveyard.
         } else {
             let ghost = state.objects.get(&id)
-                .map(|c| format!("{} (zone={:?})", c.catalog_key, c.zone))
+                .map(|c| format!("{} (zone={:?})", c.catalog_key, c.zone()))
                 .unwrap_or_else(|| format!("obj#{}", id.0));
             state.log(t, actor, format!("→ fizzled (target {} not on stack)", ghost));
         }
     } else {
         let ghost = state.objects.get(&id)
-            .map(|c| format!("{} (zone={:?})", c.catalog_key, c.zone))
+            .map(|c| format!("{} (zone={:?})", c.catalog_key, c.zone()))
             .unwrap_or_else(|| format!("obj#{}", id.0));
         state.log(t, actor, format!("→ fizzled (target {} not on stack)", ghost));
     }

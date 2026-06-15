@@ -1268,7 +1268,7 @@ fn grafdiggers_cage() -> CardDef {
             timestamp: 0,
             filter: Arc::new(move |id, _ctr, state| {
                 state.objects.get(&id).map_or(false, |o| {
-                    o.zone == Zone::Graveyard || o.zone == Zone::Library
+                    o.zone() == Zone::Graveyard || o.zone() == Zone::Library
                 })
             }),
             modifier: Arc::new(|def, _state| { def.castable = false; }),
@@ -2017,7 +2017,7 @@ fn surgical_extraction() -> CardDef {
                     };
                     let to_exile: Vec<ObjId> = state.objects.values()
                         .filter(|o| o.catalog_key == name && o.owner == owner)
-                        .filter(|o| matches!(o.zone,
+                        .filter(|o| matches!(o.zone(),
                             Zone::Graveyard | Zone::Hand { .. } | Zone::Library
                         ))
                         .map(|o| o.id)
@@ -3293,7 +3293,7 @@ fn lavinia_azorius_renegade() -> CardDef {
                 // Filter: only opponent's cards in hand (noncreature check in modifier).
                 filter: Arc::new(move |id, card_controller, state| {
                     card_controller == opp
-                        && state.objects.get(&id).map_or(false, |o| matches!(o.zone, Zone::Hand { .. }))
+                        && state.objects.get(&id).map_or(false, |o| matches!(o.zone(), Zone::Hand { .. }))
                 }),
                 modifier: Arc::new(move |def, state| {
                     if def.is_creature() || def.is_land() { return; }
@@ -3479,7 +3479,7 @@ fn hexing_squelcher() -> CardDef {
             if let GameEvent::SpellCast { caster, card_id, .. } = event {
                 if *caster == controller { return; }
                 let is_targeted = state.objects.get(card_id)
-                    .and_then(|o| o.spell.as_ref())
+                    .and_then(|o| o.spell())
                     .map_or(false, |s| s.chosen_targets.contains(&source_id));
                 if is_targeted {
                     let spell_id = *card_id;
@@ -3538,7 +3538,7 @@ fn hexing_squelcher() -> CardDef {
                             if let GameEvent::SpellCast { caster, card_id, .. } = event {
                                 if *caster == controller { return; }
                                 let is_targeted = state.objects.get(card_id)
-                                    .and_then(|o| o.spell.as_ref())
+                                    .and_then(|o| o.spell())
                                     .map_or(false, |s| s.chosen_targets.contains(&source_id));
                                 if is_targeted {
                                     let spell_id = *card_id;
@@ -4194,7 +4194,7 @@ fn cori_steel_cutter() -> CardDef {
                 timestamp: 0,
                 filter: Arc::new(move |id, _, state| {
                     state.objects.get(&source_id)
-                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|o| o.bf())
                         .and_then(|bf| bf.attached_to)
                         .map_or(false, |attached| attached == id)
                 }),
@@ -4216,7 +4216,7 @@ fn cori_steel_cutter() -> CardDef {
                 timestamp: 0,
                 filter: Arc::new(move |id, _, state| {
                     state.objects.get(&source_id)
-                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|o| o.bf())
                         .and_then(|bf| bf.attached_to)
                         .map_or(false, |attached| attached == id)
                 }),
@@ -4310,7 +4310,7 @@ fn batterskull() -> CardDef {
                 timestamp: 0,
                 filter: Arc::new(move |id, _, state| {
                     state.objects.get(&source_id)
-                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|o| o.bf())
                         .and_then(|bf| bf.attached_to)
                         .map_or(false, |attached| attached == id)
                 }),
@@ -4332,7 +4332,7 @@ fn batterskull() -> CardDef {
                 timestamp: 0,
                 filter: Arc::new(move |id, _, state| {
                     state.objects.get(&source_id)
-                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|o| o.bf())
                         .and_then(|bf| bf.attached_to)
                         .map_or(false, |attached| attached == id)
                 }),
@@ -4408,7 +4408,7 @@ fn meteor_sword() -> CardDef {
             timestamp: 0,
             filter: Arc::new(move |id, _, state| {
                 state.objects.get(&source_id)
-                    .and_then(|o| o.bf.as_ref())
+                    .and_then(|o| o.bf())
                     .and_then(|bf| bf.attached_to)
                     .map_or(false, |attached| attached == id)
             }),
@@ -4494,7 +4494,7 @@ fn pre_war_formalwear() -> CardDef {
                 timestamp: 0,
                 filter: Arc::new(move |id, _, state| {
                     state.objects.get(&source_id)
-                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|o| o.bf())
                         .and_then(|bf| bf.attached_to)
                         .map_or(false, |attached| attached == id)
                 }),
@@ -4515,7 +4515,7 @@ fn pre_war_formalwear() -> CardDef {
                 timestamp: 0,
                 filter: Arc::new(move |id, _, state| {
                     state.objects.get(&source_id)
-                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|o| o.bf())
                         .and_then(|bf| bf.attached_to)
                         .map_or(false, |attached| attached == id)
                 }),
@@ -4599,7 +4599,7 @@ fn cryptic_coat() -> CardDef {
                 timestamp: 0,
                 filter: Arc::new(move |id, _, state| {
                     state.objects.get(&source_id)
-                        .and_then(|o| o.bf.as_ref())
+                        .and_then(|o| o.bf())
                         .and_then(|bf| bf.attached_to)
                         .map_or(false, |attached| attached == id)
                 }),

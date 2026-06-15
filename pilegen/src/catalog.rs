@@ -193,12 +193,12 @@ pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: 
     state.objects.values()
         .filter(|o| {
             let zone_match = match spec.zone {
-                ZoneId::Exile => matches!(o.zone, Zone::Exile { .. }),
-                ZoneId::Hand => matches!(o.zone, Zone::Hand { .. }),
-                ZoneId::Battlefield => o.zone == Zone::Battlefield,
-                ZoneId::Graveyard  => o.zone == Zone::Graveyard,
-                ZoneId::Stack      => o.zone == Zone::Stack,
-                ZoneId::Library    => o.zone == Zone::Library,
+                ZoneId::Exile => matches!(o.zone(), Zone::Exile { .. }),
+                ZoneId::Hand => matches!(o.zone(), Zone::Hand { .. }),
+                ZoneId::Battlefield => o.zone() == Zone::Battlefield,
+                ZoneId::Graveyard  => o.zone() == Zone::Graveyard,
+                ZoneId::Stack      => o.zone() == Zone::Stack,
+                ZoneId::Library    => o.zone() == Zone::Library,
             };
             zone_match && (o.owner == target_who || o.controller == target_who)
         })
@@ -1273,7 +1273,7 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
 
     // Part 3: CE-granted triggers from materialized CardDefs (Layer 6 ability grants).
     let bf_ids: Vec<(ObjId, PlayerId)> = state.objects.iter()
-        .filter(|(_, o)| matches!(o.zone, Zone::Battlefield) && o.materialized.is_some())
+        .filter(|(_, o)| matches!(o.zone(), Zone::Battlefield) && o.materialized.is_some())
         .map(|(id, o)| (*id, o.controller))
         .collect();
     for (obj_id, controller) in bf_ids {
@@ -1292,7 +1292,7 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
         .objects
         .iter()
         .map(|(id, o)| {
-            let zk = match o.zone {
+            let zk = match o.zone() {
                 Zone::Battlefield => crate::ir::expr::ZoneKindSel::Battlefield,
                 Zone::Stack => crate::ir::expr::ZoneKindSel::Stack,
                 Zone::Graveyard => crate::ir::expr::ZoneKindSel::Graveyard,
@@ -1673,7 +1673,7 @@ pub(crate) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: P
 /// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
 /// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
 pub(crate) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
-    state.objects.get(&id).map(|c| card_zone_to_id(&c.zone)).unwrap_or(ZoneId::Hand)
+    state.objects.get(&id).map(|c| card_zone_to_id(&c.zone())).unwrap_or(ZoneId::Hand)
 }
 
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────

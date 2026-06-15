@@ -342,7 +342,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             };
             let controller = spell_obj.controller;
             let key = spell_obj.catalog_key.clone();
-            let Some(spell_state) = spell_obj.spell.as_ref() else {
+            let Some(spell_state) = spell_obj.spell() else {
                 return ExecResult::Ok;
             };
             let original_targets = spell_state.chosen_targets.clone();
@@ -488,8 +488,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             let ids = obj_ids_of(eval_expr(what, state, env));
             for id in ids {
                 if let Some(obj) = state.objects.get_mut(&id) {
-                    if matches!(obj.zone, Zone::Hand { .. }) {
-                        obj.zone = Zone::Hand { known: true };
+                    if matches!(obj.zone(), Zone::Hand { .. }) {
+                        obj.set_zone(Zone::Hand { known: true });
                     }
                 }
             }
@@ -524,8 +524,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 let ids: Vec<ObjId> = state.library_of(who).take(n).map(|o| o.id).collect();
                 for id in ids {
                     if let Some(obj) = state.objects.get_mut(&id) {
-                        if matches!(obj.zone, Zone::Hand { .. }) {
-                            obj.zone = Zone::Hand { known: true };
+                        if matches!(obj.zone(), Zone::Hand { .. }) {
+                            obj.set_zone(Zone::Hand { known: true });
                         }
                     }
                 }
@@ -683,7 +683,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
                 for id in remaining {
                     if let Some(card) = state.objects.get_mut(&id) {
-                        card.zone = Zone::Hand { known: false };
+                        card.set_zone(Zone::Hand { known: false });
                     }
                 }
             }
@@ -1175,12 +1175,12 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         }
         Expr::IsAbility(e) => {
             let o = expect_obj(eval_expr(e, state, env));
-            Value::Bool(state.objects.get(&o).map_or(false, |obj| obj.ability.is_some()))
+            Value::Bool(state.objects.get(&o).map_or(false, |obj| obj.ability().is_some()))
         }
         Expr::AbilityIsTriggered(e) => {
             let o = expect_obj(eval_expr(e, state, env));
             Value::Bool(state.objects.get(&o)
-                .and_then(|obj| obj.ability.as_ref())
+                .and_then(|obj| obj.ability())
                 .map_or(false, |a| a.is_triggered))
         }
         Expr::CountersOn(e, kind) => {
@@ -1811,7 +1811,7 @@ fn enumerate_kind_all_players(state: &SimState, kind: ZoneKindSel) -> Vec<ObjId>
 }
 
 fn obj_in_kind(o: &crate::GameObject, kind: ZoneKindSel) -> bool {
-    match (kind, &o.zone) {
+    match (kind, &o.zone()) {
         (ZoneKindSel::Stack, Zone::Stack) => true,
         (ZoneKindSel::Hand, Zone::Hand { .. }) => true,
         (ZoneKindSel::Library, Zone::Library) => true,
@@ -1839,7 +1839,7 @@ fn top_n(state: &SimState, env: &BindEnv, zone: &ZoneSel, n: usize) -> Vec<ObjId
 fn card_def_of<'a>(state: &'a SimState, id: ObjId) -> Option<&'a crate::catalog::CardDef> {
     // A card-less object (ability on the stack) has no CardDef — don't fall back
     // to the catalog by its (synthetic) catalog_key.
-    if state.objects.get(&id).map_or(false, |o| o.ability.is_some()) {
+    if state.objects.get(&id).map_or(false, |o| o.ability().is_some()) {
         return None;
     }
     state.def_of(id).or_else(|| {
@@ -1907,7 +1907,7 @@ fn toughness_of_obj(state: &SimState, id: ObjId) -> Option<i32> {
 
 fn zone_id_of_obj(state: &SimState, id: ObjId) -> Option<ZoneId> {
     let obj = state.objects.get(&id)?;
-    Some(match obj.zone {
+    Some(match obj.zone() {
         Zone::Library => ZoneId::Library,
         Zone::Hand { .. } => ZoneId::Hand,
         Zone::Stack => ZoneId::Stack,

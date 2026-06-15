@@ -356,6 +356,24 @@ impl BattlefieldState {
     }
 }
 
+/// What kind of object this is — and, for objects that live in a zone, which
+/// zone. The "kind" discriminant (card-in-a-zone, spell/ability on the stack, …)
+/// that folds the old `zone`/`bf`/`spell`/`ability` fields into one enum so
+/// illegal combinations (a permanent with no battlefield state, an ability in
+/// the graveyard) are unrepresentable. `GameObject::zone()` derives the coarse
+/// `Zone` from the variant. Players/emblems will join as their own variants —
+/// kind is a separate concern from zone (a player has no zone at all).
+#[derive(Clone)]
+pub(crate) enum ObjectRole {
+    Library,
+    Hand { known: bool },
+    Battlefield(BattlefieldState),
+    StackSpell(SpellState),
+    StackAbility(AbilityState),
+    Graveyard,
+    Exile { on_adventure: bool },
+}
+
 /// A card as a game object — follows the card through all zone changes.
 /// Carries only game-accumulated state. The card's characteristics are derived
 /// by looking up `catalog_key` in the catalog and applying continuous effects.
@@ -365,13 +383,10 @@ struct GameObject {
     catalog_key: String,  // foreign key into the CardDef catalog
     owner: PlayerId,
     controller: PlayerId,
-    zone: Zone,
     is_token: bool,
-    bf: Option<BattlefieldState>,      // Some only when zone == Battlefield
-    spell: Option<SpellState>,         // Some only when zone == Stack (spell on stack)
-    /// Some only when this object is an *ability on the stack* (zone == Stack, no card).
-    /// A card-less object: it has no `CardDef`, so `def_of`/`card_def_of` return None for it.
-    ability: Option<AbilityState>,
+    /// What kind of object this is + (for zone-resident kinds) which zone, with
+    /// the per-kind state (battlefield / spell / ability) inline. See `ObjectRole`.
+    role: ObjectRole,
     /// Inlined post-CE materialized snapshot. Rebuilt by `recompute` after each state-mutating tick.
     materialized: Option<CardDef>,
     /// Zone-independent counters (e.g. void counters from Dauthi Voidwalker).
@@ -387,9 +402,65 @@ impl GameObject {
     fn new(id: ObjId, catalog_key: impl Into<String>, owner: PlayerId) -> Self {
         GameObject {
             id, catalog_key: catalog_key.into(), controller: owner, owner,
-            zone: Zone::Library, is_token: false, bf: None, spell: None,
-            ability: None, materialized: None, counters: HashMap::new(), ci_timestamp: 0,
+            is_token: false, role: ObjectRole::Library, materialized: None,
+            counters: HashMap::new(), ci_timestamp: 0,
         }
+    }
+
+    /// The coarse `Zone` this object occupies, derived from its role.
+    fn zone(&self) -> Zone {
+        match &self.role {
+            ObjectRole::Library => Zone::Library,
+            ObjectRole::Hand { known } => Zone::Hand { known: *known },
+            ObjectRole::Battlefield(_) => Zone::Battlefield,
+            ObjectRole::StackSpell(_) | ObjectRole::StackAbility(_) => Zone::Stack,
+            ObjectRole::Graveyard => Zone::Graveyard,
+            ObjectRole::Exile { on_adventure } => Zone::Exile { on_adventure: *on_adventure },
+        }
+    }
+
+    /// Battlefield state — `Some` only for a permanent.
+    fn bf(&self) -> Option<&BattlefieldState> {
+        if let ObjectRole::Battlefield(bf) = &self.role { Some(bf) } else { None }
+    }
+    fn bf_mut(&mut self) -> Option<&mut BattlefieldState> {
+        if let ObjectRole::Battlefield(bf) = &mut self.role { Some(bf) } else { None }
+    }
+
+    /// Spell-on-stack state — `Some` only for a spell on the stack.
+    fn spell(&self) -> Option<&SpellState> {
+        if let ObjectRole::StackSpell(s) = &self.role { Some(s) } else { None }
+    }
+    fn spell_mut(&mut self) -> Option<&mut SpellState> {
+        if let ObjectRole::StackSpell(s) = &mut self.role { Some(s) } else { None }
+    }
+
+    /// Ability-on-stack state — `Some` only for a card-less ability on the stack.
+    /// Such an object has no `CardDef`, so `def_of`/`card_def_of` return None for it.
+    fn ability(&self) -> Option<&AbilityState> {
+        if let ObjectRole::StackAbility(a) = &self.role { Some(a) } else { None }
+    }
+
+    /// Transition to a payload-free zone (Library/Hand/Graveyard/Exile) or the
+    /// Battlefield (preserving an existing `bf`, or starting a fresh one with
+    /// `entered_this_turn`). Moving onto the Stack carries a spell/ability
+    /// payload, so callers set `role` to `StackSpell`/`StackAbility` directly —
+    /// this is a no-op for `Zone::Stack`.
+    fn set_zone(&mut self, zone: Zone) {
+        self.role = match zone {
+            Zone::Library => ObjectRole::Library,
+            Zone::Hand { known } => ObjectRole::Hand { known },
+            Zone::Graveyard => ObjectRole::Graveyard,
+            Zone::Exile { on_adventure } => ObjectRole::Exile { on_adventure },
+            Zone::Battlefield => {
+                let bf = match &self.role {
+                    ObjectRole::Battlefield(bf) => bf.clone(),
+                    _ => BattlefieldState { entered_this_turn: true, ..BattlefieldState::new() },
+                };
+                ObjectRole::Battlefield(bf)
+            }
+            Zone::Stack => return,
+        };
     }
 }
 
@@ -544,14 +615,14 @@ pub(crate) type TriggerPredicate =
 /// do_effect has already moved the card to the battlefield.
 pub(crate) fn tp_on_battlefield() -> TriggerPredicate {
     Arc::new(|src, state| {
-        state.objects.get(&src).map_or(false, |o| matches!(o.zone, Zone::Battlefield))
+        state.objects.get(&src).map_or(false, |o| matches!(o.zone(), Zone::Battlefield))
     })
 }
 
 /// Trigger predicate: source is on the stack (e.g. Storm).
 pub(crate) fn tp_on_stack() -> TriggerPredicate {
     Arc::new(|src, state| {
-        state.objects.get(&src).map_or(false, |o| matches!(o.zone, Zone::Stack))
+        state.objects.get(&src).map_or(false, |o| matches!(o.zone(), Zone::Stack))
     })
 }
 
@@ -761,7 +832,7 @@ pub(crate) struct ContinuousInstance {
 /// deltas visible to layer modifiers that inspect P/T (e.g. Tarmogoyf's self-referential
 /// P/T which would interact with a CE modifying it).
 fn fold_game_state_into_def(def: &mut CardDef, obj: &GameObject) {
-    let Some(bf) = &obj.bf else { return };
+    let Some(bf) = obj.bf() else { return };
     if let CardKind::Creature(c) = &mut def.kind {
         c.adjust_pt(bf.counters + bf.power_mod, bf.counters + bf.toughness_mod);
     }
@@ -871,7 +942,7 @@ pub(crate) fn recompute(state: &mut SimState) {
         // back face's values (CR 712.8a — the game sees only the face that's up).
         {
             let obj = state.objects.get(&id).unwrap();
-            if obj.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
+            if obj.bf().map_or(false, |bf| bf.active_face == 1) {
                 if let Some(ref back) = def.back.take() {
                     def.name = back.name.clone();
                     def.kind = back.kind.clone();
@@ -892,7 +963,7 @@ pub(crate) fn recompute(state: &mut SimState) {
         // (CEs may override — e.g. Dauthi sets castable=true on exiled cards).
         {
             let obj = state.objects.get(&id).unwrap();
-            def.castable = matches!(obj.zone, Zone::Hand { .. });
+            def.castable = matches!(obj.zone(), Zone::Hand { .. });
         }
 
         state.objects.get_mut(&id).unwrap().materialized = Some(def);
@@ -904,7 +975,7 @@ pub(crate) fn recompute(state: &mut SimState) {
     // continuous_instances — only ephemeral CIs live there.
     let mut static_cis: Vec<ContinuousInstance> = Vec::new();
     for (&id, obj) in &state.objects {
-        if !matches!(obj.zone, Zone::Battlefield) { continue; }
+        if !matches!(obj.zone(), Zone::Battlefield) { continue; }
         let Some(card_def) = state.catalog.get(&obj.catalog_key) else { continue };
         for factory in &card_def.static_ability_defs {
             let mut ci = factory(id, obj.controller);
@@ -1221,7 +1292,7 @@ pub(crate) fn enumerate_mana_abilities(state: &SimState, who: PlayerId) -> Vec<M
     // Battlefield permanents.
     for card in state.permanents_of(who) {
         let mas = state.def_of(card.id).map(|d| d.mana_abilities()).unwrap_or(&[]);
-        let bf = match &card.bf { Some(bf) => bf, None => continue };
+        let bf = match card.bf() { Some(bf) => bf, None => continue };
         for (idx, ma) in mas.iter().enumerate() {
             if !ma.activatable { continue; }
             if ma.timing != ActivationTiming::Default { continue; } // non-default timing excluded from mana sub-loop
@@ -1279,8 +1350,8 @@ pub(crate) fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) ->
     let find_bf = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize, usize)> {
         state.objects.iter().find_map(|(id, c)| {
             if used.contains(id) { return None; }
-            if c.controller != who || c.zone != Zone::Battlefield { return None; }
-            let bf = c.bf.as_ref()?;
+            if c.controller != who || c.zone() != Zone::Battlefield { return None; }
+            let bf = c.bf()?;
             let mas = state.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, ma) = mas.iter().enumerate().find(|(_, ma)| {
                 ma.activatable
@@ -1708,7 +1779,7 @@ impl SimState {
     pub(crate) fn def_of(&self, id: ObjId) -> Option<&CardDef> {
         let obj = self.objects.get(&id)?;
         // An ability on the stack is a card-less object — it has no CardDef.
-        if obj.ability.is_some() { return None; }
+        if obj.ability().is_some() { return None; }
         obj.materialized.as_ref()
     }
 }
@@ -1765,36 +1836,36 @@ impl SimState {
     }
 
     fn permanents_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.controller == who && c.zone == Zone::Battlefield)
+        self.objects.values().filter(move |c| c.controller == who && c.zone() == Zone::Battlefield)
     }
 
     fn permanent_bf(&self, id: ObjId) -> Option<&BattlefieldState> {
         self.objects.get(&id)
-            .filter(|c| c.zone == Zone::Battlefield)
-            .and_then(|c| c.bf.as_ref())
+            .filter(|c| c.zone() == Zone::Battlefield)
+            .and_then(|c| c.bf())
     }
 
     fn permanent_bf_mut(&mut self, id: ObjId) -> Option<&mut BattlefieldState> {
         self.objects.get_mut(&id)
-            .filter(|c| c.zone == Zone::Battlefield)
-            .and_then(|c| c.bf.as_mut())
+            .filter(|c| c.zone() == Zone::Battlefield)
+            .and_then(|c| c.bf_mut())
     }
 
     fn hand_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, Zone::Hand { .. }))
+        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone(), Zone::Hand { .. }))
     }
 
     fn graveyard_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && c.zone == Zone::Graveyard)
+        self.objects.values().filter(move |c| c.owner == who && c.zone() == Zone::Graveyard)
     }
 
     fn exile_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, Zone::Exile { .. }))
+        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone(), Zone::Exile { .. }))
     }
 
     /// Cards owned by `who` that are currently in exile with adventure status.
     fn on_adventure_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && c.zone == (Zone::Exile { on_adventure: true }))
+        self.objects.values().filter(move |c| c.owner == who && c.zone() == (Zone::Exile { on_adventure: true }))
     }
 
     /// Iterate library in deck order (front = top). Yields `&GameObject` for each ObjId.
@@ -1815,7 +1886,7 @@ impl SimState {
     /// Maintains `library_order` when entering or leaving Library zone.
     fn set_card_zone(&mut self, id: ObjId, zone: Zone) {
         let (old_zone, owner) = match self.objects.get(&id) {
-            Some(c) => (c.zone, c.owner),
+            Some(c) => (c.zone(), c.owner),
             None => return,
         };
         if old_zone == Zone::Library && zone != Zone::Library {
@@ -1830,10 +1901,7 @@ impl SimState {
             self.graveyard_order.retain(|&x| x != id);
         }
         if let Some(card) = self.objects.get_mut(&id) {
-            card.zone = zone;
-            if !matches!(zone, Zone::Battlefield) {
-                card.bf = None;
-            }
+            card.set_zone(zone);
         }
     }
 
@@ -1915,7 +1983,7 @@ impl SimState {
 
     /// Display name for a card, using the back-face name when the card is flipped.
     fn display_name(&self, card: &GameObject) -> String {
-        if card.bf.as_ref().map_or(false, |bf| bf.active_face == 1) {
+        if card.bf().map_or(false, |bf| bf.active_face == 1) {
             if let Some(back_name) = self.catalog.get(&card.catalog_key)
                 .and_then(|d| d.back.as_ref())
                 .map(|b| &b.name)
@@ -1929,7 +1997,7 @@ impl SimState {
     /// Return the name of the permanent with the given id.
     fn permanent_name(&self, id: ObjId) -> Option<String> {
         self.objects.get(&id)
-            .filter(|c| c.zone == Zone::Battlefield)
+            .filter(|c| c.zone() == Zone::Battlefield)
             .map(|c| self.display_name(c))
     }
 
@@ -1937,7 +2005,7 @@ impl SimState {
     fn potential_mana(&self, who: PlayerId) -> ManaPool {
         let mut p = self.player(who).pool.clone();
         for card in self.permanents_of(who) {
-            if let Some(bf) = &card.bf {
+            if let Some(bf) = card.bf() {
                 let card_id = card.id;
                 let mas = self.def_of(card_id).map(|d| d.mana_abilities()).unwrap_or(&[]);
                 let bf_mas: Vec<_> = mas.iter()
@@ -2042,7 +2110,7 @@ impl SimState {
     /// Every object with zone==Stack — spell or ability — is a legal target;
     /// "can't be countered" is enforced at resolution, not targeting (CR 608.2b).
     pub(crate) fn stack_item_is_counterable(&self, id: ObjId) -> bool {
-        self.objects.get(&id).map_or(false, |o| o.zone == Zone::Stack)
+        self.objects.get(&id).map_or(false, |o| o.zone() == Zone::Stack)
     }
 
     /// Place an ability (a card-less stack object) on the stack. `id` must be freshly
@@ -2056,8 +2124,7 @@ impl SimState {
         ability: AbilityState,
     ) {
         let mut obj = GameObject::new(id, source_name, controller);
-        obj.zone = Zone::Stack;
-        obj.ability = Some(ability);
+        obj.role = ObjectRole::StackAbility(ability);
         self.objects.insert(id, obj);
         self.stack.push(id);
     }
@@ -2087,13 +2154,13 @@ impl SimState {
     /// Write hand/graveyard/exile zones for `who` to the formatter — one line per zone.
     fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: PlayerId, reveal_hand: bool) -> std::fmt::Result {
         let mut visible: Vec<&str> = self.hand_of(who)
-            .filter(|c| reveal_hand || matches!(c.zone, Zone::Hand { known: true }))
+            .filter(|c| reveal_hand || matches!(c.zone(), Zone::Hand { known: true }))
             .map(|c| c.catalog_key.as_str())
             .collect();
         visible.sort();
         let hidden = if reveal_hand { 0 } else {
             self.hand_of(who)
-                .filter(|c| matches!(c.zone, Zone::Hand { known: false }))
+                .filter(|c| matches!(c.zone(), Zone::Hand { known: false }))
                 .count()
         };
         if visible.len() + hidden > 0 {
@@ -2104,7 +2171,7 @@ impl SimState {
 
         let gy: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who && c.zone == Zone::Graveyard)
+            .filter(|c| c.owner == who && c.zone() == Zone::Graveyard)
             .map(|c| c.catalog_key.clone())
             .collect();
         if !gy.is_empty() {
@@ -2112,7 +2179,7 @@ impl SimState {
         }
 
         let mut exile: Vec<String> = self.exile_of(who)
-            .map(|c| if matches!(c.zone, Zone::Exile { on_adventure: true }) {
+            .map(|c| if matches!(c.zone(), Zone::Exile { on_adventure: true }) {
                 format!("{} (adv)", c.catalog_key)
             } else {
                 c.catalog_key.clone()
@@ -2142,7 +2209,7 @@ impl SimState {
     /// Write permanents for `who` — lands on one line, non-lands on another.
     fn fmt_permanents(&self, f: &mut std::fmt::Formatter<'_>, who: PlayerId) -> std::fmt::Result {
         let fmt_perm = |card: &&GameObject| -> Option<String> {
-            let bf = card.bf.as_ref()?;
+            let bf = card.bf()?;
             let mut tags: Vec<String> = Vec::new();
             if bf.counters != 0 { tags.push(format!("{:+}", bf.counters)); }
             if bf.loyalty > 0   { tags.push(format!("loy:{}", bf.loyalty)); }
@@ -2152,17 +2219,17 @@ impl SimState {
         };
 
         let mut lands: Vec<&GameObject> = self.permanents_of(who)
-            .filter(|c| c.bf.is_some() && self.def_of(c.id).map_or(false, |d| d.is_land()))
+            .filter(|c| c.bf().is_some() && self.def_of(c.id).map_or(false, |d| d.is_land()))
             .collect();
         let tapped_first = |a: &&GameObject, b: &&GameObject| {
-            let a_tap = a.bf.as_ref().map_or(false, |bf| bf.tapped);
-            let b_tap = b.bf.as_ref().map_or(false, |bf| bf.tapped);
+            let a_tap = a.bf().map_or(false, |bf| bf.tapped);
+            let b_tap = b.bf().map_or(false, |bf| bf.tapped);
             b_tap.cmp(&a_tap).then(a.catalog_key.cmp(&b.catalog_key))
         };
         lands.sort_by(tapped_first);
 
         let mut others: Vec<&GameObject> = self.permanents_of(who)
-            .filter(|c| c.bf.is_some() && !self.def_of(c.id).map_or(false, |d| d.is_land()))
+            .filter(|c| c.bf().is_some() && !self.def_of(c.id).map_or(false, |d| d.is_land()))
             .collect();
         others.sort_by(tapped_first);
 
@@ -2304,12 +2371,12 @@ impl SimState {
 
     fn player_result(&self, who: PlayerId) -> PlayerResult {
         let is_land = |c: &&GameObject| -> bool {
-            c.bf.is_some()
+            c.bf().is_some()
                 && !self.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
         };
 
         let to_perm = |c: &GameObject| -> PermanentResult {
-            let bf = c.bf.as_ref().unwrap();
+            let bf = c.bf().unwrap();
             PermanentResult {
                 name: self.display_name(c),
                 tapped: bf.tapped,
@@ -2337,11 +2404,11 @@ impl SimState {
             (all, 0)
         } else {
             let known: Vec<CardResult> = self.hand_of(who)
-                .filter(|c| matches!(c.zone, Zone::Hand { known: true }))
+                .filter(|c| matches!(c.zone(), Zone::Hand { known: true }))
                 .map(|c| CardResult { name: c.catalog_key.clone() })
                 .collect();
             let hidden = self.hand_of(who)
-                .filter(|c| matches!(c.zone, Zone::Hand { known: false }))
+                .filter(|c| matches!(c.zone(), Zone::Hand { known: false }))
                 .count();
             (known, hidden)
         };
@@ -2359,7 +2426,7 @@ impl SimState {
 
         let mut graveyard: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who && c.zone == Zone::Graveyard)
+            .filter(|c| c.owner == who && c.zone() == Zone::Graveyard)
             .map(|c| c.catalog_key.clone())
             .collect();
 
@@ -2371,7 +2438,7 @@ impl SimState {
         }
 
         let exile: Vec<String> = self.exile_of(who)
-            .map(|c| if matches!(c.zone, Zone::Exile { on_adventure: true }) {
+            .map(|c| if matches!(c.zone(), Zone::Exile { on_adventure: true }) {
                 format!("{} (adv)", c.catalog_key)
             } else {
                 c.catalog_key.clone()
@@ -2408,7 +2475,7 @@ fn sim_play_land(
 ) {
     if state.player(who).lands_played_this_turn >= 1 { return; }
     let land_name = match state.objects.get(&card_id) {
-        Some(c) if matches!(c.zone, Zone::Hand { .. }) => c.catalog_key.clone(),
+        Some(c) if matches!(c.zone(), Zone::Hand { .. }) => c.catalog_key.clone(),
         _ => return,
     };
     state.log(t, who, format!("Play {} [hand: {}]", land_name, state.hand_size(who)));
@@ -2614,7 +2681,7 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
 
             // Read owner and old zone before mutating, to maintain library_order.
             let (owner, old_zone) = match state.objects.get(&id) {
-                Some(c) => (c.owner, c.zone),
+                Some(c) => (c.owner, c.zone()),
                 None => return,
             };
             let zone_changed = old_zone != new_zone;
@@ -2629,23 +2696,16 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
                     state.player_mut(owner).library_order.push_back(id);
                 }
             }
-            if let Some(card) = state.objects.get_mut(&id) {
-                if zone_changed {
-                    card.zone = new_zone;
-                    if from == ZoneId::Battlefield { card.bf = None; }
-                }
-                if to == ZoneId::Battlefield && card.bf.is_none() {
-                    card.bf = Some(BattlefieldState {
-                        entered_this_turn: true,
-                        ..BattlefieldState::new()
-                    });
+            if zone_changed {
+                if let Some(card) = state.objects.get_mut(&id) {
+                    card.set_zone(new_zone);
                 }
             }
 
             // Detach any equipment that was attached to the departing permanent (CR 301.5c).
             if from == ZoneId::Battlefield {
                 for obj in state.objects.values_mut() {
-                    if let Some(ref mut bf) = obj.bf {
+                    if let Some(bf) = obj.bf_mut() {
                         if bf.attached_to == Some(id) {
                             bf.attached_to = None;
                         }
@@ -2723,7 +2783,7 @@ pub(crate) fn change_zone(
             Some(c) => c,
             None => return,
         };
-        (card.catalog_key.clone(), card.controller, card_zone_to_id(&card.zone))
+        (card.catalog_key.clone(), card.controller, card_zone_to_id(&card.zone()))
     };
     // LTB: remove ephemeral CIs tied to this source.
     if from == ZoneId::Battlefield {
@@ -2794,13 +2854,7 @@ fn pay_ability_cost(
         .or_else(|| state.hand_of(who).find(|c| c.id == source_id).map(|c| c.catalog_key.clone()))
         .unwrap_or_default();
     state.log(t, who, format!("Activate {} ability", source_name));
-
-    // Hand-sourced abilities (ninjutsu): move source from hand to Stack zone before paying costs.
-    if is_hand_source {
-        if let Some(card) = state.objects.get_mut(&source_id) {
-            card.zone = Zone::Stack;
-        }
-    }
+    let _ = is_hand_source; // ninja stays in hand until its ability resolves (CR 702.49d)
 
     // Pay cost via pay_ir_cost. The default-announcement (no strategy ref)
     // suffices for cost shapes whose strategy choice is a no-op (like
@@ -2899,8 +2953,7 @@ fn cast_spell(
         };
         state.log(t, who, format!("Cast {} ({}, {}){} [hand: {}]", adv.name, adv.mana_cost(), name, adv_target_label, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
-            card.zone = Zone::Stack;
-            card.spell = Some(SpellState {
+            card.role = ObjectRole::StackSpell(SpellState {
                 effect: Some(adv_eff),
                 chosen_targets: adv_targets,
                 is_back_face: true,
@@ -2972,9 +3025,15 @@ fn cast_spell(
     // Casting legality is pre-checked via CardDef.castable (set by CEs in recompute).
     // Strategy only offers castable cards, so no prohibition gate needed here.
 
-    // Move to Stack zone.
+    // Move to Stack zone (a placeholder spell payload; the real effect/targets/
+    // costs are filled in once cost payment + `build_spell_effect` complete below).
     if let Some(card) = state.objects.get_mut(&card_id) {
-        card.zone = Zone::Stack;
+        card.role = ObjectRole::StackSpell(SpellState {
+            effect: None,
+            chosen_targets: Vec::new(),
+            is_back_face: false,
+            costs_paid_ctx: CostsPaidCtx::default(),
+        });
     }
 
     // Pay cost and build a log label.
@@ -3030,7 +3089,7 @@ fn cast_spell(
     let spell_chosen_targets = chosen_targets.to_vec();
 
     if let Some(card) = state.objects.get_mut(&card_id) {
-        card.spell = Some(SpellState {
+        card.role = ObjectRole::StackSpell(SpellState {
             effect: Some(spell_eff),
             chosen_targets: spell_chosen_targets,
             is_back_face: false,
@@ -3070,7 +3129,7 @@ fn cast_spell(
         }
         if rep_count > 0 {
             if let Some(card_obj) = state.objects.get_mut(&card_id) {
-                if let Some(spell) = card_obj.spell.as_mut() {
+                if let Some(spell) = card_obj.spell_mut() {
                     spell.costs_paid_ctx.replicate_count = rep_count;
                 }
             }
@@ -3203,13 +3262,13 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
     // card-less ability object).
     for &id in &state.stack {
         let in_objects = state.objects.get(&id)
-            .map_or(false, |o| o.zone == Zone::Stack);
+            .map_or(false, |o| o.zone() == Zone::Stack);
         check!(in_objects, state, label,
             "stack item {id:?} not an object with zone==Stack");
     }
     // Every object with zone==Stack must be in state.stack (no stranded spells).
     for (&id, obj) in &state.objects {
-        if obj.zone == Zone::Stack {
+        if obj.zone() == Zone::Stack {
             check!(state.stack.contains(&id), state, label,
                 "object {:?} has zone==Stack but is not in state.stack", obj.catalog_key);
         }
@@ -3218,21 +3277,21 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
     // ── Zone-tracking arrays match actual zones ────────────────────────
     for &id in &state.graveyard_order {
         check!(
-            state.objects.get(&id).map_or(false, |o| o.zone == Zone::Graveyard),
+            state.objects.get(&id).map_or(false, |o| o.zone() == Zone::Graveyard),
             state, label,
             "graveyard_order contains {id:?} but object zone is not Graveyard");
     }
     for who in [PlayerId::Us, PlayerId::Opp] {
         for &id in &state.player(who).library_order {
             check!(
-                state.objects.get(&id).map_or(false, |o| o.zone == Zone::Library),
+                state.objects.get(&id).map_or(false, |o| o.zone() == Zone::Library),
                 state, label,
                 "library_order contains {id:?} but object zone is not Library");
         }
     }
     // Reverse: every Library-zone object should be in its owner's library_order.
     for obj in state.objects.values() {
-        if obj.zone == Zone::Library {
+        if obj.zone() == Zone::Library {
             check!(
                 state.player(obj.owner).library_order.contains(&obj.id),
                 state, label,
@@ -3242,12 +3301,12 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
 
     // ── Battlefield objects have BattlefieldState and vice versa ────────
     for obj in state.objects.values() {
-        if obj.zone == Zone::Battlefield {
-            check!(obj.bf.is_some(), state, label,
+        if obj.zone() == Zone::Battlefield {
+            check!(obj.bf().is_some(), state, label,
                 "object {:?} on battlefield without BattlefieldState", obj.catalog_key);
         } else {
-            check!(obj.bf.is_none(), state, label,
-                "object {:?} in zone {:?} has stale BattlefieldState", obj.catalog_key, obj.zone);
+            check!(obj.bf().is_none(), state, label,
+                "object {:?} in zone {:?} has stale BattlefieldState", obj.catalog_key, obj.zone());
         }
     }
 
@@ -3292,7 +3351,7 @@ fn check_state_based_actions(
 
         // SBA: token in a zone other than the battlefield ceases to exist (rule 704.5d).
         let dead_tokens: Vec<ObjId> = state.objects.values()
-            .filter(|c| c.is_token && c.zone != Zone::Battlefield)
+            .filter(|c| c.is_token && c.zone() != Zone::Battlefield)
             .map(|c| c.id)
             .collect();
         for id in dead_tokens {
@@ -3301,7 +3360,7 @@ fn check_state_based_actions(
             any = true;
         }
         check!(
-            state.objects.values().all(|c| !c.is_token || c.zone == Zone::Battlefield),
+            state.objects.values().all(|c| !c.is_token || c.zone() == Zone::Battlefield),
             state, "sba",
             "token found outside battlefield after SBA cleanup"
         );
@@ -3315,7 +3374,7 @@ fn check_state_based_actions(
             let mut zero_tgh: Vec<ObjId> = Vec::new();
             let mut lethal_dmg: Vec<ObjId> = Vec::new();
             for card in state.permanents_of(who).collect::<Vec<_>>() {
-                let Some(bf) = card.bf.as_ref() else { continue };
+                let Some(bf) = card.bf() else { continue };
                 if !state.def_of(card.id).map_or(false, |d| d.is_creature()) { continue; }
                 let tgh = state.def_of(card.id)
                     .and_then(|d| d.as_creature())
@@ -3338,7 +3397,7 @@ fn check_state_based_actions(
         for who in [PlayerId::Us, PlayerId::Opp] {
             let dying: Vec<ObjId> = state.permanents_of(who)
                 .filter_map(|card| {
-                    let bf = card.bf.as_ref()?;
+                    let bf = card.bf()?;
                     if !state.def_of(card.id).map_or(false, |d| matches!(d.kind, CardKind::Planeswalker(_))) { return None; }
                     if bf.loyalty <= 0 { Some(card.id) } else { None }
                 })
@@ -3386,11 +3445,9 @@ pub(crate) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         catalog_key: token_key.to_string(),
         owner: controller,
         controller,
-        zone: Zone::Battlefield,
         is_token: true,
-        spell: None,
-        bf: Some(BattlefieldState::new()),
-        ability: None, materialized: None,
+        role: ObjectRole::Battlefield(BattlefieldState::new()),
+        materialized: None,
         counters: HashMap::new(), ci_timestamp: 0,
     });
     {
@@ -3413,14 +3470,16 @@ fn resolve_top_of_stack(
     _ap: PlayerId,
 ) {
     let id = state.stack.pop().unwrap();
-    let is_ability = state.objects.get(&id).map_or(false, |o| o.ability.is_some());
+    let is_ability = state.objects.get(&id).map_or(false, |o| o.ability().is_some());
     if is_ability {
         // Card-less stack object: an activated/triggered ability resolves, then
         // ceases to exist (CR 608.2m). Remove it up front and take ownership of
         // its payload so the effect can mutate state freely.
         let obj = state.objects.remove(&id).expect("ability object on stack");
         let controller = obj.controller;
-        let ability = obj.ability.expect("ability object carries an ability payload");
+        let ObjectRole::StackAbility(ability) = obj.role else {
+            panic!("ability object carries an ability payload");
+        };
         let mut effect_targets = ability.chosen_targets.clone();
         if let Some(ref spec) = ability.choice_spec {
             let choices = enumerate_choices(spec, controller, state);
@@ -3434,7 +3493,7 @@ fn resolve_top_of_stack(
         state.resolving_costs_ctx = CostsPaidCtx::default();
     } else if state.objects.contains_key(&id) {
         // It's a spell (card on the stack)
-        let spell = state.objects[&id].spell.clone().unwrap_or_else(|| SpellState {
+        let spell = state.objects[&id].spell().cloned().unwrap_or_else(|| SpellState {
             effect: None,
             chosen_targets: vec![],
             is_back_face: false,
@@ -3459,8 +3518,7 @@ fn resolve_top_of_stack(
                 .unwrap_or(name.as_str())
                 .to_string();
             if let Some(card_obj) = state.objects.get_mut(&id) {
-                card_obj.zone = Zone::Exile { on_adventure: true };
-                card_obj.spell = None;
+                card_obj.role = ObjectRole::Exile { on_adventure: true };
             }
             state.log(t, owner, format!("{} resolves → {} on adventure in exile", back_name, name));
         } else if let Some(ref eff) = spell.effect {
@@ -3469,21 +3527,16 @@ fn resolve_top_of_stack(
                     | CardKind::Planeswalker(_) | CardKind::Enchantment(_)))
                 .unwrap_or(false);
             if !is_perm {
-                if let Some(card_obj) = state.objects.get_mut(&id) {
-                    card_obj.spell = None;
-                }
                 state.log(t, owner, format!("{} resolves", name));
                 change_zone(id, ZoneId::Graveyard, state, t, owner);
                 eff.call(state, t, &spell.chosen_targets);
             } else {
                 // Stash costs-paid ctx so ETB replacement effects (e.g. Murktide) can read it.
                 state.resolving_costs_ctx = spell.costs_paid_ctx.clone();
-                // Move the spell object from Stack → Battlefield (same object,
-                // no new allocation). This is how MTG works: the spell becomes
-                // the permanent. change_zone fires the ETB event for triggers.
-                if let Some(card_obj) = state.objects.get_mut(&id) {
-                    card_obj.spell = None;
-                }
+                // Move the spell object from Stack → Battlefield (same object, no
+                // new allocation). This is how MTG works: the spell becomes the
+                // permanent. `change_zone` → `set_zone(Battlefield)` drops the
+                // spell payload and fires the ETB event for triggers.
                 change_zone(id, ZoneId::Battlefield, state, t, owner);
                 state.log(t, owner, format!("{} enters play", name));
                 // Don't call eff here: permanent spell effects are always
@@ -3492,9 +3545,6 @@ fn resolve_top_of_stack(
                 state.resolving_costs_ctx = CostsPaidCtx::default();
             }
         } else {
-            if let Some(card_obj) = state.objects.get_mut(&id) {
-                card_obj.spell = None;
-            }
             state.log(t, owner, format!("{} resolves", name));
             change_zone(id, ZoneId::Graveyard, state, t, owner);
         }
@@ -3787,7 +3837,7 @@ fn do_combat_damage_pass(
     let block_pairs = state.combat_blocks.clone();
 
     let alive = |id: ObjId, state: &SimState| -> bool {
-        state.objects.get(&id).map(|o| o.zone == Zone::Battlefield).unwrap_or(false)
+        state.objects.get(&id).map(|o| o.zone() == Zone::Battlefield).unwrap_or(false)
     };
 
     // Group blockers per attacker, preserving combat_blocks order (CR 509.1h).
@@ -3827,7 +3877,7 @@ fn do_combat_damage_pass(
                 // its damage to the defender. Without trample, no damage is dealt.
                 if atk_trample {
                     let target = state.objects.get(&atk_id)
-                        .and_then(|p| p.bf.as_ref()).and_then(|bf| bf.attack_target);
+                        .and_then(|p| p.bf()).and_then(|bf| bf.attack_target);
                     match target {
                         None => player_damage += atk_pow,
                         Some(pw) => *pw_damage.entry(pw).or_insert(0) += atk_pow,
@@ -3870,7 +3920,7 @@ fn do_combat_damage_pass(
             // CR 702.19b (trample): leftover damage spills to defending player/PW.
             if atk_trample && remaining > 0 {
                 let target = state.objects.get(&atk_id)
-                    .and_then(|p| p.bf.as_ref()).and_then(|bf| bf.attack_target);
+                    .and_then(|p| p.bf()).and_then(|bf| bf.attack_target);
                 match target {
                     None => player_damage += remaining,
                     Some(pw) => *pw_damage.entry(pw).or_insert(0) += remaining,
@@ -3880,7 +3930,7 @@ fn do_combat_damage_pass(
         } else {
             // Unblocked.
             let target = state.objects.get(&atk_id)
-                .and_then(|p| p.bf.as_ref()).and_then(|bf| bf.attack_target);
+                .and_then(|p| p.bf()).and_then(|bf| bf.attack_target);
             match target {
                 None => player_damage += atk_pow,
                 Some(pw) => *pw_damage.entry(pw).or_insert(0) += atk_pow,
@@ -4026,7 +4076,7 @@ fn do_step(
             if !attackers.is_empty() {
                 let atk_descs: Vec<String> = attackers.iter().filter_map(|&atk_id| {
                     let p = state.objects.get(&atk_id)?;
-                    let target_name = p.bf.as_ref()?.attack_target
+                    let target_name = p.bf()?.attack_target
                         .and_then(|id| state.permanent_name(id))
                         .unwrap_or_else(|| "player".to_string());
                     Some(format!("{} → {}", p.catalog_key, target_name))
@@ -4102,7 +4152,7 @@ fn do_step(
             state.combat_attackers.clear();
             state.combat_blocks.clear();
             let all_ids: Vec<ObjId> = state.objects.values()
-                .filter(|c| c.zone == Zone::Battlefield)
+                .filter(|c| c.zone() == Zone::Battlefield)
                 .map(|c| c.id)
                 .collect();
             for id in all_ids {

@@ -76,7 +76,7 @@ pub(crate) fn enumerate_playable(state: &SimState, who: PlayerId) -> Vec<Playabl
             if ability.timing == ActivationTiming::Sorcery && !state.stack.is_empty() {
                 continue;
             }
-            let _source_untapped = card.bf.as_ref().map_or(false, |bf| !bf.tapped);
+            let _source_untapped = card.bf().map_or(false, |bf| !bf.tapped);
             let crate::ir::ability::CostBody::Ir(action) = &ability.costs;
             let schema = build_schema(action, state, who, card.id);
             if schema.is_none() {

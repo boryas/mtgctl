@@ -300,7 +300,7 @@ fn walk(
             }
             let candidates: Vec<ObjId> = state
                 .permanents_of(who)
-                .filter(|c| c.bf.is_some())
+                .filter(|c| c.bf().is_some())
                 .map(|c| c.id)
                 .filter(|&id| filter_matches_for_schema(filter, id, source, state))
                 .collect();
@@ -521,7 +521,7 @@ fn candidates_in_zone<'a>(
     use crate::ir::expr::ZoneKindSel;
     match zone {
         ZoneKindSel::Battlefield => Box::new(
-            state.permanents_of(who).filter(|c| c.bf.is_some()).map(|c| c.id),
+            state.permanents_of(who).filter(|c| c.bf().is_some()).map(|c| c.id),
         ),
         ZoneKindSel::Hand => Box::new(state.hand_of(who).map(|c| c.id)),
         ZoneKindSel::Graveyard => Box::new(state.graveyard_of(who).map(|c| c.id)),
@@ -597,6 +597,6 @@ pub(crate) fn in_hand(id: ObjId, state: &SimState) -> bool {
     state
         .objects
         .get(&id)
-        .map(|o| matches!(o.zone, crate::Zone::Hand { .. }))
+        .map(|o| matches!(o.zone(), crate::Zone::Hand { .. }))
         .unwrap_or(false)
 }

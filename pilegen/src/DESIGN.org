@@ -24,14 +24,24 @@ abilities, players — is identified by an ~ObjId~. ~ObjId::UNSET~ (0) is the nu
 
 * Objects and zones
 
-~GameObject~ carries ~catalog_key~ (card name), ~owner~, ~controller~, ~zone: Zone~,
-and optional ~bf: BattlefieldState~, ~spell: SpellState~, ~materialized: Option<CardDef>~.
+~GameObject~ carries ~catalog_key~ (card name), ~owner~, ~controller~, ~is_token~,
+~materialized: Option<CardDef>~, and a single ~role: ObjectRole~ that encodes *what kind*
+of object it is plus the per-kind state:
+- ~Library~ · ~Hand { known }~ · ~Graveyard~ · ~Exile { on_adventure }~ (payload-free)
+- ~Battlefield(BattlefieldState)~ — a permanent
+- ~StackSpell(SpellState)~ — a spell on the stack
+- ~StackAbility(AbilityState)~ — a card-less ability on the stack
+(Players/emblems will join as their own variants — kind is separate from zone, so a player
+needs no zone.) This makes illegal states (a permanent with no battlefield state, an ability
+in the graveyard) unrepresentable. Accessors: ~obj.zone()~ derives the coarse ~Zone~;
+~obj.bf()/.bf_mut()~, ~obj.spell()/.spell_mut()~, ~obj.ability()~ return the payload for the
+matching role. ~obj.set_zone(zone)~ transitions to a payload-free zone or the battlefield.
 
-~Zone~ is the stored zone (has fine variants like ~Hand { known }~, ~Exile { on_adventure }~).
+~Zone~ is the derived coarse zone (fine variants ~Hand { known }~, ~Exile { on_adventure }~).
 ~ZoneId~ is the coarse enum used in events and effects. ~card_zone_to_id~ converts between them.
 
-All zone transitions go through ~change_zone(id, to, state, t, actor, rng)~, which fires
-the event pipeline. Never move a card by writing to ~obj.zone~ directly.
+All zone transitions go through ~change_zone(id, to, state, t, actor)~, which fires the event
+pipeline. Never move a card by writing to ~obj.role~ directly outside the central writers.
 
 * Two views of a card's characteristics
 

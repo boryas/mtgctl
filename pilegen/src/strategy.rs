@@ -891,7 +891,7 @@ fn find_counter_in_legal(
     let target_owner_id = state.stack_item_owner(target_id);
     let target_owner = if target_owner_id == state.us.id { PlayerId::Us } else { PlayerId::Opp };
     let target_has_untapped_lands = state.permanents_of(target_owner).any(|c| {
-        c.bf.as_ref().map_or(false, |bf| !bf.tapped)
+        c.bf().map_or(false, |bf| !bf.tapped)
             && !state.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
     });
 
@@ -967,7 +967,7 @@ fn choose_ap_react(
     let top_is_counterable = state.stack_item_is_counterable(top_id);
     let top_owner = state.stack_item_owner(top_id);
     let top_chosen = state.objects.get(&top_id)
-        .and_then(|c| c.spell.as_ref())
+        .and_then(|c| c.spell())
         .map(|s| s.chosen_targets.clone())
         .unwrap_or_default();
     let us_id = state.us.id;
@@ -1094,7 +1094,7 @@ fn choose_ninjutsu_action(
 ) -> Option<LegalAction> {
     if state.hand_size(who) <= 0 { return None; }
     let has_unblocked = state.permanents_of(who)
-        .any(|c| c.bf.as_ref().map_or(false, |bf| bf.attacking && bf.unblocked));
+        .any(|c| c.bf().map_or(false, |bf| bf.attacking && bf.unblocked));
     if !has_unblocked { return None; }
     let ninjutsu_actions: Vec<&LegalAction> = legal.iter().filter(|a| {
         matches!(a, LegalAction::ActivateAbility { source_id, ability_index }
@@ -1192,7 +1192,7 @@ fn choose_on_board_action(
         let Some(def) = state.def_of(*source_id) else { continue };
         let Some(ab) = def.abilities().get(*ability_index) else { continue };
         let tapped = state.objects.get(source_id)
-            .and_then(|c| c.bf.as_ref())
+            .and_then(|c| c.bf())
             .map_or(false, |bf| bf.tapped);
 
         if def.is_land() {
@@ -1205,7 +1205,7 @@ fn choose_on_board_action(
             let is_postcombat = matches!(state.current_phase, Some(TurnPosition::Phase(PhaseKind::PostCombatMain)));
             if is_postcombat && state.stack.is_empty() {
                 let pw_activated = state.objects.get(source_id)
-                    .and_then(|c| c.bf.as_ref())
+                    .and_then(|c| c.bf())
                     .map_or(true, |bf| bf.pw_activated_this_turn);
                 if !pw_activated {
                     candidates.push(action.clone());
@@ -1321,7 +1321,7 @@ fn pick_attackers(
     let nap = ap.opp();
     // Compute NAP blocker stats (ObjId, power) for flying/non-flying checks.
     let nap_blockers: Vec<(ObjId, i32)> = state.permanents_of(nap)
-        .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped))
+        .filter(|p| !p.bf().map_or(false, |bf| bf.tapped))
         .filter_map(|p| {
             let def = state.def_of(p.id)?;
             if !def.is_creature() { return None; }
@@ -1338,7 +1338,7 @@ fn pick_attackers(
         .map(|p| p.id)
         .collect();
     state.permanents_of(ap)
-        .filter(|p| p.bf.as_ref().map_or(false, |bf| !bf.tapped && (!bf.entered_this_turn || creature_has_keyword(p.id, Keyword::Haste, state))))
+        .filter(|p| p.bf().map_or(false, |bf| !bf.tapped && (!bf.entered_this_turn || creature_has_keyword(p.id, Keyword::Haste, state))))
         .filter_map(|p| {
             let def = state.def_of(p.id)?;
             if !def.is_creature() { return None; }
@@ -1383,7 +1383,7 @@ fn pick_blockers(
     let mut blocks: Vec<(ObjId, ObjId)> = Vec::new();
     for &atk_id in &state.combat_attackers {
         let (atk_pow, atk_tgh) = match state.objects.get(&atk_id)
-            .and_then(|p| p.bf.as_ref().map(|_| ()))
+            .and_then(|p| p.bf().map(|_| ()))
         {
             Some(()) => {
                 let pow = state.def_of(atk_id)
@@ -1401,7 +1401,7 @@ fn pick_blockers(
         let atk_flies  = creature_has_keyword(atk_id, Keyword::Flying, state);
         let atk_shadow = creature_has_keyword(atk_id, Keyword::Shadow, state);
         let blocker = state.permanents_of(nap)
-            .filter(|p| !p.bf.as_ref().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
+            .filter(|p| !p.bf().map_or(false, |bf| bf.tapped) && !used_blockers.contains(&p.id))
             .find_map(|p| {
                 if !state.def_of(p.id).map(|d| d.is_creature()).unwrap_or(false) { return None; }
                 // Flying attackers can only be blocked by flying or reach (CR 702.9b, 702.17b).
@@ -1555,7 +1555,7 @@ pub(crate) fn collect_legal_actions(state: &SimState, who: PlayerId) -> Vec<Lega
 
     // ── Battlefield abilities (non-mana) ─────────────────────────────────────
     let perms: Vec<(ObjId, bool)> = state.permanents_of(who)
-        .map(|p| (p.id, !p.bf.as_ref().map_or(false, |bf| bf.tapped)))
+        .map(|p| (p.id, !p.bf().map_or(false, |bf| bf.tapped)))
         .collect();
     for (perm_id, untapped) in &perms {
         let Some(def) = state.def_of(*perm_id) else { continue };

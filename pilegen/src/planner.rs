@@ -439,7 +439,7 @@ pub(crate) fn make_turn_plan(
 pub(crate) fn extract_plan_state(state: &SimState, who: PlayerId) -> TurnPlanState {
     let pool = state.player(who).pool.clone();
     let tapped: HashSet<ObjId> = state.permanents_of(who)
-        .filter(|c| c.bf.as_ref().map_or(false, |bf| bf.tapped))
+        .filter(|c| c.bf().map_or(false, |bf| bf.tapped))
         .map(|c| c.id)
         .collect();
     let hand: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
