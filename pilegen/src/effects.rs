@@ -333,15 +333,6 @@ pub(crate) fn eff_exile_target(caster: PlayerId) -> Effect {
     }))
 }
 
-/// Exile all targets (for "exile any number of target ..." effects).
-pub(crate) fn eff_exile_all_targets(caster: PlayerId) -> Effect {
-    Effect(Arc::new(move |state, t, targets| {
-        for &id in targets {
-            change_zone(id, ZoneId::Exile, state, t, caster);
-        }
-    }))
-}
-
 /// Bounce the permanent in `targets[0]` to its controller's hand.
 pub(crate) fn eff_bounce_target(caster: PlayerId) -> Effect {
     Effect(Arc::new(move |state, t, targets| {

@@ -1926,18 +1926,36 @@ fn flusterstorm() -> CardDef {
 /// Exile any number of target spells. If an opponent cast three or more spells this turn,
 /// you may pay {0} rather than pay this spell's mana cost. CR 107.1c, CR 118.9.
 fn mindbreak_trap() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel};
+
     let mut c = simple("Mindbreak Trap", CardKind::Instant(SpellData {
         mana_cost: "2UU".to_string(),
-        modes: single_mode(
-            TargetSpec::Any(Box::new(TargetSpec::ObjectInZone {
-                controller: Who::Opp,
-                zone: ZoneId::Stack,
-                filter: ir_spell(),
-            })),
-            |who, _source_id, _x| eff_exile_all_targets(who),
-        ),
+        modes: None,
         ..Default::default()
     }), parse_colors("2UU", true, false), None);
+    // "Exile any number of target spells" — a generic object filter over the
+    // stack: exile each spell not controlled by the caster. (No strategic reason
+    // to spare any, so the "any number" choice collapses to "all opposing spells".)
+    let not_mine = Filter(Expr::Not(Box::new(Expr::Eq(
+        Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+        Box::new(Expr::Ctx(Ctx::Controller)),
+    ))));
+    c.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: ir_for_each_obj(
+                    ZoneKindSel::Stack,
+                    ir_and(ir_spell(), not_mine),
+                    Action::Exile { target: Expr::Ctx(Ctx::Var("v")), bind_as: None },
+                ),
+            }],
+        },
+        text: Some("Exile each spell an opponent controls. (Mindbreak Trap: exile any number of target spells.)"),
+    }];
     c.alternate_costs = vec![
         AlternateCost {
             // Mindbreak Trap's alt cost is "{0}" — pay nothing — when the
@@ -2251,23 +2269,29 @@ fn toxic_deluge() -> CardDef {
     def
 }
 
-/// "For each permanent on the battlefield matching `filter`, run `body`."
-/// `body` refers to the current match as `Ctx::Var("v")`. The board-wide
-/// counterpart to a targeted effect — used by sweeper sorceries (Rough //
-/// Tumble, Brotherhood's End). Protection/indestructibility live in the leaf
-/// primitives (`DealDamage` / `Destroy`), so this stays a pure iteration.
-fn ir_for_each_on_battlefield(filter: crate::ir::expr::Filter, body: crate::ir::action::Action) -> crate::ir::action::Action {
+/// "For each object in `zone` (across all players) matching `filter`, run `body`."
+/// `body` refers to the current match as `Ctx::Var("v")`. The generic
+/// object-set sweep: a board wipe is this over `Battlefield`, Mindbreak Trap is
+/// this over `Stack`. Protection/indestructibility live in the leaf primitives
+/// (`DealDamage` / `Destroy`), so this stays a pure iteration.
+fn ir_for_each_obj(zone: crate::ir::expr::ZoneKindSel, filter: crate::ir::expr::Filter,
+                   body: crate::ir::action::Action) -> crate::ir::action::Action {
     use crate::ir::action::Action;
-    use crate::ir::expr::{Expr, ZoneKindSel, ZoneSel};
+    use crate::ir::expr::{Expr, ZoneSel};
     Action::ForEach {
         over: Expr::AllObjects {
-            zone: ZoneSel::Global(ZoneKindSel::Battlefield),
+            zone: ZoneSel::Global(zone),
             bind: "it",
             filter: Box::new(filter.0),
         },
         bind: "v",
         body: Box::new(body),
     }
+}
+
+/// `ir_for_each_obj` specialized to the battlefield — the common board-wide sweep.
+fn ir_for_each_on_battlefield(filter: crate::ir::expr::Filter, body: crate::ir::action::Action) -> crate::ir::action::Action {
+    ir_for_each_obj(crate::ir::expr::ZoneKindSel::Battlefield, filter, body)
 }
 
 /// Brotherhood's End — {1}{R}{R} sorcery. Choose one:

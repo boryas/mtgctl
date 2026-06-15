@@ -5910,8 +5910,9 @@
         });
         state.stack.push(spell_b);
 
-        // Opponent casts Mindbreak Trap targeting both spells.
-        eff_exile_all_targets(PlayerId::Opp).call(&mut state, 1, &[spell_a, spell_b]);
+        // Opponent resolves Mindbreak Trap — exiles each spell the caster (Opp) doesn't control.
+        let mbt = catalog_card("Mindbreak Trap");
+        build_spell_effect(&mbt, PlayerId::Opp, ObjId::UNSET, 0, 0).1.call(&mut state, 1, &[]);
 
         assert!(matches!(state.objects[&spell_a].zone, CardZone::Exile { .. }),
             "spell A should be exiled");

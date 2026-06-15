@@ -176,10 +176,6 @@ pub(crate) enum TargetSpec {
     ObjectInZone { controller: Who, zone: ZoneId, filter: Filter },
     /// Any one of several sub-specs is a legal target (e.g. "any target" = creature | planeswalker | player).
     Union(Vec<TargetSpec>),
-    /// Composable "any number of targets" wrapper (CR 107.1c).
-    /// `legal_targets` delegates to the inner spec; `pick_targets` returns all legal targets
-    /// instead of applying the single-target heuristic.
-    Any(Box<TargetSpec>),
 }
 
 impl TargetSpec {
@@ -189,12 +185,10 @@ impl TargetSpec {
 
 
 /// Pick targets from a list of legal targets.
-/// `TargetSpec::Any(_)` → return all targets.
-/// Everything else → single-target heuristic: prefer killable creature, then
-/// planeswalker/player over non-killable creatures, then first available.
-pub(crate) fn pick_targets(spec: &TargetSpec, targets: &[ObjId], state: &SimState) -> Vec<ObjId> {
+/// Single-target heuristic: prefer killable creature, then planeswalker/player
+/// over non-killable creatures, then first available.
+pub(crate) fn pick_targets(_spec: &TargetSpec, targets: &[ObjId], state: &SimState) -> Vec<ObjId> {
     if targets.is_empty() { return vec![]; }
-    if matches!(spec, TargetSpec::Any(_)) { return targets.to_vec(); }
     // Single-target heuristic
     // Prefer a killable creature
     if let Some(&id) = targets.iter().find(|&&id| {
@@ -244,7 +238,6 @@ pub(crate) fn exclude_from_target_spec(spec: &TargetSpec, exclude_id: ObjId) -> 
         TargetSpec::Union(specs) => TargetSpec::Union(
             specs.iter().map(|s| exclude_from_target_spec(s, exclude_id)).collect(),
         ),
-        TargetSpec::Any(inner) => TargetSpec::Any(Box::new(exclude_from_target_spec(inner, exclude_id))),
     }
 }
 
@@ -287,7 +280,6 @@ pub(crate) fn legal_targets(spec: &TargetSpec, controller: PlayerId, source_id: 
             }
             result
         }
-        TargetSpec::Any(inner) => legal_targets(inner, controller, source_id, state),
     }
 }
 
