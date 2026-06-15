@@ -1268,7 +1268,7 @@ fn grafdiggers_cage() -> CardDef {
             timestamp: 0,
             filter: Arc::new(move |id, _ctr, state| {
                 state.objects.get(&id).map_or(false, |o| {
-                    o.zone == CardZone::Graveyard || o.zone == CardZone::Library
+                    o.zone == Zone::Graveyard || o.zone == Zone::Library
                 })
             }),
             modifier: Arc::new(|def, _state| { def.castable = false; }),
@@ -2018,7 +2018,7 @@ fn surgical_extraction() -> CardDef {
                     let to_exile: Vec<ObjId> = state.objects.values()
                         .filter(|o| o.catalog_key == name && o.owner == owner)
                         .filter(|o| matches!(o.zone,
-                            CardZone::Graveyard | CardZone::Hand { .. } | CardZone::Library
+                            Zone::Graveyard | Zone::Hand { .. } | Zone::Library
                         ))
                         .map(|o| o.id)
                         .collect();
@@ -3293,7 +3293,7 @@ fn lavinia_azorius_renegade() -> CardDef {
                 // Filter: only opponent's cards in hand (noncreature check in modifier).
                 filter: Arc::new(move |id, card_controller, state| {
                     card_controller == opp
-                        && state.objects.get(&id).map_or(false, |o| matches!(o.zone, CardZone::Hand { .. }))
+                        && state.objects.get(&id).map_or(false, |o| matches!(o.zone, Zone::Hand { .. }))
                 }),
                 modifier: Arc::new(move |def, state| {
                     if def.is_creature() || def.is_land() { return; }

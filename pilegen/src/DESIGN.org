@@ -24,10 +24,10 @@ abilities, players — is identified by an ~ObjId~. ~ObjId::UNSET~ (0) is the nu
 
 * Objects and zones
 
-~GameObject~ carries ~catalog_key~ (card name), ~owner~, ~controller~, ~zone: CardZone~,
+~GameObject~ carries ~catalog_key~ (card name), ~owner~, ~controller~, ~zone: Zone~,
 and optional ~bf: BattlefieldState~, ~spell: SpellState~, ~materialized: Option<CardDef>~.
 
-~CardZone~ is the stored zone (has fine variants like ~Hand { known }~, ~Exile { on_adventure }~).
+~Zone~ is the stored zone (has fine variants like ~Hand { known }~, ~Exile { on_adventure }~).
 ~ZoneId~ is the coarse enum used in events and effects. ~card_zone_to_id~ converts between them.
 
 All zone transitions go through ~change_zone(id, to, state, t, actor, rng)~, which fires

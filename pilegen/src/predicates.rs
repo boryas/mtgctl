@@ -307,17 +307,17 @@ fn objects_in_zone<'a>(
     state: &'a SimState,
 ) -> impl Iterator<Item = ObjId> + 'a {
     let zone_card = match zone {
-        ZoneId::Battlefield => CardZone::Battlefield,
-        ZoneId::Graveyard   => CardZone::Graveyard,
-        ZoneId::Stack       => CardZone::Stack,
-        ZoneId::Library     => CardZone::Library,
-        ZoneId::Exile       => CardZone::Exile { on_adventure: false },
-        ZoneId::Hand        => CardZone::Hand { known: false },
+        ZoneId::Battlefield => Zone::Battlefield,
+        ZoneId::Graveyard   => Zone::Graveyard,
+        ZoneId::Stack       => Zone::Stack,
+        ZoneId::Library     => Zone::Library,
+        ZoneId::Exile       => Zone::Exile { on_adventure: false },
+        ZoneId::Hand        => Zone::Hand { known: false },
     };
     state.objects.values()
         .filter(move |o| {
             let zone_match = match &o.zone {
-                CardZone::Hand { .. } => matches!(zone_card, CardZone::Hand { .. }),
+                Zone::Hand { .. } => matches!(zone_card, Zone::Hand { .. }),
                 z => z == &zone_card,
             };
             zone_match && (o.controller == who || o.owner == who)

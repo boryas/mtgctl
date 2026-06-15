@@ -193,12 +193,12 @@ pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: 
     state.objects.values()
         .filter(|o| {
             let zone_match = match spec.zone {
-                ZoneId::Exile => matches!(o.zone, CardZone::Exile { .. }),
-                ZoneId::Hand => matches!(o.zone, CardZone::Hand { .. }),
-                ZoneId::Battlefield => o.zone == CardZone::Battlefield,
-                ZoneId::Graveyard  => o.zone == CardZone::Graveyard,
-                ZoneId::Stack      => o.zone == CardZone::Stack,
-                ZoneId::Library    => o.zone == CardZone::Library,
+                ZoneId::Exile => matches!(o.zone, Zone::Exile { .. }),
+                ZoneId::Hand => matches!(o.zone, Zone::Hand { .. }),
+                ZoneId::Battlefield => o.zone == Zone::Battlefield,
+                ZoneId::Graveyard  => o.zone == Zone::Graveyard,
+                ZoneId::Stack      => o.zone == Zone::Stack,
+                ZoneId::Library    => o.zone == Zone::Library,
             };
             zone_match && (o.owner == target_who || o.controller == target_who)
         })
@@ -1273,7 +1273,7 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
 
     // Part 3: CE-granted triggers from materialized CardDefs (Layer 6 ability grants).
     let bf_ids: Vec<(ObjId, PlayerId)> = state.objects.iter()
-        .filter(|(_, o)| matches!(o.zone, CardZone::Battlefield) && o.materialized.is_some())
+        .filter(|(_, o)| matches!(o.zone, Zone::Battlefield) && o.materialized.is_some())
         .map(|(id, o)| (*id, o.controller))
         .collect();
     for (obj_id, controller) in bf_ids {
@@ -1293,12 +1293,12 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
         .iter()
         .map(|(id, o)| {
             let zk = match o.zone {
-                CardZone::Battlefield => crate::ir::expr::ZoneKindSel::Battlefield,
-                CardZone::Stack => crate::ir::expr::ZoneKindSel::Stack,
-                CardZone::Graveyard => crate::ir::expr::ZoneKindSel::Graveyard,
-                CardZone::Exile { .. } => crate::ir::expr::ZoneKindSel::Exile,
-                CardZone::Hand { .. } => crate::ir::expr::ZoneKindSel::Hand,
-                CardZone::Library => crate::ir::expr::ZoneKindSel::Library,
+                Zone::Battlefield => crate::ir::expr::ZoneKindSel::Battlefield,
+                Zone::Stack => crate::ir::expr::ZoneKindSel::Stack,
+                Zone::Graveyard => crate::ir::expr::ZoneKindSel::Graveyard,
+                Zone::Exile { .. } => crate::ir::expr::ZoneKindSel::Exile,
+                Zone::Hand { .. } => crate::ir::expr::ZoneKindSel::Hand,
+                Zone::Library => crate::ir::expr::ZoneKindSel::Library,
             };
             (*id, o.controller, o.catalog_key.clone(), zk)
         })

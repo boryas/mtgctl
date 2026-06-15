@@ -270,7 +270,7 @@ impl std::fmt::Display for PlayerId {
 
 /// Zone a card currently occupies.
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum CardZone {
+pub(crate) enum Zone {
     Library,
     Hand { known: bool },   // known = identity visible to opponent
     Stack,
@@ -365,7 +365,7 @@ struct GameObject {
     catalog_key: String,  // foreign key into the CardDef catalog
     owner: PlayerId,
     controller: PlayerId,
-    zone: CardZone,
+    zone: Zone,
     is_token: bool,
     bf: Option<BattlefieldState>,      // Some only when zone == Battlefield
     spell: Option<SpellState>,         // Some only when zone == Stack (spell on stack)
@@ -387,7 +387,7 @@ impl GameObject {
     fn new(id: ObjId, catalog_key: impl Into<String>, owner: PlayerId) -> Self {
         GameObject {
             id, catalog_key: catalog_key.into(), controller: owner, owner,
-            zone: CardZone::Library, is_token: false, bf: None, spell: None,
+            zone: Zone::Library, is_token: false, bf: None, spell: None,
             ability: None, materialized: None, counters: HashMap::new(), ci_timestamp: 0,
         }
     }
@@ -544,14 +544,14 @@ pub(crate) type TriggerPredicate =
 /// do_effect has already moved the card to the battlefield.
 pub(crate) fn tp_on_battlefield() -> TriggerPredicate {
     Arc::new(|src, state| {
-        state.objects.get(&src).map_or(false, |o| matches!(o.zone, CardZone::Battlefield))
+        state.objects.get(&src).map_or(false, |o| matches!(o.zone, Zone::Battlefield))
     })
 }
 
 /// Trigger predicate: source is on the stack (e.g. Storm).
 pub(crate) fn tp_on_stack() -> TriggerPredicate {
     Arc::new(|src, state| {
-        state.objects.get(&src).map_or(false, |o| matches!(o.zone, CardZone::Stack))
+        state.objects.get(&src).map_or(false, |o| matches!(o.zone, Zone::Stack))
     })
 }
 
@@ -892,7 +892,7 @@ pub(crate) fn recompute(state: &mut SimState) {
         // (CEs may override — e.g. Dauthi sets castable=true on exiled cards).
         {
             let obj = state.objects.get(&id).unwrap();
-            def.castable = matches!(obj.zone, CardZone::Hand { .. });
+            def.castable = matches!(obj.zone, Zone::Hand { .. });
         }
 
         state.objects.get_mut(&id).unwrap().materialized = Some(def);
@@ -904,7 +904,7 @@ pub(crate) fn recompute(state: &mut SimState) {
     // continuous_instances — only ephemeral CIs live there.
     let mut static_cis: Vec<ContinuousInstance> = Vec::new();
     for (&id, obj) in &state.objects {
-        if !matches!(obj.zone, CardZone::Battlefield) { continue; }
+        if !matches!(obj.zone, Zone::Battlefield) { continue; }
         let Some(card_def) = state.catalog.get(&obj.catalog_key) else { continue };
         for factory in &card_def.static_ability_defs {
             let mut ci = factory(id, obj.controller);
@@ -1279,7 +1279,7 @@ pub(crate) fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) ->
     let find_bf = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize, usize)> {
         state.objects.iter().find_map(|(id, c)| {
             if used.contains(id) { return None; }
-            if c.controller != who || c.zone != CardZone::Battlefield { return None; }
+            if c.controller != who || c.zone != Zone::Battlefield { return None; }
             let bf = c.bf.as_ref()?;
             let mas = state.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, ma) = mas.iter().enumerate().find(|(_, ma)| {
@@ -1765,36 +1765,36 @@ impl SimState {
     }
 
     fn permanents_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.controller == who && c.zone == CardZone::Battlefield)
+        self.objects.values().filter(move |c| c.controller == who && c.zone == Zone::Battlefield)
     }
 
     fn permanent_bf(&self, id: ObjId) -> Option<&BattlefieldState> {
         self.objects.get(&id)
-            .filter(|c| c.zone == CardZone::Battlefield)
+            .filter(|c| c.zone == Zone::Battlefield)
             .and_then(|c| c.bf.as_ref())
     }
 
     fn permanent_bf_mut(&mut self, id: ObjId) -> Option<&mut BattlefieldState> {
         self.objects.get_mut(&id)
-            .filter(|c| c.zone == CardZone::Battlefield)
+            .filter(|c| c.zone == Zone::Battlefield)
             .and_then(|c| c.bf.as_mut())
     }
 
     fn hand_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, CardZone::Hand { .. }))
+        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, Zone::Hand { .. }))
     }
 
     fn graveyard_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && c.zone == CardZone::Graveyard)
+        self.objects.values().filter(move |c| c.owner == who && c.zone == Zone::Graveyard)
     }
 
     fn exile_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, CardZone::Exile { .. }))
+        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone, Zone::Exile { .. }))
     }
 
     /// Cards owned by `who` that are currently in exile with adventure status.
     fn on_adventure_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && c.zone == (CardZone::Exile { on_adventure: true }))
+        self.objects.values().filter(move |c| c.owner == who && c.zone == (Zone::Exile { on_adventure: true }))
     }
 
     /// Iterate library in deck order (front = top). Yields `&GameObject` for each ObjId.
@@ -1813,25 +1813,25 @@ impl SimState {
 
     /// Mutate zone field only — no triggers, no logging. Use `change_zone` for that.
     /// Maintains `library_order` when entering or leaving Library zone.
-    fn set_card_zone(&mut self, id: ObjId, zone: CardZone) {
+    fn set_card_zone(&mut self, id: ObjId, zone: Zone) {
         let (old_zone, owner) = match self.objects.get(&id) {
             Some(c) => (c.zone, c.owner),
             None => return,
         };
-        if old_zone == CardZone::Library && zone != CardZone::Library {
+        if old_zone == Zone::Library && zone != Zone::Library {
             self.player_mut(owner).library_order.retain(|&x| x != id);
         }
-        if zone == CardZone::Library && old_zone != CardZone::Library {
+        if zone == Zone::Library && old_zone != Zone::Library {
             self.player_mut(owner).library_order.push_back(id);
         }
-        if zone == CardZone::Graveyard && old_zone != CardZone::Graveyard {
+        if zone == Zone::Graveyard && old_zone != Zone::Graveyard {
             self.graveyard_order.push(id);
-        } else if zone != CardZone::Graveyard && old_zone == CardZone::Graveyard {
+        } else if zone != Zone::Graveyard && old_zone == Zone::Graveyard {
             self.graveyard_order.retain(|&x| x != id);
         }
         if let Some(card) = self.objects.get_mut(&id) {
             card.zone = zone;
-            if !matches!(zone, CardZone::Battlefield) {
+            if !matches!(zone, Zone::Battlefield) {
                 card.bf = None;
             }
         }
@@ -1929,7 +1929,7 @@ impl SimState {
     /// Return the name of the permanent with the given id.
     fn permanent_name(&self, id: ObjId) -> Option<String> {
         self.objects.get(&id)
-            .filter(|c| c.zone == CardZone::Battlefield)
+            .filter(|c| c.zone == Zone::Battlefield)
             .map(|c| self.display_name(c))
     }
 
@@ -2042,7 +2042,7 @@ impl SimState {
     /// Every object with zone==Stack — spell or ability — is a legal target;
     /// "can't be countered" is enforced at resolution, not targeting (CR 608.2b).
     pub(crate) fn stack_item_is_counterable(&self, id: ObjId) -> bool {
-        self.objects.get(&id).map_or(false, |o| o.zone == CardZone::Stack)
+        self.objects.get(&id).map_or(false, |o| o.zone == Zone::Stack)
     }
 
     /// Place an ability (a card-less stack object) on the stack. `id` must be freshly
@@ -2056,7 +2056,7 @@ impl SimState {
         ability: AbilityState,
     ) {
         let mut obj = GameObject::new(id, source_name, controller);
-        obj.zone = CardZone::Stack;
+        obj.zone = Zone::Stack;
         obj.ability = Some(ability);
         self.objects.insert(id, obj);
         self.stack.push(id);
@@ -2087,13 +2087,13 @@ impl SimState {
     /// Write hand/graveyard/exile zones for `who` to the formatter — one line per zone.
     fn fmt_player_zones(&self, f: &mut std::fmt::Formatter<'_>, who: PlayerId, reveal_hand: bool) -> std::fmt::Result {
         let mut visible: Vec<&str> = self.hand_of(who)
-            .filter(|c| reveal_hand || matches!(c.zone, CardZone::Hand { known: true }))
+            .filter(|c| reveal_hand || matches!(c.zone, Zone::Hand { known: true }))
             .map(|c| c.catalog_key.as_str())
             .collect();
         visible.sort();
         let hidden = if reveal_hand { 0 } else {
             self.hand_of(who)
-                .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
+                .filter(|c| matches!(c.zone, Zone::Hand { known: false }))
                 .count()
         };
         if visible.len() + hidden > 0 {
@@ -2104,7 +2104,7 @@ impl SimState {
 
         let gy: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who && c.zone == CardZone::Graveyard)
+            .filter(|c| c.owner == who && c.zone == Zone::Graveyard)
             .map(|c| c.catalog_key.clone())
             .collect();
         if !gy.is_empty() {
@@ -2112,7 +2112,7 @@ impl SimState {
         }
 
         let mut exile: Vec<String> = self.exile_of(who)
-            .map(|c| if matches!(c.zone, CardZone::Exile { on_adventure: true }) {
+            .map(|c| if matches!(c.zone, Zone::Exile { on_adventure: true }) {
                 format!("{} (adv)", c.catalog_key)
             } else {
                 c.catalog_key.clone()
@@ -2337,11 +2337,11 @@ impl SimState {
             (all, 0)
         } else {
             let known: Vec<CardResult> = self.hand_of(who)
-                .filter(|c| matches!(c.zone, CardZone::Hand { known: true }))
+                .filter(|c| matches!(c.zone, Zone::Hand { known: true }))
                 .map(|c| CardResult { name: c.catalog_key.clone() })
                 .collect();
             let hidden = self.hand_of(who)
-                .filter(|c| matches!(c.zone, CardZone::Hand { known: false }))
+                .filter(|c| matches!(c.zone, Zone::Hand { known: false }))
                 .count();
             (known, hidden)
         };
@@ -2359,7 +2359,7 @@ impl SimState {
 
         let mut graveyard: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who && c.zone == CardZone::Graveyard)
+            .filter(|c| c.owner == who && c.zone == Zone::Graveyard)
             .map(|c| c.catalog_key.clone())
             .collect();
 
@@ -2371,7 +2371,7 @@ impl SimState {
         }
 
         let exile: Vec<String> = self.exile_of(who)
-            .map(|c| if matches!(c.zone, CardZone::Exile { on_adventure: true }) {
+            .map(|c| if matches!(c.zone, Zone::Exile { on_adventure: true }) {
                 format!("{} (adv)", c.catalog_key)
             } else {
                 c.catalog_key.clone()
@@ -2408,7 +2408,7 @@ fn sim_play_land(
 ) {
     if state.player(who).lands_played_this_turn >= 1 { return; }
     let land_name = match state.objects.get(&card_id) {
-        Some(c) if matches!(c.zone, CardZone::Hand { .. }) => c.catalog_key.clone(),
+        Some(c) if matches!(c.zone, Zone::Hand { .. }) => c.catalog_key.clone(),
         _ => return,
     };
     state.log(t, who, format!("Play {} [hand: {}]", land_name, state.hand_size(who)));
@@ -2426,7 +2426,7 @@ fn sim_discard_to_limit(state: &mut SimState, t: u8, who: PlayerId) {
         // Discard n cards (move from Hand to Graveyard).
         let to_discard: Vec<ObjId> = state.hand_of(who).take(n as usize).map(|c| c.id).collect();
         for id in to_discard {
-            state.set_card_zone(id, CardZone::Graveyard);
+            state.set_card_zone(id, Zone::Graveyard);
         }
         state.log(t, who, format!("Discard {} to hand limit", n));
     }
@@ -2440,14 +2440,14 @@ fn sim_discard_to_limit(state: &mut SimState, t: u8, who: PlayerId) {
 
 // choose_permanent_target is defined in predicates.rs
 
-pub(crate) fn card_zone_to_id(zone: &CardZone) -> ZoneId {
+pub(crate) fn card_zone_to_id(zone: &Zone) -> ZoneId {
     match zone {
-        CardZone::Library        => ZoneId::Library,
-        CardZone::Hand { .. }    => ZoneId::Hand,
-        CardZone::Stack          => ZoneId::Stack,
-        CardZone::Battlefield    => ZoneId::Battlefield,
-        CardZone::Graveyard      => ZoneId::Graveyard,
-        CardZone::Exile { .. }   => ZoneId::Exile,
+        Zone::Library        => ZoneId::Library,
+        Zone::Hand { .. }    => ZoneId::Hand,
+        Zone::Stack          => ZoneId::Stack,
+        Zone::Battlefield    => ZoneId::Battlefield,
+        Zone::Graveyard      => ZoneId::Graveyard,
+        Zone::Exile { .. }   => ZoneId::Exile,
     }
 }
 
@@ -2604,12 +2604,12 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
             let to = *to;
 
             let new_zone = match to {
-                ZoneId::Graveyard   => CardZone::Graveyard,
-                ZoneId::Exile       => CardZone::Exile { on_adventure: false },
-                ZoneId::Hand        => CardZone::Hand { known: false },
-                ZoneId::Library     => CardZone::Library,
-                ZoneId::Stack       => CardZone::Stack,
-                ZoneId::Battlefield => CardZone::Battlefield,
+                ZoneId::Graveyard   => Zone::Graveyard,
+                ZoneId::Exile       => Zone::Exile { on_adventure: false },
+                ZoneId::Hand        => Zone::Hand { known: false },
+                ZoneId::Library     => Zone::Library,
+                ZoneId::Stack       => Zone::Stack,
+                ZoneId::Battlefield => Zone::Battlefield,
             };
 
             // Read owner and old zone before mutating, to maintain library_order.
@@ -2619,13 +2619,13 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
             };
             let zone_changed = old_zone != new_zone;
             if zone_changed {
-                if new_zone == CardZone::Graveyard { state.graveyard_order.push(id); }
+                if new_zone == Zone::Graveyard { state.graveyard_order.push(id); }
                 else { state.graveyard_order.retain(|&x| x != id); }
                 // Maintain library_order: remove from old library, add to new library.
-                if old_zone == CardZone::Library {
+                if old_zone == Zone::Library {
                     state.player_mut(owner).library_order.retain(|&x| x != id);
                 }
-                if new_zone == CardZone::Library {
+                if new_zone == Zone::Library {
                     state.player_mut(owner).library_order.push_back(id);
                 }
             }
@@ -2658,7 +2658,7 @@ fn do_effect(event: &GameEvent, state: &mut SimState) {
             let controller = *controller;
             let top_id = state.player_mut(controller).library_order.pop_front();
             if let Some(card_id) = top_id {
-                state.set_card_zone(card_id, CardZone::Hand { known: false });
+                state.set_card_zone(card_id, Zone::Hand { known: false });
             }
         }
         GameEvent::ManaProduced { who, ref spec } => {
@@ -2798,7 +2798,7 @@ fn pay_ability_cost(
     // Hand-sourced abilities (ninjutsu): move source from hand to Stack zone before paying costs.
     if is_hand_source {
         if let Some(card) = state.objects.get_mut(&source_id) {
-            card.zone = CardZone::Stack;
+            card.zone = Zone::Stack;
         }
     }
 
@@ -2899,7 +2899,7 @@ fn cast_spell(
         };
         state.log(t, who, format!("Cast {} ({}, {}){} [hand: {}]", adv.name, adv.mana_cost(), name, adv_target_label, state.hand_size(who)));
         if let Some(card) = state.objects.get_mut(&card_id) {
-            card.zone = CardZone::Stack;
+            card.zone = Zone::Stack;
             card.spell = Some(SpellState {
                 effect: Some(adv_eff),
                 chosen_targets: adv_targets,
@@ -2974,7 +2974,7 @@ fn cast_spell(
 
     // Move to Stack zone.
     if let Some(card) = state.objects.get_mut(&card_id) {
-        card.zone = CardZone::Stack;
+        card.zone = Zone::Stack;
     }
 
     // Pay cost and build a log label.
@@ -3203,13 +3203,13 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
     // card-less ability object).
     for &id in &state.stack {
         let in_objects = state.objects.get(&id)
-            .map_or(false, |o| o.zone == CardZone::Stack);
+            .map_or(false, |o| o.zone == Zone::Stack);
         check!(in_objects, state, label,
             "stack item {id:?} not an object with zone==Stack");
     }
     // Every object with zone==Stack must be in state.stack (no stranded spells).
     for (&id, obj) in &state.objects {
-        if obj.zone == CardZone::Stack {
+        if obj.zone == Zone::Stack {
             check!(state.stack.contains(&id), state, label,
                 "object {:?} has zone==Stack but is not in state.stack", obj.catalog_key);
         }
@@ -3218,21 +3218,21 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
     // ── Zone-tracking arrays match actual zones ────────────────────────
     for &id in &state.graveyard_order {
         check!(
-            state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Graveyard),
+            state.objects.get(&id).map_or(false, |o| o.zone == Zone::Graveyard),
             state, label,
             "graveyard_order contains {id:?} but object zone is not Graveyard");
     }
     for who in [PlayerId::Us, PlayerId::Opp] {
         for &id in &state.player(who).library_order {
             check!(
-                state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Library),
+                state.objects.get(&id).map_or(false, |o| o.zone == Zone::Library),
                 state, label,
                 "library_order contains {id:?} but object zone is not Library");
         }
     }
     // Reverse: every Library-zone object should be in its owner's library_order.
     for obj in state.objects.values() {
-        if obj.zone == CardZone::Library {
+        if obj.zone == Zone::Library {
             check!(
                 state.player(obj.owner).library_order.contains(&obj.id),
                 state, label,
@@ -3242,7 +3242,7 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
 
     // ── Battlefield objects have BattlefieldState and vice versa ────────
     for obj in state.objects.values() {
-        if obj.zone == CardZone::Battlefield {
+        if obj.zone == Zone::Battlefield {
             check!(obj.bf.is_some(), state, label,
                 "object {:?} on battlefield without BattlefieldState", obj.catalog_key);
         } else {
@@ -3292,7 +3292,7 @@ fn check_state_based_actions(
 
         // SBA: token in a zone other than the battlefield ceases to exist (rule 704.5d).
         let dead_tokens: Vec<ObjId> = state.objects.values()
-            .filter(|c| c.is_token && c.zone != CardZone::Battlefield)
+            .filter(|c| c.is_token && c.zone != Zone::Battlefield)
             .map(|c| c.id)
             .collect();
         for id in dead_tokens {
@@ -3301,7 +3301,7 @@ fn check_state_based_actions(
             any = true;
         }
         check!(
-            state.objects.values().all(|c| !c.is_token || c.zone == CardZone::Battlefield),
+            state.objects.values().all(|c| !c.is_token || c.zone == Zone::Battlefield),
             state, "sba",
             "token found outside battlefield after SBA cleanup"
         );
@@ -3386,7 +3386,7 @@ pub(crate) fn do_create_token(token_key: &str, controller: PlayerId, state: &mut
         catalog_key: token_key.to_string(),
         owner: controller,
         controller,
-        zone: CardZone::Battlefield,
+        zone: Zone::Battlefield,
         is_token: true,
         spell: None,
         bf: Some(BattlefieldState::new()),
@@ -3459,7 +3459,7 @@ fn resolve_top_of_stack(
                 .unwrap_or(name.as_str())
                 .to_string();
             if let Some(card_obj) = state.objects.get_mut(&id) {
-                card_obj.zone = CardZone::Exile { on_adventure: true };
+                card_obj.zone = Zone::Exile { on_adventure: true };
                 card_obj.spell = None;
             }
             state.log(t, owner, format!("{} resolves → {} on adventure in exile", back_name, name));
@@ -3787,7 +3787,7 @@ fn do_combat_damage_pass(
     let block_pairs = state.combat_blocks.clone();
 
     let alive = |id: ObjId, state: &SimState| -> bool {
-        state.objects.get(&id).map(|o| o.zone == CardZone::Battlefield).unwrap_or(false)
+        state.objects.get(&id).map(|o| o.zone == Zone::Battlefield).unwrap_or(false)
     };
 
     // Group blockers per attacker, preserving combat_blocks order (CR 509.1h).
@@ -4102,7 +4102,7 @@ fn do_step(
             state.combat_attackers.clear();
             state.combat_blocks.clear();
             let all_ids: Vec<ObjId> = state.objects.values()
-                .filter(|c| c.zone == CardZone::Battlefield)
+                .filter(|c| c.zone == Zone::Battlefield)
                 .map(|c| c.id)
                 .collect();
             for id in all_ids {
@@ -4293,7 +4293,7 @@ pub fn simulate_game(
             mulligans[i] += 1;
             // Return hand to library via set_card_zone (maintains library_order).
             let hand_ids: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
-            for id in hand_ids { state.set_card_zone(id, CardZone::Library); }
+            for id in hand_ids { state.set_card_zone(id, Zone::Library); }
             // Shuffle library after returning cards.
             state.shuffle_library(who);
             state.player_mut(who).draws_this_turn = 0;
@@ -4305,7 +4305,7 @@ pub fn simulate_game(
         if n > 0 {
             let to_bottom = state.with_strategy(who, |s, st| s.london_bottom(st, n));
             for id in to_bottom {
-                state.set_card_zone(id, CardZone::Library);
+                state.set_card_zone(id, Zone::Library);
                 // set_card_zone pushes to back of library_order — that's already "bottom". Good.
             }
         }

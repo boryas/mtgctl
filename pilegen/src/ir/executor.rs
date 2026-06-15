@@ -13,7 +13,7 @@ use crate::ir::ce::CEMod;
 use crate::ir::context::{Ctx, GameCtx};
 use crate::ir::expr::{Expr, Filter, Value, ZoneKindSel, ZoneSel};
 use crate::{
-    change_zone, destroy_one, CardKind, CardType, CardZone, ChoiceRequest, ChoiceResult, Keyword,
+    change_zone, destroy_one, CardKind, CardType, Zone, ChoiceRequest, ChoiceResult, Keyword,
     ObjId, PlayerId, SimState, ZoneId,
 };
 use std::collections::HashMap;
@@ -488,8 +488,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             let ids = obj_ids_of(eval_expr(what, state, env));
             for id in ids {
                 if let Some(obj) = state.objects.get_mut(&id) {
-                    if matches!(obj.zone, CardZone::Hand { .. }) {
-                        obj.zone = CardZone::Hand { known: true };
+                    if matches!(obj.zone, Zone::Hand { .. }) {
+                        obj.zone = Zone::Hand { known: true };
                     }
                 }
             }
@@ -524,8 +524,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 let ids: Vec<ObjId> = state.library_of(who).take(n).map(|o| o.id).collect();
                 for id in ids {
                     if let Some(obj) = state.objects.get_mut(&id) {
-                        if matches!(obj.zone, CardZone::Hand { .. }) {
-                            obj.zone = CardZone::Hand { known: true };
+                        if matches!(obj.zone, Zone::Hand { .. }) {
+                            obj.zone = Zone::Hand { known: true };
                         }
                     }
                 }
@@ -683,7 +683,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
                 for id in remaining {
                     if let Some(card) = state.objects.get_mut(&id) {
-                        card.zone = CardZone::Hand { known: false };
+                        card.zone = Zone::Hand { known: false };
                     }
                 }
             }
@@ -1812,12 +1812,12 @@ fn enumerate_kind_all_players(state: &SimState, kind: ZoneKindSel) -> Vec<ObjId>
 
 fn obj_in_kind(o: &crate::GameObject, kind: ZoneKindSel) -> bool {
     match (kind, &o.zone) {
-        (ZoneKindSel::Stack, CardZone::Stack) => true,
-        (ZoneKindSel::Hand, CardZone::Hand { .. }) => true,
-        (ZoneKindSel::Library, CardZone::Library) => true,
-        (ZoneKindSel::Battlefield, CardZone::Battlefield) => true,
-        (ZoneKindSel::Graveyard, CardZone::Graveyard) => true,
-        (ZoneKindSel::Exile, CardZone::Exile { .. }) => true,
+        (ZoneKindSel::Stack, Zone::Stack) => true,
+        (ZoneKindSel::Hand, Zone::Hand { .. }) => true,
+        (ZoneKindSel::Library, Zone::Library) => true,
+        (ZoneKindSel::Battlefield, Zone::Battlefield) => true,
+        (ZoneKindSel::Graveyard, Zone::Graveyard) => true,
+        (ZoneKindSel::Exile, Zone::Exile { .. }) => true,
         _ => false,
     }
 }
@@ -1908,12 +1908,12 @@ fn toughness_of_obj(state: &SimState, id: ObjId) -> Option<i32> {
 fn zone_id_of_obj(state: &SimState, id: ObjId) -> Option<ZoneId> {
     let obj = state.objects.get(&id)?;
     Some(match obj.zone {
-        CardZone::Library => ZoneId::Library,
-        CardZone::Hand { .. } => ZoneId::Hand,
-        CardZone::Stack => ZoneId::Stack,
-        CardZone::Battlefield => ZoneId::Battlefield,
-        CardZone::Graveyard => ZoneId::Graveyard,
-        CardZone::Exile { .. } => ZoneId::Exile,
+        Zone::Library => ZoneId::Library,
+        Zone::Hand { .. } => ZoneId::Hand,
+        Zone::Stack => ZoneId::Stack,
+        Zone::Battlefield => ZoneId::Battlefield,
+        Zone::Graveyard => ZoneId::Graveyard,
+        Zone::Exile { .. } => ZoneId::Exile,
     })
 }
 

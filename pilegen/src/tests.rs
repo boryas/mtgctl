@@ -40,7 +40,7 @@
             catalog_key: name.to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Battlefield,
+            zone: Zone::Battlefield,
             is_token: false,
             spell: None,
             bf: Some(bf),
@@ -75,7 +75,7 @@
             catalog_key: def.name.clone(),
             owner: who,
             controller: who,
-            zone: CardZone::Battlefield,
+            zone: Zone::Battlefield,
             is_token: false,
             spell: None,
             bf: Some(bf),
@@ -104,7 +104,7 @@
             catalog_key: name.to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             spell: None,
             bf: None,
@@ -129,7 +129,7 @@
             catalog_key: name.to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Graveyard,
+            zone: Zone::Graveyard,
             is_token: false,
             spell: None,
             bf: None,
@@ -147,7 +147,7 @@
             catalog_key: def.name.clone(),
             owner: who,
             controller: who,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: None,
             bf: None,
@@ -165,7 +165,7 @@
             catalog_key: name.to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Library,
+            zone: Zone::Library,
             is_token: false,
             spell: None,
             bf: None,
@@ -692,14 +692,14 @@
         let mut state = make_state();
         let a = add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
         let b = add_hand_card(&mut state, PlayerId::Opp, "Island");
-        assert!(matches!(state.objects[&a].zone, CardZone::Hand { known: false }));
-        assert!(matches!(state.objects[&b].zone, CardZone::Hand { known: false }));
+        assert!(matches!(state.objects[&a].zone, Zone::Hand { known: false }));
+        assert!(matches!(state.objects[&b].zone, Zone::Hand { known: false }));
 
         eff_reveal_hand(PlayerId::Us, Who::Opp).call(&mut state, 1, &[]);
 
-        assert!(matches!(state.objects[&a].zone, CardZone::Hand { known: true }),
+        assert!(matches!(state.objects[&a].zone, Zone::Hand { known: true }),
                 "reveal should mark card a as known");
-        assert!(matches!(state.objects[&b].zone, CardZone::Hand { known: true }),
+        assert!(matches!(state.objects[&b].zone, Zone::Hand { known: true }),
                 "reveal should mark card b as known");
     }
 
@@ -719,7 +719,7 @@
 
         assert_eq!(state.hand_size(PlayerId::Opp), 2);
         for card in state.hand_of(PlayerId::Opp) {
-            assert!(matches!(card.zone, CardZone::Hand { known: true }),
+            assert!(matches!(card.zone, Zone::Hand { known: true }),
                     "{} should be known after Thoughtseize", card.catalog_key);
         }
     }
@@ -733,7 +733,7 @@
         let c = add_hand_card(&mut state, PlayerId::Opp, "Island");
         // Mark all as known (as if previously revealed by Thoughtseize).
         for id in [a, b, c] {
-            state.objects.get_mut(&id).unwrap().zone = CardZone::Hand { known: true };
+            state.objects.get_mut(&id).unwrap().zone = Zone::Hand { known: true };
         }
         add_library_card(&mut state, PlayerId::Opp, "Swamp");
         add_library_card(&mut state, PlayerId::Opp, "Swamp");
@@ -747,7 +747,7 @@
         eff_draw(PlayerId::Opp, 3).then(eff_put_back(PlayerId::Opp, 2)).call(&mut state, 1, &[]);
 
         for card in state.hand_of(PlayerId::Opp) {
-            assert!(matches!(card.zone, CardZone::Hand { known: false }),
+            assert!(matches!(card.zone, Zone::Hand { known: false }),
                     "{} should be unknown after Brainstorm put-back", card.catalog_key);
         }
     }
@@ -764,7 +764,7 @@
 
         assert_eq!(state.hand_size(PlayerId::Opp), 1);
         let remaining = state.hand_of(PlayerId::Opp).next().unwrap();
-        assert!(matches!(remaining.zone, CardZone::Hand { known: false }),
+        assert!(matches!(remaining.zone, Zone::Hand { known: false }),
                 "Hymn should NOT reveal remaining cards");
     }
 
@@ -1141,7 +1141,7 @@
         // Simulate the adventure resolution inline: no effect, just exile.
         let borrower_id = state.alloc_id();
         let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", PlayerId::Us);
-        borrower_obj.zone = CardZone::Exile { on_adventure: true };
+        borrower_obj.zone = Zone::Exile { on_adventure: true };
         state.objects.insert(borrower_id, borrower_obj);
 
         assert!(state.exile_of(PlayerId::Us).any(|c| c.catalog_key == "Brazen Borrower"), "Borrower in exile");
@@ -1162,7 +1162,7 @@
         // Then exile the card to on_adventure.
         let borrower_id = state.alloc_id();
         let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", PlayerId::Us);
-        borrower_obj.zone = CardZone::Exile { on_adventure: true };
+        borrower_obj.zone = Zone::Exile { on_adventure: true };
         state.objects.insert(borrower_id, borrower_obj);
 
         assert!(state.permanents_of(PlayerId::Opp).count() == 0, "Bowmasters bounced off board");
@@ -1195,7 +1195,7 @@
             state.current_ap = state.us.id;
             let borrower_id = state.alloc_id();
             let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", PlayerId::Us);
-            borrower_obj.zone = CardZone::Exile { on_adventure: true };
+            borrower_obj.zone = Zone::Exile { on_adventure: true };
             state.objects.insert(borrower_id, borrower_obj);
             // 1UU mana: two Islands + one generic (Swamp)
             island_land(&mut state, PlayerId::Us);
@@ -2107,7 +2107,7 @@
         add_perm(&mut state, PlayerId::Us, "Murktide Regent", BattlefieldState { counters: 0, ..BattlefieldState::new() });
         // Add the card being exiled so murktide_check can look up its type.
         let consider_id = add_default_perm(&mut state, PlayerId::Us, "Consider");
-        state.objects.get_mut(&consider_id).unwrap().zone = CardZone::Exile { on_adventure: false };
+        state.objects.get_mut(&consider_id).unwrap().zone = Zone::Exile { on_adventure: false };
 
         let ev = GameEvent::ZoneChange {
             id: consider_id,
@@ -2131,7 +2131,7 @@
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Us, "Murktide Regent");
         let island_id = add_default_perm(&mut state, PlayerId::Us, "Island");
-        state.objects.get_mut(&island_id).unwrap().zone = CardZone::Exile { on_adventure: false };
+        state.objects.get_mut(&island_id).unwrap().zone = Zone::Exile { on_adventure: false };
 
         let ev = GameEvent::ZoneChange {
             id: island_id,
@@ -2435,7 +2435,7 @@
             catalog_key: "Brainstorm".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_draw(PlayerId::Us, 3).then(eff_put_back(PlayerId::Us, 2))),
@@ -2470,7 +2470,7 @@
         let delta_id = add_perm(&mut state, PlayerId::Us, "Polluted Delta", BattlefieldState::new());
 
         // Simulate paying the sacrifice cost: permanent leaves the battlefield.
-        state.set_card_zone(delta_id, CardZone::Graveyard);
+        state.set_card_zone(delta_id, Zone::Graveyard);
         state.us.life -= 1;
 
         // With the source gone, collect_legal_actions must never offer ActivateAbility for that id.
@@ -2494,7 +2494,7 @@
         // Move hand card to graveyard — Leyline should redirect to exile
         change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
         // Card should be in Exile, not Graveyard
-        assert_eq!(state.objects[&hand_id].zone, CardZone::Exile { on_adventure: false });
+        assert_eq!(state.objects[&hand_id].zone, Zone::Exile { on_adventure: false });
     }
 
     #[test]
@@ -2507,7 +2507,7 @@
         // Now move a card to GY — should stay in GY
         let hand_id = add_hand_card(&mut state, PlayerId::Us, "Ponder");
         change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
-        assert_eq!(state.objects[&hand_id].zone, CardZone::Graveyard);
+        assert_eq!(state.objects[&hand_id].zone, Zone::Graveyard);
     }
 
     // ── Section 12: State-Based Action Tests ──────────────────────────────────
@@ -2519,7 +2519,7 @@
             catalog_key: name.to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Battlefield,
+            zone: Zone::Battlefield,
             is_token: true,
             spell: None,
             bf: Some(BattlefieldState::new()),
@@ -2550,7 +2550,7 @@
         let mut state = make_state();
         let token_id = add_token(&mut state, PlayerId::Us, "Orc Army");
         // Move token to graveyard (as if it died without SBA running yet).
-        state.objects.get_mut(&token_id).unwrap().zone = CardZone::Graveyard;
+        state.objects.get_mut(&token_id).unwrap().zone = Zone::Graveyard;
         state.objects.get_mut(&token_id).unwrap().bf = None;
         check_state_based_actions(&mut state, 1);
         assert!(!state.objects.contains_key(&token_id), "token in GY ceases to exist");
@@ -2760,7 +2760,7 @@
         assert!(state.def_of(id).unwrap().has_keyword(Keyword::Flying), "flying applied by recompute");
 
         // Move the permanent off the battlefield.
-        state.objects.get_mut(&id).unwrap().zone = CardZone::Graveyard;
+        state.objects.get_mut(&id).unwrap().zone = Zone::Graveyard;
         recompute(&mut state);
         // Static CI is not generated for non-BF objects, so flying should be gone.
         if let Some(d) = state.def_of(id) {
@@ -2855,8 +2855,8 @@
 
         // Both stay in library: Doomsday was "put on top" (Library ≡ top until ordering tracked),
         // FoW was never selected.
-        assert_eq!(state.objects[&dd_id].zone,  CardZone::Library, "Doomsday should remain in library");
-        assert_eq!(state.objects[&fow_id].zone, CardZone::Library, "FoW should remain in library");
+        assert_eq!(state.objects[&dd_id].zone,  Zone::Library, "Doomsday should remain in library");
+        assert_eq!(state.objects[&fow_id].zone, Zone::Library, "FoW should remain in library");
         let log = state.log.join("\n");
         assert!(log.contains("search → Doomsday"), "should log the searched card name");
         assert!(!log.contains("Force of Will"), "FoW should not appear in search log");
@@ -2890,8 +2890,8 @@
         }
 
         assert_eq!(state.hand_of(PlayerId::Us).count(), hand_before + 1, "hand should grow by one");
-        assert_eq!(state.objects[&small_id].zone, CardZone::Hand { known: false }, "Mother of Runes should be in hand");
-        assert_eq!(state.objects[&big_id].zone,   CardZone::Library, "Tarmogoyf (toughness 3) should stay in library");
+        assert_eq!(state.objects[&small_id].zone, Zone::Hand { known: false }, "Mother of Runes should be in hand");
+        assert_eq!(state.objects[&big_id].zone,   Zone::Library, "Tarmogoyf (toughness 3) should stay in library");
     }
 
     /// Urza's Saga chapter III: finds an artifact with no colored pips and MV ≤ 1
@@ -2910,8 +2910,8 @@
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&lotus_id].zone, CardZone::Battlefield, "Lotus Petal should enter battlefield");
-        assert_eq!(state.objects[&fow_id].zone,   CardZone::Library,     "FoW should stay in library");
+        assert_eq!(state.objects[&lotus_id].zone, Zone::Battlefield, "Lotus Petal should enter battlefield");
+        assert_eq!(state.objects[&fow_id].zone,   Zone::Library,     "FoW should stay in library");
     }
 
     /// Urza's Saga does not fetch an artifact with a colored pip (e.g. {W}).
@@ -2961,8 +2961,8 @@
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&green_id].zone, CardZone::Battlefield, "green creature should enter battlefield");
-        assert_eq!(state.objects[&red_id].zone,   CardZone::Library,     "non-green creature should stay");
+        assert_eq!(state.objects[&green_id].zone, Zone::Battlefield, "green creature should enter battlefield");
+        assert_eq!(state.objects[&red_id].zone,   Zone::Library,     "non-green creature should stay");
     }
 
     /// Fetchland regression: island-or-swamp search finds the correct land.
@@ -2986,8 +2986,8 @@
         let eff = build_ability_effect(&delta_ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&sea_id].zone,    CardZone::Battlefield, "Underground Sea should enter play");
-        assert_eq!(state.objects[&forest_id].zone, CardZone::Library,     "Forest should remain in library");
+        assert_eq!(state.objects[&sea_id].zone,    Zone::Battlefield, "Underground Sea should enter play");
+        assert_eq!(state.objects[&forest_id].zone, Zone::Library,     "Forest should remain in library");
     }
 
     // ── Section 20: CostsPaidCtx / objects_moved ─────────────────────────────
@@ -3202,7 +3202,7 @@
         assert!(result.is_some(), "Bitter Triumph should be castable");
         let extra_zone = state.objects.get(&extra_id).map(|o| &o.zone);
         assert!(
-            matches!(extra_zone, Some(CardZone::Graveyard)),
+            matches!(extra_zone, Some(Zone::Graveyard)),
             "discard branch of CostOr was paid (card discarded)"
         );
         assert_eq!(state.us.life, initial_life, "life branch was not taken when discard is available");
@@ -3253,7 +3253,7 @@
             catalog_key: "Lotus Petal".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: None,
@@ -3303,7 +3303,7 @@
         assert!(!state.stack.contains(&spell_id), "colorless spell should be removed from stack");
         assert_eq!(
             state.objects.get(&spell_id).map(|o| &o.zone),
-            Some(&CardZone::Graveyard),
+            Some(&Zone::Graveyard),
             "countered spell goes to graveyard"
         );
     }
@@ -3371,7 +3371,7 @@
             catalog_key: "Long Goodbye".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
@@ -3389,7 +3389,7 @@
 
         // Spell should still be on the stack — counter fizzled.
         assert!(state.stack.contains(&spell_id), "uncounterable spell should remain on stack");
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Stack, "zone unchanged after fizzle");
+        assert_eq!(state.objects[&spell_id].zone, Zone::Stack, "zone unchanged after fizzle");
     }
 
     // ── Section 56: Stifle (counter activated or triggered ability) ──────────
@@ -3475,9 +3475,9 @@
             ctx.effect.call(&mut state, 1, &[]);
         }
 
-        assert_eq!(state.objects[&equip_id].zone, CardZone::Hand { known: false },
+        assert_eq!(state.objects[&equip_id].zone, Zone::Hand { known: false },
             "Equipment should be tutored into hand");
-        assert_eq!(state.objects[&petal_id].zone, CardZone::Library,
+        assert_eq!(state.objects[&petal_id].zone, Zone::Library,
             "non-Equipment artifact should stay in library");
     }
 
@@ -3493,7 +3493,7 @@
         // Drop the ETB tutor's pending trigger — we're testing the activated ability here.
         state.pending_triggers.clear();
         let sfm_id = state.objects.values()
-            .find(|o| o.catalog_key == "Stoneforge Mystic" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Stoneforge Mystic" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Stoneforge should be on the battlefield");
         if let Some(bf) = state.permanent_bf_mut(sfm_id) { bf.entered_this_turn = false; }
 
@@ -3505,7 +3505,7 @@
             .ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, sfm_id).call(&mut state, 1, &[equip_id]);
 
-        assert_eq!(state.objects[&equip_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&equip_id].zone, Zone::Battlefield,
             "Equipment should be on the battlefield");
     }
 
@@ -3525,10 +3525,10 @@
         }
 
         let bs_id = state.objects.values()
-            .find(|o| o.catalog_key == "Batterskull" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Batterskull" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Batterskull on battlefield");
         let germ_id = state.objects.values()
-            .find(|o| o.catalog_key == "Phyrexian Germ" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Phyrexian Germ" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Phyrexian Germ token created");
 
         let attached = state.permanent_bf(bs_id).and_then(|bf| bf.attached_to);
@@ -3553,7 +3553,7 @@
         eff_enter_permanent(PlayerId::Us, "Batterskull").call(&mut state, 1, &[]);
         state.pending_triggers.clear();
         let bs_id = state.objects.values()
-            .find(|o| o.catalog_key == "Batterskull" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Batterskull" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Batterskull on battlefield");
 
         // Fire the {3} ability (index 0 in abilities).
@@ -3565,7 +3565,7 @@
         let factory = ability.ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, bs_id).call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&bs_id].zone, CardZone::Hand { known: false },
+        assert_eq!(state.objects[&bs_id].zone, Zone::Hand { known: false },
             "Batterskull should be in its owner's hand");
     }
 
@@ -3607,7 +3607,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             bf: None,
             spell: Some(SpellState {
@@ -3630,7 +3630,7 @@
         assert!(!state.stack.contains(&spell_id), "countered spell should be off the stack");
         assert_eq!(
             state.objects[&spell_id].zone,
-            CardZone::Exile { on_adventure: false },
+            Zone::Exile { on_adventure: false },
             "countered spell should be exiled, not in graveyard",
         );
         assert!(state.objects[&spell_id].spell.is_none(), "spell state should be cleared");
@@ -3649,7 +3649,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             bf: None,
             spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
@@ -3665,7 +3665,7 @@
             catalog_key: "Force of Negation".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             bf: None,
             spell: Some(SpellState {
@@ -3683,9 +3683,9 @@
         eff_counter_target(PlayerId::Opp).call(&mut state, 1, &[fon_id]);
 
         assert!(!state.stack.contains(&fon_id), "FoN should be off the stack after being countered");
-        assert_eq!(state.objects[&fon_id].zone, CardZone::Graveyard, "FoN goes to graveyard");
+        assert_eq!(state.objects[&fon_id].zone, Zone::Graveyard, "FoN goes to graveyard");
         assert!(state.stack.contains(&y_id), "Y should still be on the stack — FoN never resolved");
-        assert_eq!(state.objects[&y_id].zone, CardZone::Stack, "Y remains in Stack zone");
+        assert_eq!(state.objects[&y_id].zone, Zone::Stack, "Y remains in Stack zone");
     }
 
     /// Stack: X (bottom), Y, FoN targeting Y, FoW targeting X (top).
@@ -3705,7 +3705,7 @@
                 catalog_key: "Dark Ritual".to_string(),
                 owner: PlayerId::Opp,
                 controller: PlayerId::Opp,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false,
                 bf: None,
                 spell: Some(SpellState { effect: None, chosen_targets: vec![], is_back_face: false, costs_paid_ctx: CostsPaidCtx::default() }),
@@ -3721,7 +3721,7 @@
             catalog_key: "Force of Negation".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             bf: None,
             spell: Some(SpellState {
@@ -3741,7 +3741,7 @@
             catalog_key: "Force of Will".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             bf: None,
             spell: Some(SpellState {
@@ -3763,14 +3763,14 @@
         resolve_top_of_stack(&mut state, 1, PlayerId::Us);
 
         assert!(state.stack.is_empty(), "stack should be empty");
-        assert_eq!(state.objects[&x_id].zone, CardZone::Graveyard, "X countered by FoW → graveyard");
+        assert_eq!(state.objects[&x_id].zone, Zone::Graveyard, "X countered by FoW → graveyard");
         assert_eq!(
             state.objects[&y_id].zone,
-            CardZone::Exile { on_adventure: false },
+            Zone::Exile { on_adventure: false },
             "Y countered by FoN → exile",
         );
-        assert_eq!(state.objects[&fow_id].zone, CardZone::Graveyard, "FoW → graveyard after resolving");
-        assert_eq!(state.objects[&fon_id].zone, CardZone::Graveyard, "FoN → graveyard after resolving");
+        assert_eq!(state.objects[&fow_id].zone, Zone::Graveyard, "FoW → graveyard after resolving");
+        assert_eq!(state.objects[&fon_id].zone, Zone::Graveyard, "FoN → graveyard after resolving");
     }
 
     // ── Section 59: Meteor Sword (ETB destroy + buff equipped) ────────────────
@@ -3789,7 +3789,7 @@
 
         eff_enter_permanent(PlayerId::Us, "Meteor Sword").call(&mut state, 1, &[]);
         let sword_id = state.objects.values()
-            .find(|o| o.catalog_key == "Meteor Sword" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Meteor Sword" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Meteor Sword on battlefield");
 
         // Resolve the ETB trigger against the opponent's creature.
@@ -3799,7 +3799,7 @@
         assert!(all.contains(&victim), "opponent permanent is a legal target");
         assert!(all.contains(&ours), "our permanent is also a legal target");
         ctx.effect.call(&mut state, 1, &[victim]);
-        assert_eq!(state.objects[&victim].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&victim].zone, Zone::Graveyard,
             "target permanent destroyed");
 
         // Equip: attach Meteor Sword to our creature and verify +3/+3.
@@ -3865,9 +3865,9 @@
         let factory = ability.ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, ee_id).call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&mv2].zone, CardZone::Graveyard, "MV 2 artifact destroyed (matches 2 charges)");
-        assert_eq!(state.objects[&mv0].zone, CardZone::Battlefield, "MV 0 artifact survives");
-        assert_eq!(state.objects[&land].zone, CardZone::Battlefield, "land survives (nonland filter)");
+        assert_eq!(state.objects[&mv2].zone, Zone::Graveyard, "MV 2 artifact destroyed (matches 2 charges)");
+        assert_eq!(state.objects[&mv0].zone, Zone::Battlefield, "MV 0 artifact survives");
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield, "land survives (nonland filter)");
     }
 
     // ── Section 60: Quantum Riddler (ETB draw + Warp alt cost + delayed exile) ──
@@ -3911,7 +3911,7 @@
         state.resolving_costs_ctx.alt_cost_index = Some(0);
         eff_enter_permanent(PlayerId::Us, "Quantum Riddler").call(&mut state, 1, &[]);
         let qr_id = state.objects.values()
-            .find(|o| o.catalog_key == "Quantum Riddler" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Quantum Riddler" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Quantum Riddler on battlefield");
 
         // Resolve the warp trigger — it registers a delayed end-step exile.
@@ -3935,7 +3935,7 @@
             .find(|ctx| ctx.source_name == "Quantum Riddler (warp exile)").cloned()
             .expect("end step produces warp exile trigger");
         exile_ctx.effect.call(&mut state, 2, &[]);
-        assert_eq!(state.objects[&qr_id].zone, CardZone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&qr_id].zone, Zone::Exile { on_adventure: false },
             "Quantum Riddler should be exiled at end step when cast for warp cost");
     }
 
@@ -3951,14 +3951,14 @@
         // Put a small creature in our graveyard.
         let gy_creature = add_default_perm(&mut state, PlayerId::Us, "Delver of Secrets");
         if let Some(obj) = state.objects.get_mut(&gy_creature) {
-            obj.zone = CardZone::Graveyard;
+            obj.zone = Zone::Graveyard;
             obj.bf = None;
         }
 
         // Pre-War Formalwear ETBs → ETB trigger queued.
         eff_enter_permanent(PlayerId::Us, "Pre-War Formalwear").call(&mut state, 1, &[]);
         let pwf_id = state.objects.values()
-            .find(|o| o.catalog_key == "Pre-War Formalwear" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Pre-War Formalwear" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Pre-War Formalwear on battlefield");
 
         let ctx = state.pending_triggers.iter()
@@ -3969,7 +3969,7 @@
             "creature in own graveyard with MV ≤ 3 is a legal target");
 
         ctx.effect.call(&mut state, 1, &[gy_creature]);
-        assert_eq!(state.objects[&gy_creature].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&gy_creature].zone, Zone::Battlefield,
             "target reanimated");
         assert_eq!(state.permanent_bf(pwf_id).and_then(|bf| bf.attached_to), Some(gy_creature),
             "Pre-War Formalwear attached to reanimated creature");
@@ -3994,7 +3994,7 @@
 
         eff_enter_permanent(PlayerId::Us, "Cryptic Coat").call(&mut state, 1, &[]);
         let coat_id = state.objects.values()
-            .find(|o| o.catalog_key == "Cryptic Coat" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Cryptic Coat" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Cryptic Coat on battlefield");
 
         // Resolve ETB: creates the token and attaches self to it.
@@ -4004,7 +4004,7 @@
         ctx.effect.call(&mut state, 1, &[]);
 
         let token_id = state.objects.values()
-            .find(|o| o.catalog_key == "Mysterious Creature" && o.zone == CardZone::Battlefield)
+            .find(|o| o.catalog_key == "Mysterious Creature" && o.zone == Zone::Battlefield)
             .map(|o| o.id).expect("Mysterious Creature token created");
         assert_eq!(state.permanent_bf(coat_id).and_then(|bf| bf.attached_to), Some(token_id),
             "Cryptic Coat attached to the cloaked token");
@@ -4024,7 +4024,7 @@
         };
         let factory = bounce.ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, coat_id).call(&mut state, 1, &[]);
-        assert!(matches!(state.objects[&coat_id].zone, CardZone::Hand { .. }),
+        assert!(matches!(state.objects[&coat_id].zone, Zone::Hand { .. }),
             "Cryptic Coat returned to owner's hand");
     }
 
@@ -4046,7 +4046,7 @@
             catalog_key: "Dauthi Voidwalker".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Battlefield,
+            zone: Zone::Battlefield,
             is_token: false,
             spell: None,
             bf: Some(BattlefieldState::new()),
@@ -4061,7 +4061,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Hand { known: true },
+            zone: Zone::Hand { known: true },
             is_token: false,
             spell: None,
             bf: None,
@@ -4075,7 +4075,7 @@
         // Card should be in exile, not graveyard.
         assert_eq!(
             state.objects[&card_id].zone,
-            CardZone::Exile { on_adventure: false },
+            Zone::Exile { on_adventure: false },
             "DV replacement: card should be in exile, not graveyard",
         );
         // Card should have a void counter.
@@ -4102,7 +4102,7 @@
             catalog_key: "Dauthi Voidwalker".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Battlefield,
+            zone: Zone::Battlefield,
             is_token: false,
             spell: None,
             bf: Some(BattlefieldState::new()),
@@ -4117,7 +4117,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Hand { known: true },
+            zone: Zone::Hand { known: true },
             is_token: false,
             spell: None,
             bf: None,
@@ -4129,7 +4129,7 @@
 
         assert_eq!(
             state.objects[&opp_card_id].zone,
-            CardZone::Graveyard,
+            Zone::Graveyard,
             "DV replacement must not intercept its controller's own cards",
         );
         assert_eq!(
@@ -4174,7 +4174,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Exile { on_adventure: false },
+            zone: Zone::Exile { on_adventure: false },
             is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters,
             ci_timestamp: 0,
@@ -4219,7 +4219,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Graveyard,
+            zone: Zone::Graveyard,
             is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
@@ -4229,7 +4229,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
@@ -4239,7 +4239,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Library,
+            zone: Zone::Library,
             is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
@@ -4251,7 +4251,7 @@
             catalog_key: "Brainstorm".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false, spell: None, bf: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
         });
@@ -4266,11 +4266,11 @@
         eff.call(&mut state, 1, &[gy_id]);
 
         // All 3 Dark Ritual copies should be in exile.
-        assert_eq!(state.objects[&gy_id].zone,   CardZone::Exile { on_adventure: false }, "GY copy exiled");
-        assert_eq!(state.objects[&hand_id].zone,  CardZone::Exile { on_adventure: false }, "hand copy exiled");
-        assert_eq!(state.objects[&lib_id].zone,   CardZone::Exile { on_adventure: false }, "library copy exiled");
+        assert_eq!(state.objects[&gy_id].zone,   Zone::Exile { on_adventure: false }, "GY copy exiled");
+        assert_eq!(state.objects[&hand_id].zone,  Zone::Exile { on_adventure: false }, "hand copy exiled");
+        assert_eq!(state.objects[&lib_id].zone,   Zone::Exile { on_adventure: false }, "library copy exiled");
         // Brainstorm is untouched.
-        assert_eq!(state.objects[&other_id].zone, CardZone::Hand { known: false }, "other card unchanged");
+        assert_eq!(state.objects[&other_id].zone, Zone::Hand { known: false }, "other card unchanged");
     }
 
     // ── Section 31: Toxic Deluge ───────────────────────────────────────────────
@@ -4351,7 +4351,7 @@
             catalog_key: name.to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             bf: None,
             spell: Some(SpellState {
@@ -4380,7 +4380,7 @@
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(!state.stack.contains(&target_id), "blue spell should be countered off the stack");
-        assert_eq!(state.objects[&target_id].zone, CardZone::Graveyard, "countered spell goes to graveyard");
+        assert_eq!(state.objects[&target_id].zone, Zone::Graveyard, "countered spell goes to graveyard");
     }
 
     /// REB destroys a blue permanent on the battlefield (Underground Sea = blue land).
@@ -4394,7 +4394,7 @@
         let effect = build_spell_effect(&reb_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[sea_id]);
 
-        assert_eq!(state.objects[&sea_id].zone, CardZone::Graveyard, "blue permanent destroyed");
+        assert_eq!(state.objects[&sea_id].zone, Zone::Graveyard, "blue permanent destroyed");
     }
 
     /// Pyroblast fizzles when targeting a non-blue spell (Dark Ritual = black).
@@ -4457,7 +4457,7 @@
             catalog_key: "Painter's Servant".to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None,
             spell: None,
@@ -4497,7 +4497,7 @@
         let effect = build_spell_effect(&pyro_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[petal_id]);
 
-        assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone, Zone::Graveyard,
             "Pyroblast should destroy the now-Blue Lotus Petal");
     }
 
@@ -4560,7 +4560,7 @@
             catalog_key: "Disruptor Flute".to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None,
             spell: None,
@@ -4588,7 +4588,7 @@
             catalog_key: "Brainstorm".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -4634,7 +4634,7 @@
             catalog_key: "Brainstorm".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -4665,7 +4665,7 @@
                 catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us,
                 controller: PlayerId::Us,
-                zone: CardZone::Library,
+                zone: Zone::Library,
                 is_token: false,
                 bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
@@ -4684,7 +4684,7 @@
                 catalog_key: "Undercity Sewers".to_string(),
                 owner: PlayerId::Us,
                 controller: PlayerId::Us,
-                zone: CardZone::Hand { known: false },
+                zone: Zone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
@@ -4696,7 +4696,7 @@
         change_zone(land_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
 
-        assert_eq!(state.objects[&top_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&top_id].zone, Zone::Graveyard,
             "top library card should be milled by surveil");
         assert!(matches!(state.objects[&land_id].bf, Some(ref bf) if bf.tapped),
             "surveil land should enter tapped");
@@ -4717,7 +4717,7 @@
                 catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us,
                 controller: PlayerId::Us,
-                zone: CardZone::Library,
+                zone: Zone::Library,
                 is_token: false,
                 bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
@@ -4735,7 +4735,7 @@
                 catalog_key: "Undercity Sewers".to_string(),
                 owner: PlayerId::Us,
                 controller: PlayerId::Us,
-                zone: CardZone::Hand { known: false },
+                zone: Zone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
@@ -4747,7 +4747,7 @@
         change_zone(land_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
 
-        assert_eq!(state.objects[&top_id].zone, CardZone::Library,
+        assert_eq!(state.objects[&top_id].zone, Zone::Library,
             "top library card should stay when surveil keeps");
     }
 
@@ -4767,7 +4767,7 @@
                 catalog_key: "Ancient Tomb".to_string(),
                 owner: PlayerId::Us,
                 controller: PlayerId::Us,
-                zone: CardZone::Hand { known: false },
+                zone: Zone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
@@ -4813,7 +4813,7 @@
                 catalog_key: "TestLegend".to_string(),
                 owner: PlayerId::Opp,
                 controller: PlayerId::Opp,
-                zone: CardZone::Hand { known: false },
+                zone: Zone::Hand { known: false },
                 is_token: false,
                 bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
@@ -4827,7 +4827,7 @@
         let effect = eff_bounce_target(PlayerId::Us);
         effect.call(&mut state, 1, &[creature_id]);
 
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Hand { known: false },
+        assert_eq!(state.objects[&creature_id].zone, Zone::Hand { known: false },
             "legendary creature should be in opp's hand after Karakas activation");
     }
 
@@ -4844,7 +4844,7 @@
         eff_damage_target(PlayerId::Us, 3, ObjId(0)).call(&mut state, 1, &[id]);
         check_state_based_actions(&mut state, 1);
 
-        assert_eq!(state.objects[&id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&id].zone, Zone::Graveyard,
             "3/3 hit by 3 damage should die via SBA");
     }
 
@@ -4859,7 +4859,7 @@
         eff_damage_target(PlayerId::Us, 3, ObjId(0)).call(&mut state, 1, &[id]);
         check_state_based_actions(&mut state, 1);
 
-        assert_eq!(state.objects[&id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield,
             "4/4 hit by 3 damage should survive");
         assert_eq!(state.objects[&id].bf.as_ref().unwrap().damage, 3);
     }
@@ -4880,7 +4880,7 @@
 
         eff_destroy_target(PlayerId::Us).call(&mut state, 1, &[id]);
 
-        assert_eq!(state.objects[&id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&id].zone, Zone::Graveyard,
             "artifact should be destroyed by Abrade's artifact mode");
     }
 
@@ -4899,7 +4899,7 @@
             catalog_key: "Grafdigger's Cage".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -4915,7 +4915,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Graveyard,
+            zone: Zone::Graveyard,
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -4936,7 +4936,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Exile { on_adventure: false },
+            zone: Zone::Exile { on_adventure: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -4965,7 +4965,7 @@
             catalog_key: "Grafdigger's Cage".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -4993,7 +4993,7 @@
             id: cage_id,
             catalog_key: "Grafdigger's Cage".to_string(),
             owner: who, controller: who,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -5017,7 +5017,7 @@
             id: creature_id,
             catalog_key: "Troll".to_string(),
             owner: PlayerId::Us, controller: PlayerId::Us,
-            zone: CardZone::Graveyard,
+            zone: Zone::Graveyard,
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -5028,7 +5028,7 @@
 
         assert_eq!(
             state.objects[&creature_id].zone,
-            CardZone::Graveyard,
+            Zone::Graveyard,
             "Cage prohibition must block creature from entering battlefield from graveyard"
         );
     }
@@ -5047,7 +5047,7 @@
             id: creature_id,
             catalog_key: "Troll".to_string(),
             owner: PlayerId::Us, controller: PlayerId::Us,
-            zone: CardZone::Graveyard,
+            zone: Zone::Graveyard,
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -5061,7 +5061,7 @@
 
         assert_eq!(
             state.objects[&creature_id].zone,
-            CardZone::Battlefield,
+            Zone::Battlefield,
             "After Cage leaves, creature should be free to enter battlefield"
         );
     }
@@ -5080,7 +5080,7 @@
             id: artifact_id,
             catalog_key: artifact_name.to_string(),
             owner: PlayerId::Us, controller: PlayerId::Us,
-            zone: CardZone::Graveyard,
+            zone: Zone::Graveyard,
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -5090,7 +5090,7 @@
 
         assert_eq!(
             state.objects[&artifact_id].zone,
-            CardZone::Battlefield,
+            Zone::Battlefield,
             "Cage must not block non-creature cards from entering battlefield"
         );
     }
@@ -5106,7 +5106,7 @@
         // Default mode = 0 (nontoken creature)
         let filter = ir_and(ir_not(ir_token()), ir_type(CardType::Creature));
         eff_sacrifice(PlayerId::Us, Who::Opp, filter).call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&creature_id].zone, Zone::Graveyard,
             "nontoken creature should be sacrificed");
     }
 
@@ -5125,7 +5125,7 @@
             catalog_key: "OrcToken".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Battlefield,
+            zone: Zone::Battlefield,
             is_token: true,
             bf: Some(BattlefieldState::new()),
             spell: None,
@@ -5134,9 +5134,9 @@
         });
         // Mode 1: sacrifice a token
         eff_sacrifice(PlayerId::Us, Who::Opp, ir_token()).call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&token_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&token_id].zone, Zone::Graveyard,
             "token should be sacrificed by mode 1");
-        assert_eq!(state.objects[&nontoken_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&nontoken_id].zone, Zone::Battlefield,
             "nontoken creature should not be sacrificed by mode 1");
     }
 
@@ -5155,7 +5155,7 @@
             catalog_key: "Engineered Explosives".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -5199,9 +5199,9 @@
             .expect("EE must have a battlefield ability");
         let eff = ability_factory(PlayerId::Us, ee_id);
         eff.call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&mv2_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&mv2_id].zone, Zone::Graveyard,
             "MV 2 permanent should be destroyed by EE[2]");
-        assert_eq!(state.objects[&mv3_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&mv3_id].zone, Zone::Battlefield,
             "MV 3 permanent should survive EE[2]");
     }
 
@@ -5284,7 +5284,7 @@
             ctx.effect.call(&mut state, 1, &[]);
         }
 
-        assert_eq!(state.objects[&fow_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&fow_id].zone, Zone::Graveyard,
             "FoW should be countered and in graveyard");
         assert!(!state.stack.contains(&fow_id), "FoW should be off the stack");
     }
@@ -5314,7 +5314,7 @@
             ctx.effect.call(&mut state, 1, &[]);
         }
 
-        assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone, Zone::Graveyard,
             "Lotus Petal should be countered by Lavinia");
     }
 
@@ -5343,7 +5343,7 @@
 
         assert!(state.stack.contains(&spell_id),
             "Hexing Squelcher should prevent the opponent from countering our spell");
-        assert_ne!(state.objects[&spell_id].zone, CardZone::Graveyard);
+        assert_ne!(state.objects[&spell_id].zone, Zone::Graveyard);
     }
 
     /// Hexing Squelcher only protects YOUR spells; opponent's spells can still be countered.
@@ -5363,7 +5363,7 @@
         counter_one(spell_id, &mut state, 1, PlayerId::Us);
 
         assert!(!state.stack.contains(&spell_id), "Opponent's spell should be countered normally");
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard);
+        assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard);
     }
 
     /// "Other creatures you control have Ward—Pay 2 life."
@@ -5386,7 +5386,7 @@
             catalog_key: "Brainstorm".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: None,
@@ -5428,7 +5428,7 @@
             catalog_key: "Brainstorm".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: None,
@@ -5482,7 +5482,7 @@
             catalog_key: "Brainstorm".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: None,
@@ -5527,7 +5527,7 @@
 
         assert!(state.stack.contains(&lg_id),
             "Long Goodbye can't be countered (ProhibitionDef on SpellBeingCountered)");
-        assert_ne!(state.objects[&lg_id].zone, CardZone::Graveyard);
+        assert_ne!(state.objects[&lg_id].zone, Zone::Graveyard);
     }
 
     // ── §48: Show and Tell ────────────────────────────────────────────────────
@@ -5548,7 +5548,7 @@
             ),
         ).call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield,
             "Show and Tell should put chosen creature onto the battlefield");
     }
 
@@ -5591,7 +5591,7 @@
             catalog_key: "Ponder".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_draw(PlayerId::Opp, 1)),
@@ -5607,7 +5607,7 @@
 
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "2");
 
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard,
             "spell should be countered when opponent can't pay 2");
         assert!(!state.stack.contains(&spell_id));
     }
@@ -5629,7 +5629,7 @@
             catalog_key: "Ponder".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_draw(PlayerId::Opp, 1)),
@@ -5647,7 +5647,7 @@
 
         assert!(state.stack.contains(&spell_id),
             "spell should remain on stack when opponent pays 2");
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Stack);
+        assert_eq!(state.objects[&spell_id].zone, Zone::Stack);
     }
 
     #[test]
@@ -5661,7 +5661,7 @@
             catalog_key: "Ponder".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_draw(PlayerId::Opp, 1)),
@@ -5678,7 +5678,7 @@
         // Daze: counter unless pays {1}
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard,
             "Daze should counter when opponent can't pay 1");
     }
 
@@ -5697,7 +5697,7 @@
 
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Stack,
+        assert_eq!(state.objects[&spell_id].zone, Zone::Stack,
             "Daze should NOT counter — opponent taps a land to pay the {{1}} tax");
         assert!(state.objects[&island].bf.as_ref().unwrap().tapped,
             "the Island was tapped to produce the mana");
@@ -5722,7 +5722,7 @@
                 catalog_key: name.to_string(),
                 owner: PlayerId::Opp,
                 controller: PlayerId::Opp,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false,
                 spell: Some(SpellState {
                     effect: Some(eff_draw(PlayerId::Opp, 1)),
@@ -5743,7 +5743,7 @@
             catalog_key: "Flusterstorm".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 // Storm copies are built from the catalog def, not this object's
@@ -5803,7 +5803,7 @@
             catalog_key: "Flusterstorm".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: None,
@@ -5841,7 +5841,7 @@
             catalog_key: "Ponder".to_string(),
             owner: PlayerId::Opp,
             controller: PlayerId::Opp,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_draw(PlayerId::Opp, 1)),
@@ -5858,7 +5858,7 @@
         // A storm copy's effect is the same as the original: counter unless pays {1}.
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
-        assert_eq!(state.objects[&spell_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard,
             "storm copy should counter spell when opponent can't pay 1");
     }
 
@@ -5876,7 +5876,7 @@
             catalog_key: "Dark Ritual".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_mana(PlayerId::Us, "BBB")),
@@ -5896,7 +5896,7 @@
             catalog_key: "Ponder".to_string(),
             owner: PlayerId::Us,
             controller: PlayerId::Us,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff_draw(PlayerId::Us, 1)),
@@ -5914,9 +5914,9 @@
         let mbt = catalog_card("Mindbreak Trap");
         build_spell_effect(&mbt, PlayerId::Opp, ObjId::UNSET, 0, 0).1.call(&mut state, 1, &[]);
 
-        assert!(matches!(state.objects[&spell_a].zone, CardZone::Exile { .. }),
+        assert!(matches!(state.objects[&spell_a].zone, Zone::Exile { .. }),
             "spell A should be exiled");
-        assert!(matches!(state.objects[&spell_b].zone, CardZone::Exile { .. }),
+        assert!(matches!(state.objects[&spell_b].zone, Zone::Exile { .. }),
             "spell B should be exiled");
     }
 
@@ -5961,7 +5961,7 @@
         // Activate SSG's hand-zone mana ability — should exile from hand.
         let act = ManaActivation { source_id: ssg_id, ability_index: 0, color_choice: Some(Color::Red) };
         execute_mana_activation(&mut state, 1, PlayerId::Us, &act);
-        assert_eq!(state.objects[&ssg_id].zone, CardZone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&ssg_id].zone, Zone::Exile { on_adventure: false },
             "SSG should be exiled after paying mana");
         assert_eq!(state.us.pool.r, 1, "SSG should produce R");
     }
@@ -6002,7 +6002,7 @@
             .with_var("target", crate::ir::expr::Value::Obj(creature_id));
         crate::ir::executor::execute(&body, &mut state, &env);
 
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&creature_id].zone, Zone::Exile { on_adventure: false },
             "creature should be exiled");
         assert!(state.opp.life > opp_life_before,
             "opponent should gain life equal to creature's power");
@@ -6030,7 +6030,7 @@
         // Resolve the trigger — CoT goes to graveyard.
         let ctx = state.pending_triggers.remove(0);
         ctx.effect.call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&cot_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&cot_id].zone, Zone::Graveyard,
             "City of Traitors should be sacrificed");
     }
 
@@ -6141,7 +6141,7 @@
         recompute(&mut state);
 
         // Creature should be on the battlefield with haste.
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield,
             "creature should be on the battlefield");
         let def = state.def_of(creature_id).expect("should have materialized def");
         assert!(def.has_keyword(Keyword::Haste), "creature should have haste");
@@ -6161,7 +6161,7 @@
         let eff = build_ability_effect(ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &[creature_id]);
         recompute(&mut state);
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield);
+        assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield);
 
         // Drain any pending triggers from the ETB (e.g. Bowmasters draw-trigger setup).
         state.pending_triggers.clear();
@@ -6177,7 +6177,7 @@
         // Resolve the trigger — creature should be sacrificed.
         let ctx = state.pending_triggers.remove(0);
         ctx.effect.call(&mut state, 2, &[]);
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&creature_id].zone, Zone::Graveyard,
             "creature should be sacrificed at end step");
     }
 
@@ -6720,7 +6720,7 @@
             catalog_key: "Mistrise Village".to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Hand { known: false },
+            zone: Zone::Hand { known: false },
             is_token: false,
             bf: None, spell: None, ability: None, materialized: None,
             counters: HashMap::new(), ci_timestamp: 0,
@@ -6913,7 +6913,7 @@
             state.objects.insert(id, GameObject {
                 id, catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Library, is_token: false,
+                zone: Zone::Library, is_token: false,
                 bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -6927,7 +6927,7 @@
         let eff = build_ability_effect(ability, PlayerId::Us, clue_id);
         eff.call(&mut state, 1, &[]);
 
-        assert!(matches!(state.objects[&top_id].zone, CardZone::Hand { .. }),
+        assert!(matches!(state.objects[&top_id].zone, Zone::Hand { .. }),
             "Clue Token activation should draw the top card into hand");
     }
 
@@ -7091,7 +7091,7 @@
         let eff = build_ability_effect(ability, PlayerId::Us, wl_id);
         eff.call(&mut state, 1, &[victim_id]);
 
-        assert_eq!(state.objects[&victim_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&victim_id].zone, Zone::Graveyard,
             "targeted nonbasic land should be destroyed");
     }
 
@@ -7135,7 +7135,7 @@
         let effect = build_spell_effect(&be_def, PlayerId::Us, ObjId::UNSET, 0, 1).1;
         effect.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone, Zone::Graveyard,
             "Lotus Petal (MV 0) should be destroyed by Brotherhood's End mode 1");
     }
 
@@ -7253,7 +7253,7 @@
                 id,
                 catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Library,
+                zone: Zone::Library,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -7272,7 +7272,7 @@
                 id,
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -7287,7 +7287,7 @@
         );
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
 
-        assert_eq!(state.objects[&top_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&top_id].zone, Zone::Graveyard,
             "DRC surveil should mill top library card when surveil_choice returns true");
     }
 
@@ -7304,7 +7304,7 @@
                 id,
                 catalog_key: "Brainstorm".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Library,
+                zone: Zone::Library,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -7322,7 +7322,7 @@
                 id,
                 catalog_key: "Barrowgoyf".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -7337,7 +7337,7 @@
 
         assert!(state.pending_triggers.is_empty(),
             "DRC should not trigger on creature spell cast");
-        assert_eq!(state.objects[&top_id].zone, CardZone::Library,
+        assert_eq!(state.objects[&top_id].zone, Zone::Library,
             "library card should remain untouched when no surveil fires");
     }
 
@@ -7449,7 +7449,7 @@
 
         change_zone(cp_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
-        assert_eq!(state.objects[&cp_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&cp_id].zone, Zone::Battlefield,
             "Containment Priest should not exile itself when entering via non-cast");
     }
 
@@ -7469,7 +7469,7 @@
 
         change_zone(opp_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
 
-        assert!(matches!(state.objects[&opp_id].zone, CardZone::Exile { .. }),
+        assert!(matches!(state.objects[&opp_id].zone, Zone::Exile { .. }),
             "non-cast creature should be exiled by Containment Priest");
     }
 
@@ -7641,11 +7641,11 @@
         let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 1, 0).1;
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&petal_id].zone, CardZone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone, Zone::Graveyard,
             "Lotus Petal (MV 0) should be destroyed by Meltdown X=1");
-        assert_eq!(state.objects[&rod_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&rod_id].zone, Zone::Battlefield,
             "Null Rod (MV 2) should survive Meltdown X=1");
-        assert_eq!(state.objects[&creature_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&creature_id].zone, Zone::Battlefield,
             "non-artifact creature should be unaffected by Meltdown");
     }
 
@@ -7708,7 +7708,7 @@
         let def = catalog_card("Prismatic Ending");
         let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 2, 0).1;
         eff.call(&mut state, 1, &[rod_id]);
-        assert_eq!(state.objects[&rod_id].zone, CardZone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&rod_id].zone, Zone::Exile { on_adventure: false },
             "Null Rod (MV 2) should be exiled when converge = 3");
 
         // Reset: put Null Rod back on the battlefield for the second case.
@@ -7718,7 +7718,7 @@
         // chosen_x = 0 → converge = 1 < Null Rod's MV 2 → spared.
         let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         eff.call(&mut state, 1, &[rod2_id]);
-        assert_eq!(state.objects[&rod2_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&rod2_id].zone, Zone::Battlefield,
             "Null Rod (MV 2) should survive when converge = 1");
     }
 
@@ -7756,7 +7756,7 @@
         assert_eq!(picked, vec![target_id], "only legal target is our Null Rod");
         ctx.effect.call(&mut state, 1, &picked);
 
-        assert_eq!(state.objects[&target_id].zone, CardZone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&target_id].zone, Zone::Exile { on_adventure: false },
             "target exiled after trigger resolves");
         assert_eq!(state.trigger_instances.len(), 1, "delayed return trigger registered");
 
@@ -7770,7 +7770,7 @@
         let ctx = state.pending_triggers.remove(delayed_pos);
         ctx.effect.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&target_id].zone, CardZone::Battlefield,
+        assert_eq!(state.objects[&target_id].zone, Zone::Battlefield,
             "target returns to battlefield at end of turn");
         assert_eq!(state.objects[&target_id].controller, PlayerId::Us,
             "our card returns under our control");
@@ -7883,7 +7883,7 @@
                 id,
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -7918,7 +7918,7 @@
                 id,
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -7952,7 +7952,7 @@
                 id,
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -7987,7 +7987,7 @@
                 id,
                 catalog_key: "Ponder".to_string(),
                 owner: PlayerId::Us, controller: PlayerId::Us,
-                zone: CardZone::Stack,
+                zone: Zone::Stack,
                 is_token: false, bf: None, spell: None, ability: None, materialized: None,
                 counters: HashMap::new(), ci_timestamp: 0,
             });
@@ -8651,7 +8651,7 @@
         assert!(hand.contains(&"Doomsday".to_string()), "should draw DD after surveilling Oracle away");
         // Oracle in graveyard
         let gy: Vec<String> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Graveyard)
+            .filter(|o| o.zone == Zone::Graveyard)
             .map(|o| o.catalog_key.clone()).collect();
         assert!(gy.contains(&"Thassa's Oracle".to_string()), "Oracle should be in graveyard");
     }
@@ -9323,7 +9323,7 @@
             catalog_key: name.to_string(),
             owner: who,
             controller: who,
-            zone: CardZone::Stack,
+            zone: Zone::Stack,
             is_token: false,
             spell: Some(SpellState {
                 effect: Some(eff),
@@ -9359,7 +9359,7 @@
         // Stack should be empty and no objects should have zone == Stack.
         assert!(state.stack.is_empty(), "stack list should be empty after resolution");
         let stale_stack_objs: Vec<_> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Stack)
+            .filter(|o| o.zone == Zone::Stack)
             .map(|o| o.catalog_key.clone())
             .collect();
         assert!(stale_stack_objs.is_empty(),
@@ -9483,7 +9483,7 @@
         assert!(state.stack.is_empty(),
             "stack should be empty after priority round with no spells cast");
         let stack_objs: Vec<_> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Stack)
+            .filter(|o| o.zone == Zone::Stack)
             .collect();
         assert!(stack_objs.is_empty(),
             "no objects should have zone == Stack after clean priority round");
@@ -9509,7 +9509,7 @@
         assert!(state.stack.is_empty(),
             "stack list should be empty after resolving all 3 permanents");
         let stale: Vec<_> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Stack)
+            .filter(|o| o.zone == Zone::Stack)
             .map(|o| o.catalog_key.clone())
             .collect();
         assert!(stale.is_empty(),
@@ -9517,7 +9517,7 @@
         // All 3 should be on the battlefield.
         for name in &names {
             let on_bf = state.objects.values()
-                .any(|o| o.catalog_key == *name && o.zone == CardZone::Battlefield);
+                .any(|o| o.catalog_key == *name && o.zone == Zone::Battlefield);
             assert!(on_bf, "{} should be on the battlefield after resolution", name);
         }
     }
@@ -9543,11 +9543,11 @@
 
         // Verify graveyard_order matches actual graveyard objects.
         let gy_objs: Vec<ObjId> = state.objects.values()
-            .filter(|o| o.zone == CardZone::Graveyard && o.owner == PlayerId::Us)
+            .filter(|o| o.zone == Zone::Graveyard && o.owner == PlayerId::Us)
             .map(|o| o.id)
             .collect();
         for &id in &state.graveyard_order {
-            assert!(state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Graveyard),
+            assert!(state.objects.get(&id).map_or(false, |o| o.zone == Zone::Graveyard),
                 "graveyard_order contains id {:?} that is not in graveyard zone", id);
         }
         for &id in &gy_objs {
@@ -9558,12 +9558,12 @@
         // Verify library_order matches actual library objects.
         for who in [PlayerId::Us, PlayerId::Opp] {
             let lib_objs: Vec<ObjId> = state.objects.values()
-                .filter(|o| o.zone == CardZone::Library && o.owner == who)
+                .filter(|o| o.zone == Zone::Library && o.owner == who)
                 .map(|o| o.id)
                 .collect();
             let lib_order = &state.player(who).library_order;
             for &id in lib_order.iter() {
-                assert!(state.objects.get(&id).map_or(false, |o| o.zone == CardZone::Library),
+                assert!(state.objects.get(&id).map_or(false, |o| o.zone == Zone::Library),
                     "library_order for {:?} contains id {:?} not in library zone", who, id);
             }
             for &id in &lib_objs {

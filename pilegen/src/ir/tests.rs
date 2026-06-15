@@ -420,7 +420,7 @@ mod parity {
     use super::*;
     use crate::catalog::{ArtifactData, CreatureData, LandData, LandTypes, BasicLandType};
     use crate::{
-        CardDef, CardKind, CardLayout, CardType, CardZone, Color,
+        CardDef, CardKind, CardLayout, CardType, Zone, Color,
         CounterType, GameObject, Keyword, ObjId, PlayerId, PlayerState, SimState,
         Supertype,
     };
@@ -442,7 +442,7 @@ mod parity {
                 catalog_key: def.name.clone(),
                 owner,
                 controller: owner,
-                zone: CardZone::Battlefield,
+                zone: Zone::Battlefield,
                 is_token: false,
                 spell: None,
                 bf: None,
@@ -605,7 +605,7 @@ mod execute_parity {
     use super::*;
     use crate::catalog::{ArtifactData, CreatureData, LandData, LandTypes, BasicLandType};
     use crate::{
-        effects as E, CardDef, CardKind, CardLayout, CardZone, Color, CounterType,
+        effects as E, CardDef, CardKind, CardLayout, Zone, Color, CounterType,
         GameObject, Keyword, ObjId, PlayerId, PlayerState, SimState, Supertype,
     };
     use std::collections::HashMap;
@@ -686,7 +686,7 @@ mod execute_parity {
                 catalog_key: def.name.clone(),
                 owner,
                 controller: owner,
-                zone: CardZone::Library,
+                zone: Zone::Library,
                 is_token: false,
                 spell: None,
                 bf: None,
@@ -702,7 +702,7 @@ mod execute_parity {
     }
 
     fn put_on_bf(state: &mut SimState, id: ObjId) {
-        state.set_card_zone(id, CardZone::Battlefield);
+        state.set_card_zone(id, Zone::Battlefield);
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.bf = Some(crate::BattlefieldState {
                 tapped: false,
@@ -881,7 +881,7 @@ mod execute_parity {
 
         let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone);
         let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone);
-        assert!(matches!(c_zone, Some(CardZone::Graveyard)));
+        assert!(matches!(c_zone, Some(Zone::Graveyard)));
         assert_eq!(c_zone, i_zone);
     }
 
@@ -910,8 +910,8 @@ mod execute_parity {
 
         let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone);
         let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone);
-        assert!(matches!(c_zone, Some(CardZone::Exile { .. })));
-        assert!(matches!(i_zone, Some(CardZone::Exile { .. })));
+        assert!(matches!(c_zone, Some(Zone::Exile { .. })));
+        assert!(matches!(i_zone, Some(Zone::Exile { .. })));
     }
 
     // ── Return (bounce to hand) ─────────────────────────────────────────────
@@ -943,8 +943,8 @@ mod execute_parity {
 
         let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone);
         let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone);
-        assert!(matches!(c_zone, Some(CardZone::Hand { .. })));
-        assert!(matches!(i_zone, Some(CardZone::Hand { .. })));
+        assert!(matches!(c_zone, Some(Zone::Hand { .. })));
+        assert!(matches!(i_zone, Some(Zone::Hand { .. })));
     }
 
     // ── Counters ─────────────────────────────────────────────────────────────
@@ -1211,11 +1211,11 @@ mod execute_parity {
         // Both paths should have sacrificed the smallest-id candidate (a).
         assert!(matches!(
             closure_state.objects.get(&a1).unwrap().zone,
-            CardZone::Graveyard
+            Zone::Graveyard
         ));
         assert!(matches!(
             ir_state.objects.get(&a2).unwrap().zone,
-            CardZone::Graveyard
+            Zone::Graveyard
         ));
     }
 
@@ -1287,7 +1287,7 @@ mod execute_parity {
             let mut s = make_state();
             let spell = insert_obj(&mut s, PlayerId::Opp, make_creature("X", "{2}", 2, 2));
             // Move onto stack.
-            s.set_card_zone(spell, CardZone::Stack);
+            s.set_card_zone(spell, Zone::Stack);
             s.stack.push(spell);
             (s, spell)
         };
@@ -1317,13 +1317,13 @@ mod execute_parity {
         assert!(closure_state.stack.is_empty());
         assert!(matches!(
             closure_state.objects.get(&spell1).unwrap().zone,
-            CardZone::Graveyard
+            Zone::Graveyard
         ));
         // IR path: same.
         assert!(ir_state.stack.is_empty());
         assert!(matches!(
             ir_state.objects.get(&spell3).unwrap().zone,
-            CardZone::Graveyard
+            Zone::Graveyard
         ));
     }
 
@@ -1441,7 +1441,7 @@ mod execute_parity {
         );
         assert!(matches!(
             s.objects.get(&id).unwrap().zone,
-            CardZone::Hand { .. }
+            Zone::Hand { .. }
         ));
     }
 
@@ -1449,7 +1449,7 @@ mod execute_parity {
     fn reveal_marks_hand_known() {
         let mut s = make_state();
         let id = insert_obj(&mut s, PlayerId::Us, make_creature("A", "{G}", 1, 1));
-        s.set_card_zone(id, CardZone::Hand { known: false });
+        s.set_card_zone(id, Zone::Hand { known: false });
 
         let env = BindEnv::new()
             .with_controller(PlayerId::Us)
@@ -1465,7 +1465,7 @@ mod execute_parity {
         );
         assert_eq!(
             s.objects.get(&id).unwrap().zone,
-            CardZone::Hand { known: true }
+            Zone::Hand { known: true }
         );
     }
 
@@ -1475,8 +1475,8 @@ mod execute_parity {
         s.rng = seeded_rng(42);
         let a = insert_obj(&mut s, PlayerId::Us, make_creature("A", "{G}", 1, 1));
         let b = insert_obj(&mut s, PlayerId::Us, make_creature("B", "{G}", 1, 1));
-        s.set_card_zone(a, CardZone::Hand { known: false });
-        s.set_card_zone(b, CardZone::Hand { known: false });
+        s.set_card_zone(a, Zone::Hand { known: false });
+        s.set_card_zone(b, Zone::Hand { known: false });
 
         execute(
             &Action::Discard {
@@ -1530,7 +1530,7 @@ mod execute_parity {
         assert!(in_hand[0] == a || in_hand[0] == b);
         assert!(!matches!(
             s.objects.get(&land).unwrap().zone,
-            CardZone::Hand { .. }
+            Zone::Hand { .. }
         ));
     }
 
@@ -1553,7 +1553,7 @@ mod cost_phase1 {
     use crate::ir::expr::{Expr, Filter};
     use crate::ir::context::Ctx;
     use crate::{
-        parse_mana_cost, BattlefieldState, CardDef, CardKind, CardLayout, CardZone, Color,
+        parse_mana_cost, BattlefieldState, CardDef, CardKind, CardLayout, Zone, Color,
         GameObject, ObjId, PlayerId, PlayerState, SimState,
     };
     use std::collections::HashMap;
@@ -1580,7 +1580,7 @@ mod cost_phase1 {
         state.objects.insert(id, GameObject {
             id, catalog_key: def.name.clone(),
             owner, controller: owner,
-            zone: CardZone::Library,
+            zone: Zone::Library,
             is_token: false, spell: None, bf: None,
             ability: None, materialized: Some(def.clone()),
             counters: HashMap::new(),
@@ -1592,7 +1592,7 @@ mod cost_phase1 {
     }
 
     pub(super) fn put_on_bf(state: &mut SimState, id: ObjId) {
-        state.set_card_zone(id, CardZone::Battlefield);
+        state.set_card_zone(id, Zone::Battlefield);
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.bf = Some(BattlefieldState {
                 tapped: false, damage: 0, entered_this_turn: false,
@@ -1848,10 +1848,10 @@ mod cost_phase1 {
 mod playable_phase2 {
     use super::cost_phase1::{insert_obj, make_creature, make_state};
     use crate::playable::{enumerate_playable, PlayableKind};
-    use crate::{CardZone, ObjId, PlayerId};
+    use crate::{Zone, ObjId, PlayerId};
 
     fn move_to_hand(state: &mut crate::SimState, id: ObjId, _owner: PlayerId) {
-        state.set_card_zone(id, CardZone::Hand { known: true });
+        state.set_card_zone(id, Zone::Hand { known: true });
         // The CE materialization pass normally sets castable from zone — short
         // of running it here, set the bit manually so enumerate_playable sees
         // a castable hand card.
@@ -2238,7 +2238,7 @@ mod cost_phase4 {
         // `pay_ir_cost`. Asserts pool drained by 2, EE in graveyard,
         // and `CostsPaidCtx.objects_moved` contains the EE id.
         use crate::ir::ability::CostBody;
-        use crate::{BattlefieldState, CardZone, PlayerId};
+        use crate::{BattlefieldState, Zone, PlayerId};
         use super::cost_phase1::{insert_obj, make_state};
 
         let mut state = make_state();
@@ -2247,7 +2247,7 @@ mod cost_phase4 {
         state.catalog.insert(ee_def.name.clone(), ee_def.clone());
         let ee_id = insert_obj(&mut state, PlayerId::Us, ee_def.clone());
         // Move EE to battlefield and give it a `bf` slot.
-        state.set_card_zone(ee_id, CardZone::Battlefield);
+        state.set_card_zone(ee_id, Zone::Battlefield);
         state.objects.get_mut(&ee_id).unwrap().bf = Some(BattlefieldState::new());
         // Fill the pool with {2}.
         state.player_mut(PlayerId::Us).pool.c = 2;
@@ -2264,7 +2264,7 @@ mod cost_phase4 {
             .expect("pay_ir_cost succeeds for EE");
 
         assert_eq!(state.player(PlayerId::Us).pool.total, 0, "pool drained by 2");
-        assert!(matches!(state.objects[&ee_id].zone, CardZone::Graveyard),
+        assert!(matches!(state.objects[&ee_id].zone, Zone::Graveyard),
             "EE moved to graveyard");
         assert_eq!(ctx.objects_moved, vec![ee_id],
             "CostsPaidCtx.objects_moved records the sacrificed EE");
@@ -2434,7 +2434,7 @@ mod cost_xmana {
         use super::cost_phase1::{insert_obj, make_creature};
         let mut s = make_state();
         let card = insert_obj(&mut s, PlayerId::Us, make_creature("Spare", "1", 1, 1));
-        s.set_card_zone(card, crate::CardZone::Hand { known: true });
+        s.set_card_zone(card, crate::Zone::Hand { known: true });
 
         let schema = build_schema(&bitter_choice(), &s, PlayerId::Us, ObjId::UNSET).expect("payable");
         assert_eq!(schema.decisions.len(), 1);
@@ -2453,7 +2453,7 @@ mod cost_xmana {
         use super::cost_phase1::{insert_obj, make_creature};
         let mut s = make_state();
         let card = insert_obj(&mut s, PlayerId::Us, make_creature("Spare", "1", 1, 1));
-        s.set_card_zone(card, crate::CardZone::Hand { known: true });
+        s.set_card_zone(card, crate::Zone::Hand { known: true });
         let start_life = s.life_of(PlayerId::Us);
 
         let cost = bitter_choice();
@@ -2461,7 +2461,7 @@ mod cost_xmana {
         // Default plan: first payable branch (discard) + first candidate card.
         let env = crate::strategy::default_announcement(&schema);
         let ctx = pay(&cost, &schema, &env, &mut s, 0, PlayerId::Us, ObjId::UNSET).expect("pay ok");
-        assert!(matches!(s.objects[&card].zone, crate::CardZone::Graveyard), "chosen card discarded");
+        assert!(matches!(s.objects[&card].zone, crate::Zone::Graveyard), "chosen card discarded");
         assert_eq!(s.life_of(PlayerId::Us), start_life, "discard branch taken → no life paid");
         assert_eq!(ctx.objects_moved, vec![card], "discarded card recorded in objects_moved");
     }

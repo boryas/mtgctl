@@ -152,7 +152,7 @@ pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
         let remaining: Vec<ObjId> = state.hand_of(who).map(|c| c.id).collect();
         for id in remaining {
             if let Some(card) = state.objects.get_mut(&id) {
-                card.zone = CardZone::Hand { known: false };
+                card.zone = Zone::Hand { known: false };
             }
         }
     }))
@@ -364,7 +364,7 @@ pub(crate) fn eff_reveal_hand(caster: PlayerId, target: Who) -> Effect {
             .collect();
         for id in &ids {
             if let Some(card) = state.objects.get_mut(id) {
-                card.zone = CardZone::Hand { known: true };
+                card.zone = Zone::Hand { known: true };
             }
         }
         if !names.is_empty() {
@@ -406,7 +406,7 @@ pub(crate) fn eff_enter_permanent(
             catalog_key: card_name.clone(),
             owner,
             controller: owner,
-            zone: CardZone::Battlefield,
+            zone: Zone::Battlefield,
             is_token: false,
             spell: None,
             bf: Some(BattlefieldState {
@@ -615,7 +615,7 @@ pub(crate) fn eff_hand_boost(who: PlayerId, n: usize) -> Effect {
         let ids: Vec<ObjId> = state.library_of(who).map(|o| o.id).take(n).collect();
         let count = ids.len();
         for id in ids {
-            state.set_card_zone(id, CardZone::Hand { known: true });
+            state.set_card_zone(id, Zone::Hand { known: true });
         }
         state.log(t, who, format!("Atraxa ETB: {} cards to hand (placeholder)", count));
     }))
