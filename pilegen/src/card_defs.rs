@@ -5111,30 +5111,65 @@ fn meltdown() -> CardDef {
 /// Rough: {1}{R} Sorcery — "Rough deals 2 damage to each creature without flying."
 /// Tumble: {5}{R} Sorcery — "Tumble deals 6 damage to each creature with flying."
 fn rough_tumble() -> CardDef {
-    let tumble = simple("Tumble", CardKind::Sorcery(SpellData {
-        mana_cost: "5R".to_string(),
-        modes: untargeted_mode(|who, source_id, _x| {
-            let filter = ir_keyword(Keyword::Flying);
-            eff_damage_all(who, 6, source_id, filter)
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
+    use crate::ir::action::Action;
+    use crate::ir::context::Ctx;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel, ZoneSel};
+
+    // "deals `n` damage to each creature matching `flying_filter`" — a ForEach
+    // over the battlefield, dealing damage per match. Protection is enforced by
+    // the `DealDamage` primitive (CR 702.16e), so no per-card check is needed.
+    let damage_each = |n: i64, flying_filter: Filter| Action::ForEach {
+        over: Expr::AllObjects {
+            zone: ZoneSel::Global(ZoneKindSel::Battlefield),
+            bind: "it",
+            filter: Box::new(ir_and(ir_type(CardType::Creature), flying_filter).0),
+        },
+        bind: "v",
+        body: Box::new(Action::DealDamage {
+            source: Expr::Ctx(Ctx::Source),
+            target: Expr::Ctx(Ctx::Var("v")),
+            amount: Expr::Num(n),
         }),
+    };
+
+    let mut tumble = simple("Tumble", CardKind::Sorcery(SpellData {
+        mana_cost: "5R".to_string(),
+        modes: None,
         ..Default::default()
     }), parse_colors("R", false, false), None);
+    tumble.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: damage_each(6, ir_keyword(Keyword::Flying)),
+            }],
+        },
+        text: Some("Tumble deals 6 damage to each creature with flying."),
+    }];
 
-    CardDef::new(
+    let mut card = CardDef::new(
         "Rough // Tumble",
         CardKind::Sorcery(SpellData {
             mana_cost: "1R".to_string(),
-            modes: untargeted_mode(|who, source_id, _x| {
-                let filter = ir_not(ir_keyword(Keyword::Flying));
-                eff_damage_all(who, 2, source_id, filter)
-            }),
+            modes: None,
             ..Default::default()
         }),
         parse_colors("R", false, false),
         None,
         vec![], CardLayout::Split, Some(Box::new(tumble)),
         vec![], vec![], vec![], vec![],
-    )
+    );
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                body: damage_each(2, ir_not(ir_keyword(Keyword::Flying))),
+            }],
+        },
+        text: Some("Rough deals 2 damage to each creature without flying."),
+    }];
+    card
 }
 
 // ── Prismatic Ending ─────────────────────────────────────────────────────────

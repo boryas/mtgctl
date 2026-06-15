@@ -117,14 +117,25 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
-        Action::DealDamage { source: _, target, amount } => {
+        Action::DealDamage { source, target, amount } => {
+            let src = match eval_expr(source, state, env) {
+                Value::Obj(o) => Some(o),
+                _ => None,
+            };
             let tgt = eval_expr(target, state, env);
             let n = expect_num(eval_expr(amount, state, env)) as i32;
             match tgt {
                 Value::Player(p) => state.lose_life(p, n),
                 Value::Obj(id) => {
-                    if let Some(bf) = state.permanent_bf_mut(id) {
-                        bf.damage += n;
+                    // CR 702.16e: a permanent with protection from the source's
+                    // quality can't be damaged by it. Enforced here (not just at
+                    // targeting) so "deal damage to each" effects respect it too.
+                    let protected = src.map_or(false,
+                        |s| crate::predicates::is_protected_from(id, s, state));
+                    if !protected {
+                        if let Some(bf) = state.permanent_bf_mut(id) {
+                            bf.damage += n;
+                        }
                     }
                 }
                 _ => {}
