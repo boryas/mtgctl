@@ -1428,18 +1428,14 @@ pub(crate) fn pay_ir_cost(
             Err(crate::ir::cost::PayError::ManaShortage(rem)) => {
                 match strategy.as_deref_mut() {
                     Some(s) => run_mana_loop(state, t, who, &rem, s),
-                    // No strategy in hand — this is a resolution-time payment
+                    // No strategy threaded — this is a resolution-time payment
                     // (e.g. "counter unless its controller pays", or an
                     // `Action::Choose` cost option resolving on the stack). The
                     // payer may still activate mana abilities (CR 605.3b /
-                    // 602.2g): auto-tap a plan covering the shortfall.
-                    None => {
-                        let plan = auto_tap_plan(state, who, &rem);
-                        if plan.is_empty() { return None; }
-                        for act in &plan {
-                            execute_mana_activation(state, t, who, act);
-                        }
-                    }
+                    // 602.2g): route the *which-sources* choice through the
+                    // payer's own strategy (default: auto_tap_plan), never the
+                    // engine deciding inline.
+                    None => state.with_strategy(who, |s, st| run_mana_loop(st, t, who, &rem, s)),
                 }
             }
             Err(_) => return None,
@@ -1506,18 +1502,14 @@ fn pay_additional_ir_cost(
             Err(crate::ir::cost::PayError::ManaShortage(rem)) => {
                 match strategy.as_deref_mut() {
                     Some(s) => run_mana_loop(state, t, who, &rem, s),
-                    // No strategy in hand — this is a resolution-time payment
+                    // No strategy threaded — this is a resolution-time payment
                     // (e.g. "counter unless its controller pays", or an
                     // `Action::Choose` cost option resolving on the stack). The
                     // payer may still activate mana abilities (CR 605.3b /
-                    // 602.2g): auto-tap a plan covering the shortfall.
-                    None => {
-                        let plan = auto_tap_plan(state, who, &rem);
-                        if plan.is_empty() { return None; }
-                        for act in &plan {
-                            execute_mana_activation(state, t, who, act);
-                        }
-                    }
+                    // 602.2g): route the *which-sources* choice through the
+                    // payer's own strategy (default: auto_tap_plan), never the
+                    // engine deciding inline.
+                    None => state.with_strategy(who, |s, st| run_mana_loop(st, t, who, &rem, s)),
                 }
             }
             Err(_) => return None,
