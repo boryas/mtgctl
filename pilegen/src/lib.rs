@@ -180,12 +180,12 @@ pub fn encode_snapshot(scenario_json: &str, pile_json: &str) -> Result<String, J
         .map_err(|e| JsValue::from_str(&format!("snapshot: {e}")))?;
 
     for &(idx, slot) in &pile.library {
-        if let Some(card) = snap.player(PlayerId::Us).library.get_mut(idx) {
+        if let Some(card) = snap.player_mut(PlayerId::Us).library.get_mut(idx) {
             card.pile_slot = slot;
         }
     }
     for &(idx, slot) in &pile.graveyard {
-        if let Some(card) = snap.player(PlayerId::Us).graveyard.get_mut(idx) {
+        if let Some(card) = snap.player_mut(PlayerId::Us).graveyard.get_mut(idx) {
             card.pile_slot = slot;
         }
     }

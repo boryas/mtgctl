@@ -185,6 +185,17 @@ impl CardRegistry {
 use super::{ScenarioResult, PlayerResult, PermanentResult};
 
 impl BoardSnapshot {
+    /// Per-player snapshot accessor (mirrors `SimState::player`/`player_mut`).
+    /// Used by the wasm pile-encode/decode path, which only touches our (Us) side.
+    #[cfg(target_arch = "wasm32")]
+    pub fn player(&self, who: crate::PlayerId) -> &PlayerSnapshot {
+        match who { crate::PlayerId::Us => &self.us, crate::PlayerId::Opp => &self.opp }
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn player_mut(&mut self, who: crate::PlayerId) -> &mut PlayerSnapshot {
+        match who { crate::PlayerId::Us => &mut self.us, crate::PlayerId::Opp => &mut self.opp }
+    }
+
     /// Convert a `ScenarioResult` (name-based) into a compact `BoardSnapshot`
     /// (id-based).  All card names are resolved through the registry.
     pub fn from_result(
