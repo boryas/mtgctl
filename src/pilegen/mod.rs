@@ -8,7 +8,7 @@ use std::io::Cursor;
 use crate::db::schema::{cards, deck_types, decks};
 use crate::db::{establish_connection, models::*};
 
-pub use pilegen::build_catalog;
+pub use mtg_engine::build_catalog;
 
 // ── Clap args ─────────────────────────────────────────────────────────────────
 
@@ -35,11 +35,11 @@ pub fn run(_args: PilegenArgs) {
     let all_cards = load_deck_cards(&deck_name);
     let opp_cards = load_deck_cards(&opp_deck_name);
 
-    pilegen::warn_unimplemented_cards(&all_cards, &deck_name, &catalog);
-    pilegen::warn_unimplemented_cards(&opp_cards, &opp_display, &catalog);
+    mtg_engine::warn_unimplemented_cards(&all_cards, &deck_name, &catalog);
+    mtg_engine::warn_unimplemented_cards(&opp_cards, &opp_display, &catalog);
 
     loop {
-        let state = pilegen::generate_scenario(&deck_name, &opp_display, &catalog, &all_cards, &opp_cards);
+        let state = mtg_engine::generate_scenario(&deck_name, &opp_display, &catalog, &all_cards, &opp_cards);
         println!("{}", state);
 
         println!();
