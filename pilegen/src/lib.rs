@@ -4341,25 +4341,48 @@ fn do_turn(
 
 /// Simulate the full game up to the Doomsday turn.
 /// Returns the final `SimState` — check `state.terminal` to see if Doomsday resolved.
-pub fn simulate_game(
-    deck_name: &str,
-    opponent: &str,
-    catalog: &HashMap<String, CardDef>,
-    all_cards: &[(String, i32, String)],
-    opp_cards: &[(String, i32, String)],
-    rng: &mut impl Rng,
-) -> SimState {
-    let on_play = rng.gen_bool(0.5);
-    let us = PlayerState::new(deck_name);
-    let opp = PlayerState::new(opponent);
+/// Everything an application supplies to run one game on the engine's generic
+/// loop: the two decks + decision policies + card evaluator + termination
+/// objective + config. The engine owns the loop (shuffle, opening hands,
+/// mulligans, turn order); the application owns *who* plays, *what* decks, *how*
+/// cards are valued, and *when* the run ends (via the `Objective`). This is the
+/// seam between the engine and concrete apps (dd-pilegen, dd-goldfish, ...).
+/// (pub(crate) for now — becomes `pub` when the apps are split into their own crates.)
+pub(crate) struct Scenario {
+    pub us_label: String,
+    pub opp_label: String,
+    pub catalog: HashMap<String, CardDef>,
+    pub us_deck: Vec<(String, i32, String)>,
+    pub opp_deck: Vec<(String, i32, String)>,
+    pub us_strategy: Box<dyn Strategy>,
+    pub opp_strategy: Box<dyn Strategy>,
+    pub evaluate_card: Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync>,
+    pub objective: Box<dyn crate::objective::Objective>,
+    pub max_turns: u8,
+    /// `Some(b)` forces the on-the-play coin; `None` flips it with `rng`.
+    pub on_play: Option<bool>,
+}
+
+/// Run one game to completion on the generic engine loop. Application-agnostic:
+/// every app-specific behavior arrives via `scenario`. Returns the final state —
+/// inspect `state.terminal` (and the objective) for the outcome.
+pub(crate) fn run_game(scenario: Scenario, rng: &mut impl Rng) -> SimState {
+    let Scenario {
+        us_label, opp_label, catalog, us_deck, opp_deck,
+        us_strategy, opp_strategy, evaluate_card, objective, max_turns, on_play,
+    } = scenario;
+
+    let on_play = on_play.unwrap_or_else(|| rng.gen_bool(0.5));
+    let us = PlayerState::new(&us_label);
+    let opp = PlayerState::new(&opp_label);
     let mut state = SimState::new(us, opp);
-    state.catalog = catalog.clone();
+    state.catalog = catalog;
     state.on_play = on_play;
 
     // Populate state.objects with Library-zone objects for each player's mainboard.
     // catalog: game setup — ObjIds are assigned here for the first time; materialized
     // does not exist yet. Catalog is the only source of card definitions at this stage.
-    for (name, qty, board) in all_cards {
+    for (name, qty, board) in &us_deck {
         if board != "main" { continue; }
         if state.catalog.get(name.as_str()).is_none() { continue; }
         for _ in 0..*qty {
@@ -4368,7 +4391,7 @@ pub fn simulate_game(
             state.player_mut(PlayerId::Us).library_order.push_back(id);
         }
     }
-    for (name, qty, board) in opp_cards {
+    for (name, qty, board) in &opp_deck {
         if board != "main" { continue; }
         if state.catalog.get(name.as_str()).is_none() { continue; }
         for _ in 0..*qty {
@@ -4382,44 +4405,11 @@ pub fn simulate_game(
     state.shuffle_library(PlayerId::Us);
     state.shuffle_library(PlayerId::Opp);
 
-    // ── Strategies and opening hands ─────────────────────────────────────────
-
-    // Derive matchup info from opponent identity.
-    let opp_is_blue = matches!(opponent, "Izzet Delver" | "UB Tempo" | "UR Delver");
-    let dd_matchup = MatchupInfo {
-        opp_has_counters: opp_is_blue,
-        opp_fast_clock: opp_is_blue,
-        fetch_colors: vec![Color::Blue, Color::Black],
-    };
-    let opp_matchup = MatchupInfo {
-        opp_has_counters: true,  // DD plays FoW/Daze
-        opp_fast_clock: false,   // DD is combo, not aggro
-        fetch_colors: vec![Color::Blue, Color::Black], // TODO: derive from opponent deck
-    };
-
-    // Wire the universal card evaluator callback (captures matchup info).
-    let eval_dd_matchup = dd_matchup.clone();
-    let eval_opp_matchup = opp_matchup.clone();
-    state.evaluate_card = Arc::new(move |who, card_id, state| {
-        match who {
-            PlayerId::Us => {
-                let gap = dd_plan_gap(state, who, &eval_dd_matchup);
-                dd_card_fills(card_id, &gap, state, who)
-            }
-            PlayerId::Opp => {
-                let gap = opp_plan_gap(state, who, &eval_opp_matchup);
-                opp_card_fills(card_id, &gap, state, who)
-            }
-        }
-    });
-
-    // Install each player's decision policy on the player itself (composed
-    // Player { state, strategy }); the engine reaches it via `with_strategy`.
-    state.set_strategy(PlayerId::Us, Box::new(DoomsdayStrategy::new(dd_matchup)));
-    state.set_strategy(PlayerId::Opp, Box::new(GenericOppStrategy::new(opp_matchup)));
-
-    // Install the dd-pilegen objective: the simulation ends when our Doomsday resolves.
-    state.objective = Some(Box::new(crate::objective::DoomsdayResolvedObjective::default()));
+    // Install the application's card evaluator, decision policies, and objective.
+    state.evaluate_card = evaluate_card;
+    state.set_strategy(PlayerId::Us, us_strategy);
+    state.set_strategy(PlayerId::Opp, opp_strategy);
+    state.objective = Some(objective);
 
     // Deal opening hands with mulligan decisions (London mulligan).
     let mut mulligans = [0u32; 2];
@@ -4461,7 +4451,7 @@ pub fn simulate_game(
         PlayerId::Us,
         format!(
             "{} ({}) | us: {} cards (-{} mulligans), opp: {} cards (-{} mulligans)",
-            opponent,
+            opp_label,
             if on_play { "play" } else { "draw" },
             us_hand,
             mulligans[0],
@@ -4471,10 +4461,8 @@ pub fn simulate_game(
     );
 
     // ── Turn loop ────────────────────────────────────────────────────────────
-    // Run until the game ends (DD resolves, someone wins, etc.) or a hard cap.
-    const MAX_TURNS: u8 = 10;
-
-    for t in 1..=MAX_TURNS {
+    // Run until the game ends (objective fires, someone wins, etc.) or a hard cap.
+    for t in 1..=max_turns {
         if !on_play {
             do_turn(&mut state, t, PlayerId::Opp, on_play);
             if state.done() { break; }
@@ -4490,6 +4478,63 @@ pub fn simulate_game(
     }
 
     state
+}
+
+/// dd-pilegen driver: build the Doomsday `Scenario` (DD strategy + generic
+/// opponent, matchup-parameterized card evaluator, Doomsday-resolved objective)
+/// and run it on the generic engine loop.
+pub fn simulate_game(
+    deck_name: &str,
+    opponent: &str,
+    catalog: &HashMap<String, CardDef>,
+    all_cards: &[(String, i32, String)],
+    opp_cards: &[(String, i32, String)],
+    rng: &mut impl Rng,
+) -> SimState {
+    // Derive matchup info from opponent identity.
+    let opp_is_blue = matches!(opponent, "Izzet Delver" | "UB Tempo" | "UR Delver");
+    let dd_matchup = MatchupInfo {
+        opp_has_counters: opp_is_blue,
+        opp_fast_clock: opp_is_blue,
+        fetch_colors: vec![Color::Blue, Color::Black],
+    };
+    let opp_matchup = MatchupInfo {
+        opp_has_counters: true,  // DD plays FoW/Daze
+        opp_fast_clock: false,   // DD is combo, not aggro
+        fetch_colors: vec![Color::Blue, Color::Black], // TODO: derive from opponent deck
+    };
+
+    // Universal card evaluator callback (captures matchup info).
+    let eval_dd_matchup = dd_matchup.clone();
+    let eval_opp_matchup = opp_matchup.clone();
+    let evaluate_card: Arc<dyn Fn(PlayerId, ObjId, &SimState) -> f64 + Send + Sync> =
+        Arc::new(move |who, card_id, state| match who {
+            PlayerId::Us => {
+                let gap = dd_plan_gap(state, who, &eval_dd_matchup);
+                dd_card_fills(card_id, &gap, state, who)
+            }
+            PlayerId::Opp => {
+                let gap = opp_plan_gap(state, who, &eval_opp_matchup);
+                opp_card_fills(card_id, &gap, state, who)
+            }
+        });
+
+    run_game(
+        Scenario {
+            us_label: deck_name.to_string(),
+            opp_label: opponent.to_string(),
+            catalog: catalog.clone(),
+            us_deck: all_cards.to_vec(),
+            opp_deck: opp_cards.to_vec(),
+            us_strategy: Box::new(DoomsdayStrategy::new(dd_matchup)),
+            opp_strategy: Box::new(GenericOppStrategy::new(opp_matchup)),
+            evaluate_card,
+            objective: Box::new(crate::objective::DoomsdayResolvedObjective::default()),
+            max_turns: 10,
+            on_play: None,
+        },
+        rng,
+    )
 }
 
 
