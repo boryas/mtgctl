@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/mtg-engine"]
+members = [".", "crates/mtg-engine", "crates/pilegen"]
 
 [package]
 name = "mtgctl"
