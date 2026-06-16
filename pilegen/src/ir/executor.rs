@@ -942,20 +942,6 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
         // copies after the spell lands on the stack. Outside a cost context
         // this is a no-op (legacy `CostComponent::Replicate` behaved the same).
         Action::Replicate(_) => ExecResult::Ok,
-
-        // Doomsday sentinel: end the simulation with the given outcome. Peers
-        // through the layers (this is a sim signal, not an MTG effect) —
-        // records pre-DD life, applies the sim's Doomsday life accounting, and
-        // sets the terminal `success` flag. Mirrors the former `eff_doomsday`.
-        Action::EndSimulation { success } => {
-            if *success {
-                let life = state.player(crate::PlayerId::Us).life;
-                state.life_before_dd = Some(life);
-                state.player_mut(crate::PlayerId::Us).life = life / 2;
-                state.success = true;
-            }
-            ExecResult::Ok
-        }
     }
 }
 

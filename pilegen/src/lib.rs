@@ -18,6 +18,7 @@ mod planner;
 pub(crate) use planner::*;
 
 mod snapshot;
+mod objective;
 pub use snapshot::{
     BoardSnapshot, PlayerSnapshot, CardId, CardEntry, PermanentEntry,
     Stage, CardRegistry, SnapshotError,
@@ -579,6 +580,13 @@ pub(crate) enum GameEvent {
         caster: PlayerId,
         card_id: ObjId,
         mana_spent: bool,
+    },
+    /// Fired after a spell finishes resolving — its effect has been applied (or it has
+    /// become a permanent), just before priority returns. The general "spell resolved"
+    /// event; objectives (and future resolution triggers) observe it.
+    SpellResolved {
+        controller: PlayerId,
+        card_id: ObjId,
     },
     /// Fired inside `counter_one` before the counterable check, for spell objects only.
     /// Prohibition gate: "can't be countered" effects suppress this event (CR 614.17).
@@ -1734,8 +1742,12 @@ pub struct SimState {
     pub(crate) decision_log: Vec<String>,
     /// Set when the game ends by normal rules (a player's life reaches 0, etc.). Holds the winner.
     winner: Option<PlayerId>,
-    /// Set when Doomsday resolved — simulation ends successfully.
-    pub(crate) success: bool,
+    /// Set when the active `Objective` decides the run has ended (e.g. Doomsday
+    /// resolved). Replaces the former `success` flag / `Action::EndSimulation` sentinel.
+    pub(crate) terminal: bool,
+    /// App-supplied objective: observes the event stream and decides termination.
+    /// `None` for bare test states with no objective installed.
+    pub(crate) objective: Option<Box<dyn crate::objective::Objective>>,
     /// Life total before Doomsday halved it (for display as "X → Y").
     pub(crate) life_before_dd: Option<i32>,
     /// Card being cast during the mana sub-loop (CR 601.2g). Set before mana loop,
@@ -1825,7 +1837,8 @@ impl SimState {
             log: Vec::new(),
             decision_log: Vec::new(),
             winner: None,
-            success: false,
+            terminal: false,
+            objective: None,
             life_before_dd: None,
             casting_spell: None,
             current_ap: ObjId::UNSET,
@@ -1969,7 +1982,7 @@ impl SimState {
 
     /// True when the simulation should stop (game ended or objective reached).
     fn done(&self) -> bool {
-        self.winner.is_some() || self.success
+        self.winner.is_some() || self.terminal
     }
 
     fn player(&self, who: PlayerId) -> &PlayerState {
@@ -2407,7 +2420,7 @@ pub struct CardResult {
 
 impl SimState {
     pub fn to_result(&self) -> ScenarioResult {
-        let stack = if self.success {
+        let stack = if self.terminal {
             vec!["Doomsday".to_string()]
         } else {
             vec![]
@@ -2489,7 +2502,7 @@ impl SimState {
             .collect();
 
         // If DD just resolved, it's in the GY but we display it on the stack instead.
-        if who == PlayerId::Us && self.success {
+        if who == PlayerId::Us && self.terminal {
             if let Some(pos) = graveyard.iter().rposition(|n| n == "Doomsday") {
                 graveyard.remove(pos);
             }
@@ -2702,6 +2715,17 @@ pub(crate) fn fire_event(
 
     // Stage 4: Log.
     log_event(&event, state, t, actor);
+
+    // Stage 4.5: Objective observation. The active objective decides termination
+    // off the event stream (replaces the former EndSimulation/success sentinel).
+    // Moved out and restored so it and the rest of `state` are disjoint, mirroring
+    // the `with_strategy` pattern.
+    if let Some(mut obj) = state.objective.take() {
+        if obj.observe(&event, state) {
+            state.terminal = true;
+        }
+        state.objective = Some(obj);
+    }
 
     // Stage 5: Trigger dispatch.
     let (triggers, one_shot_fired) = fire_triggers(&event, state);
@@ -3560,6 +3584,7 @@ fn resolve_top_of_stack(
             costs_paid_ctx: CostsPaidCtx::default(),
         });
         let owner = state.objects[&id].owner;
+        let controller = state.objects[&id].controller;
         let name = state.objects[&id].catalog_key.clone();
 
         // Back face of a split card whose back has subtype "adventure" → exile to on_adventure.
@@ -3608,6 +3633,10 @@ fn resolve_top_of_stack(
             state.log(t, owner, format!("{} resolves", name));
             change_zone(id, ZoneId::Graveyard, state, t, owner);
         }
+
+        // The spell finished resolving (effect applied, or it became a permanent).
+        // Fire the general resolution event so objectives / triggers can react.
+        fire_event(GameEvent::SpellResolved { controller, card_id: id }, state, t, controller);
     }
 }
 
@@ -4311,7 +4340,7 @@ fn do_turn(
 
 
 /// Simulate the full game up to the Doomsday turn.
-/// Returns the final `SimState` — check `state.success` to see if Doomsday resolved.
+/// Returns the final `SimState` — check `state.terminal` to see if Doomsday resolved.
 pub fn simulate_game(
     deck_name: &str,
     opponent: &str,
@@ -4388,6 +4417,9 @@ pub fn simulate_game(
     // Player { state, strategy }); the engine reaches it via `with_strategy`.
     state.set_strategy(PlayerId::Us, Box::new(DoomsdayStrategy::new(dd_matchup)));
     state.set_strategy(PlayerId::Opp, Box::new(GenericOppStrategy::new(opp_matchup)));
+
+    // Install the dd-pilegen objective: the simulation ends when our Doomsday resolves.
+    state.objective = Some(Box::new(crate::objective::DoomsdayResolvedObjective::default()));
 
     // Deal opening hands with mulligan decisions (London mulligan).
     let mut mulligans = [0u32; 2];
@@ -4476,7 +4508,7 @@ pub fn generate_scenario(
         attempts += 1;
         let state =
             simulate_game(deck_name, opp_display, catalog, all_cards, opp_cards, &mut rng);
-        if state.success {
+        if state.terminal {
             if attempts > 1 {
                 eprintln!("  (generated after {} attempts)", attempts);
             }

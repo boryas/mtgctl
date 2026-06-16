@@ -576,16 +576,19 @@
     // ── Section 6: Spell Resolution ───────────────────────────────────────────
 
     #[test]
-    fn test_effect_doomsday_sets_success() {
+    fn test_doomsday_resolved_objective_ends_sim() {
+        use crate::objective::Objective;
         let mut state = make_state();
         let before = state.player(PlayerId::Us).life;
-        let env = crate::ir::executor::BindEnv::new().with_controller(PlayerId::Us);
-        crate::ir::executor::execute(
-            &crate::ir::action::Action::EndSimulation { success: true },
+        // A Doomsday object as if it just resolved.
+        let id = state.alloc_id();
+        state.objects.insert(id, GameObject::new(id, "Doomsday".to_string(), PlayerId::Us));
+        let mut obj = crate::objective::DoomsdayResolvedObjective::default();
+        let ended = obj.observe(
+            &crate::GameEvent::SpellResolved { controller: PlayerId::Us, card_id: id },
             &mut state,
-            &env,
         );
-        assert!(state.success, "Doomsday sentinel sets the terminal success flag");
+        assert!(ended, "Doomsday resolving ends the simulation");
         assert_eq!(state.life_before_dd, Some(before), "pre-DD life recorded");
         assert_eq!(state.player(PlayerId::Us).life, before / 2, "Doomsday life accounting applied");
     }
@@ -9247,7 +9250,7 @@
                 Err(_) => { panics += 1; continue; }
             };
             let state = result;
-            if state.success {
+            if state.terminal {
                 dd_success += 1;
                 success_turns.push(state.current_turn);
                 // Find the opening hand summary line (contains "mulligans").
@@ -9324,7 +9327,7 @@
         // Run sims until one succeeds (DD resolves).
         let state = loop {
             let s = simulate_game("doomsday", "UB Tempo", &catalog, &dd_cards, &opp_cards, &mut rng);
-            if s.success { break s; }
+            if s.terminal { break s; }
         };
         assert!(!state.decision_log.is_empty(), "decision_log should have entries");
         // Should contain at least a mulligan decision and a planner decision.

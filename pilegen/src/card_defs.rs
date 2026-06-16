@@ -2343,8 +2343,11 @@ fn brotherhoods_end() -> CardDef {
 fn doomsday() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::Action;
-    // "Doomsday" is fake in this sim — resolving it signals combo success and
-    // ends the simulation (see `Action::EndSimulation`). Not a real cast.
+    // "Doomsday" is a sentinel in this sim: resolving it is the stopping point
+    // (the real pile-building is deferred to the human via the web UI). The card
+    // body is a deliberate no-op — termination + life accounting are owned by the
+    // application's objective (`objective::DoomsdayResolvedObjective`), which
+    // observes the `SpellResolved` event. Not a real cast.
     let mut card = simple("Doomsday", CardKind::Sorcery(SpellData {
         mana_cost: "BBB".to_string(),
         modes: None,
@@ -2354,10 +2357,10 @@ fn doomsday() -> CardDef {
         kind: AbilityKind::OnResolve {
             modes: vec![IrSpellMode {
                 target_spec: TargetSpec::None,
-                body: Action::EndSimulation { success: true },
+                body: Action::Sequence(vec![]),
             }],
         },
-        text: Some("(sim sentinel) Resolving Doomsday ends the simulation in success."),
+        text: Some("(sim sentinel) Resolving Doomsday ends the simulation; the objective observes it."),
     }];
     card
 }

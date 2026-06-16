@@ -471,7 +471,6 @@ fn walk(
         | Action::Attach { .. }
         | Action::Search { .. }
         | Action::ForEach { .. }
-        | Action::EndSimulation { .. }
         | Action::OrderTop { .. }
         | Action::MayDo { .. } => Some(()),
     }

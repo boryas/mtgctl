@@ -372,19 +372,6 @@ pub(crate) enum Action {
     /// inside a cast cost tree (not an arbitrary effect body).
     Replicate(crate::ManaCost),
 
-    // ── simulation control ────────────────────────────────────────────────
-    /// Mark the simulation's terminal success state. NOT an MTG effect — in
-    /// this engine "Doomsday" is a sentinel that signals the combo resolved
-    /// and the simulation should end (consumed by `is_game_over` and the
-    /// board snapshot). The executor peers through the layers on purpose:
-    /// it records pre-resolution life (`life_before_dd`), applies the sim's
-    /// Doomsday life accounting, and sets `state.success`. This is the one
-    /// deliberate exception to "Actions are composable MTG primitives" — the
-    /// card it models is itself fake.
-    EndSimulation {
-        success: bool,
-    },
-
     // ── library placement ────────────────────────────────────────────────
     /// Move `count` cards from zone `from` (owned by `who`) onto their
     /// library — `top` = top, `!top` = bottom. Agency: strategy picks which
