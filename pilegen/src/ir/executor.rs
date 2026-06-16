@@ -519,6 +519,28 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             ExecResult::Ok
         }
 
+        Action::OrderTop { who, n } => {
+            let who = resolve_who(who, state, env, actor);
+            let n = expect_num(eval_expr(n, state, env)) as usize;
+            let top: Vec<ObjId> = state.library_of(who).take(n).map(|o| o.id).collect();
+            if top.len() < 2 {
+                return ExecResult::Ok; // 0 or 1 card — nothing to arrange.
+            }
+            // The arrangement is the player's decision.
+            let ordered = state.with_strategy(who, |s, st| s.order_top_library(&top, st));
+            // Guard against a misbehaving strategy: keep only the looked-at cards,
+            // and append any it dropped, so the library can't be corrupted.
+            let mut final_order: Vec<ObjId> =
+                ordered.into_iter().filter(|id| top.contains(id)).collect();
+            for &id in &top {
+                if !final_order.contains(&id) { final_order.push(id); }
+            }
+            let lib = &mut state.player_mut(who).library_order;
+            for _ in 0..top.len().min(lib.len()) { lib.pop_front(); }
+            for &id in final_order.iter().rev() { lib.push_front(id); }
+            ExecResult::Ok
+        }
+
         Action::Look { who, zone, n } => {
             let who = resolve_who(who, state, env, actor);
             let n = expect_num(eval_expr(n, state, env)) as usize;

@@ -205,39 +205,9 @@ pub(crate) fn eff_scry(who: PlayerId, n: usize) -> Effect {
     }))
 }
 
-/// Order top N: sort top N cards of `who`'s library by evaluator score (best on top).
-/// Used by Ponder: look at top 3 and arrange them.
-pub(crate) fn eff_order(who: PlayerId, n: usize) -> Effect {
-    Effect(Arc::new(move |state, _t, _targets| {
-        let eval = Arc::clone(&state.evaluate_card);
-        let lib = match who {
-            PlayerId::Us  => &state.player(PlayerId::Us).library_order,
-            PlayerId::Opp => &state.player(PlayerId::Opp).library_order,
-        };
-        let mut top: Vec<ObjId> = lib.iter().take(n).copied().collect();
-        if top.len() < 2 { return; }
-
-        // Score each card.
-        let mut scored: Vec<(ObjId, f64)> = top.iter()
-            .map(|&id| (id, eval(who, id, state)))
-            .collect();
-        // Sort best first (highest score on top = front of library).
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        top = scored.into_iter().map(|(id, _)| id).collect();
-
-        // Remove the N cards from front, re-insert in sorted order.
-        let lib = match who {
-            PlayerId::Us  => &mut state.player_mut(PlayerId::Us).library_order,
-            PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
-        };
-        for _ in 0..n.min(lib.len()) {
-            lib.pop_front();
-        }
-        for &id in top.iter().rev() {
-            lib.push_front(id);
-        }
-    }))
-}
+// `eff_order` (top-N library arrangement) was removed: it sorted by the engine's
+// evaluator (a player-agency leak). It is now the IR `Action::OrderTop`, routed
+// through `Strategy::order_top_library`.
 
 /// `who` loses `n` life, with a log line.
 pub(crate) fn eff_life_loss(who: PlayerId, n: i32) -> Effect {

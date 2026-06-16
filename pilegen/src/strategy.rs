@@ -198,6 +198,20 @@ pub(crate) trait Strategy {
         candidates.first().copied()
     }
 
+    /// "Put them back in any order" (Ponder, scry-then-arrange, etc.): given the
+    /// looked-at library cards (current top-to-bottom), return them in the desired
+    /// top-to-bottom order — a genuine player decision, not an engine sort.
+    /// Default: highest-value first (via the evaluator), matching the old heuristic.
+    fn order_top_library(&mut self, cards: &[ObjId], state: &SimState) -> Vec<ObjId> {
+        let who = self.player_id();
+        let eval = std::sync::Arc::clone(&state.evaluate_card);
+        let mut scored: Vec<(ObjId, f64)> = cards.iter()
+            .map(|&id| (id, eval(who, id, state)))
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.into_iter().map(|(id, _)| id).collect()
+    }
+
     /// Drain accumulated decision-log entries. Called by the engine after each
     /// strategy invocation; entries are appended to `SimState::decision_log`.
     fn drain_decisions(&mut self) -> Vec<String> { Vec::new() }
@@ -261,6 +275,9 @@ pub(crate) struct TestStrategy {
     /// Forced sacrifice: pick the smallest-`ObjId` candidate (deterministic
     /// regardless of HashMap iteration order); false → trait default (first).
     sacrifice_min_id: bool,
+    /// Library ordering: reverse the looked-at cards (proves OrderTop routes the
+    /// arrangement through the strategy, not an engine sort); false → trait default.
+    order_reverse: bool,
 }
 
 #[cfg(test)]
@@ -269,6 +286,7 @@ impl TestStrategy {
         TestStrategy {
             player_id, color: None, card_name: None, mode: None,
             put_first_candidate: false, surveil: None, sacrifice_min_id: false,
+            order_reverse: false,
         }
     }
     pub(crate) fn color(mut self, c: Color) -> Self { self.color = Some(c); self }
@@ -277,6 +295,7 @@ impl TestStrategy {
     pub(crate) fn put_first_candidate(mut self) -> Self { self.put_first_candidate = true; self }
     pub(crate) fn surveil(mut self, mill: bool) -> Self { self.surveil = Some(mill); self }
     pub(crate) fn sacrifice_min_id(mut self) -> Self { self.sacrifice_min_id = true; self }
+    pub(crate) fn order_reverse(mut self) -> Self { self.order_reverse = true; self }
 }
 
 #[cfg(test)]
@@ -315,6 +334,14 @@ impl Strategy for TestStrategy {
             candidates.iter().min_by_key(|id| id.0).copied()
         } else {
             DefaultStrategy::new(self.player_id).sacrifice_choice(who, candidates, state)
+        }
+    }
+
+    fn order_top_library(&mut self, cards: &[ObjId], state: &SimState) -> Vec<ObjId> {
+        if self.order_reverse {
+            cards.iter().rev().copied().collect()
+        } else {
+            DefaultStrategy::new(self.player_id).order_top_library(cards, state)
         }
     }
 }

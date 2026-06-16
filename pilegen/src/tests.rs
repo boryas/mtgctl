@@ -8414,7 +8414,9 @@
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
 
-        eff_order(PlayerId::Us, 3).call(&mut state, 0, &[]);
+        eff_ir(PlayerId::Us, crate::ir::action::Action::OrderTop {
+            who: crate::ir::action::Who::You, n: crate::ir::expr::Expr::Num(3),
+        }).call(&mut state, 0, &[]);
 
         let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib[0], dd, "Doomsday (0.9) should be on top after ordering");
@@ -8436,7 +8438,9 @@
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Force of Will", 0.8)]);
 
-        eff_order(PlayerId::Us, 2).call(&mut state, 0, &[]);
+        eff_ir(PlayerId::Us, crate::ir::action::Action::OrderTop {
+            who: crate::ir::action::Who::You, n: crate::ir::expr::Expr::Num(2),
+        }).call(&mut state, 0, &[]);
 
         let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib[0], dd, "DD sorted to top of the 2");
@@ -8556,25 +8560,14 @@
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Brainstorm", 0.35), ("Thassa's Oracle", 0.05)]);
 
-        // Ponder = order(3), may-shuffle, draw(1). Default strategy declines the
-        // shuffle, so order puts DD on top and we draw it.
-        let effect = eff_order(PlayerId::Us, 3)
-            .then(eff_ir(PlayerId::Us, ponder_may_shuffle()))
-            .then(eff_draw(PlayerId::Us, 1));
-        effect.call(&mut state, 0, &[]);
+        // Real Ponder: OrderTop(3) (default = best on top), may-shuffle (default
+        // strategy declines), draw(1) → draw DD.
+        let ponder = catalog_card("Ponder");
+        build_spell_effect(&ponder, PlayerId::Us, ObjId::UNSET, 0, 0).1.call(&mut state, 0, &[]);
 
-        // After order: DD(0.9) on top, BS(0.35), Oracle(0.05)
-        // may-shuffle: default strategy declines → no shuffle
-        // draw: DD drawn into hand
         let hand: Vec<String> = state.hand_of(PlayerId::Us)
             .map(|c| c.catalog_key.clone()).collect();
         assert!(hand.contains(&"Doomsday".to_string()), "should draw DD (best card)");
-    }
-
-    /// Ponder's "you may shuffle" step as an IR action (mirrors `ponder()`).
-    fn ponder_may_shuffle() -> crate::ir::action::Action {
-        use crate::ir::action::{Action, Who};
-        Action::MayDo { who: Who::You, action: Box::new(Action::Shuffle { who: Who::You }) }
     }
 
     #[test]
@@ -8595,15 +8588,36 @@
         // Strategy opts into the may-shuffle (Mode 1).
         state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).mode(1)));
 
-        let effect = eff_order(PlayerId::Us, 3)
-            .then(eff_ir(PlayerId::Us, ponder_may_shuffle()))
-            .then(eff_draw(PlayerId::Us, 1));
-        effect.call(&mut state, 0, &[]);
+        let ponder = catalog_card("Ponder");
+        build_spell_effect(&ponder, PlayerId::Us, ObjId::UNSET, 0, 0).1.call(&mut state, 0, &[]);
 
         // Drew 1 card from the (shuffled) library; 3 remain.
         let hand_count = state.hand_of(PlayerId::Us).count();
         assert_eq!(hand_count, 1, "should draw 1 card after ponder");
         assert_eq!(state.player(PlayerId::Us).library_order.len(), 3, "3 cards left in library");
+    }
+
+    /// OrderTop honors the *strategy's* arrangement, not an engine/evaluator sort:
+    /// a strategy that reverses the looked-at cards reverses the library top.
+    #[test]
+    fn test_order_top_respects_strategy_arrangement() {
+        let mut state = make_state();
+        state.catalog = test_catalog();
+        let a = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
+        let b = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
+        let c = add_library_card(&mut state, PlayerId::Us, "Doomsday");
+        state.player_mut(PlayerId::Us).library_order.clear();
+        for id in [a, b, c] { state.player_mut(PlayerId::Us).library_order.push_back(id); }
+        // Evaluator would put Doomsday (c) on top — the reversing strategy must win.
+        wire_eval(&mut state, vec![("Doomsday", 0.9), ("Brainstorm", 0.35), ("Thassa's Oracle", 0.05)]);
+        state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).order_reverse()));
+
+        eff_ir(PlayerId::Us, crate::ir::action::Action::OrderTop {
+            who: crate::ir::action::Who::You, n: crate::ir::expr::Expr::Num(3),
+        }).call(&mut state, 0, &[]);
+
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
+        assert_eq!(lib, vec![c, b, a], "OrderTop must honor the strategy's reversed arrangement");
     }
 
     #[test]

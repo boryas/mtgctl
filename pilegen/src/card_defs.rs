@@ -2413,19 +2413,33 @@ fn preordain() -> CardDef {
 /// "You may shuffle" decomposes to `MayDo { Shuffle }` — the shuffle is the
 /// effect, the "may" is a y/n strategy decision (no heuristic baked in).
 fn ponder() -> CardDef {
+    use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::{Action, Who as IrWho};
-    simple("Ponder", CardKind::Sorcery(SpellData {
+    use crate::ir::expr::Expr;
+    let mut card = simple("Ponder", CardKind::Sorcery(SpellData {
         mana_cost: "U".to_string(),
-        modes: untargeted_mode(|who, _source_id, _x| {
-            eff_order(who, 3)
-                .then(eff_ir(who, Action::MayDo {
-                    who: IrWho::You,
-                    action: Box::new(Action::Shuffle { who: IrWho::You }),
-                }))
-                .then(eff_draw(who, 1))
-        }),
+        modes: None,
         ..Default::default()
-    }), parse_colors("U", false, false), None)
+    }), parse_colors("U", false, false), None);
+    card.abilities = vec![Ability {
+        kind: AbilityKind::OnResolve {
+            modes: vec![IrSpellMode {
+                target_spec: TargetSpec::None,
+                // Look at top 3, put back in any order (a player decision via
+                // OrderTop → Strategy::order_top_library); you may shuffle; draw.
+                body: Action::Sequence(vec![
+                    Action::OrderTop { who: IrWho::You, n: Expr::Num(3) },
+                    Action::MayDo {
+                        who: IrWho::You,
+                        action: Box::new(Action::Shuffle { who: IrWho::You }),
+                    },
+                    Action::Draw { who: IrWho::You, n: Expr::Num(1) },
+                ]),
+            }],
+        },
+        text: Some("Look at the top three cards of your library, then put them back in any order. You may shuffle. Draw a card."),
+    }];
+    card
 }
 
 /// Target opponent discards a nonland card; you lose 2 life. CR 701.8, CR 702.1.

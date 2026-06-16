@@ -299,6 +299,13 @@ pub(crate) enum Action {
         who: Who,
         n: Expr,
     },
+    /// Look at the top `n` cards of `who`'s library and put them back in a
+    /// player-chosen order (Ponder, "put back in any order"). The arrangement is
+    /// a decision, routed through `Strategy::order_top_library` — not an engine sort.
+    OrderTop {
+        who: Who,
+        n: Expr,
+    },
     Reveal {
         who: Who,
         what: Expr,
