@@ -1268,7 +1268,7 @@ fn grafdiggers_cage() -> CardDef {
             timestamp: 0,
             filter: Arc::new(move |id, _ctr, state| {
                 state.objects.get(&id).map_or(false, |o| {
-                    o.zone() == Zone::Graveyard || o.zone() == Zone::Library
+                    o.in_zone(Zone::Graveyard) || o.in_zone(Zone::Library)
                 })
             }),
             modifier: Arc::new(|def, _state| { def.castable = false; }),
@@ -3293,7 +3293,7 @@ fn lavinia_azorius_renegade() -> CardDef {
                 // Filter: only opponent's cards in hand (noncreature check in modifier).
                 filter: Arc::new(move |id, card_controller, state| {
                     card_controller == opp
-                        && state.objects.get(&id).map_or(false, |o| matches!(o.zone(), Zone::Hand { .. }))
+                        && state.objects.get(&id).map_or(false, |o| o.in_zone(Zone::Hand { known: false }))
                 }),
                 modifier: Arc::new(move |def, state| {
                     if def.is_creature() || def.is_land() { return; }

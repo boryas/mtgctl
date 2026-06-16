@@ -193,12 +193,12 @@ pub(crate) fn enumerate_choices(spec: &ChoiceSpec, controller: PlayerId, state: 
     state.objects.values()
         .filter(|o| {
             let zone_match = match spec.zone {
-                ZoneId::Exile => matches!(o.zone(), Zone::Exile { .. }),
-                ZoneId::Hand => matches!(o.zone(), Zone::Hand { .. }),
-                ZoneId::Battlefield => o.zone() == Zone::Battlefield,
-                ZoneId::Graveyard  => o.zone() == Zone::Graveyard,
-                ZoneId::Stack      => o.zone() == Zone::Stack,
-                ZoneId::Library    => o.zone() == Zone::Library,
+                ZoneId::Exile => o.in_zone(Zone::Exile { on_adventure: false }),
+                ZoneId::Hand => o.in_zone(Zone::Hand { known: false }),
+                ZoneId::Battlefield => o.in_zone(Zone::Battlefield),
+                ZoneId::Graveyard  => o.in_zone(Zone::Graveyard),
+                ZoneId::Stack      => o.in_zone(Zone::Stack),
+                ZoneId::Library    => o.in_zone(Zone::Library),
             };
             zone_match && (o.owner == target_who || o.controller == target_who)
         })

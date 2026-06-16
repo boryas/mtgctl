@@ -3482,7 +3482,7 @@
         // Drop the ETB tutor's pending trigger — we're testing the activated ability here.
         state.pending_triggers.clear();
         let sfm_id = state.objects.values()
-            .find(|o| o.catalog_key == "Stoneforge Mystic" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Stoneforge Mystic" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Stoneforge should be on the battlefield");
         if let Some(bf) = state.permanent_bf_mut(sfm_id) { bf.entered_this_turn = false; }
 
@@ -3514,10 +3514,10 @@
         }
 
         let bs_id = state.objects.values()
-            .find(|o| o.catalog_key == "Batterskull" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Batterskull" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Batterskull on battlefield");
         let germ_id = state.objects.values()
-            .find(|o| o.catalog_key == "Phyrexian Germ" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Phyrexian Germ" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Phyrexian Germ token created");
 
         let attached = state.permanent_bf(bs_id).and_then(|bf| bf.attached_to);
@@ -3542,7 +3542,7 @@
         eff_enter_permanent(PlayerId::Us, "Batterskull").call(&mut state, 1, &[]);
         state.pending_triggers.clear();
         let bs_id = state.objects.values()
-            .find(|o| o.catalog_key == "Batterskull" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Batterskull" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Batterskull on battlefield");
 
         // Fire the {3} ability (index 0 in abilities).
@@ -3772,7 +3772,7 @@
 
         eff_enter_permanent(PlayerId::Us, "Meteor Sword").call(&mut state, 1, &[]);
         let sword_id = state.objects.values()
-            .find(|o| o.catalog_key == "Meteor Sword" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Meteor Sword" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Meteor Sword on battlefield");
 
         // Resolve the ETB trigger against the opponent's creature.
@@ -3894,7 +3894,7 @@
         state.resolving_costs_ctx.alt_cost_index = Some(0);
         eff_enter_permanent(PlayerId::Us, "Quantum Riddler").call(&mut state, 1, &[]);
         let qr_id = state.objects.values()
-            .find(|o| o.catalog_key == "Quantum Riddler" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Quantum Riddler" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Quantum Riddler on battlefield");
 
         // Resolve the warp trigger — it registers a delayed end-step exile.
@@ -3940,7 +3940,7 @@
         // Pre-War Formalwear ETBs → ETB trigger queued.
         eff_enter_permanent(PlayerId::Us, "Pre-War Formalwear").call(&mut state, 1, &[]);
         let pwf_id = state.objects.values()
-            .find(|o| o.catalog_key == "Pre-War Formalwear" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Pre-War Formalwear" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Pre-War Formalwear on battlefield");
 
         let ctx = state.pending_triggers.iter()
@@ -3976,7 +3976,7 @@
 
         eff_enter_permanent(PlayerId::Us, "Cryptic Coat").call(&mut state, 1, &[]);
         let coat_id = state.objects.values()
-            .find(|o| o.catalog_key == "Cryptic Coat" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Cryptic Coat" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Cryptic Coat on battlefield");
 
         // Resolve ETB: creates the token and attaches self to it.
@@ -3986,7 +3986,7 @@
         ctx.effect.call(&mut state, 1, &[]);
 
         let token_id = state.objects.values()
-            .find(|o| o.catalog_key == "Mysterious Creature" && o.zone() == Zone::Battlefield)
+            .find(|o| o.catalog_key == "Mysterious Creature" && o.in_zone(Zone::Battlefield))
             .map(|o| o.id).expect("Mysterious Creature token created");
         assert_eq!(state.permanent_bf(coat_id).and_then(|bf| bf.attached_to), Some(token_id),
             "Cryptic Coat attached to the cloaked token");
@@ -4006,7 +4006,7 @@
         };
         let factory = bounce.ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, coat_id).call(&mut state, 1, &[]);
-        assert!(matches!(state.objects[&coat_id].zone(), Zone::Hand { .. }),
+        assert!(state.objects[&coat_id].in_zone(Zone::Hand { known: false }),
             "Cryptic Coat returned to owner's hand");
     }
 
@@ -5905,9 +5905,9 @@
         let mbt = catalog_card("Mindbreak Trap");
         build_spell_effect(&mbt, PlayerId::Opp, ObjId::UNSET, 0, 0).1.call(&mut state, 1, &[]);
 
-        assert!(matches!(state.objects[&spell_a].zone(), Zone::Exile { .. }),
+        assert!(state.objects[&spell_a].in_zone(Zone::Exile { on_adventure: false }),
             "spell A should be exiled");
-        assert!(matches!(state.objects[&spell_b].zone(), Zone::Exile { .. }),
+        assert!(state.objects[&spell_b].in_zone(Zone::Exile { on_adventure: false }),
             "spell B should be exiled");
     }
 
@@ -6923,7 +6923,7 @@
         let eff = build_ability_effect(ability, PlayerId::Us, clue_id);
         eff.call(&mut state, 1, &[]);
 
-        assert!(matches!(state.objects[&top_id].zone(), Zone::Hand { .. }),
+        assert!(state.objects[&top_id].in_zone(Zone::Hand { known: false }),
             "Clue Token activation should draw the top card into hand");
     }
 
@@ -7477,7 +7477,7 @@
 
         change_zone(opp_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Opp);
 
-        assert!(matches!(state.objects[&opp_id].zone(), Zone::Exile { .. }),
+        assert!(state.objects[&opp_id].in_zone(Zone::Exile { on_adventure: false }),
             "non-cast creature should be exiled by Containment Priest");
     }
 
@@ -8671,7 +8671,7 @@
         assert!(hand.contains(&"Doomsday".to_string()), "should draw DD after surveilling Oracle away");
         // Oracle in graveyard
         let gy: Vec<String> = state.objects.values()
-            .filter(|o| o.zone() == Zone::Graveyard)
+            .filter(|o| o.in_zone(Zone::Graveyard))
             .map(|o| o.catalog_key.clone()).collect();
         assert!(gy.contains(&"Thassa's Oracle".to_string()), "Oracle should be in graveyard");
     }
@@ -9378,7 +9378,7 @@
         // Stack should be empty and no objects should have zone == Stack.
         assert!(state.stack.is_empty(), "stack list should be empty after resolution");
         let stale_stack_objs: Vec<_> = state.objects.values()
-            .filter(|o| o.zone() == Zone::Stack)
+            .filter(|o| o.in_zone(Zone::Stack))
             .map(|o| o.catalog_key.clone())
             .collect();
         assert!(stale_stack_objs.is_empty(),
@@ -9502,7 +9502,7 @@
         assert!(state.stack.is_empty(),
             "stack should be empty after priority round with no spells cast");
         let stack_objs: Vec<_> = state.objects.values()
-            .filter(|o| o.zone() == Zone::Stack)
+            .filter(|o| o.in_zone(Zone::Stack))
             .collect();
         assert!(stack_objs.is_empty(),
             "no objects should have zone == Stack after clean priority round");
@@ -9528,7 +9528,7 @@
         assert!(state.stack.is_empty(),
             "stack list should be empty after resolving all 3 permanents");
         let stale: Vec<_> = state.objects.values()
-            .filter(|o| o.zone() == Zone::Stack)
+            .filter(|o| o.in_zone(Zone::Stack))
             .map(|o| o.catalog_key.clone())
             .collect();
         assert!(stale.is_empty(),
@@ -9536,7 +9536,7 @@
         // All 3 should be on the battlefield.
         for name in &names {
             let on_bf = state.objects.values()
-                .any(|o| o.catalog_key == *name && o.zone() == Zone::Battlefield);
+                .any(|o| o.catalog_key == *name && o.in_zone(Zone::Battlefield));
             assert!(on_bf, "{} should be on the battlefield after resolution", name);
         }
     }
@@ -9562,11 +9562,11 @@
 
         // Verify graveyard_order matches actual graveyard objects.
         let gy_objs: Vec<ObjId> = state.objects.values()
-            .filter(|o| o.zone() == Zone::Graveyard && o.owner == PlayerId::Us)
+            .filter(|o| o.in_zone(Zone::Graveyard) && o.owner == PlayerId::Us)
             .map(|o| o.id)
             .collect();
         for &id in &state.graveyard_order {
-            assert!(state.objects.get(&id).map_or(false, |o| o.zone() == Zone::Graveyard),
+            assert!(state.objects.get(&id).map_or(false, |o| o.in_zone(Zone::Graveyard)),
                 "graveyard_order contains id {:?} that is not in graveyard zone", id);
         }
         for &id in &gy_objs {
@@ -9577,12 +9577,12 @@
         // Verify library_order matches actual library objects.
         for who in [PlayerId::Us, PlayerId::Opp] {
             let lib_objs: Vec<ObjId> = state.objects.values()
-                .filter(|o| o.zone() == Zone::Library && o.owner == who)
+                .filter(|o| o.in_zone(Zone::Library) && o.owner == who)
                 .map(|o| o.id)
                 .collect();
             let lib_order = &state.player(who).library_order;
             for &id in lib_order.iter() {
-                assert!(state.objects.get(&id).map_or(false, |o| o.zone() == Zone::Library),
+                assert!(state.objects.get(&id).map_or(false, |o| o.in_zone(Zone::Library)),
                     "library_order for {:?} contains id {:?} not in library zone", who, id);
             }
             for &id in &lib_objs {

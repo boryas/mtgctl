@@ -407,6 +407,21 @@ impl GameObject {
         }
     }
 
+    /// Kind-first "is this object in zone `z`?" — matches on the role's *kind*
+    /// (ignoring the `known`/`on_adventure` payload), so objects with no zone
+    /// (a player, once that role exists) simply return `false`. Prefer this over
+    /// `zone() == z` for membership tests; reserve `zone()` for the rare site
+    /// that needs the actual zone value.
+    fn in_zone(&self, z: Zone) -> bool {
+        matches!((&self.role, z),
+            (ObjectRole::Library, Zone::Library)
+            | (ObjectRole::Hand { .. }, Zone::Hand { .. })
+            | (ObjectRole::Battlefield(_), Zone::Battlefield)
+            | (ObjectRole::StackSpell(_) | ObjectRole::StackAbility(_), Zone::Stack)
+            | (ObjectRole::Graveyard, Zone::Graveyard)
+            | (ObjectRole::Exile { .. }, Zone::Exile { .. }))
+    }
+
     /// The coarse `Zone` this object occupies, derived from its role.
     fn zone(&self) -> Zone {
         match &self.role {
@@ -963,7 +978,7 @@ pub(crate) fn recompute(state: &mut SimState) {
         // (CEs may override — e.g. Dauthi sets castable=true on exiled cards).
         {
             let obj = state.objects.get(&id).unwrap();
-            def.castable = matches!(obj.zone(), Zone::Hand { .. });
+            def.castable = obj.in_zone(Zone::Hand { known: false });
         }
 
         state.objects.get_mut(&id).unwrap().materialized = Some(def);
@@ -1350,7 +1365,7 @@ pub(crate) fn auto_tap_plan(state: &SimState, who: PlayerId, cost: &ManaCost) ->
     let find_bf = |state: &SimState, used: &HashSet<ObjId>, color: Option<Color>| -> Option<(ObjId, usize, usize)> {
         state.objects.iter().find_map(|(id, c)| {
             if used.contains(id) { return None; }
-            if c.controller != who || c.zone() != Zone::Battlefield { return None; }
+            if c.controller != who || !c.in_zone(Zone::Battlefield) { return None; }
             let bf = c.bf()?;
             let mas = state.def_of(*id).map(|d| d.mana_abilities()).unwrap_or(&[]);
             let (idx, ma) = mas.iter().enumerate().find(|(_, ma)| {
@@ -1836,31 +1851,31 @@ impl SimState {
     }
 
     fn permanents_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.controller == who && c.zone() == Zone::Battlefield)
+        self.objects.values().filter(move |c| c.controller == who && c.in_zone(Zone::Battlefield))
     }
 
     fn permanent_bf(&self, id: ObjId) -> Option<&BattlefieldState> {
         self.objects.get(&id)
-            .filter(|c| c.zone() == Zone::Battlefield)
+            .filter(|c| c.in_zone(Zone::Battlefield))
             .and_then(|c| c.bf())
     }
 
     fn permanent_bf_mut(&mut self, id: ObjId) -> Option<&mut BattlefieldState> {
         self.objects.get_mut(&id)
-            .filter(|c| c.zone() == Zone::Battlefield)
+            .filter(|c| c.in_zone(Zone::Battlefield))
             .and_then(|c| c.bf_mut())
     }
 
     fn hand_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone(), Zone::Hand { .. }))
+        self.objects.values().filter(move |c| c.owner == who && c.in_zone(Zone::Hand { known: false }))
     }
 
     fn graveyard_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && c.zone() == Zone::Graveyard)
+        self.objects.values().filter(move |c| c.owner == who && c.in_zone(Zone::Graveyard))
     }
 
     fn exile_of(&self, who: PlayerId) -> impl Iterator<Item = &GameObject> {
-        self.objects.values().filter(move |c| c.owner == who && matches!(c.zone(), Zone::Exile { .. }))
+        self.objects.values().filter(move |c| c.owner == who && c.in_zone(Zone::Exile { on_adventure: false }))
     }
 
     /// Cards owned by `who` that are currently in exile with adventure status.
@@ -1997,7 +2012,7 @@ impl SimState {
     /// Return the name of the permanent with the given id.
     fn permanent_name(&self, id: ObjId) -> Option<String> {
         self.objects.get(&id)
-            .filter(|c| c.zone() == Zone::Battlefield)
+            .filter(|c| c.in_zone(Zone::Battlefield))
             .map(|c| self.display_name(c))
     }
 
@@ -2110,7 +2125,7 @@ impl SimState {
     /// Every object with zone==Stack — spell or ability — is a legal target;
     /// "can't be countered" is enforced at resolution, not targeting (CR 608.2b).
     pub(crate) fn stack_item_is_counterable(&self, id: ObjId) -> bool {
-        self.objects.get(&id).map_or(false, |o| o.zone() == Zone::Stack)
+        self.objects.get(&id).map_or(false, |o| o.in_zone(Zone::Stack))
     }
 
     /// Place an ability (a card-less stack object) on the stack. `id` must be freshly
@@ -2171,7 +2186,7 @@ impl SimState {
 
         let gy: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who && c.zone() == Zone::Graveyard)
+            .filter(|c| c.owner == who && c.in_zone(Zone::Graveyard))
             .map(|c| c.catalog_key.clone())
             .collect();
         if !gy.is_empty() {
@@ -2426,7 +2441,7 @@ impl SimState {
 
         let mut graveyard: Vec<String> = self.graveyard_order.iter()
             .filter_map(|id| self.objects.get(id))
-            .filter(|c| c.owner == who && c.zone() == Zone::Graveyard)
+            .filter(|c| c.owner == who && c.in_zone(Zone::Graveyard))
             .map(|c| c.catalog_key.clone())
             .collect();
 
@@ -2475,7 +2490,7 @@ fn sim_play_land(
 ) {
     if state.player(who).lands_played_this_turn >= 1 { return; }
     let land_name = match state.objects.get(&card_id) {
-        Some(c) if matches!(c.zone(), Zone::Hand { .. }) => c.catalog_key.clone(),
+        Some(c) if c.in_zone(Zone::Hand { known: false }) => c.catalog_key.clone(),
         _ => return,
     };
     state.log(t, who, format!("Play {} [hand: {}]", land_name, state.hand_size(who)));
@@ -3262,13 +3277,13 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
     // card-less ability object).
     for &id in &state.stack {
         let in_objects = state.objects.get(&id)
-            .map_or(false, |o| o.zone() == Zone::Stack);
+            .map_or(false, |o| o.in_zone(Zone::Stack));
         check!(in_objects, state, label,
             "stack item {id:?} not an object with zone==Stack");
     }
     // Every object with zone==Stack must be in state.stack (no stranded spells).
     for (&id, obj) in &state.objects {
-        if obj.zone() == Zone::Stack {
+        if obj.in_zone(Zone::Stack) {
             check!(state.stack.contains(&id), state, label,
                 "object {:?} has zone==Stack but is not in state.stack", obj.catalog_key);
         }
@@ -3277,21 +3292,21 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
     // ── Zone-tracking arrays match actual zones ────────────────────────
     for &id in &state.graveyard_order {
         check!(
-            state.objects.get(&id).map_or(false, |o| o.zone() == Zone::Graveyard),
+            state.objects.get(&id).map_or(false, |o| o.in_zone(Zone::Graveyard)),
             state, label,
             "graveyard_order contains {id:?} but object zone is not Graveyard");
     }
     for who in [PlayerId::Us, PlayerId::Opp] {
         for &id in &state.player(who).library_order {
             check!(
-                state.objects.get(&id).map_or(false, |o| o.zone() == Zone::Library),
+                state.objects.get(&id).map_or(false, |o| o.in_zone(Zone::Library)),
                 state, label,
                 "library_order contains {id:?} but object zone is not Library");
         }
     }
     // Reverse: every Library-zone object should be in its owner's library_order.
     for obj in state.objects.values() {
-        if obj.zone() == Zone::Library {
+        if obj.in_zone(Zone::Library) {
             check!(
                 state.player(obj.owner).library_order.contains(&obj.id),
                 state, label,
@@ -3301,7 +3316,7 @@ fn assert_engine_invariants(state: &SimState, label: &str) {
 
     // ── Battlefield objects have BattlefieldState and vice versa ────────
     for obj in state.objects.values() {
-        if obj.zone() == Zone::Battlefield {
+        if obj.in_zone(Zone::Battlefield) {
             check!(obj.bf().is_some(), state, label,
                 "object {:?} on battlefield without BattlefieldState", obj.catalog_key);
         } else {
@@ -3351,7 +3366,7 @@ fn check_state_based_actions(
 
         // SBA: token in a zone other than the battlefield ceases to exist (rule 704.5d).
         let dead_tokens: Vec<ObjId> = state.objects.values()
-            .filter(|c| c.is_token && c.zone() != Zone::Battlefield)
+            .filter(|c| c.is_token && !c.in_zone(Zone::Battlefield))
             .map(|c| c.id)
             .collect();
         for id in dead_tokens {
@@ -3360,7 +3375,7 @@ fn check_state_based_actions(
             any = true;
         }
         check!(
-            state.objects.values().all(|c| !c.is_token || c.zone() == Zone::Battlefield),
+            state.objects.values().all(|c| !c.is_token || c.in_zone(Zone::Battlefield)),
             state, "sba",
             "token found outside battlefield after SBA cleanup"
         );
@@ -3837,7 +3852,7 @@ fn do_combat_damage_pass(
     let block_pairs = state.combat_blocks.clone();
 
     let alive = |id: ObjId, state: &SimState| -> bool {
-        state.objects.get(&id).map(|o| o.zone() == Zone::Battlefield).unwrap_or(false)
+        state.objects.get(&id).map(|o| o.in_zone(Zone::Battlefield)).unwrap_or(false)
     };
 
     // Group blockers per attacker, preserving combat_blocks order (CR 509.1h).
@@ -4152,7 +4167,7 @@ fn do_step(
             state.combat_attackers.clear();
             state.combat_blocks.clear();
             let all_ids: Vec<ObjId> = state.objects.values()
-                .filter(|c| c.zone() == Zone::Battlefield)
+                .filter(|c| c.in_zone(Zone::Battlefield))
                 .map(|c| c.id)
                 .collect();
             for id in all_ids {

@@ -488,7 +488,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             let ids = obj_ids_of(eval_expr(what, state, env));
             for id in ids {
                 if let Some(obj) = state.objects.get_mut(&id) {
-                    if matches!(obj.zone(), Zone::Hand { .. }) {
+                    if obj.in_zone(Zone::Hand { known: false }) {
                         obj.set_zone(Zone::Hand { known: true });
                     }
                 }
@@ -524,7 +524,7 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 let ids: Vec<ObjId> = state.library_of(who).take(n).map(|o| o.id).collect();
                 for id in ids {
                     if let Some(obj) = state.objects.get_mut(&id) {
-                        if matches!(obj.zone(), Zone::Hand { .. }) {
+                        if obj.in_zone(Zone::Hand { known: false }) {
                             obj.set_zone(Zone::Hand { known: true });
                         }
                     }
