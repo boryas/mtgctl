@@ -2018,7 +2018,7 @@ fn surgical_extraction() -> CardDef {
                     let to_exile: Vec<ObjId> = state.objects.values()
                         .filter(|o| o.catalog_key == name && o.owner == owner)
                         .filter(|o| matches!(o.zone(),
-                            Zone::Graveyard | Zone::Hand { .. } | Zone::Library
+                            Some(Zone::Graveyard | Zone::Hand { .. } | Zone::Library)
                         ))
                         .map(|o| o.id)
                         .collect();
@@ -5172,7 +5172,20 @@ fn price_of_progress() -> CardDef {
     use crate::ir::ability::{Ability, AbilityKind, IrSpellMode};
     use crate::ir::action::Action;
     use crate::ir::context::Ctx;
-    use crate::ir::expr::Expr;
+    use crate::ir::expr::{Expr, Filter, ZoneKindSel, ZoneSel};
+
+    // Nonbasic lands the bound player `p` controls (`p` is a player object).
+    let nonbasic_lands_controlled = || Expr::AllObjects {
+        zone: ZoneSel::Global(ZoneKindSel::Battlefield),
+        bind: "it",
+        filter: Box::new(ir_and(
+            ir_and(ir_type(CardType::Land), ir_not(ir_supertype(Supertype::Basic))),
+            Filter(Expr::Eq(
+                Box::new(Expr::Controller(Box::new(Expr::Ctx(Ctx::It)))),
+                Box::new(Expr::Ctx(Ctx::Var("p"))),
+            )),
+        ).0),
+    };
 
     let mut card = simple("Price of Progress", CardKind::Instant(SpellData {
         mana_cost: "1R".to_string(),
@@ -5183,17 +5196,21 @@ fn price_of_progress() -> CardDef {
         kind: AbilityKind::OnResolve {
             modes: vec![IrSpellMode {
                 target_spec: TargetSpec::None,
-                // "Each player takes 2 × the nonbasic lands they control" is
-                // exactly: each nonbasic land deals 2 to its controller. Summing
-                // per controller reproduces the total without a ForEach-over-players.
-                body: ir_for_each_on_battlefield(
-                    ir_and(ir_type(CardType::Land), ir_not(ir_supertype(Supertype::Basic))),
-                    Action::DealDamage {
+                // The direct oracle form: for each player, deal 2 × the nonbasic
+                // lands they control. Players are objects, so this is a ForEach
+                // over `Expr::Players`; damage to a player object is life loss.
+                body: Action::ForEach {
+                    over: Expr::Players,
+                    bind: "p",
+                    body: Box::new(Action::DealDamage {
                         source: Expr::Ctx(Ctx::Source),
-                        target: Expr::Controller(Box::new(Expr::Ctx(Ctx::Var("v")))),
-                        amount: Expr::Num(2),
-                    },
-                ),
+                        target: Expr::Ctx(Ctx::Var("p")),
+                        amount: Expr::Mul(
+                            Box::new(Expr::Num(2)),
+                            Box::new(Expr::Count(Box::new(nonbasic_lands_controlled()))),
+                        ),
+                    }),
+                },
             }],
         },
         text: Some("Price of Progress deals damage to each player equal to twice the number of nonbasic lands they control."),

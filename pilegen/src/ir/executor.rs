@@ -126,6 +126,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
             let n = expect_num(eval_expr(amount, state, env)) as i32;
             match tgt {
                 Value::Player(p) => state.lose_life(p, n),
+                // A player is an object too: damage to a player-object is life loss.
+                Value::Obj(id) if state.is_player(id) => state.lose_life(state.who_pid(id), n),
                 Value::Obj(id) => {
                     // CR 702.16e: a permanent with protection from the source's
                     // quality can't be damaged by it. Enforced here (not just at
@@ -671,8 +673,8 @@ pub(crate) fn execute_mut(action: &Action, state: &mut SimState, env: &mut BindE
                 else { break; };
                 change_zone(pick, ZoneId::Library, state, t, who);
                 let lib = match who {
-                    PlayerId::Us => &mut state.us.library_order,
-                    PlayerId::Opp => &mut state.opp.library_order,
+                    PlayerId::Us => &mut state.player_mut(PlayerId::Us).library_order,
+                    PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
                 };
                 if *top && lib.back() == Some(&pick) {
                     lib.pop_back();
@@ -1236,10 +1238,19 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
             Value::Bool(va || expect_bool(eval_expr(b, state, env)))
         }
         Expr::Not(a) => Value::Bool(!expect_bool(eval_expr(a, state, env))),
-        Expr::Eq(a, b) => Value::Bool(values_eq(
-            &eval_expr(a, state, env),
-            &eval_expr(b, state, env),
-        )),
+        Expr::Eq(a, b) => {
+            // Bridge: a player and that player's object are the same entity, so a
+            // `Player` and an `Obj`-that-is-a-player compare equal (e.g. comparing
+            // a land's `Controller` to a bound player object in Price of Progress).
+            let norm = |v: Value| match v {
+                Value::Obj(id) if state.is_player(id) => Value::Player(state.who_pid(id)),
+                other => other,
+            };
+            Value::Bool(values_eq(
+                &norm(eval_expr(a, state, env)),
+                &norm(eval_expr(b, state, env)),
+            ))
+        }
         Expr::Lt(a, b) => Value::Bool(
             expect_num(eval_expr(a, state, env)) < expect_num(eval_expr(b, state, env)),
         ),
@@ -1262,6 +1273,10 @@ pub(crate) fn eval_expr(expr: &Expr, state: &SimState, env: &BindEnv) -> Value {
         Expr::Sub(a, b) => Value::Num(
             expect_num(eval_expr(a, state, env)) - expect_num(eval_expr(b, state, env)),
         ),
+        Expr::Mul(a, b) => Value::Num(
+            expect_num(eval_expr(a, state, env)) * expect_num(eval_expr(b, state, env)),
+        ),
+        Expr::Players => Value::ObjSet(vec![state.us_id, state.opp_id]),
         Expr::Neg(a) => Value::Num(-expect_num(eval_expr(a, state, env))),
         Expr::Min(a, b) => Value::Num(std::cmp::min(
             expect_num(eval_expr(a, state, env)),
@@ -1664,8 +1679,8 @@ fn obj_ids_of(v: Value) -> Vec<ObjId> {
 fn scry_by_evaluator(state: &mut SimState, who: PlayerId, n: usize) {
     let eval = std::sync::Arc::clone(&state.evaluate_card);
     let top_ids: Vec<ObjId> = match who {
-        PlayerId::Us => state.us.library_order.iter().take(n).copied().collect(),
-        PlayerId::Opp => state.opp.library_order.iter().take(n).copied().collect(),
+        PlayerId::Us => state.player(PlayerId::Us).library_order.iter().take(n).copied().collect(),
+        PlayerId::Opp => state.player(PlayerId::Opp).library_order.iter().take(n).copied().collect(),
     };
     if top_ids.is_empty() {
         return;
@@ -1680,8 +1695,8 @@ fn scry_by_evaluator(state: &mut SimState, who: PlayerId, n: usize) {
         }
     }
     let lib = match who {
-        PlayerId::Us => &mut state.us.library_order,
-        PlayerId::Opp => &mut state.opp.library_order,
+        PlayerId::Us => &mut state.player_mut(PlayerId::Us).library_order,
+        PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
     };
     for _ in 0..top_ids.len().min(lib.len()) {
         lib.pop_front();
@@ -1811,13 +1826,13 @@ fn enumerate_kind_all_players(state: &SimState, kind: ZoneKindSel) -> Vec<ObjId>
 }
 
 fn obj_in_kind(o: &crate::GameObject, kind: ZoneKindSel) -> bool {
-    match (kind, &o.zone()) {
-        (ZoneKindSel::Stack, Zone::Stack) => true,
-        (ZoneKindSel::Hand, Zone::Hand { .. }) => true,
-        (ZoneKindSel::Library, Zone::Library) => true,
-        (ZoneKindSel::Battlefield, Zone::Battlefield) => true,
-        (ZoneKindSel::Graveyard, Zone::Graveyard) => true,
-        (ZoneKindSel::Exile, Zone::Exile { .. }) => true,
+    match (kind, o.zone()) {
+        (ZoneKindSel::Stack, Some(Zone::Stack)) => true,
+        (ZoneKindSel::Hand, Some(Zone::Hand { .. })) => true,
+        (ZoneKindSel::Library, Some(Zone::Library)) => true,
+        (ZoneKindSel::Battlefield, Some(Zone::Battlefield)) => true,
+        (ZoneKindSel::Graveyard, Some(Zone::Graveyard)) => true,
+        (ZoneKindSel::Exile, Some(Zone::Exile { .. })) => true,
         _ => false,
     }
 }
@@ -1907,7 +1922,7 @@ fn toughness_of_obj(state: &SimState, id: ObjId) -> Option<i32> {
 
 fn zone_id_of_obj(state: &SimState, id: ObjId) -> Option<ZoneId> {
     let obj = state.objects.get(&id)?;
-    Some(match obj.zone() {
+    Some(match obj.zone()? {
         Zone::Library => ZoneId::Library,
         Zone::Hand { .. } => ZoneId::Hand,
         Zone::Stack => ZoneId::Stack,
@@ -2080,11 +2095,12 @@ fn walk_reads(expr: &Expr, out: &mut Vec<Axis>) {
         Expr::And(a, b) | Expr::Or(a, b) | Expr::Eq(a, b) | Expr::Lt(a, b)
         | Expr::Le(a, b) | Expr::Gt(a, b) | Expr::Ge(a, b)
         | Expr::Contains(a, b) | Expr::Add(a, b) | Expr::Sub(a, b)
-        | Expr::Min(a, b) | Expr::Max(a, b) => {
+        | Expr::Mul(a, b) | Expr::Min(a, b) | Expr::Max(a, b) => {
             walk_reads(a, out);
             walk_reads(b, out);
         }
         Expr::Not(a) | Expr::Neg(a) => walk_reads(a, out),
+        Expr::Players => {}
 
         // ── folds / binding ───────────────────────────────────────────────
         Expr::Count(a) => walk_reads(a, out),

@@ -889,7 +889,7 @@ fn find_counter_in_legal(
     probabilistic: bool,
 ) -> Option<LegalAction> {
     let target_owner_id = state.stack_item_owner(target_id);
-    let target_owner = if target_owner_id == state.us.id { PlayerId::Us } else { PlayerId::Opp };
+    let target_owner = if target_owner_id == state.us_id { PlayerId::Us } else { PlayerId::Opp };
     let target_has_untapped_lands = state.permanents_of(target_owner).any(|c| {
         c.bf().map_or(false, |bf| !bf.tapped)
             && !state.def_of(c.id).map(|d| d.mana_abilities()).unwrap_or(&[]).is_empty()
@@ -970,7 +970,7 @@ fn choose_ap_react(
         .and_then(|c| c.spell())
         .map(|s| s.chosen_targets.clone())
         .unwrap_or_default();
-    let us_id = state.us.id;
+    let us_id = state.us_id;
     let dd_countered = top_is_counterable
         && top_owner != us_id
         && top_chosen.first().copied()

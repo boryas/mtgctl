@@ -316,9 +316,10 @@ fn objects_in_zone<'a>(
     };
     state.objects.values()
         .filter(move |o| {
-            let zone_match = match &o.zone() {
-                Zone::Hand { .. } => matches!(zone_card, Zone::Hand { .. }),
-                z => z == &zone_card,
+            let zone_match = match o.zone() {
+                Some(Zone::Hand { .. }) => matches!(zone_card, Zone::Hand { .. }),
+                Some(z) => z == zone_card,
+                None => false,
             };
             zone_match && (o.controller == who || o.owner == who)
         })

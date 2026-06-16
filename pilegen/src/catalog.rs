@@ -1273,7 +1273,7 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
 
     // Part 3: CE-granted triggers from materialized CardDefs (Layer 6 ability grants).
     let bf_ids: Vec<(ObjId, PlayerId)> = state.objects.iter()
-        .filter(|(_, o)| matches!(o.zone(), Zone::Battlefield) && o.materialized.is_some())
+        .filter(|(_, o)| matches!(o.zone(), Some(Zone::Battlefield)) && o.materialized.is_some())
         .map(|(id, o)| (*id, o.controller))
         .collect();
     for (obj_id, controller) in bf_ids {
@@ -1291,8 +1291,9 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
     let all_ids: Vec<(ObjId, PlayerId, String, crate::ir::expr::ZoneKindSel)> = state
         .objects
         .iter()
-        .map(|(id, o)| {
-            let zk = match o.zone() {
+        .filter_map(|(id, o)| {
+            // `zone()?` skips players (zoneless) — they carry no triggered abilities.
+            let zk = match o.zone()? {
                 Zone::Battlefield => crate::ir::expr::ZoneKindSel::Battlefield,
                 Zone::Stack => crate::ir::expr::ZoneKindSel::Stack,
                 Zone::Graveyard => crate::ir::expr::ZoneKindSel::Graveyard,
@@ -1300,7 +1301,7 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
                 Zone::Hand { .. } => crate::ir::expr::ZoneKindSel::Hand,
                 Zone::Library => crate::ir::expr::ZoneKindSel::Library,
             };
-            (*id, o.controller, o.catalog_key.clone(), zk)
+            Some((*id, o.controller, o.catalog_key.clone(), zk))
         })
         .collect();
     for (obj_id, controller, key, obj_zone) in all_ids {
@@ -1336,7 +1337,7 @@ pub(crate) fn fire_triggers(event: &GameEvent, state: &SimState) -> (Vec<Trigger
                     env = env.with_var(k, v.clone());
                 }
                 if let Some(&tgt) = targets.first() {
-                    let v = if tgt == state.us.id || tgt == state.opp.id {
+                    let v = if tgt == state.us_id || tgt == state.opp_id {
                         Value::Player(state.who_pid(tgt))
                     } else {
                         Value::Obj(tgt)
@@ -1569,7 +1570,7 @@ pub(crate) fn build_ability_effect(
                 .with_source(source_id)
                 .with_controller(who);
             if let Some(&tgt) = targets.first() {
-                let v = if tgt == state.us.id || tgt == state.opp.id {
+                let v = if tgt == state.us_id || tgt == state.opp_id {
                     Value::Player(state.who_pid(tgt))
                 } else {
                     Value::Obj(tgt)
@@ -1612,7 +1613,7 @@ pub(crate) fn build_spell_effect(
                         // bodies can read it as `Ctx::Var("x")` (e.g. Meltdown's MV ≤ X).
                         .with_var("x", Value::Num(chosen_x as i64));
                     if let Some(&tgt) = targets.first() {
-                        let v = if tgt == state.us.id || tgt == state.opp.id {
+                        let v = if tgt == state.us_id || tgt == state.opp_id {
                             Value::Player(state.who_pid(tgt))
                         } else {
                             Value::Obj(tgt)
@@ -1673,7 +1674,7 @@ pub(crate) fn etb_self_check(event: &GameEvent, source_id: ObjId, _controller: P
 /// Read the card's current zone as a ZoneId. Used to supply the `from` field when re-firing
 /// an ETB event from inside a replacement (the card has not yet moved when the replacement fires).
 pub(crate) fn current_zone_id(id: ObjId, state: &SimState) -> ZoneId {
-    state.objects.get(&id).map(|c| card_zone_to_id(&c.zone())).unwrap_or(ZoneId::Hand)
+    state.objects.get(&id).and_then(|c| c.zone()).map(|z| card_zone_to_id(&z)).unwrap_or(ZoneId::Hand)
 }
 
 // ── Murktide Regent ETB ───────────────────────────────────────────────────────

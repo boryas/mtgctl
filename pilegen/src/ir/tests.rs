@@ -875,8 +875,8 @@ mod execute_parity {
                 .with_var("t", Value::Obj(i_id)),
         );
 
-        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone());
-        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone());
+        let c_zone = closure_state.objects.get(&c_id).and_then(|o| o.zone());
+        let i_zone = ir_state.objects.get(&i_id).and_then(|o| o.zone());
         assert!(matches!(c_zone, Some(Zone::Graveyard)));
         assert_eq!(c_zone, i_zone);
     }
@@ -904,8 +904,8 @@ mod execute_parity {
                 .with_var("t", Value::Obj(i_id)),
         );
 
-        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone());
-        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone());
+        let c_zone = closure_state.objects.get(&c_id).and_then(|o| o.zone());
+        let i_zone = ir_state.objects.get(&i_id).and_then(|o| o.zone());
         assert!(matches!(c_zone, Some(Zone::Exile { .. })));
         assert!(matches!(i_zone, Some(Zone::Exile { .. })));
     }
@@ -937,8 +937,8 @@ mod execute_parity {
                 .with_var("t", Value::Obj(i_id)),
         );
 
-        let c_zone = closure_state.objects.get(&c_id).map(|o| o.zone());
-        let i_zone = ir_state.objects.get(&i_id).map(|o| o.zone());
+        let c_zone = closure_state.objects.get(&c_id).and_then(|o| o.zone());
+        let i_zone = ir_state.objects.get(&i_id).and_then(|o| o.zone());
         assert!(matches!(c_zone, Some(Zone::Hand { .. })));
         assert!(matches!(i_zone, Some(Zone::Hand { .. })));
     }
@@ -1206,12 +1206,10 @@ mod execute_parity {
 
         // Both paths should have sacrificed the smallest-id candidate (a).
         assert!(matches!(
-            closure_state.objects.get(&a1).unwrap().zone(),
-            Zone::Graveyard
+            closure_state.objects.get(&a1).unwrap().zone(), Some(Zone::Graveyard)
         ));
         assert!(matches!(
-            ir_state.objects.get(&a2).unwrap().zone(),
-            Zone::Graveyard
+            ir_state.objects.get(&a2).unwrap().zone(), Some(Zone::Graveyard)
         ));
     }
 
@@ -1312,14 +1310,12 @@ mod execute_parity {
         // Closure path: stack empty, spell in graveyard.
         assert!(closure_state.stack.is_empty());
         assert!(matches!(
-            closure_state.objects.get(&spell1).unwrap().zone(),
-            Zone::Graveyard
+            closure_state.objects.get(&spell1).unwrap().zone(), Some(Zone::Graveyard)
         ));
         // IR path: same.
         assert!(ir_state.stack.is_empty());
         assert!(matches!(
-            ir_state.objects.get(&spell3).unwrap().zone(),
-            Zone::Graveyard
+            ir_state.objects.get(&spell3).unwrap().zone(), Some(Zone::Graveyard)
         ));
     }
 
@@ -1436,8 +1432,7 @@ mod execute_parity {
             &env,
         );
         assert!(matches!(
-            s.objects.get(&id).unwrap().zone(),
-            Zone::Hand { .. }
+            s.objects.get(&id).unwrap().zone(), Some(Zone::Hand { .. })
         ));
     }
 
@@ -1460,8 +1455,7 @@ mod execute_parity {
             &env,
         );
         assert_eq!(
-            s.objects.get(&id).unwrap().zone(),
-            Zone::Hand { known: true }
+            s.objects.get(&id).unwrap().zone(), Some(Zone::Hand { known: true })
         );
     }
 
@@ -1525,8 +1519,7 @@ mod execute_parity {
         assert_eq!(in_hand.len(), 1);
         assert!(in_hand[0] == a || in_hand[0] == b);
         assert!(!matches!(
-            s.objects.get(&land).unwrap().zone(),
-            Zone::Hand { .. }
+            s.objects.get(&land).unwrap().zone(), Some(Zone::Hand { .. })
         ));
     }
 
@@ -2262,7 +2255,7 @@ mod cost_phase4 {
             .expect("pay_ir_cost succeeds for EE");
 
         assert_eq!(state.player(PlayerId::Us).pool.total, 0, "pool drained by 2");
-        assert!(matches!(state.objects[&ee_id].zone(), Zone::Graveyard),
+        assert!(matches!(state.objects[&ee_id].zone(), Some(Zone::Graveyard)),
             "EE moved to graveyard");
         assert_eq!(ctx.objects_moved, vec![ee_id],
             "CostsPaidCtx.objects_moved records the sacrificed EE");
@@ -2459,7 +2452,7 @@ mod cost_xmana {
         // Default plan: first payable branch (discard) + first candidate card.
         let env = crate::strategy::default_announcement(&schema);
         let ctx = pay(&cost, &schema, &env, &mut s, 0, PlayerId::Us, ObjId::UNSET).expect("pay ok");
-        assert!(matches!(s.objects[&card].zone(), crate::Zone::Graveyard), "chosen card discarded");
+        assert!(matches!(s.objects[&card].zone(), Some(crate::Zone::Graveyard)), "chosen card discarded");
         assert_eq!(s.life_of(PlayerId::Us), start_life, "discard branch taken → no life paid");
         assert_eq!(ctx.objects_moved, vec![card], "discarded card recorded in objects_moved");
     }

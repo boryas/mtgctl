@@ -597,6 +597,6 @@ pub(crate) fn in_hand(id: ObjId, state: &SimState) -> bool {
     state
         .objects
         .get(&id)
-        .map(|o| matches!(o.zone(), crate::Zone::Hand { .. }))
+        .map(|o| matches!(o.zone(), Some(crate::Zone::Hand { .. })))
         .unwrap_or(false)
 }

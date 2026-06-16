@@ -223,7 +223,7 @@
             entered_this_turn: true,
             ..BattlefieldState::new()
         });
-        state.us.spells_cast_this_turn = 2;
+        state.player_mut(PlayerId::Us).spells_cast_this_turn = 2;
 
         let step = Step { kind: StepKind::Untap, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
@@ -231,8 +231,8 @@
         assert!(!state.permanent_bf(land_id).unwrap().tapped, "land should be untapped");
         assert!(!state.permanent_bf(ragavan_id).unwrap().tapped, "permanent should be untapped");
         assert!(!state.permanent_bf(ragavan_id).unwrap().entered_this_turn, "summoning sickness should clear");
-        assert_eq!(state.us.lands_played_this_turn, 0, "land drop count should reset");
-        assert_eq!(state.us.spells_cast_this_turn, 0);
+        assert_eq!(state.player(PlayerId::Us).lands_played_this_turn, 0, "land drop count should reset");
+        assert_eq!(state.player(PlayerId::Us).spells_cast_this_turn, 0);
     }
 
     #[test]
@@ -372,7 +372,7 @@
     #[test]
     fn test_combat_damage_unblocked_hits_player() {
         let mut state = make_state();
-        let initial_life = state.opp.life;
+        let initial_life = state.player(PlayerId::Opp).life;
         let atk_def = creature("Ragavan", 2, 1);
         let ragavan_id = add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
             tapped: true,
@@ -385,13 +385,13 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_life - 2);
+        assert_eq!(state.player(PlayerId::Opp).life, initial_life - 2);
     }
 
     #[test]
     fn test_combat_damage_blocked_no_player_damage() {
         let mut state = make_state();
-        let initial_life = state.opp.life;
+        let initial_life = state.player(PlayerId::Opp).life;
         let atk_def = creature("Ragavan", 2, 2);
         let blk_def = creature("Mosscoat Construct", 3, 3);
         let ragavan_id = add_perm(&mut state, PlayerId::Us, "Ragavan", BattlefieldState {
@@ -407,7 +407,7 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_life, "blocked — no player damage");
+        assert_eq!(state.player(PlayerId::Opp).life, initial_life, "blocked — no player damage");
     }
 
     #[test]
@@ -508,8 +508,8 @@
         // current_phase is "" (not "Main") → both players pass immediately
         handle_priority_round(&mut state, 1, PlayerId::Us);
 
-        assert_eq!(state.us.life, 20);
-        assert_eq!(state.opp.life, 20);
+        assert_eq!(state.player(PlayerId::Us).life, 20);
+        assert_eq!(state.player(PlayerId::Opp).life, 20);
     }
 
     // ── Section 5: Spell Casting ──────────────────────────────────────────────
@@ -518,8 +518,8 @@
     fn test_cast_spell_normal_cost_removes_from_library() {
         let mut state = make_state();
         let def = catalog_card("Dark Ritual");
-        state.us.pool.b = 1;
-        state.us.pool.total = 1;
+        state.player_mut(PlayerId::Us).pool.b = 1;
+        state.player_mut(PlayerId::Us).pool.total = 1;
         let dark_ritual_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
 
         let catalog = vec![def];
@@ -531,9 +531,9 @@
         let card_id = card_id.unwrap();
         let card = state.objects.get(&card_id).expect("card in state");
         assert_eq!(card.catalog_key, "Dark Ritual");
-        assert_eq!(state.player_id(card.owner), state.us.id, "owner should be us player id");
+        assert_eq!(state.player_id(card.owner), state.us_id, "owner should be us player id");
         assert!(!state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Dark Ritual"), "removed from hand");
-        assert_eq!(state.us.pool.b, 0, "mana spent");
+        assert_eq!(state.player(PlayerId::Us).pool.b, 0, "mana spent");
     }
 
     #[test]
@@ -563,12 +563,12 @@
         add_hand_card(&mut state, PlayerId::Us, "Brainstorm");
 
         let alt_cost = &fow_def.alternate_costs()[0];
-        let initial_life = state.us.life;
+        let initial_life = state.player(PlayerId::Us).life;
 
         let item = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, Some(alt_cost), Some(0), &[], 0, 0, None);
 
         assert!(item.is_some(), "FoW should be cast via pitch");
-        assert_eq!(state.us.life, initial_life - 1, "paid 1 life");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life - 1, "paid 1 life");
         assert!(!state.hand_of(PlayerId::Us).any(|c| c.catalog_key == "Brainstorm"), "pitch card removed from hand");
         assert!(state.exile_of(PlayerId::Us).any(|c| c.catalog_key == "Brainstorm"), "pitch card exiled");
     }
@@ -578,7 +578,7 @@
     #[test]
     fn test_effect_doomsday_sets_success() {
         let mut state = make_state();
-        let before = state.us.life;
+        let before = state.player(PlayerId::Us).life;
         let env = crate::ir::executor::BindEnv::new().with_controller(PlayerId::Us);
         crate::ir::executor::execute(
             &crate::ir::action::Action::EndSimulation { success: true },
@@ -587,7 +587,7 @@
         );
         assert!(state.success, "Doomsday sentinel sets the terminal success flag");
         assert_eq!(state.life_before_dd, Some(before), "pre-DD life recorded");
-        assert_eq!(state.us.life, before / 2, "Doomsday life accounting applied");
+        assert_eq!(state.player(PlayerId::Us).life, before / 2, "Doomsday life accounting applied");
     }
 
     #[test]
@@ -638,7 +638,7 @@
         // Brainstorm's 2nd draw = draw_index=3 → Tamiyo flips.
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Us, "Tamiyo, Inquisitive Student");
-        state.us.draws_this_turn = 1; // simulate having already drawn naturally
+        state.player_mut(PlayerId::Us).draws_this_turn = 1; // simulate having already drawn naturally
         add_library_card(&mut state, PlayerId::Us, "Island");
         add_library_card(&mut state, PlayerId::Us, "Swamp");
         add_library_card(&mut state, PlayerId::Us, "Plains");
@@ -654,10 +654,10 @@
     #[test]
     fn test_effect_life_loss_reduces_caster_life() {
         let mut state = make_state();
-        let initial = state.us.life;
+        let initial = state.player(PlayerId::Us).life;
         eff_life_loss(PlayerId::Us, 2).call(&mut state, 1, &[]);
 
-        assert_eq!(state.us.life, initial - 2);
+        assert_eq!(state.player(PlayerId::Us).life, initial - 2);
     }
 
     #[test]
@@ -665,8 +665,8 @@
         let mut state = make_state();
         eff_mana(PlayerId::Us, "BBB").call(&mut state, 1, &[]);
 
-        assert_eq!(state.us.pool.b, 3, "should add 3 black mana");
-        assert_eq!(state.us.pool.total, 3);
+        assert_eq!(state.player(PlayerId::Us).pool.b, 3, "should add 3 black mana");
+        assert_eq!(state.player(PlayerId::Us).pool.total, 3);
     }
 
     #[test]
@@ -686,14 +686,14 @@
         let mut state = make_state();
         let a = add_hand_card(&mut state, PlayerId::Opp, "Counterspell");
         let b = add_hand_card(&mut state, PlayerId::Opp, "Island");
-        assert!(matches!(state.objects[&a].zone(), Zone::Hand { known: false }));
-        assert!(matches!(state.objects[&b].zone(), Zone::Hand { known: false }));
+        assert!(matches!(state.objects[&a].zone(), Some(Zone::Hand { known: false })));
+        assert!(matches!(state.objects[&b].zone(), Some(Zone::Hand { known: false })));
 
         eff_reveal_hand(PlayerId::Us, Who::Opp).call(&mut state, 1, &[]);
 
-        assert!(matches!(state.objects[&a].zone(), Zone::Hand { known: true }),
+        assert!(matches!(state.objects[&a].zone(), Some(Zone::Hand { known: true })),
                 "reveal should mark card a as known");
-        assert!(matches!(state.objects[&b].zone(), Zone::Hand { known: true }),
+        assert!(matches!(state.objects[&b].zone(), Some(Zone::Hand { known: true })),
                 "reveal should mark card b as known");
     }
 
@@ -713,7 +713,7 @@
 
         assert_eq!(state.hand_size(PlayerId::Opp), 2);
         for card in state.hand_of(PlayerId::Opp) {
-            assert!(matches!(card.zone(), Zone::Hand { known: true }),
+            assert!(matches!(card.zone(), Some(Zone::Hand { known: true })),
                     "{} should be known after Thoughtseize", card.catalog_key);
         }
     }
@@ -741,7 +741,7 @@
         eff_draw(PlayerId::Opp, 3).then(eff_put_back(PlayerId::Opp, 2)).call(&mut state, 1, &[]);
 
         for card in state.hand_of(PlayerId::Opp) {
-            assert!(matches!(card.zone(), Zone::Hand { known: false }),
+            assert!(matches!(card.zone(), Some(Zone::Hand { known: false })),
                     "{} should be unknown after Brainstorm put-back", card.catalog_key);
         }
     }
@@ -758,7 +758,7 @@
 
         assert_eq!(state.hand_size(PlayerId::Opp), 1);
         let remaining = state.hand_of(PlayerId::Opp).next().unwrap();
-        assert!(matches!(remaining.zone(), Zone::Hand { known: false }),
+        assert!(matches!(remaining.zone(), Some(Zone::Hand { known: false })),
                 "Hymn should NOT reveal remaining cards");
     }
 
@@ -850,8 +850,8 @@
             add_graveyard_card(&mut state, PlayerId::Us, name);
         }
         let tc_id = add_hand_card(&mut state, PlayerId::Us, "Treasure Cruise");
-        state.us.pool.u  = 1;
-        state.us.pool.total = 1; // only 1 mana in pool — delve pays the other 7
+        state.player_mut(PlayerId::Us).pool.u  = 1;
+        state.player_mut(PlayerId::Us).pool.total = 1; // only 1 mana in pool — delve pays the other 7
 
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -861,7 +861,7 @@
         assert!(item.is_some(), "should cast with full delve");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "all 7 graveyard cards exiled");
         assert_eq!(state.exile_of(PlayerId::Us).count(), 7, "exiled by delve");
-        assert_eq!(state.us.pool.u, 0, "blue pip paid");
+        assert_eq!(state.player(PlayerId::Us).pool.u, 0, "blue pip paid");
     }
 
     #[test]
@@ -873,7 +873,7 @@
         add_graveyard_card(&mut state, PlayerId::Us, "Ritual");
         add_graveyard_card(&mut state, PlayerId::Us, "Ponder");
         let dead_drop_id = add_hand_card(&mut state, PlayerId::Us, "Dead Drop");
-        state.us.pool.total = 1; // covers the 1 remaining generic after delve
+        state.player_mut(PlayerId::Us).pool.total = 1; // covers the 1 remaining generic after delve
 
         let catalog = vec![def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -883,7 +883,7 @@
         assert!(item.is_some(), "should cast with partial delve + 1 mana");
         assert_eq!(state.graveyard_of(PlayerId::Us).count(), 0, "both graveyard cards exiled");
         assert_eq!(state.exile_of(PlayerId::Us).count(), 2);
-        assert_eq!(state.us.pool.total, 0, "remaining generic pip paid");
+        assert_eq!(state.player(PlayerId::Us).pool.total, 0, "remaining generic pip paid");
     }
 
     #[test]
@@ -902,8 +902,8 @@
         add_graveyard_card(&mut state, PlayerId::Us, "Ragavan");
         let murktide_id = add_hand_card(&mut state, PlayerId::Us, "Murktide Regent");
         // After delving all 4, generic cost = 5-4 = 1. Need UU + 1 generic.
-        state.us.pool.u  = 2;
-        state.us.pool.total = 3;
+        state.player_mut(PlayerId::Us).pool.u  = 2;
+        state.player_mut(PlayerId::Us).pool.total = 3;
 
         let catalog = vec![murktide_def.clone(), ritual_def, ponder_def, consider_def, ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -941,8 +941,8 @@
         add_graveyard_card(&mut state, PlayerId::Us, "Ragavan");
         let murktide_id = add_hand_card(&mut state, PlayerId::Us, "Murktide Regent");
         // 5 - 1 = 4 generic remaining; need UU + 4 generic
-        state.us.pool.u  = 2;
-        state.us.pool.total = 6;
+        state.player_mut(PlayerId::Us).pool.u  = 2;
+        state.player_mut(PlayerId::Us).pool.total = 6;
 
         let catalog = vec![murktide_def.clone(), ragavan_def];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
@@ -1186,7 +1186,7 @@
             let mut state = make_state();
             for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
             state.current_phase = Some(TurnPosition::Phase(PhaseKind::PreCombatMain));
-            state.current_ap = state.us.id;
+            state.current_ap = state.us_id;
             let borrower_id = state.alloc_id();
             let mut borrower_obj = GameObject::new(borrower_id, "Brazen Borrower", PlayerId::Us);
             borrower_obj.set_zone(Zone::Exile { on_adventure: true });
@@ -1343,8 +1343,8 @@
     #[test]
     fn test_lifelink_unblocked_gains_life() {
         let mut state = make_state();
-        let initial_us = state.us.life;
-        let initial_opp = state.opp.life;
+        let initial_us = state.player(PlayerId::Us).life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let vamp = keyword_creature("Vampire Nighthawk", 3, 3, &[Keyword::Lifelink]);
         state.catalog.insert(vamp.name.clone(), vamp.clone());
         let id = add_perm(&mut state, PlayerId::Us, "Vampire Nighthawk", BattlefieldState {
@@ -1356,15 +1356,15 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_opp - 3, "opponent loses 3");
-        assert_eq!(state.us.life, initial_us + 3, "lifelink gains 3");
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 3, "opponent loses 3");
+        assert_eq!(state.player(PlayerId::Us).life, initial_us + 3, "lifelink gains 3");
     }
 
     /// Blocked lifelink attacker still gains life from damage dealt to the blocker.
     #[test]
     fn test_lifelink_blocked_gains_life_from_blocker() {
         let mut state = make_state();
-        let initial_us = state.us.life;
+        let initial_us = state.player(PlayerId::Us).life;
         let vamp = keyword_creature("Vampire Nighthawk", 3, 3, &[Keyword::Lifelink]);
         let bear = creature("Grizzly Bears", 2, 2);
         state.catalog.insert(vamp.name.clone(), vamp.clone());
@@ -1380,7 +1380,7 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.us.life, initial_us + 3,
+        assert_eq!(state.player(PlayerId::Us).life, initial_us + 3,
             "lifelink: 3 damage to blocker → 3 life gained");
     }
 
@@ -1388,7 +1388,7 @@
     #[test]
     fn test_lifelink_on_blocker_gains_life() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let bear = creature("Grizzly Bears", 2, 2);
         let lifelinker = keyword_creature("Ajani's Pridemate", 2, 2, &[Keyword::Lifelink]);
         state.catalog.insert(bear.name.clone(), bear.clone());
@@ -1404,7 +1404,7 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_opp + 2,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp + 2,
             "lifelink blocker gains 2 from damage to attacker");
     }
 
@@ -1414,7 +1414,7 @@
     #[test]
     fn test_trample_excess_to_player() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let rhino = keyword_creature("Trampler", 5, 5, &[Keyword::Trample]);
         let bear = creature("Grizzly Bears", 2, 2);
         state.catalog.insert(rhino.name.clone(), rhino.clone());
@@ -1430,7 +1430,7 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_opp - 3,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 3,
             "trample: 5-power attacker assigns 2 to 2/2 blocker, 3 spill to player");
     }
 
@@ -1438,7 +1438,7 @@
     #[test]
     fn test_trample_no_excess_no_player_damage() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let small = keyword_creature("Small Trampler", 2, 2, &[Keyword::Trample]);
         let troll = creature("Troll", 4, 4);
         state.catalog.insert(small.name.clone(), small.clone());
@@ -1454,7 +1454,7 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_opp,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp,
             "trample: 2-power attacker into 4/4 blocker leaves nothing for the player");
     }
 
@@ -1462,7 +1462,7 @@
     #[test]
     fn test_no_trample_no_spillover() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let big = creature("Big", 5, 5);
         let bear = creature("Grizzly Bears", 2, 2);
         state.catalog.insert(big.name.clone(), big.clone());
@@ -1478,7 +1478,7 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_opp, "no trample → no spillover");
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp, "no trample → no spillover");
     }
 
     // ── Deathtouch (CR 702.2) ────────────────────────────────────────────────
@@ -1533,7 +1533,7 @@
     #[test]
     fn test_trample_with_deathtouch_assigns_one_to_blocker() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let wurm = keyword_creature("Wurm", 5, 5, &[Keyword::Trample, Keyword::Deathtouch]);
         let troll = creature("Troll", 4, 4);
         state.catalog.insert(wurm.name.clone(), wurm.clone());
@@ -1549,7 +1549,7 @@
         let step = Step { kind: StepKind::CombatDamage, prio: false };
         do_step(&mut state, 1, PlayerId::Us, &step, true);
 
-        assert_eq!(state.opp.life, initial_opp - 4,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 4,
             "trample+deathtouch: 1 to 4/4 blocker is lethal, 4 spills to player");
     }
 
@@ -1810,7 +1810,7 @@
     #[test]
     fn test_double_strike_unblocked_deals_damage_twice() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let fury = keyword_creature("Fury", 3, 3, &[Keyword::DoubleStrike]);
         state.catalog.insert(fury.name.clone(), fury.clone());
         let atk = add_perm(&mut state, PlayerId::Us, "Fury", BattlefieldState {
@@ -1825,7 +1825,7 @@
                 &Step { kind: StepKind::CombatDamage, prio: false },
                 true);
 
-        assert_eq!(state.opp.life, initial_opp - 6,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 6,
             "double strike: 3 power × 2 hits = 6 damage to player");
     }
 
@@ -1833,7 +1833,7 @@
     #[test]
     fn test_plain_attacker_skips_first_strike_step() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let bear = creature("Bear", 2, 2);
         let knight = keyword_creature("Other Knight", 1, 1, &[Keyword::FirstStrike]);
         state.catalog.insert(bear.name.clone(), bear.clone());
@@ -1851,13 +1851,13 @@
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
                 true);
-        assert_eq!(state.opp.life, initial_opp - 1,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 1,
             "FS pass deals 1 damage from the knight only; bear waits for regular");
         // Regular pass: both deal damage (FS knight does NOT strike again).
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
                 true);
-        assert_eq!(state.opp.life, initial_opp - 1 - 2,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 1 - 2,
             "regular pass deals 2 from the bear only (knight has FS, not DS)");
     }
 
@@ -1866,7 +1866,7 @@
     #[test]
     fn test_double_strike_trample_dead_blocker_spills_in_regular() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let stomper = keyword_creature("Stomper", 4, 4,
             &[Keyword::DoubleStrike, Keyword::Trample]);
         let bear = creature("Bear", 2, 2);
@@ -1886,13 +1886,13 @@
         check_state_based_actions(&mut state, 1);
         assert!(state.graveyard_of(PlayerId::Opp).any(|c| c.catalog_key == "Bear"),
             "blocker dies in FS pass");
-        assert_eq!(state.opp.life, initial_opp - 2, "FS pass: 2 trampled");
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 2, "FS pass: 2 trampled");
 
         // Regular pass: blocker is dead, attacker still 'blocked' but trample dumps all to player.
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
                 true);
-        assert_eq!(state.opp.life, initial_opp - 2 - 4,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 2 - 4,
             "regular pass: dead blocker → trample spills full 4 to player");
     }
 
@@ -1901,7 +1901,7 @@
     #[test]
     fn test_double_strike_no_trample_dead_blocker_no_spill() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let strong = keyword_creature("Strong", 4, 4, &[Keyword::DoubleStrike]);
         let bear = creature("Bear", 2, 2);
         state.catalog.insert(strong.name.clone(), strong.clone());
@@ -1921,7 +1921,7 @@
                 &Step { kind: StepKind::CombatDamage, prio: false },
                 true);
 
-        assert_eq!(state.opp.life, initial_opp,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp,
             "no trample, dead blocker → second strike deals no damage to player");
     }
 
@@ -1929,7 +1929,7 @@
     #[test]
     fn test_first_strike_step_skipped_when_no_first_or_double_strike() {
         let mut state = make_state();
-        let initial_opp = state.opp.life;
+        let initial_opp = state.player(PlayerId::Opp).life;
         let bear = creature("Bear", 2, 2);
         state.catalog.insert(bear.name.clone(), bear.clone());
         let atk = add_perm(&mut state, PlayerId::Us, "Bear", BattlefieldState {
@@ -1942,12 +1942,12 @@
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::FirstStrikeCombatDamage, prio: false },
                 true);
-        assert_eq!(state.opp.life, initial_opp,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp,
             "FS pass with no FS/DS source deals no damage");
         do_step(&mut state, 1, PlayerId::Us,
                 &Step { kind: StepKind::CombatDamage, prio: false },
                 true);
-        assert_eq!(state.opp.life, initial_opp - 2,
+        assert_eq!(state.player(PlayerId::Opp).life, initial_opp - 2,
             "regular pass: plain bear deals its 2 once");
     }
 
@@ -2011,9 +2011,9 @@
     fn test_apply_bowmasters_etb_deals_damage_and_creates_army() {
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
-        let initial_life = state.us.life;
+        let initial_life = state.player(PlayerId::Us).life;
         fire_bowmasters_etb(PlayerId::Opp, &mut state);
-        assert_eq!(state.us.life, initial_life - 1, "ETB deals 1 to us");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life - 1, "ETB deals 1 to us");
         assert!(state.permanents_of(PlayerId::Opp).any(|p| p.catalog_key == "Orc Army"), "Orc Army token created");
         let army = state.permanents_of(PlayerId::Opp).find(|p| p.catalog_key == "Orc Army").and_then(|p| p.bf()).unwrap();
         assert_eq!(army.counters, 1, "Orc Army has 1 counter");
@@ -2033,12 +2033,12 @@
     fn test_bowmasters_ping_hits_face_when_no_killable_creature() {
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
-        let initial_life = state.us.life;
+        let initial_life = state.player(PlayerId::Us).life;
         add_default_perm(&mut state, PlayerId::Us, "Troll");
         let catalog = vec![creature("Troll", 3, 3)];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         fire_bowmasters_etb(PlayerId::Opp, &mut state);
-        assert_eq!(state.us.life, initial_life - 1, "damage hits face when no killable creature");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life - 1, "damage hits face when no killable creature");
         assert!(state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Troll"), "Troll survives");
     }
 
@@ -2046,13 +2046,13 @@
     fn test_bowmasters_ping_kills_1_1_creature() {
         let mut state = make_state();
         add_default_perm(&mut state, PlayerId::Opp, "Orcish Bowmasters");
-        let initial_life = state.us.life;
+        let initial_life = state.player(PlayerId::Us).life;
         add_default_perm(&mut state, PlayerId::Us, "Ragavan, Nimble Pilferer");
         let catalog = vec![creature("Ragavan, Nimble Pilferer", 2, 1)];
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
         fire_bowmasters_etb(PlayerId::Opp, &mut state);
         check_state_based_actions(&mut state, 1);
-        assert_eq!(state.us.life, initial_life, "life total unchanged when creature is targeted");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life, "life total unchanged when creature is targeted");
         assert!(!state.permanents_of(PlayerId::Us).any(|p| p.catalog_key == "Ragavan, Nimble Pilferer"),
             "Ragavan dies to 1 damage");
         assert!(state.graveyard_of(PlayerId::Us).any(|c| c.catalog_key == "Ragavan, Nimble Pilferer"),
@@ -2458,13 +2458,13 @@
 
         let mut state = make_state();
         for c in &catalog { state.catalog.insert(c.name.clone(), c.clone()); }
-        state.us.life = 20;
+        state.player_mut(PlayerId::Us).life = 20;
         state.current_phase = Some(TurnPosition::Phase(PhaseKind::PostCombatMain));
         let delta_id = add_perm(&mut state, PlayerId::Us, "Polluted Delta", BattlefieldState::new());
 
         // Simulate paying the sacrifice cost: permanent leaves the battlefield.
         state.set_card_zone(delta_id, Zone::Graveyard);
-        state.us.life -= 1;
+        state.player_mut(PlayerId::Us).life -= 1;
 
         // With the source gone, collect_legal_actions must never offer ActivateAbility for that id.
         state.current_turn = 1;
@@ -2487,7 +2487,7 @@
         // Move hand card to graveyard — Leyline should redirect to exile
         change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
         // Card should be in Exile, not Graveyard
-        assert_eq!(state.objects[&hand_id].zone(), Zone::Exile { on_adventure: false });
+        assert_eq!(state.objects[&hand_id].zone(), Some(Zone::Exile { on_adventure: false }));
     }
 
     #[test]
@@ -2500,7 +2500,7 @@
         // Now move a card to GY — should stay in GY
         let hand_id = add_hand_card(&mut state, PlayerId::Us, "Ponder");
         change_zone(hand_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Us);
-        assert_eq!(state.objects[&hand_id].zone(), Zone::Graveyard);
+        assert_eq!(state.objects[&hand_id].zone(), Some(Zone::Graveyard));
     }
 
     // ── Section 12: State-Based Action Tests ──────────────────────────────────
@@ -2524,7 +2524,7 @@
     #[test]
     fn test_sba_life_zero_ends_game() {
         let mut state = make_state();
-        state.us.life = 0;
+        state.player_mut(PlayerId::Us).life = 0;
         check_state_based_actions(&mut state, 1);
         assert_eq!(state.winner, Some(PlayerId::Opp), "us at 0 life → opp wins");
     }
@@ -2532,7 +2532,7 @@
     #[test]
     fn test_sba_life_negative_ends_game() {
         let mut state = make_state();
-        state.us.life = -3;
+        state.player_mut(PlayerId::Us).life = -3;
         check_state_based_actions(&mut state, 1);
         assert_eq!(state.winner, Some(PlayerId::Opp));
     }
@@ -2846,8 +2846,8 @@
 
         // Both stay in library: Doomsday was "put on top" (Library ≡ top until ordering tracked),
         // FoW was never selected.
-        assert_eq!(state.objects[&dd_id].zone(),  Zone::Library, "Doomsday should remain in library");
-        assert_eq!(state.objects[&fow_id].zone(), Zone::Library, "FoW should remain in library");
+        assert_eq!(state.objects[&dd_id].zone(), Some(Zone::Library), "Doomsday should remain in library");
+        assert_eq!(state.objects[&fow_id].zone(), Some(Zone::Library), "FoW should remain in library");
         let log = state.log.join("\n");
         assert!(log.contains("search → Doomsday"), "should log the searched card name");
         assert!(!log.contains("Force of Will"), "FoW should not appear in search log");
@@ -2881,8 +2881,8 @@
         }
 
         assert_eq!(state.hand_of(PlayerId::Us).count(), hand_before + 1, "hand should grow by one");
-        assert_eq!(state.objects[&small_id].zone(), Zone::Hand { known: false }, "Mother of Runes should be in hand");
-        assert_eq!(state.objects[&big_id].zone(),   Zone::Library, "Tarmogoyf (toughness 3) should stay in library");
+        assert_eq!(state.objects[&small_id].zone(), Some(Zone::Hand { known: false }), "Mother of Runes should be in hand");
+        assert_eq!(state.objects[&big_id].zone(), Some(Zone::Library), "Tarmogoyf (toughness 3) should stay in library");
     }
 
     /// Urza's Saga chapter III: finds an artifact with no colored pips and MV ≤ 1
@@ -2901,8 +2901,8 @@
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&lotus_id].zone(), Zone::Battlefield, "Lotus Petal should enter battlefield");
-        assert_eq!(state.objects[&fow_id].zone(),   Zone::Library,     "FoW should stay in library");
+        assert_eq!(state.objects[&lotus_id].zone(), Some(Zone::Battlefield), "Lotus Petal should enter battlefield");
+        assert_eq!(state.objects[&fow_id].zone(), Some(Zone::Library),     "FoW should stay in library");
     }
 
     /// Urza's Saga does not fetch an artifact with a colored pip (e.g. {W}).
@@ -2952,8 +2952,8 @@
         let eff  = eff_fetch_search(PlayerId::Us, pred, ZoneId::Battlefield);
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&green_id].zone(), Zone::Battlefield, "green creature should enter battlefield");
-        assert_eq!(state.objects[&red_id].zone(),   Zone::Library,     "non-green creature should stay");
+        assert_eq!(state.objects[&green_id].zone(), Some(Zone::Battlefield), "green creature should enter battlefield");
+        assert_eq!(state.objects[&red_id].zone(), Some(Zone::Library),     "non-green creature should stay");
     }
 
     /// Fetchland regression: island-or-swamp search finds the correct land.
@@ -2977,8 +2977,8 @@
         let eff = build_ability_effect(&delta_ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&sea_id].zone(),    Zone::Battlefield, "Underground Sea should enter play");
-        assert_eq!(state.objects[&forest_id].zone(), Zone::Library,     "Forest should remain in library");
+        assert_eq!(state.objects[&sea_id].zone(), Some(Zone::Battlefield), "Underground Sea should enter play");
+        assert_eq!(state.objects[&forest_id].zone(), Some(Zone::Library),     "Forest should remain in library");
     }
 
     // ── Section 20: CostsPaidCtx / objects_moved ─────────────────────────────
@@ -3021,12 +3021,12 @@
         let fow_def = catalog_card("Force of Will");
         state.catalog.insert(fow_def.name.clone(), fow_def.clone());
         let fow_id = add_hand_card(&mut state, PlayerId::Us, "Force of Will");
-        state.us.pool.u     = 2;
-        state.us.pool.total = 5; // 3 generic + 2 blue
+        state.player_mut(PlayerId::Us).pool.u     = 2;
+        state.player_mut(PlayerId::Us).pool.total = 5; // 3 generic + 2 blue
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, fow_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "FoW should cast for 3UU when pool is full");
-        assert_eq!(state.us.pool.total, 0, "all mana spent");
+        assert_eq!(state.player(PlayerId::Us).pool.total, 0, "all mana spent");
     }
 
     // ── Section 21: Snuff Out ────────────────────────────────────────────────
@@ -3041,12 +3041,12 @@
         state.catalog.insert(troll_def.name.clone(), troll_def);
         add_default_perm(&mut state, PlayerId::Opp, "Troll");
         let snuff_id = add_hand_card(&mut state, PlayerId::Us, "Snuff Out");
-        let initial_life = state.us.life;
+        let initial_life = state.player(PlayerId::Us).life;
         let alt = &def.alternate_costs()[0];
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, snuff_id, SpellFace::Main, Some(alt), Some(0), &[], 0, 0, None);
         assert!(result.is_some(), "Snuff Out should cast for 4 life");
-        assert_eq!(state.us.life, initial_life - 4, "paid 4 life");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life - 4, "paid 4 life");
         let ctx = &state.objects[&result.unwrap()].spell().unwrap().costs_paid_ctx;
         assert!(ctx.objects_moved.is_empty(), "no objects moved for life payment");
     }
@@ -3059,7 +3059,7 @@
         let def = catalog_card("Snuff Out");
         state.catalog.insert(def.name.clone(), def.clone());
         let snuff_id = add_hand_card(&mut state, PlayerId::Us, "Snuff Out");
-        state.us.life = 4; // exactly 4 — can't pay (would reach 0)
+        state.player_mut(PlayerId::Us).life = 4; // exactly 4 — can't pay (would reach 0)
         let alt = &def.alternate_costs()[0];
         let crate::ir::ability::CostBody::Ir(action) = &alt.costs else {
             panic!("Snuff Out alt cost is IR after Phase 4 step 5 follow-up")
@@ -3104,8 +3104,8 @@
         );
         state.catalog.insert(def.name.clone(), def.clone());
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        state.us.pool.b = 1; state.us.pool.total = 1;
-        state.us.life = 3; // can't pay Life(3) — would reach 0
+        state.player_mut(PlayerId::Us).pool.b = 1; state.player_mut(PlayerId::Us).pool.total = 1;
+        state.player_mut(PlayerId::Us).life = 3; // can't pay Life(3) — would reach 0
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_none(), "additional Life(3) cost blocks cast at 3 life");
@@ -3124,12 +3124,12 @@
         );
         state.catalog.insert(def.name.clone(), def.clone());
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
-        state.us.pool.b = 1; state.us.pool.total = 1;
-        let initial_life = state.us.life; // 20
+        state.player_mut(PlayerId::Us).pool.b = 1; state.player_mut(PlayerId::Us).pool.total = 1;
+        let initial_life = state.player(PlayerId::Us).life; // 20
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "Dark Ritual + Life(3) additional cost is payable at 20 life");
-        assert_eq!(state.us.life, initial_life - 3, "additional Life(3) was paid");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life - 3, "additional Life(3) was paid");
     }
 
     /// Meltdown ({X}{R}) drains the announced X generic on top of its base {R}
@@ -3141,14 +3141,14 @@
         state.catalog.insert(def.name.clone(), def.clone());
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Meltdown");
         // Base {R} + X=3 generic = 4 mana available.
-        state.us.pool.r = 1;
-        state.us.pool.c = 3;
-        state.us.pool.total = 4;
+        state.player_mut(PlayerId::Us).pool.r = 1;
+        state.player_mut(PlayerId::Us).pool.c = 3;
+        state.player_mut(PlayerId::Us).pool.total = 4;
 
         // chosen_x = 3 (positional arg).
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 3, 0, None);
         assert!(result.is_some(), "Meltdown castable with {{R}} + 3 generic at X=3");
-        assert_eq!(state.us.pool.total, 0, "base {{R}} + 3 generic (XMana) fully drained");
+        assert_eq!(state.player(PlayerId::Us).pool.total, 0, "base {{R}} + 3 generic (XMana) fully drained");
         let ctx = &state.objects[&result.unwrap()].spell().unwrap().costs_paid_ctx;
         assert_eq!(ctx.chosen_x, 3, "announced X recorded for the resolution effect");
     }
@@ -3161,9 +3161,9 @@
         state.catalog.insert(def.name.clone(), def.clone());
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Meltdown");
         // Only {R} + 1 generic = 2 mana, but X=3 needs 3 generic on top of {R}.
-        state.us.pool.r = 1;
-        state.us.pool.c = 1;
-        state.us.pool.total = 2;
+        state.player_mut(PlayerId::Us).pool.r = 1;
+        state.player_mut(PlayerId::Us).pool.c = 1;
+        state.player_mut(PlayerId::Us).pool.total = 2;
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 3, 0, None);
         assert!(result.is_none(), "Meltdown blocked: not enough mana for X=3 additional cost");
@@ -3186,17 +3186,17 @@
         setup_bitter_triumph(&mut state);
         let extra_id = add_hand_card(&mut state, PlayerId::Us, "Dark Ritual");
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Bitter Triumph");
-        state.us.pool.b = 2; state.us.pool.total = 2;
-        let initial_life = state.us.life;
+        state.player_mut(PlayerId::Us).pool.b = 2; state.player_mut(PlayerId::Us).pool.total = 2;
+        let initial_life = state.player(PlayerId::Us).life;
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "Bitter Triumph should be castable");
-        let extra_zone = state.objects.get(&extra_id).map(|o| o.zone());
+        let extra_zone = state.objects.get(&extra_id).and_then(|o| o.zone());
         assert!(
             matches!(extra_zone, Some(Zone::Graveyard)),
             "discard branch of CostOr was paid (card discarded)"
         );
-        assert_eq!(state.us.life, initial_life, "life branch was not taken when discard is available");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life, "life branch was not taken when discard is available");
     }
 
     /// Bitter Triumph falls back to the life branch when no spare card is in hand.
@@ -3205,12 +3205,12 @@
         let mut state = make_state();
         setup_bitter_triumph(&mut state);
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Bitter Triumph");
-        state.us.pool.b = 2; state.us.pool.total = 2;
-        let initial_life = state.us.life;
+        state.player_mut(PlayerId::Us).pool.b = 2; state.player_mut(PlayerId::Us).pool.total = 2;
+        let initial_life = state.player(PlayerId::Us).life;
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_some(), "Bitter Triumph should be castable via life branch");
-        assert_eq!(state.us.life, initial_life - 3, "3 life paid as fallback cost");
+        assert_eq!(state.player(PlayerId::Us).life, initial_life - 3, "3 life paid as fallback cost");
     }
 
     /// Bitter Triumph is uncastable when neither branch can be paid.
@@ -3219,8 +3219,8 @@
         let mut state = make_state();
         setup_bitter_triumph(&mut state);
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Bitter Triumph");
-        state.us.pool.b = 2; state.us.pool.total = 2;
-        state.us.life = 3; // can't pay Life(3) — life > n is strict
+        state.player_mut(PlayerId::Us).pool.b = 2; state.player_mut(PlayerId::Us).pool.total = 2;
+        state.player_mut(PlayerId::Us).life = 3; // can't pay Life(3) — life > n is strict
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[], 0, 0, None);
         assert!(result.is_none(), "Bitter Triumph should be blocked when life ≤ 3 and no spare card");
@@ -3280,7 +3280,7 @@
         setup_consign(&mut state);
         let spell_id = push_colorless_spell_for_opp(&mut state);
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
-        state.us.pool.u = 1; state.us.pool.total = 1;
+        state.player_mut(PlayerId::Us).pool.u = 1; state.player_mut(PlayerId::Us).pool.total = 1;
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[spell_id], 0, 0, None);
         assert!(result.is_some(), "Consign to Memory should be castable");
@@ -3292,7 +3292,7 @@
 
         assert!(!state.stack.contains(&spell_id), "colorless spell should be removed from stack");
         assert_eq!(
-            state.objects.get(&spell_id).map(|o| o.zone()),
+            state.objects.get(&spell_id).and_then(|o| o.zone()),
             Some(Zone::Graveyard),
             "countered spell goes to graveyard"
         );
@@ -3305,7 +3305,7 @@
         setup_consign(&mut state);
         let ab_id = push_opp_triggered_ability(&mut state);
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Consign to Memory");
-        state.us.pool.u = 1; state.us.pool.total = 1;
+        state.player_mut(PlayerId::Us).pool.u = 1; state.player_mut(PlayerId::Us).pool.total = 1;
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[ab_id], 0, 0, None);
         assert!(result.is_some(), "Consign to Memory should be castable targeting a triggered ability");
@@ -3378,7 +3378,7 @@
 
         // Spell should still be on the stack — counter fizzled.
         assert!(state.stack.contains(&spell_id), "uncounterable spell should remain on stack");
-        assert_eq!(state.objects[&spell_id].zone(), Zone::Stack, "zone unchanged after fizzle");
+        assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Stack), "zone unchanged after fizzle");
     }
 
     // ── Section 56: Stifle (counter activated or triggered ability) ──────────
@@ -3392,7 +3392,7 @@
 
         let ab_id = push_opp_triggered_ability(&mut state);
         let card_id = add_hand_card(&mut state, PlayerId::Us, "Stifle");
-        state.us.pool.u = 1; state.us.pool.total = 1;
+        state.player_mut(PlayerId::Us).pool.u = 1; state.player_mut(PlayerId::Us).pool.total = 1;
 
         let result = cast_spell(&mut state, 1, PlayerId::Us, card_id, SpellFace::Main, None, None, &[ab_id], 0, 0, None);
         assert!(result.is_some(), "Stifle should be castable targeting a triggered ability");
@@ -3464,9 +3464,9 @@
             ctx.effect.call(&mut state, 1, &[]);
         }
 
-        assert_eq!(state.objects[&equip_id].zone(), Zone::Hand { known: false },
+        assert_eq!(state.objects[&equip_id].zone(), Some(Zone::Hand { known: false }),
             "Equipment should be tutored into hand");
-        assert_eq!(state.objects[&petal_id].zone(), Zone::Library,
+        assert_eq!(state.objects[&petal_id].zone(), Some(Zone::Library),
             "non-Equipment artifact should stay in library");
     }
 
@@ -3494,7 +3494,7 @@
             .ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, sfm_id).call(&mut state, 1, &[equip_id]);
 
-        assert_eq!(state.objects[&equip_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&equip_id].zone(), Some(Zone::Battlefield),
             "Equipment should be on the battlefield");
     }
 
@@ -3554,7 +3554,7 @@
         let factory = ability.ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, bs_id).call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&bs_id].zone(), Zone::Hand { known: false },
+        assert_eq!(state.objects[&bs_id].zone(), Some(Zone::Hand { known: false }),
             "Batterskull should be in its owner's hand");
     }
 
@@ -3617,8 +3617,7 @@
         // Spell should be in Exile, not Graveyard; stack should be empty.
         assert!(!state.stack.contains(&spell_id), "countered spell should be off the stack");
         assert_eq!(
-            state.objects[&spell_id].zone(),
-            Zone::Exile { on_adventure: false },
+            state.objects[&spell_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "countered spell should be exiled, not in graveyard",
         );
         assert!(state.objects[&spell_id].spell().is_none(), "spell state should be cleared");
@@ -3669,9 +3668,9 @@
         eff_counter_target(PlayerId::Opp).call(&mut state, 1, &[fon_id]);
 
         assert!(!state.stack.contains(&fon_id), "FoN should be off the stack after being countered");
-        assert_eq!(state.objects[&fon_id].zone(), Zone::Graveyard, "FoN goes to graveyard");
+        assert_eq!(state.objects[&fon_id].zone(), Some(Zone::Graveyard), "FoN goes to graveyard");
         assert!(state.stack.contains(&y_id), "Y should still be on the stack — FoN never resolved");
-        assert_eq!(state.objects[&y_id].zone(), Zone::Stack, "Y remains in Stack zone");
+        assert_eq!(state.objects[&y_id].zone(), Some(Zone::Stack), "Y remains in Stack zone");
     }
 
     /// Stack: X (bottom), Y, FoN targeting Y, FoW targeting X (top).
@@ -3746,14 +3745,13 @@
         resolve_top_of_stack(&mut state, 1, PlayerId::Us);
 
         assert!(state.stack.is_empty(), "stack should be empty");
-        assert_eq!(state.objects[&x_id].zone(), Zone::Graveyard, "X countered by FoW → graveyard");
+        assert_eq!(state.objects[&x_id].zone(), Some(Zone::Graveyard), "X countered by FoW → graveyard");
         assert_eq!(
-            state.objects[&y_id].zone(),
-            Zone::Exile { on_adventure: false },
+            state.objects[&y_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "Y countered by FoN → exile",
         );
-        assert_eq!(state.objects[&fow_id].zone(), Zone::Graveyard, "FoW → graveyard after resolving");
-        assert_eq!(state.objects[&fon_id].zone(), Zone::Graveyard, "FoN → graveyard after resolving");
+        assert_eq!(state.objects[&fow_id].zone(), Some(Zone::Graveyard), "FoW → graveyard after resolving");
+        assert_eq!(state.objects[&fon_id].zone(), Some(Zone::Graveyard), "FoN → graveyard after resolving");
     }
 
     // ── Section 59: Meteor Sword (ETB destroy + buff equipped) ────────────────
@@ -3782,7 +3780,7 @@
         assert!(all.contains(&victim), "opponent permanent is a legal target");
         assert!(all.contains(&ours), "our permanent is also a legal target");
         ctx.effect.call(&mut state, 1, &[victim]);
-        assert_eq!(state.objects[&victim].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&victim].zone(), Some(Zone::Graveyard),
             "target permanent destroyed");
 
         // Equip: attach Meteor Sword to our creature and verify +3/+3.
@@ -3848,9 +3846,9 @@
         let factory = ability.ability_factory.as_ref().unwrap().clone();
         factory(PlayerId::Us, ee_id).call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&mv2].zone(), Zone::Graveyard, "MV 2 artifact destroyed (matches 2 charges)");
-        assert_eq!(state.objects[&mv0].zone(), Zone::Battlefield, "MV 0 artifact survives");
-        assert_eq!(state.objects[&land].zone(), Zone::Battlefield, "land survives (nonland filter)");
+        assert_eq!(state.objects[&mv2].zone(), Some(Zone::Graveyard), "MV 2 artifact destroyed (matches 2 charges)");
+        assert_eq!(state.objects[&mv0].zone(), Some(Zone::Battlefield), "MV 0 artifact survives");
+        assert_eq!(state.objects[&land].zone(), Some(Zone::Battlefield), "land survives (nonland filter)");
     }
 
     // ── Section 60: Quantum Riddler (ETB draw + Warp alt cost + delayed exile) ──
@@ -3868,13 +3866,13 @@
         let mut state = make_state();
         state.catalog.insert("Quantum Riddler".into(), def);
         // Normal (non-warp) cast: alt_cost_index is None, so only the ETB-draw trigger fires.
-        let before = state.us.draws_this_turn;
+        let before = state.player(PlayerId::Us).draws_this_turn;
         eff_enter_permanent(PlayerId::Us, "Quantum Riddler").call(&mut state, 1, &[]);
         let drew = state.pending_triggers.iter()
             .find(|ctx| ctx.source_name == "Quantum Riddler").cloned()
             .expect("ETB draw trigger queued");
         drew.effect.call(&mut state, 1, &[]);
-        assert!(state.us.draws_this_turn > before,
+        assert!(state.player(PlayerId::Us).draws_this_turn > before,
             "Quantum Riddler ETB should draw a card");
 
         assert!(!state.pending_triggers.iter().any(|ctx| ctx.source_name == "Quantum Riddler (warp)"),
@@ -3918,7 +3916,7 @@
             .find(|ctx| ctx.source_name == "Quantum Riddler (warp exile)").cloned()
             .expect("end step produces warp exile trigger");
         exile_ctx.effect.call(&mut state, 2, &[]);
-        assert_eq!(state.objects[&qr_id].zone(), Zone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&qr_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "Quantum Riddler should be exiled at end step when cast for warp cost");
     }
 
@@ -3951,7 +3949,7 @@
             "creature in own graveyard with MV ≤ 3 is a legal target");
 
         ctx.effect.call(&mut state, 1, &[gy_creature]);
-        assert_eq!(state.objects[&gy_creature].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&gy_creature].zone(), Some(Zone::Battlefield),
             "target reanimated");
         assert_eq!(state.permanent_bf(pwf_id).and_then(|bf| bf.attached_to), Some(gy_creature),
             "Pre-War Formalwear attached to reanimated creature");
@@ -4054,8 +4052,7 @@
 
         // Card should be in exile, not graveyard.
         assert_eq!(
-            state.objects[&card_id].zone(),
-            Zone::Exile { on_adventure: false },
+            state.objects[&card_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "DV replacement: card should be in exile, not graveyard",
         );
         // Card should have a void counter.
@@ -4106,8 +4103,7 @@
         change_zone(opp_card_id, ZoneId::Graveyard, &mut state, 1, PlayerId::Opp);
 
         assert_eq!(
-            state.objects[&opp_card_id].zone(),
-            Zone::Graveyard,
+            state.objects[&opp_card_id].zone(), Some(Zone::Graveyard),
             "DV replacement must not intercept its controller's own cards",
         );
         assert_eq!(
@@ -4228,7 +4224,7 @@
             ci_timestamp: 0,
             role: ObjectRole::Library,
         });
-        state.opp.library_order.push_back(lib_id);
+        state.player_mut(PlayerId::Opp).library_order.push_back(lib_id);
         // A different card in opp's hand — must not be exiled.
         let other_id = state.alloc_id();
         state.objects.insert(other_id, GameObject {
@@ -4253,11 +4249,11 @@
         eff.call(&mut state, 1, &[gy_id]);
 
         // All 3 Dark Ritual copies should be in exile.
-        assert_eq!(state.objects[&gy_id].zone(),   Zone::Exile { on_adventure: false }, "GY copy exiled");
-        assert_eq!(state.objects[&hand_id].zone(),  Zone::Exile { on_adventure: false }, "hand copy exiled");
-        assert_eq!(state.objects[&lib_id].zone(),   Zone::Exile { on_adventure: false }, "library copy exiled");
+        assert_eq!(state.objects[&gy_id].zone(), Some(Zone::Exile { on_adventure: false }), "GY copy exiled");
+        assert_eq!(state.objects[&hand_id].zone(), Some(Zone::Exile { on_adventure: false }), "hand copy exiled");
+        assert_eq!(state.objects[&lib_id].zone(), Some(Zone::Exile { on_adventure: false }), "library copy exiled");
         // Brainstorm is untouched.
-        assert_eq!(state.objects[&other_id].zone(), Zone::Hand { known: false }, "other card unchanged");
+        assert_eq!(state.objects[&other_id].zone(), Some(Zone::Hand { known: false }), "other card unchanged");
     }
 
     // ── Section 31: Toxic Deluge ───────────────────────────────────────────────
@@ -4317,13 +4313,13 @@
         let mut state = make_state();
         let td_def = catalog_card("Toxic Deluge");
         state.catalog.insert(td_def.name.clone(), td_def);
-        state.us.pool.b = 3;
-        state.us.pool.total = 3;
-        state.us.life = 20;
+        state.player_mut(PlayerId::Us).pool.b = 3;
+        state.player_mut(PlayerId::Us).pool.total = 3;
+        state.player_mut(PlayerId::Us).life = 20;
         let td_id = add_hand_card(&mut state, PlayerId::Us, "Toxic Deluge");
         let result = cast_spell(&mut state, 1, PlayerId::Us, td_id, SpellFace::Main, None, None, &[], 3, 0, None);
         assert!(result.is_some(), "Toxic Deluge should cast successfully");
-        assert_eq!(state.us.life, 17, "caster pays X=3 life");
+        assert_eq!(state.player(PlayerId::Us).life, 17, "caster pays X=3 life");
     }
 
     // ── 35. Red/Blue Elemental Blast, Pyroblast, Hydroblast ───────────────────
@@ -4365,7 +4361,7 @@
         effect.call(&mut state, 1, &[target_id]);
 
         assert!(!state.stack.contains(&target_id), "blue spell should be countered off the stack");
-        assert_eq!(state.objects[&target_id].zone(), Zone::Graveyard, "countered spell goes to graveyard");
+        assert_eq!(state.objects[&target_id].zone(), Some(Zone::Graveyard), "countered spell goes to graveyard");
     }
 
     /// REB destroys a blue permanent on the battlefield (Underground Sea = blue land).
@@ -4379,7 +4375,7 @@
         let effect = build_spell_effect(&reb_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[sea_id]);
 
-        assert_eq!(state.objects[&sea_id].zone(), Zone::Graveyard, "blue permanent destroyed");
+        assert_eq!(state.objects[&sea_id].zone(), Some(Zone::Graveyard), "blue permanent destroyed");
     }
 
     /// Pyroblast fizzles when targeting a non-blue spell (Dark Ritual = black).
@@ -4481,7 +4477,7 @@
         let effect = build_spell_effect(&pyro_def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         effect.call(&mut state, 1, &[petal_id]);
 
-        assert_eq!(state.objects[&petal_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone(), Some(Zone::Graveyard),
             "Pyroblast should destroy the now-Blue Lotus Petal");
     }
 
@@ -4656,7 +4652,7 @@
             ci_timestamp: 0,
             role: ObjectRole::Library,
         });
-            state.us.library_order.push_front(id);
+            state.player_mut(PlayerId::Us).library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
         };
@@ -4683,7 +4679,7 @@
         change_zone(land_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
 
-        assert_eq!(state.objects[&top_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&top_id].zone(), Some(Zone::Graveyard),
             "top library card should be milled by surveil");
         assert!(matches!(state.objects[&land_id].bf(), Some(bf) if bf.tapped),
             "surveil land should enter tapped");
@@ -4710,7 +4706,7 @@
             ci_timestamp: 0,
             role: ObjectRole::Library,
         });
-            state.us.library_order.push_front(id);
+            state.player_mut(PlayerId::Us).library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert(def);
             id
         };
@@ -4736,7 +4732,7 @@
         change_zone(land_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
 
-        assert_eq!(state.objects[&top_id].zone(), Zone::Library,
+        assert_eq!(state.objects[&top_id].zone(), Some(Zone::Library),
             "top library card should stay when surveil keeps");
     }
 
@@ -4746,7 +4742,7 @@
     fn test_ancient_tomb_produces_two_and_deals_damage() {
         let mut state = make_state();
         state.catalog = test_catalog();
-        state.us.life = 20;
+        state.player_mut(PlayerId::Us).life = 20;
 
         let tomb_id = {
             let def = catalog_card("Ancient Tomb");
@@ -4772,9 +4768,9 @@
         let act = ManaActivation { source_id: tomb_id, ability_index: 0, color_choice: None };
         execute_mana_activation(&mut state, 1, PlayerId::Us, &act);
 
-        assert_eq!(state.us.pool.total, 2, "Ancient Tomb should produce 2 mana");
-        assert_eq!(state.us.pool.c, 2, "both mana pips should be colorless");
-        assert_eq!(state.us.life, 18, "Ancient Tomb deals 2 damage to controller");
+        assert_eq!(state.player(PlayerId::Us).pool.total, 2, "Ancient Tomb should produce 2 mana");
+        assert_eq!(state.player(PlayerId::Us).pool.c, 2, "both mana pips should be colorless");
+        assert_eq!(state.player(PlayerId::Us).life, 18, "Ancient Tomb deals 2 damage to controller");
         assert!(state.objects[&tomb_id].bf().map_or(false, |bf| bf.tapped),
             "Ancient Tomb should be tapped after activation");
     }
@@ -4818,7 +4814,7 @@
         let effect = eff_bounce_target(PlayerId::Us);
         effect.call(&mut state, 1, &[creature_id]);
 
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Hand { known: false },
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Hand { known: false }),
             "legendary creature should be in opp's hand after Karakas activation");
     }
 
@@ -4835,7 +4831,7 @@
         eff_damage_target(PlayerId::Us, 3, ObjId(0)).call(&mut state, 1, &[id]);
         check_state_based_actions(&mut state, 1);
 
-        assert_eq!(state.objects[&id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&id].zone(), Some(Zone::Graveyard),
             "3/3 hit by 3 damage should die via SBA");
     }
 
@@ -4850,7 +4846,7 @@
         eff_damage_target(PlayerId::Us, 3, ObjId(0)).call(&mut state, 1, &[id]);
         check_state_based_actions(&mut state, 1);
 
-        assert_eq!(state.objects[&id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&id].zone(), Some(Zone::Battlefield),
             "4/4 hit by 3 damage should survive");
         assert_eq!(state.objects[&id].bf().unwrap().damage, 3);
     }
@@ -4871,7 +4867,7 @@
 
         eff_destroy_target(PlayerId::Us).call(&mut state, 1, &[id]);
 
-        assert_eq!(state.objects[&id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&id].zone(), Some(Zone::Graveyard),
             "artifact should be destroyed by Abrade's artifact mode");
     }
 
@@ -5026,8 +5022,7 @@
         eff_reanimate(PlayerId::Us).call(&mut state, 2, &[creature_id]);
 
         assert_eq!(
-            state.objects[&creature_id].zone(),
-            Zone::Graveyard,
+            state.objects[&creature_id].zone(), Some(Zone::Graveyard),
             "Cage prohibition must block creature from entering battlefield from graveyard"
         );
     }
@@ -5061,8 +5056,7 @@
         eff_reanimate(PlayerId::Us).call(&mut state, 3, &[creature_id]);
 
         assert_eq!(
-            state.objects[&creature_id].zone(),
-            Zone::Battlefield,
+            state.objects[&creature_id].zone(), Some(Zone::Battlefield),
             "After Cage leaves, creature should be free to enter battlefield"
         );
     }
@@ -5092,8 +5086,7 @@
         eff_reanimate(PlayerId::Us).call(&mut state, 2, &[artifact_id]);
 
         assert_eq!(
-            state.objects[&artifact_id].zone(),
-            Zone::Battlefield,
+            state.objects[&artifact_id].zone(), Some(Zone::Battlefield),
             "Cage must not block non-creature cards from entering battlefield"
         );
     }
@@ -5109,7 +5102,7 @@
         // Default mode = 0 (nontoken creature)
         let filter = ir_and(ir_not(ir_token()), ir_type(CardType::Creature));
         eff_sacrifice(PlayerId::Us, Who::Opp, filter).call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Graveyard),
             "nontoken creature should be sacrificed");
     }
 
@@ -5136,9 +5129,9 @@
         });
         // Mode 1: sacrifice a token
         eff_sacrifice(PlayerId::Us, Who::Opp, ir_token()).call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&token_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&token_id].zone(), Some(Zone::Graveyard),
             "token should be sacrificed by mode 1");
-        assert_eq!(state.objects[&nontoken_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&nontoken_id].zone(), Some(Zone::Battlefield),
             "nontoken creature should not be sacrificed by mode 1");
     }
 
@@ -5202,9 +5195,9 @@
             .expect("EE must have a battlefield ability");
         let eff = ability_factory(PlayerId::Us, ee_id);
         eff.call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&mv2_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&mv2_id].zone(), Some(Zone::Graveyard),
             "MV 2 permanent should be destroyed by EE[2]");
-        assert_eq!(state.objects[&mv3_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&mv3_id].zone(), Some(Zone::Battlefield),
             "MV 3 permanent should survive EE[2]");
     }
 
@@ -5287,7 +5280,7 @@
             ctx.effect.call(&mut state, 1, &[]);
         }
 
-        assert_eq!(state.objects[&fow_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&fow_id].zone(), Some(Zone::Graveyard),
             "FoW should be countered and in graveyard");
         assert!(!state.stack.contains(&fow_id), "FoW should be off the stack");
     }
@@ -5317,7 +5310,7 @@
             ctx.effect.call(&mut state, 1, &[]);
         }
 
-        assert_eq!(state.objects[&petal_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone(), Some(Zone::Graveyard),
             "Lotus Petal should be countered by Lavinia");
     }
 
@@ -5346,7 +5339,7 @@
 
         assert!(state.stack.contains(&spell_id),
             "Hexing Squelcher should prevent the opponent from countering our spell");
-        assert_ne!(state.objects[&spell_id].zone(), Zone::Graveyard);
+        assert_ne!(state.objects[&spell_id].zone(), Some(Zone::Graveyard));
     }
 
     /// Hexing Squelcher only protects YOUR spells; opponent's spells can still be countered.
@@ -5366,7 +5359,7 @@
         counter_one(spell_id, &mut state, 1, PlayerId::Us);
 
         assert!(!state.stack.contains(&spell_id), "Opponent's spell should be countered normally");
-        assert_eq!(state.objects[&spell_id].zone(), Zone::Graveyard);
+        assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Graveyard));
     }
 
     /// "Other creatures you control have Ward—Pay 2 life."
@@ -5527,7 +5520,7 @@
 
         assert!(state.stack.contains(&lg_id),
             "Long Goodbye can't be countered (ProhibitionDef on SpellBeingCountered)");
-        assert_ne!(state.objects[&lg_id].zone(), Zone::Graveyard);
+        assert_ne!(state.objects[&lg_id].zone(), Some(Zone::Graveyard));
     }
 
     // ── §48: Show and Tell ────────────────────────────────────────────────────
@@ -5548,7 +5541,7 @@
             ),
         ).call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Battlefield),
             "Show and Tell should put chosen creature onto the battlefield");
     }
 
@@ -5606,7 +5599,7 @@
 
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "2");
 
-        assert_eq!(state.objects[&spell_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Graveyard),
             "spell should be countered when opponent can't pay 2");
         assert!(!state.stack.contains(&spell_id));
     }
@@ -5645,7 +5638,7 @@
 
         assert!(state.stack.contains(&spell_id),
             "spell should remain on stack when opponent pays 2");
-        assert_eq!(state.objects[&spell_id].zone(), Zone::Stack);
+        assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Stack));
     }
 
     #[test]
@@ -5675,7 +5668,7 @@
         // Daze: counter unless pays {1}
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
-        assert_eq!(state.objects[&spell_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Graveyard),
             "Daze should counter when opponent can't pay 1");
     }
 
@@ -5694,7 +5687,7 @@
 
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
-        assert_eq!(state.objects[&spell_id].zone(), Zone::Stack,
+        assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Stack),
             "Daze should NOT counter — opponent taps a land to pay the {{1}} tax");
         assert!(state.objects[&island].bf().unwrap().tapped,
             "the Island was tapped to produce the mana");
@@ -5851,7 +5844,7 @@
         // A storm copy's effect is the same as the original: counter unless pays {1}.
         run_counter_unless_pays(&mut state, PlayerId::Us, spell_id, "1");
 
-        assert_eq!(state.objects[&spell_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&spell_id].zone(), Some(Zone::Graveyard),
             "storm copy should counter spell when opponent can't pay 1");
     }
 
@@ -5921,12 +5914,12 @@
         let condition = alt.condition.as_ref().unwrap();
 
         // Opponent (Us from their perspective) has cast 2 spells — condition false for Opp caster.
-        state.us.spells_cast_this_turn = 2;
+        state.player_mut(PlayerId::Us).spells_cast_this_turn = 2;
         assert!(!condition(PlayerId::Opp, &state),
             "trap condition should be false when opponent cast only 2 spells");
 
         // Opponent has cast 3 spells — condition true.
-        state.us.spells_cast_this_turn = 3;
+        state.player_mut(PlayerId::Us).spells_cast_this_turn = 3;
         assert!(condition(PlayerId::Opp, &state),
             "trap condition should be true when opponent cast 3+ spells");
     }
@@ -5952,9 +5945,9 @@
         // Activate SSG's hand-zone mana ability — should exile from hand.
         let act = ManaActivation { source_id: ssg_id, ability_index: 0, color_choice: Some(Color::Red) };
         execute_mana_activation(&mut state, 1, PlayerId::Us, &act);
-        assert_eq!(state.objects[&ssg_id].zone(), Zone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&ssg_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "SSG should be exiled after paying mana");
-        assert_eq!(state.us.pool.r, 1, "SSG should produce R");
+        assert_eq!(state.player(PlayerId::Us).pool.r, 1, "SSG should produce R");
     }
 
     #[test]
@@ -5980,7 +5973,7 @@
         let bf = BattlefieldState { counters: 0, ..BattlefieldState::new() };
         let creature_id = add_perm_with_def(&mut state, PlayerId::Opp, &creature_def, bf);
         recompute(&mut state);
-        let opp_life_before = state.opp.life;
+        let opp_life_before = state.player(PlayerId::Opp).life;
 
         // Run Swords' actual resolution body (IR) with `target` bound to the creature.
         let swords = catalog_card("Swords to Plowshares");
@@ -5993,9 +5986,9 @@
             .with_var("target", crate::ir::expr::Value::Obj(creature_id));
         crate::ir::executor::execute(&body, &mut state, &env);
 
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "creature should be exiled");
-        assert!(state.opp.life > opp_life_before,
+        assert!(state.player(PlayerId::Opp).life > opp_life_before,
             "opponent should gain life equal to creature's power");
     }
 
@@ -6021,7 +6014,7 @@
         // Resolve the trigger — CoT goes to graveyard.
         let ctx = state.pending_triggers.remove(0);
         ctx.effect.call(&mut state, 1, &[]);
-        assert_eq!(state.objects[&cot_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&cot_id].zone(), Some(Zone::Graveyard),
             "City of Traitors should be sacrificed");
     }
 
@@ -6132,7 +6125,7 @@
         recompute(&mut state);
 
         // Creature should be on the battlefield with haste.
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Battlefield),
             "creature should be on the battlefield");
         let def = state.def_of(creature_id).expect("should have materialized def");
         assert!(def.has_keyword(Keyword::Haste), "creature should have haste");
@@ -6152,7 +6145,7 @@
         let eff = build_ability_effect(ability, PlayerId::Us, ObjId::UNSET);
         eff.call(&mut state, 1, &[creature_id]);
         recompute(&mut state);
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Battlefield);
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Battlefield));
 
         // Drain any pending triggers from the ETB (e.g. Bowmasters draw-trigger setup).
         state.pending_triggers.clear();
@@ -6168,7 +6161,7 @@
         // Resolve the trigger — creature should be sacrificed.
         let ctx = state.pending_triggers.remove(0);
         ctx.effect.call(&mut state, 2, &[]);
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Graveyard),
             "creature should be sacrificed at end step");
     }
 
@@ -6913,7 +6906,7 @@
             ci_timestamp: 0,
             role: ObjectRole::Library,
         });
-            state.us.library_order.push_front(id);
+            state.player_mut(PlayerId::Us).library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert(brainstorm);
             id
         };
@@ -6954,10 +6947,10 @@
         assert_eq!(ma.produces_count, 1, "Island produces one mana");
 
         let _island_id = add_perm_with_def(&mut state, PlayerId::Us, &def, BattlefieldState::new());
-        assert_eq!(state.us.pool.u, 0, "pool starts empty");
+        assert_eq!(state.player(PlayerId::Us).pool.u, 0, "pool starts empty");
         let eff = (ma.make_effect)(PlayerId::Us, None);
         eff.call(&mut state, 1, &[]);
-        assert_eq!(state.us.pool.u, 1, "Island mana ability must add U to pool");
+        assert_eq!(state.player(PlayerId::Us).pool.u, 1, "Island mana ability must add U to pool");
     }
 
     #[test]
@@ -7087,7 +7080,7 @@
         let eff = build_ability_effect(ability, PlayerId::Us, wl_id);
         eff.call(&mut state, 1, &[victim_id]);
 
-        assert_eq!(state.objects[&victim_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&victim_id].zone(), Some(Zone::Graveyard),
             "targeted nonbasic land should be destroyed");
     }
 
@@ -7131,7 +7124,7 @@
         let effect = build_spell_effect(&be_def, PlayerId::Us, ObjId::UNSET, 0, 1).1;
         effect.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&petal_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone(), Some(Zone::Graveyard),
             "Lotus Petal (MV 0) should be destroyed by Brotherhood's End mode 1");
     }
 
@@ -7256,7 +7249,7 @@
             ci_timestamp: 0,
             role: ObjectRole::Library,
         });
-            state.us.library_order.push_front(id);
+            state.player_mut(PlayerId::Us).library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert_with(|| catalog_card("Brainstorm"));
             id
         };
@@ -7289,7 +7282,7 @@
         );
         for ctx in std::mem::take(&mut state.pending_triggers) { ctx.effect.call(&mut state, 1, &[]); }
 
-        assert_eq!(state.objects[&top_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&top_id].zone(), Some(Zone::Graveyard),
             "DRC surveil should mill top library card when surveil_choice returns true");
     }
 
@@ -7313,7 +7306,7 @@
             ci_timestamp: 0,
             role: ObjectRole::Library,
         });
-            state.us.library_order.push_front(id);
+            state.player_mut(PlayerId::Us).library_order.push_front(id);
             state.catalog.entry("Brainstorm".to_string()).or_insert_with(|| catalog_card("Brainstorm"));
             id
         };
@@ -7345,7 +7338,7 @@
 
         assert!(state.pending_triggers.is_empty(),
             "DRC should not trigger on creature spell cast");
-        assert_eq!(state.objects[&top_id].zone(), Zone::Library,
+        assert_eq!(state.objects[&top_id].zone(), Some(Zone::Library),
             "library card should remain untouched when no surveil fires");
     }
 
@@ -7457,7 +7450,7 @@
 
         change_zone(cp_id, ZoneId::Battlefield, &mut state, 1, PlayerId::Us);
 
-        assert_eq!(state.objects[&cp_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&cp_id].zone(), Some(Zone::Battlefield),
             "Containment Priest should not exile itself when entering via non-cast");
     }
 
@@ -7649,11 +7642,11 @@
         let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 1, 0).1;
         eff.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&petal_id].zone(), Zone::Graveyard,
+        assert_eq!(state.objects[&petal_id].zone(), Some(Zone::Graveyard),
             "Lotus Petal (MV 0) should be destroyed by Meltdown X=1");
-        assert_eq!(state.objects[&rod_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&rod_id].zone(), Some(Zone::Battlefield),
             "Null Rod (MV 2) should survive Meltdown X=1");
-        assert_eq!(state.objects[&creature_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&creature_id].zone(), Some(Zone::Battlefield),
             "non-artifact creature should be unaffected by Meltdown");
     }
 
@@ -7716,7 +7709,7 @@
         let def = catalog_card("Prismatic Ending");
         let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 2, 0).1;
         eff.call(&mut state, 1, &[rod_id]);
-        assert_eq!(state.objects[&rod_id].zone(), Zone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&rod_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "Null Rod (MV 2) should be exiled when converge = 3");
 
         // Reset: put Null Rod back on the battlefield for the second case.
@@ -7726,7 +7719,7 @@
         // chosen_x = 0 → converge = 1 < Null Rod's MV 2 → spared.
         let eff = build_spell_effect(&def, PlayerId::Us, ObjId::UNSET, 0, 0).1;
         eff.call(&mut state, 1, &[rod2_id]);
-        assert_eq!(state.objects[&rod2_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&rod2_id].zone(), Some(Zone::Battlefield),
             "Null Rod (MV 2) should survive when converge = 1");
     }
 
@@ -7764,7 +7757,7 @@
         assert_eq!(picked, vec![target_id], "only legal target is our Null Rod");
         ctx.effect.call(&mut state, 1, &picked);
 
-        assert_eq!(state.objects[&target_id].zone(), Zone::Exile { on_adventure: false },
+        assert_eq!(state.objects[&target_id].zone(), Some(Zone::Exile { on_adventure: false }),
             "target exiled after trigger resolves");
         assert_eq!(state.trigger_instances.len(), 1, "delayed return trigger registered");
 
@@ -7778,7 +7771,7 @@
         let ctx = state.pending_triggers.remove(delayed_pos);
         ctx.effect.call(&mut state, 1, &[]);
 
-        assert_eq!(state.objects[&target_id].zone(), Zone::Battlefield,
+        assert_eq!(state.objects[&target_id].zone(), Some(Zone::Battlefield),
             "target returns to battlefield at end of turn");
         assert_eq!(state.objects[&target_id].controller, PlayerId::Us,
             "our card returns under our control");
@@ -7883,7 +7876,7 @@
         let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
 
         // Simulate second spell: first spell already counted.
-        state.us.spells_cast_this_turn = 1;
+        state.player_mut(PlayerId::Us).spells_cast_this_turn = 1;
 
         let spell_id = {
             let id = state.alloc_id();
@@ -7921,7 +7914,7 @@
         state.catalog = test_catalog();
 
         let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        state.us.spells_cast_this_turn = 0;
+        state.player_mut(PlayerId::Us).spells_cast_this_turn = 0;
 
         let spell_id = {
             let id = state.alloc_id();
@@ -7958,7 +7951,7 @@
         state.catalog = test_catalog();
 
         let _cori_id = add_default_perm(&mut state, PlayerId::Us, "Cori-Steel Cutter");
-        state.us.spells_cast_this_turn = 2;
+        state.player_mut(PlayerId::Us).spells_cast_this_turn = 2;
 
         let spell_id = {
             let id = state.alloc_id();
@@ -8329,7 +8322,7 @@
         assert!(!hand.contains(&oracle), "Oracle should be removed from hand");
         assert!(hand.contains(&dd), "Doomsday should stay in hand");
         assert!(hand.contains(&bs), "Brainstorm should stay in hand");
-        assert_eq!(state.us.library_order.front(), Some(&oracle), "Oracle should be on top of library");
+        assert_eq!(state.player(PlayerId::Us).library_order.front(), Some(&oracle), "Oracle should be on top of library");
     }
 
     #[test]
@@ -8354,8 +8347,8 @@
         assert!(hand.contains(&bs));
         // Oracle was put back first (worst), then Edge of Autumn (second worst).
         // Oracle first → front, then Edge → new front. So library front = Edge, next = Oracle.
-        assert_eq!(state.us.library_order.front(), Some(&edge), "Edge on top (put back second)");
-        assert_eq!(state.us.library_order.get(1), Some(&oracle), "Oracle second (put back first)");
+        assert_eq!(state.player(PlayerId::Us).library_order.front(), Some(&edge), "Edge on top (put back second)");
+        assert_eq!(state.player(PlayerId::Us).library_order.get(1), Some(&oracle), "Oracle second (put back first)");
     }
 
     #[test]
@@ -8367,10 +8360,10 @@
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
         // Reorder so dd is on top
-        state.us.library_order.clear();
-        state.us.library_order.push_back(dd);
-        state.us.library_order.push_back(oracle);
-        state.us.library_order.push_back(bs);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.push_back(bs);
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
 
@@ -8379,7 +8372,7 @@
         // Doomsday (0.9 >= 0.3) and Brainstorm (0.35 >= 0.3) kept on top.
         // Oracle (0.05 < 0.3) bottomed.
         // Kept cards preserve order: Doomsday, Brainstorm.
-        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib.len(), 3);
         assert_eq!(lib[0], dd, "Doomsday should be on top (kept)");
         assert_eq!(lib[1], bs, "Brainstorm should be second (kept)");
@@ -8393,17 +8386,17 @@
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let edge = add_library_card(&mut state, PlayerId::Us, "Edge of Autumn");
         let deep = add_library_card(&mut state, PlayerId::Us, "Doomsday"); // will be below scry range
-        state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);
-        state.us.library_order.push_back(edge);
-        state.us.library_order.push_back(deep);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.push_back(edge);
+        state.player_mut(PlayerId::Us).library_order.push_back(deep);
 
         wire_eval(&mut state, vec![("Thassa's Oracle", 0.05), ("Edge of Autumn", 0.1), ("Doomsday", 0.9)]);
 
         eff_scry(PlayerId::Us, 2).call(&mut state, 0, &[]);
 
         // Both top cards were bad → both bottomed. Doomsday (untouched) now on top.
-        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib[0], deep, "Doomsday should now be on top");
     }
 
@@ -8414,16 +8407,16 @@
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);  // worst on top
-        state.us.library_order.push_back(dd);       // best in middle
-        state.us.library_order.push_back(bs);        // medium at bottom
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);  // worst on top
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);       // best in middle
+        state.player_mut(PlayerId::Us).library_order.push_back(bs);        // medium at bottom
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
 
         eff_order(PlayerId::Us, 3).call(&mut state, 0, &[]);
 
-        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib[0], dd, "Doomsday (0.9) should be on top after ordering");
         assert_eq!(lib[1], bs, "Brainstorm (0.35) should be second");
         assert_eq!(lib[2], oracle, "Oracle (0.05) should be third");
@@ -8436,16 +8429,16 @@
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let deep = add_library_card(&mut state, PlayerId::Us, "Force of Will");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);
-        state.us.library_order.push_back(dd);
-        state.us.library_order.push_back(deep);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.push_back(deep);
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Force of Will", 0.8)]);
 
         eff_order(PlayerId::Us, 2).call(&mut state, 0, &[]);
 
-        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib[0], dd, "DD sorted to top of the 2");
         assert_eq!(lib[1], oracle, "Oracle second of the 2");
         assert_eq!(lib[2], deep, "FoW untouched at position 3");
@@ -8460,17 +8453,17 @@
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
-        state.us.library_order.clear();
-        for id in [oracle, dd, bs] { state.us.library_order.push_back(id); }
+        state.player_mut(PlayerId::Us).library_order.clear();
+        for id in [oracle, dd, bs] { state.player_mut(PlayerId::Us).library_order.push_back(id); }
         let before: std::collections::HashSet<ObjId> =
-            state.us.library_order.iter().copied().collect();
+            state.player(PlayerId::Us).library_order.iter().copied().collect();
 
         execute(&Action::Shuffle { who: Who::You }, &mut state,
                 &BindEnv::new().with_controller(PlayerId::Us));
 
         // The shuffle carries no agency: same multiset, same count, possibly new order.
         let after: std::collections::HashSet<ObjId> =
-            state.us.library_order.iter().copied().collect();
+            state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(after.len(), 3, "shuffle preserves card count");
         assert_eq!(before, after, "shuffle preserves the library multiset");
     }
@@ -8489,20 +8482,20 @@
         state.catalog = test_catalog();
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(dd);
-        state.us.library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
 
         // Default strategy declines (Mode 0) → order preserved exactly.
         eff_ir(PlayerId::Us, may_shuffle()).call(&mut state, 0, &[]);
-        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib, vec![dd, oracle], "default strategy declines the may-shuffle");
 
         // Opt-in strategy (Mode 1) → shuffles; multiset preserved.
         state.set_strategy(PlayerId::Us, Box::new(TestStrategy::new(PlayerId::Us).mode(1)));
         eff_ir(PlayerId::Us, may_shuffle()).call(&mut state, 0, &[]);
         let after: std::collections::HashSet<ObjId> =
-            state.us.library_order.iter().copied().collect();
+            state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(after.len(), 2, "shuffle preserves count");
         assert!(after.contains(&dd) && after.contains(&oracle), "shuffle preserves cards");
     }
@@ -8518,10 +8511,10 @@
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let fow = add_library_card(&mut state, PlayerId::Us, "Force of Will");
         let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(dd);
-        state.us.library_order.push_back(fow);
-        state.us.library_order.push_back(bs);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.push_back(fow);
+        state.player_mut(PlayerId::Us).library_order.push_back(bs);
 
         wire_eval(&mut state, vec![
             ("Doomsday", 0.9), ("Force of Will", 0.8), ("Brainstorm", 0.35),
@@ -8543,7 +8536,7 @@
         assert!(hand_names.contains(&"Force of Will".to_string()));
         assert!(hand_names.contains(&"Brainstorm".to_string()));
         // Oracle and Edge should be on top of library (Edge on top, Oracle second)
-        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib[0], edge, "Edge (put back second) on top");
         assert_eq!(lib[1], oracle, "Oracle (put back first) second");
     }
@@ -8556,10 +8549,10 @@
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);
-        state.us.library_order.push_back(bs);
-        state.us.library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.push_back(bs);
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Brainstorm", 0.35), ("Thassa's Oracle", 0.05)]);
 
@@ -8592,8 +8585,8 @@
         let edge = add_library_card(&mut state, PlayerId::Us, "Edge of Autumn");
         let unearth = add_library_card(&mut state, PlayerId::Us, "Unearth");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
-        state.us.library_order.clear();
-        for id in [oracle, edge, unearth, dd] { state.us.library_order.push_back(id); }
+        state.player_mut(PlayerId::Us).library_order.clear();
+        for id in [oracle, edge, unearth, dd] { state.player_mut(PlayerId::Us).library_order.push_back(id); }
 
         wire_eval(&mut state, vec![
             ("Thassa's Oracle", 0.05), ("Edge of Autumn", 0.1),
@@ -8610,7 +8603,7 @@
         // Drew 1 card from the (shuffled) library; 3 remain.
         let hand_count = state.hand_of(PlayerId::Us).count();
         assert_eq!(hand_count, 1, "should draw 1 card after ponder");
-        assert_eq!(state.us.library_order.len(), 3, "3 cards left in library");
+        assert_eq!(state.player(PlayerId::Us).library_order.len(), 3, "3 cards left in library");
     }
 
     #[test]
@@ -8621,10 +8614,10 @@
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let bs = add_library_card(&mut state, PlayerId::Us, "Brainstorm");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);
-        state.us.library_order.push_back(dd);
-        state.us.library_order.push_back(bs);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.push_back(bs);
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05), ("Brainstorm", 0.35)]);
 
@@ -8640,7 +8633,7 @@
             .map(|c| c.catalog_key.clone()).collect();
         assert!(hand.contains(&"Doomsday".to_string()), "should draw DD after scrying Oracle to bottom");
         // Library: BS, Oracle
-        let lib: Vec<ObjId> = state.us.library_order.iter().copied().collect();
+        let lib: Vec<ObjId> = state.player(PlayerId::Us).library_order.iter().copied().collect();
         assert_eq!(lib.len(), 2);
         assert_eq!(lib[0], bs, "BS should be on top of remaining library");
         assert_eq!(lib[1], oracle, "Oracle should be on bottom");
@@ -8653,9 +8646,9 @@
         // Library: Oracle(0.05 → mill), DD(0.9)
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(oracle);
-        state.us.library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
 
         wire_eval(&mut state, vec![("Thassa's Oracle", 0.05), ("Doomsday", 0.9)]);
         // No override: the default surveil policy already bins cards the
@@ -8683,9 +8676,9 @@
         // Library: DD(0.9 → keep), Oracle(0.05)
         let dd = add_library_card(&mut state, PlayerId::Us, "Doomsday");
         let oracle = add_library_card(&mut state, PlayerId::Us, "Thassa's Oracle");
-        state.us.library_order.clear();
-        state.us.library_order.push_back(dd);
-        state.us.library_order.push_back(oracle);
+        state.player_mut(PlayerId::Us).library_order.clear();
+        state.player_mut(PlayerId::Us).library_order.push_back(dd);
+        state.player_mut(PlayerId::Us).library_order.push_back(oracle);
 
         wire_eval(&mut state, vec![("Doomsday", 0.9), ("Thassa's Oracle", 0.05)]);
         // No override: the default surveil policy already bins cards the
@@ -8699,7 +8692,7 @@
             .map(|c| c.catalog_key.clone()).collect();
         assert!(hand.contains(&"Doomsday".to_string()), "should draw DD (surveil kept it)");
         // Oracle still in library (not milled)
-        assert_eq!(state.us.library_order.len(), 1);
+        assert_eq!(state.player(PlayerId::Us).library_order.len(), 1);
     }
 
     #[test]

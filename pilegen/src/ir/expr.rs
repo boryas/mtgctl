@@ -68,11 +68,15 @@ pub(crate) enum Expr {
     Contains(Box<Expr>, Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     Min(Box<Expr>, Box<Expr>),
     Max(Box<Expr>, Box<Expr>),
 
     // ── set-builder and folds ────────────────────────────────────────────
+    /// The players, as objects (`ObjSet` of the player `GameObject`s). Players are
+    /// first-class objects, so "each player" is a `ForEach` over this set.
+    Players,
     /// All objects in a zone matching a filter, bound to a variable name in
     /// the filter body. Result is a set of object refs.
     AllObjects {

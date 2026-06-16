@@ -69,7 +69,7 @@ pub(crate) fn eff_ir_targeted(who: PlayerId, source_id: ObjId, action: crate::ir
             .with_source(source_id)
             .with_controller(who);
         if let Some(&tgt) = targets.first() {
-            let v = if tgt == state.us.id || tgt == state.opp.id {
+            let v = if tgt == state.us_id || tgt == state.opp_id {
                 Value::Player(state.who_pid(tgt))
             } else {
                 Value::Obj(tgt)
@@ -136,8 +136,8 @@ pub(crate) fn eff_put_back(who: PlayerId, n: usize) -> Effect {
                 let name = state.objects.get(&worst_id).map(|o| o.catalog_key.clone()).unwrap_or_default();
                 change_zone(worst_id, ZoneId::Library, state, t, who);
                 let lib = match who {
-                    PlayerId::Us  => &mut state.us.library_order,
-                    PlayerId::Opp => &mut state.opp.library_order,
+                    PlayerId::Us  => &mut state.player_mut(PlayerId::Us).library_order,
+                    PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
                 };
                 if lib.back() == Some(&worst_id) {
                     lib.pop_back();
@@ -166,8 +166,8 @@ pub(crate) fn eff_scry(who: PlayerId, n: usize) -> Effect {
     Effect(Arc::new(move |state, _t, _targets| {
         let eval = Arc::clone(&state.evaluate_card);
         let lib = match who {
-            PlayerId::Us  => &state.us.library_order,
-            PlayerId::Opp => &state.opp.library_order,
+            PlayerId::Us  => &state.player(PlayerId::Us).library_order,
+            PlayerId::Opp => &state.player(PlayerId::Opp).library_order,
         };
         let top_ids: Vec<ObjId> = lib.iter().take(n).copied().collect();
         if top_ids.is_empty() { return; }
@@ -185,8 +185,8 @@ pub(crate) fn eff_scry(who: PlayerId, n: usize) -> Effect {
         // Remove the N cards from front of library, then re-insert:
         // kept cards go back to front (preserving order), bottomed cards go to back.
         let lib = match who {
-            PlayerId::Us  => &mut state.us.library_order,
-            PlayerId::Opp => &mut state.opp.library_order,
+            PlayerId::Us  => &mut state.player_mut(PlayerId::Us).library_order,
+            PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
         };
         for _ in 0..top_ids.len().min(lib.len()) {
             lib.pop_front();
@@ -211,8 +211,8 @@ pub(crate) fn eff_order(who: PlayerId, n: usize) -> Effect {
     Effect(Arc::new(move |state, _t, _targets| {
         let eval = Arc::clone(&state.evaluate_card);
         let lib = match who {
-            PlayerId::Us  => &state.us.library_order,
-            PlayerId::Opp => &state.opp.library_order,
+            PlayerId::Us  => &state.player(PlayerId::Us).library_order,
+            PlayerId::Opp => &state.player(PlayerId::Opp).library_order,
         };
         let mut top: Vec<ObjId> = lib.iter().take(n).copied().collect();
         if top.len() < 2 { return; }
@@ -227,8 +227,8 @@ pub(crate) fn eff_order(who: PlayerId, n: usize) -> Effect {
 
         // Remove the N cards from front, re-insert in sorted order.
         let lib = match who {
-            PlayerId::Us  => &mut state.us.library_order,
-            PlayerId::Opp => &mut state.opp.library_order,
+            PlayerId::Us  => &mut state.player_mut(PlayerId::Us).library_order,
+            PlayerId::Opp => &mut state.player_mut(PlayerId::Opp).library_order,
         };
         for _ in 0..n.min(lib.len()) {
             lib.pop_front();
@@ -270,7 +270,7 @@ pub(crate) fn eff_damage_target(caster: PlayerId, n: i32, source_id: ObjId) -> E
             state.log(t, caster, format!("→ damage to {} prevented (protection)", name));
             return;
         }
-        if id == state.us.id || id == state.opp.id {
+        if id == state.us_id || id == state.opp_id {
             let who = state.who_pid(id);
             state.lose_life(who, n);
             state.log(t, caster, format!("→ deals {} damage to {}", n, who));
