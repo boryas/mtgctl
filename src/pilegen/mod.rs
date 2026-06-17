@@ -39,7 +39,7 @@ pub fn run(_args: PilegenArgs) {
     mtg_engine::warn_unimplemented_cards(&opp_cards, &opp_display, &catalog);
 
     loop {
-        let state = mtg_engine::generate_scenario(&deck_name, &opp_display, &catalog, &all_cards, &opp_cards);
+        let state = doomsday::generate_scenario(&deck_name, &opp_display, &catalog, &all_cards, &opp_cards);
         println!("{}", state);
 
         println!();
