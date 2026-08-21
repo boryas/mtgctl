@@ -123,7 +123,11 @@ pub fn vectorize(docs: &[Doc]) -> Vectors {
         }
     }
     let n = docs.len() as f32;
-    let idf: Vec<f32> = df.iter().map(|&d| (n / d as f32).ln() + 1.0).collect();
+    // Cap rarity: a card seen in fewer than IDF_CAP_DF signatures weighs no more than one seen in
+    // IDF_CAP_DF — otherwise one rare shared one-of (e.g. Deafening Silence, df=2) dominates the
+    // similarity of small observed-card signatures and merges unrelated decks.
+    const IDF_CAP_DF: f32 = 5.0;
+    let idf: Vec<f32> = df.iter().map(|&d| (n / (d as f32).max(IDF_CAP_DF)).ln() + 1.0).collect();
     let vecs = docs
         .iter()
         .map(|d| {

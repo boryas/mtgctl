@@ -183,10 +183,10 @@ category = "Non-Blue"
 markers = ["Ocelot Pride", "Guide of Souls", "Amped Raptor", "Ajani, Nacatl Pariah", "Galvanic Discharge"]
   [[archetype.subtype]]
   name = "Mardu"
-  markers = ["Shadowy Backstreet", "Scrubland", "Badlands", "Thoughtseize", "Orcish Bowmasters", "Fatal Push", "Marsh Flats"]
+  markers = ["Shadowy Backstreet", "Scrubland", "Badlands", "Thoughtseize", "Orcish Bowmasters", "Fatal Push"]
   [[archetype.subtype]]
   name = "Boros"
-  markers = ["Plateau", "Elegant Parlor", "Lightning Bolt", "Boros Charm", "Arid Mesa"]
+  markers = ["Plateau", "Elegant Parlor", "Lightning Bolt", "Boros Charm", "Arid Mesa", "Mountain", "Pyroblast", "Red Elemental Blast"]
 
 [[archetype]]
 name = "Beanstalk"
