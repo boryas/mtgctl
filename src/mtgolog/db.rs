@@ -9,7 +9,7 @@ use super::scan::{guess_me, load_all, Loaded};
 use super::MtgoConfig;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::Path;
 
 diesel::table! {
@@ -445,6 +445,10 @@ pub struct ImportStats {
     pub events: usize,
     pub replays_skipped: usize,
     pub failed: usize,
+    /// files modified in the last 10 minutes (match may still be running) — left for next time
+    pub in_progress: usize,
+    /// existing matches whose file grew after import → deleted and re-imported (counted in `matches` too)
+    pub refreshed: usize,
 }
 
 pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force: bool, with_events: bool) -> QueryResult<ImportStats> {
@@ -456,9 +460,16 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
             diesel::sql_query(format!("DELETE FROM {t}")).execute(conn)?;
         }
     }
-    let existing: HashSet<String> = mtgo_matches::table.select(mtgo_matches::guid).load::<String>(conn)?.into_iter().collect();
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut st = ImportStats { matches: 0, skipped: 0, games: 0, cards: 0, events: 0, replays_skipped: 0, failed: bad.len() };
+    // guid → (id, imported_at) of what is already in the DB
+    let existing: HashMap<String, (i32, String)> = mtgo_matches::table
+        .select((mtgo_matches::guid, mtgo_matches::id, mtgo_matches::imported_at))
+        .load::<(String, i32, String)>(conn)?
+        .into_iter()
+        .map(|(g, id, at)| (g, (id, at)))
+        .collect();
+    let now_dt = chrono::Local::now().naive_local();
+    let now = now_dt.format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut st = ImportStats { matches: 0, skipped: 0, games: 0, cards: 0, events: 0, replays_skipped: 0, failed: bad.len(), in_progress: 0, refreshed: 0 };
 
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         for l in &loaded {
@@ -466,15 +477,43 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
                 st.replays_skipped += 1;
                 continue;
             }
-            if existing.contains(&l.m.guid) {
-                st.skipped += 1;
-                continue;
+            // MTGO appends to the log while the match is being played: a file touched in the last
+            // 10 minutes may be incomplete — leave it for the next run.
+            let mtime = std::fs::metadata(&l.path).and_then(|m| m.modified()).ok().map(chrono::DateTime::<chrono::Local>::from).map(|t| t.naive_local());
+            if let Some(mt) = mtime {
+                if (now_dt - mt).num_minutes() < 10 {
+                    st.in_progress += 1;
+                    continue;
+                }
+            }
+            if let Some((id, imported_at)) = existing.get(&l.m.guid) {
+                // Re-import if the file grew after we imported it (e.g. imported mid-match before the guard existed).
+                let stale = match (mtime, chrono::NaiveDateTime::parse_from_str(imported_at, "%Y-%m-%d %H:%M:%S")) {
+                    (Some(mt), Ok(at)) => mt > at,
+                    _ => false,
+                };
+                if !stale {
+                    st.skipped += 1;
+                    continue;
+                }
+                delete_match(conn, *id)?;
+                st.refreshed += 1;
             }
             insert_match(conn, l, &me, &now, with_events, &mut st)?;
         }
         Ok(())
     })?;
     Ok(st)
+}
+
+/// Remove one match and everything hanging off it (foreign keys are not enforced by default in SQLite).
+fn delete_match(conn: &mut SqliteConnection, id: i32) -> QueryResult<()> {
+    for t in ["mtgo_events", "mtgo_game_cards", "mtgo_games"] {
+        diesel::sql_query(format!("DELETE FROM {t} WHERE match_id = {id}")).execute(conn)?;
+    }
+    diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE match_id = {id}")).execute(conn)?;
+    diesel::sql_query(format!("DELETE FROM mtgo_matches WHERE id = {id}")).execute(conn)?;
+    Ok(())
 }
 
 fn insert_match(conn: &mut SqliteConnection, l: &Loaded, me: &str, now: &str, with_events: bool, st: &mut ImportStats) -> QueryResult<()> {

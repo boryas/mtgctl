@@ -302,8 +302,8 @@ pub fn run(args: MtgoArgs) {
             let conn = &mut crate::db::establish_connection();
             match db::import(conn, &cfg, &root, force, !no_events) {
                 Ok(st) => println!(
-                    "imported {} matches ({} already present, {} replays skipped, {} files failed): {} games, {} game-card rows, {} events",
-                    st.matches, st.skipped, st.replays_skipped, st.failed, st.games, st.cards, st.events
+                    "imported {} matches ({} refreshed, {} already present, {} in progress, {} replays skipped, {} files failed): {} games, {} game-card rows, {} events",
+                    st.matches, st.refreshed, st.skipped, st.in_progress, st.replays_skipped, st.failed, st.games, st.cards, st.events
                 ),
                 Err(e) => eprintln!("import failed: {e}"),
             }
