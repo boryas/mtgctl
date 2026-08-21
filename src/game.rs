@@ -46,7 +46,7 @@ struct CollectedDoomsdayData {
 
 
 /// Fuzzy multi-select: Tab marks items, Enter confirms all marked (or current if none marked)
-fn fuzzy_multi_select(prompt: &str, options: &[String]) -> Vec<String> {
+pub(crate) fn fuzzy_multi_select(prompt: &str, options: &[String]) -> Vec<String> {
     if options.is_empty() {
         return vec![];
     }
@@ -760,7 +760,7 @@ struct ArchetypeData {
 ///   "Doomsday: Tempo (tempo-doomsday-wasteland-1.0)" -> ("Doomsday", Some("Tempo"))
 ///   "Reanimator: UB" -> ("Reanimator", Some("UB"))
 ///   "Lands" -> ("Lands", None)
-fn parse_deck_name(deck_name: &str) -> (&str, Option<&str>) {
+pub(crate) fn parse_deck_name(deck_name: &str) -> (&str, Option<&str>) {
     // First check if there's a list name in parentheses
     let name_without_list = if let Some(pos) = deck_name.find(" (") {
         &deck_name[..pos]

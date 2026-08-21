@@ -55,3 +55,16 @@ chart_smoothing = 10
 # opponent = "Alice"
 # opponent_deck = "Delver"
 # event_type = "league"
+
+[mtgo]
+# Root searched recursively for the MTGO client's Match_GameLog_*.dat files.
+# Default: the docker/wine MTGO volume.
+log_dir = "/var/lib/docker/volumes/mtgo-data-bo/_data/wine/AppData/Local/Apps/2.0"
+# Your MTGO username (auto-detected from the logs if unset).
+username = "boryas"
+# `mtgctl mtgo stats -i` defaults: columns pre-selected as filters / group-bys / histograms
+# (any column of mtgo_game_view — see `mtgctl mtgo columns` — plus "last N matches").
+stats_filters = ["my_cards"]
+stats_groupbys = ["opp_cards"]
+stats_hist = []
+stats_min_games = 10

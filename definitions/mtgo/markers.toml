@@ -1,0 +1,318 @@
+# Advisory deck labels guessed positively from marker cards seen in the logs. Used for BOTH sides:
+# my side uses the day+cluster-merged signature, the opponent's side the single match's cards.
+# Ordered: the first archetype whose marker is seen wins, then the first matching subtype rule.
+# No marker → unknown (never a default). Names follow the deck_types taxonomy ("Archetype: Subtype").
+# `mtgctl mtgo label --suggest` prints a skeleton for clusters no rule covers; `--check` scores vs hand data.
+# This is a GUESS from cards drawn/played; true decks (my_deck) come from the client's "Deck Used" logs.
+
+# ---- unique-signature combo decks first -------------------------------------------------------
+
+[[archetype]]
+name = "Cephalid Breakfast"
+category = "Combo"
+markers = ["Cephalid Illusionist", "Nomads en-Kor", "Shuko"]
+  [[archetype.subtype]]
+  name = "Nadu"
+  markers = ["Nadu, Winged Wisdom"]
+  [[archetype.subtype]]
+  name = "Dimir"
+  markers = ["Cabal Therapy", "Underground Sea", "Undercity Sewers"]
+
+[[archetype]]
+name = "Doomsday"
+category = "Combo"
+markers = ["Doomsday", "Edge of Autumn", "Personal Tutor", "Spoils of the Vault"]
+  [[archetype.subtype]]
+  name = "Turbo"
+  markers = ["Personal Tutor", "Spoils of the Vault"]
+  [[archetype.subtype]]
+  name = "Tempo-Sultai"
+  markers = ["Bayou", "Tropical Island", "Carpet of Flowers", "Abrupt Decay", "Witherbloom Charm"]
+  [[archetype.subtype]]
+  name = "Esper"
+  markers = ["Scrubland", "Tundra", "Orim's Chant", "Swords to Plowshares"]
+  [[archetype.subtype]]
+  name = "Car"
+  markers = ["The Fantasticar"]
+  [[archetype.subtype]]
+  name = "Tempo"
+  markers = ["Wasteland", "Barrowgoyf", "Murktide Regent", "Orcish Bowmasters", "Tamiyo, Inquisitive Student", "Kaito, Bane of Nightmares", "Dauthi Voidwalker"]
+
+[[archetype]]
+name = "Oops! All Spells"
+category = "Combo"
+markers = ["Balustrade Spy", "Undercity Informer", "Fell Mire", "Agadeem, the Undercrypt"]
+
+[[archetype]]
+name = "Storm"
+category = "Combo"
+markers = ["Infernal Tutor", "Tendrils of Agony", "Ad Nauseam", "Echo of Eons", "Burning Wish", "Rite of Flame", "Necrodominance", "Beseech the Mirror", "Gaea's Will"]
+  [[archetype.subtype]]
+  name = "Necrodominance"
+  markers = ["Necrodominance"]
+  [[archetype.subtype]]
+  name = "TES"
+  markers = ["Gaea's Will", "Wishclaw Talisman", "Burning Wish", "Echo of Eons"]
+  [[archetype.subtype]]
+  name = "Ruby"
+  markers = ["Rite of Flame", "Seething Song", "Gamble", "Mox Opal", "Song of Creation"]
+  [[archetype.subtype]]
+  name = "ANT"
+  markers = ["Ad Nauseam", "Past in Flames", "Dark Petition", "Tendrils of Agony"]
+
+[[archetype]]
+name = "Coveted Jewel"
+category = "Combo"
+markers = ["Coveted Jewel"]
+
+[[archetype]]
+name = "Show and Tell"
+category = "Combo"
+markers = ["Show and Tell", "Sneak Attack", "Omniscience", "Cunning Wish"]
+  [[archetype.subtype]]
+  name = "Sneak"
+  markers = ["Sneak Attack"]
+  [[archetype.subtype]]
+  name = "Omni"
+  markers = ["Omniscience", "Cunning Wish"]
+
+[[archetype]]
+name = "Reanimator"
+category = "Combo"
+markers = ["Entomb", "Reanimate", "Animate Dead", "Exhume", "Shallow Grave", "Griselbrand", "Archon of Cruelty", "Atraxa, Grand Unifier"]
+  [[archetype.subtype]]
+  name = "Rakdos"
+  markers = ["Badlands", "Unmask", "Shallow Grave", "Faithless Looting", "Raucous Theater"]
+  [[archetype.subtype]]
+  name = "Golgari"
+  markers = ["Bayou", "Troll of Khazad-dûm"]
+  [[archetype.subtype]]
+  name = "Dimir"
+  markers = ["Underground Sea", "Undercity Sewers", "Petty Theft", "Polluted Delta"]
+
+[[archetype]]
+name = "Cloudpost"
+category = "Non-Blue"
+markers = ["Cloudpost", "Glimmerpost"]
+
+[[archetype]]
+name = "Mystic Forge"
+category = "Combo"
+markers = ["Mystic Forge", "Manifold Key", "Urza's Workshop"]
+
+[[archetype]]
+name = "Dredge"
+category = "Combo"
+markers = ["Golgari Grave-Troll", "Bridge from Below", "Stinkweed Imp", "Golgari Thug"]
+
+[[archetype]]
+name = "Hogaak"
+category = "Combo"
+markers = ["Hogaak, Arisen Necropolis"]
+
+[[archetype]]
+name = "Mono Black Helm"
+category = "Combo"
+markers = ["Helm of Obedience", "Leyline of the Void"]
+
+[[archetype]]
+name = "Painter"
+category = "Non-Blue"
+markers = ["Painter's Servant", "Grindstone", "Goblin Welder", "Goblin Engineer"]
+  [[archetype.subtype]]
+  name = "Mono-Red"
+  markers = ["Mountain", "Goblin Welder", "Goblin Engineer", "Great Furnace"]
+  [[archetype.subtype]]
+  name = "Mono-Blue"
+  markers = ["Island", "Seat of the Synod"]
+
+[[archetype]]
+name = "Stiflenaught"
+category = "Blue"
+markers = ["Phyrexian Dreadnought", "Dress Down", "Torpor Orb"]
+
+# ---- lands & non-blue --------------------------------------------------------------------------
+
+[[archetype]]
+name = "Lands"
+category = "Non-Blue"
+markers = ["Thespian's Stage", "Dark Depths", "Exploration", "Crop Rotation", "Maze of Ith", "Glacial Chasm"]
+  [[archetype.subtype]]
+  name = "Punishing"
+  markers = ["Punishing Fire", "Grove of the Burnwillows", "The One Ring"]
+  [[archetype.subtype]]
+  name = "Port-Sphere"
+  markers = ["Sphere of Resistance", "Rishadan Port"]
+  [[archetype.subtype]]
+  name = "Gruul"
+  markers = ["Taiga", "Wooded Foothills", "Lightning Bolt"]
+  [[archetype.subtype]]
+  name = "Mono Green"
+  markers = ["Once Upon a Time", "Malevolent Rumble", "Disruptor Flute", "Yavimaya, Cradle of Growth", "Forest"]
+
+[[archetype]]
+name = "Pox"
+category = "Non-Blue"
+markers = ["Smallpox", "Pox", "The Rack"]
+  [[archetype.subtype]]
+  name = "Loam"
+  markers = ["Life from the Loam", "Smallpox"]
+
+[[archetype]]
+name = "Initiative"
+category = "Non-Blue"
+markers = ["The Initiative", "Undercity", "Seasoned Dungeoneer", "White Plume Adventurer", "Caves of Chaos Adventurer"]
+
+[[archetype]]
+name = "Stompy"
+category = "Non-Blue"
+markers = ["Eldrazi Temple", "Thought-Knot Seer", "Eye of Ugin", "Blood Moon", "Magus of the Moon", "Goblin Rabblemaster"]
+  [[archetype.subtype]]
+  name = "Eldrazi"
+  markers = ["Eldrazi Temple", "Thought-Knot Seer", "Eye of Ugin", "Glaring Fleshraker"]
+  [[archetype.subtype]]
+  name = "Moon"
+  markers = ["Blood Moon", "Magus of the Moon", "Fable of the Mirror-Breaker"]
+  [[archetype.subtype]]
+  name = "Mono-Black"
+  markers = ["Swamp", "Dauthi Voidwalker"]
+
+[[archetype]]
+name = "Energy"
+category = "Non-Blue"
+markers = ["Ocelot Pride", "Guide of Souls", "Amped Raptor", "Ajani, Nacatl Pariah", "Galvanic Discharge"]
+  [[archetype.subtype]]
+  name = "Mardu"
+  markers = ["Shadowy Backstreet", "Scrubland", "Badlands", "Thoughtseize", "Orcish Bowmasters", "Fatal Push", "Marsh Flats"]
+  [[archetype.subtype]]
+  name = "Boros"
+  markers = ["Plateau", "Elegant Parlor", "Lightning Bolt", "Boros Charm", "Arid Mesa"]
+
+[[archetype]]
+name = "Beanstalk"
+category = "Blue"
+markers = ["Up the Beanstalk", "Leyline Binding", "Leyline of the Guildpact"]
+  [[archetype.subtype]]
+  name = "Domain"
+  markers = ["Leyline of the Guildpact", "Hedge Maze", "Xander's Lounge", "Lush Portico"]
+  [[archetype.subtype]]
+  name = "Sultai"
+  markers = ["Bayou", "Underground Sea"]
+  [[archetype.subtype]]
+  name = "Bant"
+  markers = ["Savannah", "Tundra", "Tropical Island"]
+
+[[archetype]]
+name = "Goblins"
+category = "Non-Blue"
+markers = ["Goblin Lackey", "Muxus, Goblin Grandee", "Goblin Matron", "Conspicuous Snoop"]
+
+[[archetype]]
+name = "Death and Taxes"
+category = "Non-Blue"
+markers = ["Aether Vial", "Mother of Runes", "Recruiter of the Guard", "Flickerwisp", "Skyclave Apparition"]
+  [[archetype.subtype]]
+  name = "Yorion"
+  markers = ["Yorion, Sky Nomad"]
+  [[archetype.subtype]]
+  name = "Orzhov"
+  markers = ["Scrubland", "Shadowy Backstreet", "Marsh Flats", "Orcish Bowmasters"]
+
+[[archetype]]
+name = "Cradle Control"
+category = "Non-Blue"
+markers = ["Wight of the Reliquary", "Gaea's Cradle", "Badgermole Cub", "Ignoble Hierarch"]
+
+[[archetype]]
+name = "Maverick"
+category = "Non-Blue"
+markers = ["Knight of the Reliquary"]
+
+[[archetype]]
+name = "Nadu"
+category = "Combo"
+markers = ["Nadu, Winged Wisdom", "Delighted Halfling", "Green Sun's Zenith"]
+  [[archetype.subtype]]
+  name = "Elves"
+  markers = ["Elvish Visionary", "Wirewood Symbiote", "Quirion Ranger", "Heritage Druid"]
+  [[archetype.subtype]]
+  name = "Midrange"
+  markers = ["Tundra", "Tropical Island", "Swords to Plowshares", "Hedge Maze"]
+
+[[archetype]]
+name = "Nic-Fit"
+category = "Non-Blue"
+markers = ["Veteran Explorer"]
+
+# ---- blue decks ---------------------------------------------------------------------------------
+
+[[archetype]]
+name = "Affinity"
+category = "Blue"
+markers = ["Thoughtcast", "Emry, Lurker of the Loch", "Seat of the Synod", "Kappa Cannoneer", "Pinnacle Emissary"]
+  [[archetype.subtype]]
+  name = "Pinnacle-Emissary"
+  markers = ["Pinnacle Emissary"]
+  [[archetype.subtype]]
+  name = "8-Cast"
+  markers = ["Kappa Cannoneer", "Thought Monitor"]
+
+[[archetype]]
+name = "Merfolk"
+category = "Blue"
+markers = ["Lord of Atlantis", "Vodalian Hexcatcher", "Silvergill Adept", "Master of the Pearl Trident"]
+
+[[archetype]]
+name = "Ninjas"
+category = "Blue"
+markers = ["Ninja of the Deep Hours", "Changeling Outcast", "Yuriko, the Tiger's Shadow"]
+
+[[archetype]]
+name = "Landstill"
+category = "Blue"
+markers = ["Standstill", "Mishra's Factory"]
+
+[[archetype]]
+name = "Midrange"
+category = "Blue"
+markers = ["Stoneforge Mystic", "Phelia, Exuberant Shepherd", "Stifle", "Batterskull", "Kaldra Compleat"]
+  [[archetype.subtype]]
+  name = "Phelia"
+  markers = ["Phelia, Exuberant Shepherd", "Stifle", "Quantum Riddler"]
+  [[archetype.subtype]]
+  name = "Stoneforge"
+  markers = ["Stoneforge Mystic", "Batterskull", "Kaldra Compleat"]
+
+[[archetype]]
+name = "Tempo"
+category = "Blue"
+markers = ["Dragon's Rage Channeler", "Delver of Secrets", "Cori-Steel Cutter", "Nethergoyf", "Kaito, Bane of Nightmares", "Murktide Regent"]
+  [[archetype.subtype]]
+  name = "Grixis"
+  markers = ["Badlands", "Blood Crypt", "Raucous Theater"]
+  [[archetype.subtype]]
+  name = "Izzet"
+  markers = ["Volcanic Island", "Lightning Bolt", "Dragon's Rage Channeler", "Cori-Steel Cutter", "Thundering Falls"]
+  [[archetype.subtype]]
+  name = "Dimir"
+  markers = ["Underground Sea", "Nethergoyf", "Kaito, Bane of Nightmares", "Fatal Push", "Undercity Sewers", "Thoughtseize"]
+  [[archetype.subtype]]
+  name = "Temur"
+  markers = ["Tropical Island", "Taiga"]
+
+[[archetype]]
+name = "Control"
+category = "Blue"
+markers = ["Supreme Verdict", "Terminus", "Jace, the Mind Sculptor", "Teferi, Time Raveler", "Counterspell"]
+  [[archetype.subtype]]
+  name = "Jeskai"
+  markers = ["Volcanic Island", "Plateau", "Tundra"]
+  [[archetype.subtype]]
+  name = "Esper"
+  markers = ["Scrubland", "Underground Sea", "Tundra"]
+  [[archetype.subtype]]
+  name = "Grixis"
+  markers = ["Badlands", "Volcanic Island"]
+  [[archetype.subtype]]
+  name = "Bant"
+  markers = ["Savannah", "Tropical Island"]

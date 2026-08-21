@@ -3,11 +3,13 @@ mod game;
 mod db;
 mod deck;
 mod html_stats;
+mod mtgolog;
 
 use clap::{Parser, Subcommand};
 use league::LeagueArgs;
 use game::GameArgs;
 use deck::DeckArgs;
+use mtgolog::MtgoArgs;
 
 #[derive(Parser)]
 #[command(name = "mtgctl")]
@@ -22,6 +24,8 @@ enum Commands {
     League(LeagueArgs),
     Game(GameArgs),
     Deck(DeckArgs),
+    /// MTGO client game-log analysis (reads Match_GameLog_*.dat).
+    Mtgo(MtgoArgs),
 }
 
 fn main() {
@@ -41,5 +45,6 @@ fn main() {
         Commands::League(args) => league::run(args),
         Commands::Game(args) => game::run(args),
         Commands::Deck(args) => deck::run(args),
+        Commands::Mtgo(args) => mtgolog::run(args),
     }
 }

@@ -844,6 +844,7 @@ dependencies = [
  "dialoguer",
  "diesel",
  "rand",
+ "regex",
  "serde",
  "skim",
  "textplots",

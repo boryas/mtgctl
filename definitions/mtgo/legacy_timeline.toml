@@ -1,0 +1,388 @@
+# Legacy format timeline 2025-01 .. 2026-08. Sources listed per entry.
+#
+# SUMMARY (compiled 2026-08-20)
+# - 8 Wizards B&R announcements fell in the window: 2025-03-31, 2025-06-30, 2025-11-10,
+#   2026-02-09, 2026-03-23, 2026-05-18, 2026-06-29, 2026-08-10.
+#   5 of them changed Legacy (all bans, no unbans):
+#     2025-03-31  Troll of Khazad-dûm, Sowing Mycospawn
+#     2025-11-10  Entomb, Nadu, Winged Wisdom
+#     2026-05-18  Undercity Informer
+#     2026-06-29  Candelabra of Tawnos
+#     2026-08-10  The Fantasticar
+#   3 explicitly made no Legacy change (2025-06-30, 2026-02-09, 2026-03-23) and are kept as notes.
+#   (Context just before the window: 2024-12-16 banned Psychic Frog + Vexing Bauble in Legacy.)
+#   Cross-checked against mtg.wiki "Banned and restricted cards/Timeline" (curl'd, 2025/2026 sections)
+#   which lists exactly these Legacy changes and nothing else in the window.
+# - MTGO effective dates: MTGO applies B&R changes the same day as the announcement in this era
+#   (confirmed by MTGO weekly blog for 2025-03-31 "applied in MTGO yesterday" [blog of 04-01],
+#   2026-06-29 "now in effect" [blog of 06-30], 2026-08-10 "have been implemented" [blog of 08-11]).
+#   For 2025-11-10 and 2026-05-18 the Wizards page gives a single effective date and no MTGO
+#   blog text was found; assumed same-day (one third-party summary says 2026-05-19 for Informer).
+# - Set releases: paper date from Scryfall; MTGO date from the mtgo.com "<set> on MTGO" articles
+#   (all downloaded and read). Standard sets hit MTGO the Tuesday BEFORE paper release.
+#   BIG MTGO-SPECIFIC CAVEAT: Marvel's Spider-Man (SPM, paper 2025-09-26) did NOT come to MTGO
+#   until 2026-06-16; MTGO instead got the digital set "Through the Omenpaths" (OM1, 2025-09-23),
+#   functionally-identical cards under different names that MTGO treats as the same name as
+#   their SPM counterparts. OM1 is Arena/MTGO only (no paper), included below for MTGO Legacy.
+# - Gaps: Digital-only Arena sets (Pioneer Masters, Alchemy) excluded. Reprint-only products
+#   (INR, FCA, EOS, SOA, MAR, PZA) add no new Legacy cards; listed where MTGO got them.
+#   The Hobbit (HOB) has no Commander decks; HOC = scene-box/Beyond cards (on MTGO 2026-08-11).
+
+# ---------------------------------------------------------------------------
+# Banned & Restricted
+# ---------------------------------------------------------------------------
+
+[[event]]
+date = "2024-12-16"
+effective = "2024-12-16"
+kind = "banlist"
+name = "B&R announcement 2024-12-16"
+banned = ["Psychic Frog", "Vexing Bauble"]
+unbanned = []
+notes = "Precedes the log window; defines the opening era. Legacy: Psychic Frog and Vexing Bauble banned."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-announcement-december-16-2024"
+
+[[event]]
+date = "2025-03-31"
+effective = "2025-03-31"
+kind = "banlist"
+name = "B&R announcement 2025-03-31"
+banned = ["Troll of Khazad-dûm", "Sowing Mycospawn"]
+unbanned = []
+notes = "Wizards: 'Effective Date: March 31, 2025' (all formats; Modern: Underworld Breach banned; Pauper changes). MTGO weekly blog 2025-04-01: 'As announced yesterday on Daily MTG, the following changes were applied in MTGO yesterday: Legacy Banned: Sowing Mycospawn and Troll of Khazad-Dum'. Next announcement was set for 2025-06-30."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-announcement-march-31-2025 ; https://www.mtgo.com/news/mtgo-blog-04012025"
+
+[[event]]
+date = "2025-06-30"
+effective = "2025-06-30"
+kind = "banlist"
+name = "B&R announcement 2025-06-30 (no Legacy changes)"
+banned = []
+unbanned = []
+notes = "Legacy: no changes ('It's been a few months since we last took action in Legacy'). Standard: 7 bans (Cori-Steel Cutter, Abuelo's Awakening, Monstrous Rage, Heartfire Hero, Up the Beanstalk, Hopeless Nightmare, This Town Ain't Big Enough). MTGO blog 2025-07-01 confirms only the Standard update applied. Next announcement originally 2025-11-24, later moved up to 2025-11-10."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-june-30-2025 ; https://www.mtgo.com/news/mtgo070125"
+
+[[event]]
+date = "2025-11-10"
+effective = "2025-11-10"
+kind = "banlist"
+name = "B&R announcement 2025-11-10"
+banned = ["Entomb", "Nadu, Winged Wisdom"]
+unbanned = []
+notes = "Wizards: 'Effective Date: November 10, 2025' (single date for all platforms). Also Standard: Vivi Ornitier, Screaming Nemesis, Proft's Eidetic Memory banned; Pioneer: Heartfire Hero; Pauper: High Tide banned. MTGO-specific implementation date not found in the 2025-11-11 MTGO weekly blog; assumed same day (Wizards B&R is applied to MTGO on announcement day in this era). Next announcement 2026-02-09."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-november-10-2025"
+
+[[event]]
+date = "2026-02-09"
+effective = "2026-02-09"
+kind = "banlist"
+name = "B&R announcement 2026-02-09 (no Legacy changes)"
+banned = []
+unbanned = []
+notes = "Legacy: no changes (Dimir Tempo most played; Lands, Death and Taxes, Affinity, Cradle decks rising). Only Commander (Biorhythm/Lutri unbanned, Farewell to Game Changers) and Arena formats changed. Article announced new cadence; next announcements 2026-03-23 / 2026-05-18 / 2026-06-29 / 2026-08-10."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-february-9-2026"
+
+[[event]]
+date = "2026-03-23"
+effective = "2026-03-23"
+kind = "banlist"
+name = "B&R announcement 2026-03-23 (no Legacy changes)"
+banned = []
+unbanned = []
+notes = "Legacy: no changes ('Legacy looks like it hasn't reached a solved end state...'). Only Historic changed (Food Chain banned). mtg.wiki dates the page 2026-03-24 but title is March 23, 2026."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-march-23-2026"
+
+[[event]]
+date = "2026-05-18"
+effective = "2026-05-18"
+kind = "banlist"
+name = "B&R announcement 2026-05-18"
+banned = ["Undercity Informer"]
+unbanned = []
+notes = "Wizards: 'Undercity Informer is banned.' (Oops, All Spells! too dominant; Balustrade Spy left legal). Also Pioneer: Cori-Steel Cutter banned; Modern: Phlage, Titan of Fire's Fury + Lotus Field banned, Violent Outburst + Umezawa's Jitte unbanned; Pauper: Bonder's Ornament unbanned. UNVERIFIED MTGO date: Wizards page states no per-platform date; one third-party summary says effective 2026-05-19; MTGO weekly 2026-05-19 does not mention it. Treat MTGO effective as 2026-05-18 or 2026-05-19. Next announcement 2026-06-29."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-may-18-2026"
+
+[[event]]
+date = "2026-06-29"
+effective = "2026-06-29"
+kind = "banlist"
+name = "B&R announcement 2026-06-29"
+banned = ["Candelabra of Tawnos"]
+unbanned = []
+notes = "Wizards: Candelabra of Tawnos banned in Legacy (High Tide / colorless Tron combo), 'Effective Date: June 29, 2026' for tabletop and Magic Online. MTGO weekly blog 2026-06-30: 'Yesterday, Wizards of the Coast announced a ban of Candalabra of Tawnos in Legacy... Both of these actions are now in effect on Magic Online.' Also Pauper: Seeker of Skybreak banned; Brawl: 6 bans. Next announcement 2026-08-10."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-june-29-2026 ; https://www.mtgo.com/news/mtgo063026"
+
+[[event]]
+date = "2026-08-10"
+effective = "2026-08-10"
+kind = "banlist"
+name = "B&R announcement 2026-08-10"
+banned = ["The Fantasticar"]
+unbanned = []
+notes = "Wizards: 'The Fantasticar is banned in Legacy. This change is effective as of August 10, 2026.' Also restricted in Vintage; Standard: Badgermole Cub, Stormchaser's Talent, Gran-Gran banned. MTGO weekly blog 2026-08-11 (Tuesday): 'Changes to the Banned & Restricted list announced today by Wizards of the Coast have been implemented on Magic Online... The Fantasticar banned in Legacy and restricted in Vintage' -- so MTGO implementation is 2026-08-10 or at latest 2026-08-11 (the Hobbit launch day). Next announcement 2026-10-12."
+source = "https://magic.wizards.com/en/news/announcements/banned-and-restricted-august-10-2026 ; https://www.mtgo.com/news/mtgo081126"
+
+# ---------------------------------------------------------------------------
+# Set releases (paper date = Scryfall released_at; effective = MTGO release date)
+# ---------------------------------------------------------------------------
+
+[[event]]
+date = "2025-01-24"
+effective = "2025-01-22"
+kind = "set"
+code = "INR"
+name = "Innistrad Remastered"
+notes = "Reprint set (no new-to-Legacy cards). MTGO: 'Magic Online will be the exclusive digital home of Innistrad Remastered! The set will debut when we come up from downtime tomorrow, January 22' (blog 2025-01-21)."
+source = "https://api.scryfall.com/sets/inr ; https://www.mtgo.com/news/mtgo-blog-01212025"
+
+[[event]]
+date = "2025-02-14"
+effective = "2025-02-11"
+kind = "set"
+code = "DFT"
+name = "Aetherdrift"
+notes = "Standard expansion. MTGO: 'Aetherdrift (set code DFT) debuts on Magic Online next Tuesday, February 11 at 10 a.m. Pacific'."
+source = "https://api.scryfall.com/sets/dft ; https://www.mtgo.com/news/aetherdrift-on-mtgo"
+
+[[event]]
+date = "2025-02-14"
+effective = "2025-02-11"
+kind = "set"
+code = "DRC"
+name = "Aetherdrift Commander"
+notes = "2 Commander decks, 10 new cards each; on MTGO Store 'starting next Tuesday' (2025-02-11) with the main set."
+source = "https://api.scryfall.com/sets/drc ; https://www.mtgo.com/news/aetherdrift-on-mtgo"
+
+[[event]]
+date = "2025-04-11"
+effective = "2025-04-08"
+kind = "set"
+code = "TDM"
+name = "Tarkir: Dragonstorm"
+notes = "Standard expansion. MTGO: 'debuts on Magic Online next Tuesday, April 8 at 10 a.m. Pacific'."
+source = "https://api.scryfall.com/sets/tdm ; https://www.mtgo.com/news/tarkir-dragonstorm-on-mtgo"
+
+[[event]]
+date = "2025-04-11"
+effective = "2025-04-08"
+kind = "set"
+code = "TDC"
+name = "Tarkir: Dragonstorm Commander"
+notes = "5 Commander decks, 10 new cards each; on MTGO with the main set (2025-04-08)."
+source = "https://api.scryfall.com/sets/tdc ; https://www.mtgo.com/news/tarkir-dragonstorm-on-mtgo"
+
+[[event]]
+date = "2025-06-13"
+effective = "2025-06-10"
+kind = "set"
+code = "FIN"
+name = "Final Fantasy"
+notes = "Universes Beyond, Standard-legal expansion. MTGO: 'debuts on Magic Online next Tuesday, June 10 at 10 a.m. Pacific'. Not redeemable."
+source = "https://api.scryfall.com/sets/fin ; https://www.mtgo.com/news/final-fantasy-on-mtgo"
+
+[[event]]
+date = "2025-06-13"
+effective = "2025-06-10"
+kind = "set"
+code = "FIC"
+name = "Final Fantasy Commander"
+notes = "4 Commander decks, 25 new cards each; on MTGO with the main set (2025-06-10)."
+source = "https://api.scryfall.com/sets/fic ; https://www.mtgo.com/news/final-fantasy-on-mtgo"
+
+[[event]]
+date = "2025-06-13"
+effective = "2025-06-10"
+kind = "set"
+code = "FCA"
+name = "Final Fantasy: Through the Ages"
+notes = "Bonus-sheet reprints (no new cards); in FIN boosters on MTGO."
+source = "https://api.scryfall.com/sets/fca ; https://www.mtgo.com/news/final-fantasy-on-mtgo"
+
+[[event]]
+date = "2025-08-01"
+effective = "2025-07-29"
+kind = "set"
+code = "EOE"
+name = "Edge of Eternities"
+notes = "Standard expansion. MTGO: 'debuts on Magic Online next Tuesday, July 29 at 10 a.m. Pacific'. Standard rotation on MTGO same day."
+source = "https://api.scryfall.com/sets/eoe ; https://www.mtgo.com/news/edge-of-eternities-on-mtgo"
+
+[[event]]
+date = "2025-08-01"
+effective = "2025-07-29"
+kind = "set"
+code = "EOC"
+name = "Edge of Eternities Commander"
+notes = "2 Commander decks, 12 new cards each; on MTGO with the main set (2025-07-29)."
+source = "https://api.scryfall.com/sets/eoc ; https://www.mtgo.com/news/edge-of-eternities-on-mtgo"
+
+[[event]]
+date = "2025-08-01"
+effective = "2025-07-29"
+kind = "set"
+code = "EOS"
+name = "Edge of Eternities: Stellar Sights"
+notes = "Bonus-sheet land reprints (no new cards); in EOE boosters on MTGO."
+source = "https://api.scryfall.com/sets/eos ; https://www.mtgo.com/news/edge-of-eternities-on-mtgo"
+
+[[event]]
+date = "2025-09-23"
+effective = "2025-09-23"
+kind = "set"
+code = "OM1"
+name = "Through the Omenpaths"
+notes = "DIGITAL-ONLY (Arena + MTGO), no paper; Scryfall marks digital=true. MTGO's stand-in for Marvel's Spider-Man: 'Through the Omenpaths (set code OM1) debuts on Magic Online next Tuesday, September 23 at 10 a.m. Pacific'. Cards are functional reprints of SPM cards under different names; MTGO treats an OM1 card and its SPM counterpart as the same name (4-copy limit shared). Legal in MTGO Constructed incl. Legacy from this date; this is when the Spider-Man card pool entered MTGO Legacy."
+source = "https://api.scryfall.com/sets/om1 ; https://www.mtgo.com/news/through-the-omenpaths ; https://www.mtgo.com/news/marvel-on-mtgo"
+
+[[event]]
+date = "2025-09-26"
+effective = "2026-06-16"
+kind = "set"
+code = "SPM"
+name = "Marvel's Spider-Man"
+notes = "Universes Beyond, Standard-legal expansion in paper 2025-09-26, but NOT on MTGO until 2026-06-16: 'Marvel's Spider-Man (set code SPM) debuts on Magic Online following downtime this Tuesday, June 16... Cards in SPM will be legal in Constructed decks immediately following downtime.' On MTGO its cards were available earlier as OM1 equivalents (see OM1 entry). Includes Scene Box cards."
+source = "https://api.scryfall.com/sets/spm ; https://www.mtgo.com/news/marvel-spiderman-on-mtgo ; https://www.mtgo.com/news/marvel-on-mtgo"
+
+[[event]]
+date = "2025-09-26"
+effective = "2026-06-16"
+kind = "set"
+code = "SPE"
+name = "Marvel's Spider-Man Eternal"
+notes = "Scene Box / non-Standard 'eternal' cards of Spider-Man (Legacy-legal). MTGO article 2026-06-12 lists 'Scene Box Cards' as included in the 2026-06-16 MTGO release. Paper 2025-09-26."
+source = "https://api.scryfall.com/sets/spe ; https://www.mtgo.com/news/marvel-spiderman-on-mtgo"
+
+[[event]]
+date = "2025-09-26"
+effective = "2026-06-16"
+kind = "set"
+code = "MAR"
+name = "Marvel Universe"
+notes = "Source Material bonus sheet (reprints, no new cards). On MTGO with SPM 2026-06-16 and MSH 2026-06-23."
+source = "https://api.scryfall.com/sets/mar ; https://www.mtgo.com/news/marvel-spiderman-on-mtgo"
+
+[[event]]
+date = "2025-11-21"
+effective = "2025-11-18"
+kind = "set"
+code = "TLA"
+name = "Avatar: The Last Airbender"
+notes = "Universes Beyond, Standard-legal expansion. MTGO: 'debuts on Magic Online next Tuesday, November 18 at 10 a.m. Pacific'. No Avatar Commander product sold on MTGO."
+source = "https://api.scryfall.com/sets/tla ; https://www.mtgo.com/news/avatar-the-last-airbender-on-mtgo"
+
+[[event]]
+date = "2025-11-21"
+effective = "2025-11-18"
+kind = "set"
+code = "TLE"
+name = "Avatar: The Last Airbender Eternal"
+notes = "'Eternal set (TLE)' = new-to-Magic cards from Jumpstart/Beginner Box/Scene Box products (Legacy-legal, not Standard). On MTGO inside TLA Play/Collector boosters from 2025-11-18."
+source = "https://api.scryfall.com/sets/tle ; https://www.mtgo.com/news/avatar-the-last-airbender-on-mtgo"
+
+[[event]]
+date = "2026-01-23"
+effective = "2026-01-20"
+kind = "set"
+code = "ECL"
+name = "Lorwyn Eclipsed"
+notes = "Standard expansion. MTGO: 'Lorwyn Eclipsed (set code ECL) debuts on Magic Online next Tuesday, January 20 at 10 a.m. PT'."
+source = "https://api.scryfall.com/sets/ecl ; https://www.mtgo.com/news/lorwyn-eclipsed-on-mtgo"
+
+[[event]]
+date = "2026-01-23"
+effective = "2026-01-20"
+kind = "set"
+code = "ECC"
+name = "Lorwyn Eclipsed Commander"
+notes = "2 Commander decks, 12 new cards each; on MTGO with the main set (2026-01-20)."
+source = "https://api.scryfall.com/sets/ecc ; https://www.mtgo.com/news/lorwyn-eclipsed-on-mtgo"
+
+[[event]]
+date = "2026-03-06"
+effective = "2026-03-03"
+kind = "set"
+code = "TMT"
+name = "Teenage Mutant Ninja Turtles"
+notes = "Universes Beyond, Standard-legal expansion. MTGO: 'debuts on Magic Online next Tuesday, March 3 at 10 a.m. Pacific'."
+source = "https://api.scryfall.com/sets/tmt ; https://www.mtgo.com/news/tmnt-on-mtgo"
+
+[[event]]
+date = "2026-03-06"
+effective = "2026-03-03"
+kind = "set"
+code = "TMC"
+name = "Teenage Mutant Ninja Turtles Eternal"
+notes = "TMNT Commander (Turtle Power! deck) + Scene cards (Legacy-legal, not Standard). Turtle Power! deck on MTGO Store 'starting next Tuesday' (2026-03-03); Scene cards in boosters same day."
+source = "https://api.scryfall.com/sets/tmc ; https://www.mtgo.com/news/tmnt-on-mtgo"
+
+[[event]]
+date = "2026-03-06"
+effective = "2026-03-03"
+kind = "set"
+code = "PZA"
+name = "Teenage Mutant Ninja Turtles Source Material"
+notes = "Borderless Source Material reprints (no new cards); in TMT boosters on MTGO."
+source = "https://api.scryfall.com/sets/pza ; https://www.mtgo.com/news/tmnt-on-mtgo"
+
+[[event]]
+date = "2026-04-24"
+effective = "2026-04-21"
+kind = "set"
+code = "SOS"
+name = "Secrets of Strixhaven"
+notes = "Standard expansion. MTGO: 'Secrets of Strixhaven (set code SOS) debuts on Magic Online next Tuesday, April 21 at 10 a.m. PT'."
+source = "https://api.scryfall.com/sets/sos ; https://www.mtgo.com/news/secrets-of-strixhaven-on-mtgo"
+
+[[event]]
+date = "2026-04-24"
+effective = "2026-04-21"
+kind = "set"
+code = "SOC"
+name = "Secrets of Strixhaven Commander"
+notes = "5 Commander decks, 12 new cards each; on MTGO with the main set (2026-04-21)."
+source = "https://api.scryfall.com/sets/soc ; https://www.mtgo.com/news/secrets-of-strixhaven-on-mtgo"
+
+[[event]]
+date = "2026-04-24"
+effective = "2026-04-21"
+kind = "set"
+code = "SOA"
+name = "Secrets of Strixhaven Mystical Archive"
+notes = "Mystical Archive bonus sheet (reprints, no new cards); in SOS boosters on MTGO."
+source = "https://api.scryfall.com/sets/soa ; https://www.mtgo.com/news/secrets-of-strixhaven-on-mtgo"
+
+[[event]]
+date = "2026-06-26"
+effective = "2026-06-23"
+kind = "set"
+code = "MSH"
+name = "Marvel Super Heroes"
+notes = "Universes Beyond, Standard-legal expansion. MTGO: 'Marvel Super Heroes (set code MSH) debuts on Magic Online next Tuesday, June 23 at 10 a.m. PT'. Home of The Fantasticar (banned in Legacy 2026-08-10)."
+source = "https://api.scryfall.com/sets/msh ; https://www.mtgo.com/news/marvel-superheroes-on-mtgo"
+
+[[event]]
+date = "2026-06-26"
+effective = "2026-06-23"
+kind = "set"
+code = "MSC"
+name = "Marvel Super Heroes Commander"
+notes = "4 Commander decks, 30 new cards each; on MTGO Store 'starting next Tuesday' (2026-06-23)."
+source = "https://api.scryfall.com/sets/msc ; https://www.mtgo.com/news/marvel-superheroes-on-mtgo"
+
+[[event]]
+date = "2026-08-14"
+effective = "2026-08-11"
+kind = "set"
+code = "HOB"
+name = "The Hobbit"
+notes = "Universes Beyond, Standard-legal expansion. MTGO: 'The Hobbit (set code HOB) debuts on Magic Online next Tuesday, August 11 at 10 a.m. Pacific'. No stand-alone Commander decks."
+source = "https://api.scryfall.com/sets/hob ; https://www.mtgo.com/news/the-hobbit-on-mtgo"
+
+[[event]]
+date = "2026-08-14"
+effective = "2026-08-11"
+kind = "set"
+code = "HOC"
+name = "The Hobbit Eternal"
+notes = "Scene Box / non-Standard 'eternal' Hobbit cards (Legacy-legal). MTGO article lists Scene Box cards as included on 2026-08-11."
+source = "https://api.scryfall.com/sets/hoc ; https://www.mtgo.com/news/the-hobbit-on-mtgo"
