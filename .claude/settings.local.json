@@ -54,8 +54,25 @@
       "WebFetch(domain:yawgatog.com)",
       "WebFetch(domain:ancestral.vision)",
       "Read(//home/bo/**)",
-      "WebFetch(domain:api.scryfall.com)"
+      "WebFetch(domain:api.scryfall.com)",
+      "mcp__scryfall__get_card_by_name",
+      "Read(//tmp/**)",
+      "Bash(~/.cargo/bin/wasm-pack build:*)",
+      "Bash(wasm-pack build:*)",
+      "Bash(sudo perf *)",
+      "Bash(timeout 3 cat)",
+      "Bash(sudo cat *)",
+      "Read(//proc/1184936/**)",
+      "Bash(sudo gdb *)",
+      "mcp__scryfall__get_rulings",
+      "Bash(wait)",
+      "Bash(cat)",
+      "Bash(chmod +x /tmp/analyze.sh)",
+      "Bash(/tmp/analyze.sh)"
     ],
     "deny": []
-  }
+  },
+  "enabledMcpjsonServers": [
+    "scryfall"
+  ]
 }

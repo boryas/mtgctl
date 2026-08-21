@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "scryfall": {
+      "command": "npx",
+      "args": ["-y", "scryfall-mcp-server"]
+    }
+  }
+}
