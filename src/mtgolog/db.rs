@@ -35,6 +35,7 @@ diesel::table! {
         imported_at -> Text,
         my_variant -> Nullable<Integer>,
         opp_variant -> Nullable<Integer>,
+        my_list_id -> Nullable<Integer>,
     }
 }
 
@@ -69,6 +70,7 @@ diesel::table! {
         opp_lands -> Integer,
         my_spells -> Integer,
         opp_spells -> Integer,
+        list_id -> Nullable<Integer>,
     }
 }
 
@@ -259,11 +261,11 @@ const DDL: &[&str] = &[
 ];
 
 pub fn ensure_schema(conn: &mut SqliteConnection) -> QueryResult<()> {
-    for stmt in DDL {
+    for stmt in DDL.iter().chain(super::decklist::DDL.iter()) {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     // Columns added after the first release (ALTER if missing).
-    for (table, col, ty) in [("mtgo_matches", "my_variant", "INTEGER"), ("mtgo_matches", "opp_variant", "INTEGER")] {
+    for (table, col, ty) in [("mtgo_matches", "my_variant", "INTEGER"), ("mtgo_matches", "opp_variant", "INTEGER"), ("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER")] {
         if diesel::sql_query(format!("SELECT {col} FROM {table} LIMIT 0")).execute(conn).is_err() {
             diesel::sql_query(format!("ALTER TABLE {table} ADD COLUMN {col} {ty}")).execute(conn)?;
         }

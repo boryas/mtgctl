@@ -41,6 +41,14 @@ SELECT
   lo.category         AS opp_guess_category,
   lo.archetype_marker AS opp_guess_marker,
   lo.subtype_marker   AS opp_guess_subtype_marker,
+  m.my_list_id        AS my_list_id,
+  CASE WHEN m.my_list_id IS NOT NULL THEN 1 ELSE 0 END AS has_decklist,
+  COALESCE(li.name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_deck,
+  ll.archetype        AS my_list_archetype,
+  ll.subtype          AS my_list_subtype,
+  ll.category         AS my_list_category,
+  g.list_id           AS game_list_id,
+  dl.event_kind       AS event_kind,
   g.game_number       AS game_number,
   g.on_play           AS on_play,
   g.turns             AS turns,
@@ -66,6 +74,9 @@ LEFT JOIN mtgo_variants vo ON vo.id = m.opp_variant
 LEFT JOIN mtgo_eras e ON e.id = m.era_id
 LEFT JOIN mtgo_match_labels lg ON lg.match_id = m.id AND lg.side = 'me' AND lg.source = 'guess'
 LEFT JOIN mtgo_match_labels lo ON lo.match_id = m.id AND lo.side = 'opp' AND lo.source = 'guess'
+LEFT JOIN mtgo_lists li ON li.id = m.my_list_id
+LEFT JOIN mtgo_match_labels ll ON ll.match_id = m.id AND ll.side = 'me' AND ll.source = 'list'
+LEFT JOIN mtgo_decklists dl ON dl.game_db_id = g.id
 WHERE m.replay = 0";
 
 pub fn ensure_view(conn: &mut SqliteConnection) -> QueryResult<()> {
@@ -430,7 +441,7 @@ pub fn is_game_mode(q: &StatsQuery) -> bool {
 
 /// Columns derived from clustering observed cards (not registered decklists).
 pub const SIGNATURE_COLS: &[&str] = &["my_cards", "opp_cards", "my_cards_variant", "opp_cards_variant", "my_cards_id", "opp_cards_id", "my_cards_variant_id", "opp_cards_variant_id"];
-pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_guess_*/opp_guess_* = advisory labels from marker cards (definitions/mtgo/markers.toml). Decklists (my_deck) will come from the client's 'Deck Used' logs.";
+pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_guess_*/opp_guess_* = advisory labels from marker cards (definitions/mtgo/markers.toml). my_deck/my_list_* = exact registered list (has_decklist=1), from the client's 'Deck Used' session logs — available from 2026-08-18 on.";
 
 pub fn print_columns(conn: &mut SqliteConnection) -> QueryResult<()> {
     super::db::ensure_schema(conn)?;

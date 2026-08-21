@@ -7,6 +7,7 @@
 pub mod cards;
 pub mod cluster;
 pub mod db;
+pub mod decklist;
 pub mod eras;
 pub mod event;
 pub mod format;
@@ -40,6 +41,13 @@ pub struct MtgoConfig {
     pub stats_hist: Vec<String>,
     /// `mtgo stats -i`: default minimum games per row.
     pub stats_min_games: Option<i64>,
+    /// Directory of archived session logs (mtgo-YYYYmmdd-HHMMSS.log); default ~/.local/share/mtgo/logs.
+    pub session_logs_dir: Option<String>,
+    /// Marker rules file; default definitions/mtgo/markers.toml.
+    pub markers: Option<String>,
+    /// Default scope (SQL over mtgo_game_view) applied to stats/cards/pivot/picker unless --all.
+    /// Default: "has_decklist = 1" — only matches with an exact registered list.
+    pub default_scope: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -59,6 +67,30 @@ pub fn load_config() -> MtgoConfig {
 impl MtgoConfig {
     pub fn log_dir(&self) -> PathBuf {
         PathBuf::from(self.log_dir.clone().unwrap_or_else(|| DEFAULT_LOG_DIR.to_string()))
+    }
+    pub fn session_logs_dir(&self) -> PathBuf {
+        match &self.session_logs_dir {
+            Some(d) => PathBuf::from(d),
+            None => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                PathBuf::from(format!("{home}/.local/share/mtgo/logs"))
+            }
+        }
+    }
+    /// Combine the default scope with a user WHERE (unless `all`). Returns (where, scope description).
+    pub fn scope(&self, where_sql: Option<String>, all: bool) -> (Option<String>, String) {
+        let scope = self.default_scope.clone().unwrap_or_else(|| "has_decklist = 1".to_string());
+        if all || scope.trim().is_empty() {
+            return (where_sql, "all matches".to_string());
+        }
+        let desc = format!("scope: {scope} (list-backed only; --all to include everything)");
+        match where_sql {
+            Some(w) if !w.trim().is_empty() => (Some(format!("({scope}) AND ({w})")), desc),
+            _ => (Some(scope), desc),
+        }
+    }
+    pub fn markers_path(&self) -> PathBuf {
+        PathBuf::from(self.markers.clone().unwrap_or_else(|| "definitions/mtgo/markers.toml".to_string()))
     }
 }
 
@@ -144,6 +176,9 @@ enum MtgoCommand {
         /// Interactive: fuzzy-pick filters and group-bys (defaults from [mtgo] in config.toml).
         #[arg(short, long)]
         interactive: bool,
+        /// Include every match (default scope is list-backed matches only: has_decklist = 1).
+        #[arg(long)]
+        all: bool,
     },
     /// Per-card win-rate lift: games where a card was played vs not (first-order, no confounder control).
     Cards {
@@ -167,6 +202,9 @@ enum MtgoCommand {
         sort: String,
         #[arg(long, default_value_t = 40)]
         limit: usize,
+        /// Include every match (default scope is list-backed matches only).
+        #[arg(long)]
+        all: bool,
     },
     /// Guess advisory archetype/subtype/category labels for my side from marker cards (definitions/mtgo/markers.toml).
     Label {
@@ -196,7 +234,28 @@ enum MtgoCommand {
         /// Rows per direction in each table.
         #[arg(long, default_value_t = 12)]
         top: usize,
+        /// Include every match (default scope is list-backed matches only).
+        #[arg(long)]
+        all: bool,
     },
+    /// Import exact registered decklists from the client's session logs ("Deck Used in Game ID") and link them to games.
+    Decklists {
+        /// Resolve unknown catalog ids via Scryfall (curl); off = leave as mtgo#<id>.
+        #[arg(long, default_value_t = true)]
+        fetch: bool,
+        #[arg(short, long)]
+        verbose: bool,
+    },
+    /// Show the distinct registered lists (id, name, archetype, usage).
+    Lists,
+    /// Print one list (or the diff between two: `mtgo list 3 --diff 5`).
+    List {
+        id: i32,
+        #[arg(long)]
+        diff: Option<i32>,
+    },
+    /// Name a list (shows up as my_deck).
+    NameList { id: i32, name: String },
     /// List the columns available to `mtgo stats`.
     Columns,
     /// Load the Legacy timeline (bans, set releases) into mtgo_eras and stamp matches with era_id.
@@ -239,9 +298,11 @@ pub fn run(args: MtgoArgs) {
                 eprintln!("cluster failed: {e}");
             }
         }
-        MtgoCommand::Stats { by, where_sql, min, sort, limit, full, hist, interactive } => {
+        MtgoCommand::Stats { by, where_sql, min, sort, limit, full, hist, interactive, all } => {
             let conn = &mut crate::db::establish_connection();
+            let (where_sql, scope_desc) = cfg.scope(where_sql, all);
             let mut q = stats::StatsQuery { by, where_sql, min_games: min, sort, limit, full, hist };
+            println!("{scope_desc}");
             if interactive {
                 match picker::pick(conn, &cfg, q) {
                     Ok(Some(picked)) => q = picked,
@@ -263,8 +324,10 @@ pub fn run(args: MtgoArgs) {
                 eprintln!("eras failed: {e}");
             }
         }
-        MtgoCommand::Cards { side, where_sql, by_turn, seen, min, sort, limit } => {
+        MtgoCommand::Cards { side, where_sql, by_turn, seen, min, sort, limit, all } => {
             let conn = &mut crate::db::establish_connection();
+            let (where_sql, scope_desc) = cfg.scope(where_sql, all);
+            println!("{scope_desc}");
             if let Err(e) = cards::run_cards(conn, &side, where_sql.as_deref(), by_turn, seen, min, &sort, limit) {
                 eprintln!("cards failed: {e}");
             }
@@ -275,11 +338,43 @@ pub fn run(args: MtgoArgs) {
                 eprintln!("label failed: {e}");
             }
         }
-        MtgoCommand::Pivot { card, convert, where_sql, min, top } => {
+        MtgoCommand::Pivot { card, convert, where_sql, min, top, all } => {
             let conn = &mut crate::db::establish_connection();
-            let wher = where_sql.or_else(|| if card == "Doomsday" { Some("my_guess_archetype = 'Doomsday'".to_string()) } else { None });
+            let (wher, scope_desc) = cfg.scope(where_sql, all);
+            println!("{scope_desc}");
             if let Err(e) = pivot::run_pivot(conn, &card, convert.as_deref(), wher.as_deref(), min, top) {
                 eprintln!("pivot failed: {e}");
+            }
+        }
+        MtgoCommand::Decklists { fetch, verbose } => {
+            let conn = &mut crate::db::establish_connection();
+            match decklist::run_decklists(conn, &cfg, fetch, verbose) {
+                Ok(st) => println!(
+                    "decklists: {} 'Deck Used' games, {} new distinct lists, {} linked to imported games, {} unlinked (game not imported yet), {} mismatched, {} unresolved card ids",
+                    st.lines, st.lists, st.linked, st.unlinked, st.mismatched, st.unknown_names
+                ),
+                Err(e) => eprintln!("decklists failed: {e}"),
+            }
+        }
+        MtgoCommand::Lists => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = decklist::print_lists(conn) {
+                eprintln!("{e}");
+            }
+        }
+        MtgoCommand::List { id, diff } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = decklist::print_list(conn, id, diff) {
+                eprintln!("{e}");
+            }
+        }
+        MtgoCommand::NameList { id, name } => {
+            use diesel::prelude::*;
+            let conn = &mut crate::db::establish_connection();
+            match diesel::sql_query(format!("UPDATE mtgo_lists SET name = '{}' WHERE id = {id}", name.replace('\'', "''"))).execute(conn) {
+                Ok(1) => println!("list {id} → {name}"),
+                Ok(_) => eprintln!("no list {id}"),
+                Err(e) => eprintln!("{e}"),
             }
         }
         MtgoCommand::Columns => {
