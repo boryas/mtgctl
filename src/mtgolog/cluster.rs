@@ -446,6 +446,7 @@ pub fn run_cluster(conn: &mut SqliteConnection, threshold: f32, variant_threshol
     let results: HashMap<i32, String> = mtgo_matches::table.select((mtgo_matches::id, mtgo_matches::result)).load::<(i32, String)>(conn)?.into_iter().collect();
 
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let mut chimera_names = 0usize;
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         super::db::truncate(conn, "mtgo_clusters")?;
         super::db::truncate(conn, "mtgo_variants")?;
@@ -463,7 +464,24 @@ pub fn run_cluster(conn: &mut SqliteConnection, threshold: f32, variant_threshol
         for s in &summaries {
             let top: Vec<String> = s.top_cards.iter().take(8).map(|(c, f, _)| format!("{c} {:.0}%", f * 100.0)).collect();
             // Auto-name from the most characteristic cards. Override with `mtgctl mtgo name <id> <name>`.
-            let name = name_cluster(&s.top_cards, &lands, naming);
+            // Naming invariant: the named cards must co-occur in at least one member's signature;
+            // otherwise drop the weakest named card until they do (never below 2).
+            let mut name = name_cluster(&s.top_cards, &lands, naming);
+            let cooccur = |name: &str| -> bool {
+                let parts: Vec<&str> = name.split(" + ").collect();
+                s.members.iter().any(|&m| parts.iter().all(|c| docs[m].cards.contains_key(*c)))
+            };
+            while !cooccur(&name) && name.matches(" + ").count() >= 2 {
+                let mut parts: Vec<&str> = name.split(" + ").collect();
+                // drop the lowest-scoring card among the named ones
+                let score = |c: &str| s.top_cards.iter().find(|(n, _, _)| n == c).map(|(_, _, sc)| *sc).unwrap_or(0.0);
+                let (idx, _) = parts.iter().enumerate().min_by(|a, b| score(a.1).partial_cmp(&score(b.1)).unwrap()).unwrap();
+                parts.remove(idx);
+                name = parts.join(" + ");
+            }
+            if !cooccur(&name) {
+                chimera_names += 1;
+            }
             if compare_names && s.members.len() >= min_show {
                 println!("{:4}  top2: {:<55} cutoff: {}", s.members.len(), name_cluster(&s.top_cards, &lands, "top2"), name_cluster(&s.top_cards, &lands, "cutoff"));
             }
@@ -556,6 +574,7 @@ pub fn run_cluster(conn: &mut SqliteConnection, threshold: f32, variant_threshol
         println!("{t}");
         Ok(())
     })?;
+    println!("naming lint: {chimera_names} cluster names whose cards never co-occur in a member (should be 0)");
     println!("{} clusters at cosine-distance threshold {threshold}; variants at {variant_threshold} (mtgo_clusters / mtgo_variants; my_cards/opp_cards + my_cards_variant/opp_cards_variant in mtgo_game_view)", summaries.len());
     println!("{}", super::stats::SIGNATURE_NOTE);
     Ok(())
