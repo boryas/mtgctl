@@ -194,8 +194,8 @@ enum MtgoCommand {
         /// Count cards merely seen (revealed/discarded/milled…) too, not just cast/played.
         #[arg(long)]
         seen: bool,
-        /// Minimum games-with to list a card.
-        #[arg(long, default_value_t = 20)]
+        /// Minimum games-with to list a card (default: no filtering).
+        #[arg(long, default_value_t = 1)]
         min: i64,
         /// Order: lift (default), worst, n, name.
         #[arg(long, default_value = "lift")]
@@ -228,8 +228,8 @@ enum MtgoCommand {
         /// SQL WHERE over mtgo_game_view to pick the population, e.g. "my_guess_archetype='Doomsday' AND my_guess_subtype='Tempo'"
         #[arg(long = "where")]
         where_sql: Option<String>,
-        /// Minimum games-with for an event row.
-        #[arg(long, default_value_t = 25)]
+        /// Minimum games-with for an event row (default: no filtering).
+        #[arg(long, default_value_t = 1)]
         min: i64,
         /// Rows per direction in each table.
         #[arg(long, default_value_t = 12)]

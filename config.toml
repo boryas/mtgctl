@@ -67,7 +67,7 @@ username = "boryas"
 stats_filters = ["my_deck"]
 stats_groupbys = ["opp_cards"]
 stats_hist = []
-stats_min_games = 10
+stats_min_games = 1
 # Default scope for stats/cards/pivot/-i: only matches with an exact registered list (from the
 # client's session logs, 2026-08-18 on). Pass --all to include the historical, observation-only matches.
 default_scope = "has_decklist = 1"

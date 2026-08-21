@@ -130,7 +130,7 @@ pub fn pick(conn: &mut SqliteConnection, cfg: &MtgoConfig, base: StatsQuery) -> 
     q.by = gb.into_iter().map(|i| cols[i].clone()).collect();
     q.where_sql = if terms.is_empty() { None } else { Some(terms.join(" AND ")) };
     if q.min_games <= 1 {
-        q.min_games = cfg.stats_min_games.unwrap_or(1);
+        q.min_games = cfg.stats_min_games.unwrap_or(1).max(1);
     }
     if q.hist.is_empty() {
         q.hist = cfg.stats_hist.clone();
