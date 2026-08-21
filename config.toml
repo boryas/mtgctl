@@ -68,6 +68,9 @@ stats_filters = ["my_deck"]
 stats_groupbys = ["opp_cards"]
 stats_hist = []
 stats_min_games = 1
+# First-screen columns in `mtgo stats -i` (everything else is behind "more columns…"); empty = built-in curated list.
+picker_filter_columns = []
+picker_groupby_columns = []
 # Default scope for stats/cards/pivot/-i: only matches with an exact registered list (from the
 # client's session logs, 2026-08-18 on). Pass --all to include the historical, observation-only matches.
 default_scope = "has_decklist = 1"

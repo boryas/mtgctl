@@ -13,6 +13,50 @@ use diesel::sqlite::SqliteConnection;
 /// Pseudo-filter offered alongside the view's columns.
 const LAST_N: &str = "last N matches";
 const NULL_LABEL: &str = "∅ (none)";
+const MORE: &str = "more columns…";
+
+/// Curated first screen; everything else hides behind "more columns…". Overridable via
+/// [mtgo] picker_filter_columns / picker_groupby_columns in config.toml.
+const DEFAULT_FILTER_COLS: &[&str] = &["my_deck", "my_list_subtype", "opp_guess_archetype", "opp_guess_subtype", "opp_cards", "era", "month", "opponent", "event_kind", "game_number", "on_play", "my_mulligans"];
+const DEFAULT_GROUPBY_COLS: &[&str] = &["opp_guess_archetype", "opp_guess_subtype", "opp_cards", "my_deck", "my_list_subtype", "era", "month", "game_number", "on_play", "my_mulligans", "win_by"];
+
+/// Two-tier multi-select: a short curated list (defaults pre-checked) + "more columns…" which opens
+/// a fuzzy finder over the remaining columns. Returns the chosen column names (None = aborted).
+fn pick_columns(prompt: &str, all: &[String], primary: &[String], defaults: &[String], extra_last: Option<&str>) -> Result<Option<Vec<String>>, String> {
+    let mut items: Vec<String> = primary.iter().filter(|c| all.contains(c)).cloned().collect();
+    // defaults that aren't in the curated list still show up front
+    for d in defaults {
+        if all.contains(d) && !items.contains(d) {
+            items.push(d.clone());
+        }
+    }
+    if let Some(x) = extra_last {
+        items.push(x.to_string());
+    }
+    items.push(MORE.to_string());
+    let checks: Vec<bool> = items.iter().map(|c| defaults.contains(c)).collect();
+    let Some(chosen) = MultiSelect::new().with_prompt(prompt).items(&items).defaults(&checks).interact_opt().map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let mut out: Vec<String> = Vec::new();
+    let mut want_more = false;
+    for i in chosen {
+        if items[i] == MORE {
+            want_more = true;
+        } else {
+            out.push(items[i].clone());
+        }
+    }
+    if want_more {
+        let rest: Vec<String> = all.iter().filter(|c| !items.contains(c)).cloned().collect();
+        for c in fuzzy_multi_select(&format!("{prompt} — more columns"), &rest) {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    Ok(Some(out))
+}
 
 #[derive(QueryableByName)]
 struct ColName {
@@ -79,23 +123,14 @@ fn label_value(label: &str) -> Option<String> {
 pub fn pick(conn: &mut SqliteConnection, cfg: &MtgoConfig, base: StatsQuery) -> Result<Option<StatsQuery>, String> {
     let cols = view_columns(conn).map_err(|e| e.to_string())?;
 
-    // Step 1: which columns to filter on.
-    let mut filter_options: Vec<String> = cols.clone();
-    filter_options.push(LAST_N.to_string());
-    let filter_defaults: Vec<bool> = filter_options.iter().map(|c| cfg.stats_filters.contains(c)).collect();
-    let chosen = MultiSelect::new()
-        .with_prompt("Filter on (space to toggle, enter to continue)")
-        .items(&filter_options)
-        .defaults(&filter_defaults)
-        .interact_opt()
-        .map_err(|e| e.to_string())?;
-    let Some(chosen) = chosen else { return Ok(None) };
+    // Step 1: which columns to filter on (curated first screen + "more columns…").
+    let primary_f: Vec<String> = if cfg.picker_filter_columns.is_empty() { DEFAULT_FILTER_COLS.iter().map(|s| s.to_string()).collect() } else { cfg.picker_filter_columns.clone() };
+    let Some(chosen) = pick_columns("Filter on (space to toggle, enter to continue)", &cols, &primary_f, &cfg.stats_filters, Some(LAST_N))? else { return Ok(None) };
 
     // Step 1b: values for each chosen column (narrowing progressively so later pickers only show
     // values that still exist under the earlier filters).
     let mut terms: Vec<String> = base.where_sql.iter().cloned().collect();
-    for idx in chosen {
-        let col = &filter_options[idx];
+    for col in &chosen {
         if col == LAST_N {
             let n: usize = Input::new().with_prompt("Last N matches").default(50).interact_text().map_err(|e| e.to_string())?;
             terms.push(format!("match_id IN (SELECT id FROM mtgo_matches WHERE replay = 0 ORDER BY start_ts DESC LIMIT {n})"));
@@ -116,18 +151,12 @@ pub fn pick(conn: &mut SqliteConnection, cfg: &MtgoConfig, base: StatsQuery) -> 
         }
     }
 
-    // Step 2: group-bys.
-    let gb_defaults: Vec<bool> = cols.iter().map(|c| cfg.stats_groupbys.contains(c)).collect();
-    let gb = MultiSelect::new()
-        .with_prompt("Group by (space to toggle, enter to run)")
-        .items(&cols)
-        .defaults(&gb_defaults)
-        .interact_opt()
-        .map_err(|e| e.to_string())?;
-    let Some(gb) = gb else { return Ok(None) };
+    // Step 2: group-bys (same two-tier screen).
+    let primary_g: Vec<String> = if cfg.picker_groupby_columns.is_empty() { DEFAULT_GROUPBY_COLS.iter().map(|s| s.to_string()).collect() } else { cfg.picker_groupby_columns.clone() };
+    let Some(gb) = pick_columns("Group by (space to toggle, enter to run)", &cols, &primary_g, &cfg.stats_groupbys, None)? else { return Ok(None) };
 
     let mut q = base;
-    q.by = gb.into_iter().map(|i| cols[i].clone()).collect();
+    q.by = gb;
     q.where_sql = if terms.is_empty() { None } else { Some(terms.join(" AND ")) };
     if q.min_games <= 1 {
         q.min_games = cfg.stats_min_games.unwrap_or(1).max(1);

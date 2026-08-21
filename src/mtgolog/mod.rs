@@ -45,6 +45,9 @@ pub struct MtgoConfig {
     pub session_logs_dir: Option<String>,
     /// Marker rules file; default definitions/mtgo/markers.toml.
     pub markers: Option<String>,
+    /// `mtgo stats -i`: curated first-screen columns for filters / group-bys (rest behind "more columns…").
+    pub picker_filter_columns: Vec<String>,
+    pub picker_groupby_columns: Vec<String>,
     /// Default scope (SQL over mtgo_game_view) applied to stats/cards/pivot/picker unless --all.
     /// Default: "has_decklist = 1" — only matches with an exact registered list.
     pub default_scope: Option<String>,
