@@ -93,7 +93,7 @@ markers = ["Entomb", "Reanimate", "Animate Dead", "Exhume", "Shallow Grave", "Gr
 [[archetype]]
 name = "Cloudpost"
 category = "Non-Blue"
-markers = ["Cloudpost", "Glimmerpost"]
+markers = ["Cloudpost", "Glimmerpost", "Urza's Tower", "Urza's Mine", "Urza's Power Plant"]
 
 [[archetype]]
 name = "Mystic Forge"
@@ -217,6 +217,11 @@ markers = ["Aether Vial", "Mother of Runes", "Recruiter of the Guard", "Flickerw
   [[archetype.subtype]]
   name = "Orzhov"
   markers = ["Scrubland", "Shadowy Backstreet", "Marsh Flats", "Orcish Bowmasters"]
+
+[[archetype]]
+name = "Combo Elves"
+category = "Combo"
+markers = ["Allosaurus Shepherd", "Quirion Ranger", "Heritage Druid", "Wirewood Symbiote", "Elvish Visionary", "Natural Order", "Glimpse of Nature", "Craterhoof Behemoth", "Fyndhorn Elves", "Llanowar Elves", "Elvish Archdruid"]
 
 [[archetype]]
 name = "Cradle Control"

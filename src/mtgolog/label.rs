@@ -6,7 +6,7 @@ use super::db::{mtgo_game_cards, mtgo_match_labels, mtgo_matches, truncate};
 use super::stats::ensure_view;
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Table};
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Nullable, Text};
+use diesel::sql_types::{BigInt, Integer, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -150,6 +150,72 @@ pub fn run_label(conn: &mut SqliteConnection, path: &Path, check: bool, suggest:
             println!("({} more label combinations)", rows.len() - 40);
         }
     }
+    // Cluster fallback (opponent side): no marker seen, but the opponent's card cluster has a clear
+    // majority archetype among its rule-labelled members → adopt it, marked "cluster" so it is
+    // visibly second-hand. Subtype too when the majority agrees on it.
+    #[derive(QueryableByName)]
+    struct Member {
+        #[diesel(sql_type = Integer)]
+        match_id: i32,
+        #[diesel(sql_type = Nullable<Integer>)]
+        cluster: Option<i32>,
+        #[diesel(sql_type = Nullable<Text>)]
+        archetype: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        subtype: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        category: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        marker: Option<String>,
+    }
+    let members: Vec<Member> = diesel::sql_query(
+        "SELECT m.id AS match_id, m.opp_cluster AS cluster, l.archetype, l.subtype, l.category, l.archetype_marker AS marker
+         FROM mtgo_matches m LEFT JOIN mtgo_match_labels l ON l.match_id = m.id AND l.side = 'opp' AND l.source = 'guess'
+         WHERE m.replay = 0",
+    )
+    .load(conn)?;
+    let mut by_cluster: HashMap<i32, Vec<&Member>> = HashMap::new();
+    for mm in &members {
+        if let Some(c) = mm.cluster {
+            by_cluster.entry(c).or_default().push(mm);
+        }
+    }
+    let mut adopted = 0;
+    for mm in members.iter().filter(|x| x.archetype.is_none() && x.cluster.is_some()) {
+        let peers: Vec<&&Member> = by_cluster[&mm.cluster.unwrap()].iter().filter(|p| p.match_id != mm.match_id && p.archetype.is_some() && p.marker.as_deref() != Some("cluster")).collect();
+        if peers.len() < 3 {
+            continue;
+        }
+        let mut votes: HashMap<(&str, Option<&str>, Option<&str>), usize> = HashMap::new();
+        let mut arch_votes: HashMap<&str, usize> = HashMap::new();
+        for p in &peers {
+            *arch_votes.entry(p.archetype.as_deref().unwrap()).or_default() += 1;
+            *votes.entry((p.archetype.as_deref().unwrap(), p.subtype.as_deref(), p.category.as_deref())).or_default() += 1;
+        }
+        let (arch, n) = arch_votes.iter().max_by_key(|(_, n)| **n).unwrap();
+        if (*n as f64) / (peers.len() as f64) < 0.6 {
+            continue;
+        }
+        // subtype: majority among peers with this archetype
+        let mut sub_votes: HashMap<Option<&str>, usize> = HashMap::new();
+        let mut cat: Option<&str> = None;
+        for ((a, s, c), k) in &votes {
+            if a == arch {
+                *sub_votes.entry(*s).or_default() += k;
+                cat = cat.or(*c);
+            }
+        }
+        let (sub, sn) = sub_votes.iter().max_by_key(|(_, k)| **k).unwrap();
+        let sub = if (*sn as f64) / (*n as f64) >= 0.6 { *sub } else { None };
+        let q = |v: Option<&str>| v.map(|x| format!("'{}'", x.replace('\'', "''"))).unwrap_or("NULL".into());
+        diesel::sql_query(format!(
+            "INSERT OR REPLACE INTO mtgo_match_labels(match_id, side, source, archetype, subtype, category, archetype_marker, subtype_marker) VALUES ({}, 'opp', 'guess', {}, {}, {}, 'cluster', {})",
+            mm.match_id, q(Some(arch)), q(sub), q(cat), if sub.is_some() { "'cluster'" } else { "NULL" }
+        ))
+        .execute(conn)?;
+        adopted += 1;
+    }
+    println!("cluster fallback: {adopted} opponent matches with no marker seen adopted their cluster's majority archetype (archetype_marker = 'cluster')");
     println!("advisory labels from marker cards (source = guess) → mtgo_match_labels; my_guess_* / opp_guess_* columns in mtgo_game_view");
 
     if check {
