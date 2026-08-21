@@ -65,7 +65,7 @@ username = "boryas"
 # `mtgctl mtgo stats -i` defaults: columns pre-selected as filters / group-bys / histograms
 # (any column of mtgo_game_view — see `mtgctl mtgo columns` — plus "last N matches").
 stats_filters = ["my_deck"]
-stats_groupbys = ["opp_cards"]
+stats_groupbys = ["opp_guess_archetype"]
 stats_hist = []
 stats_min_games = 1
 # First-screen columns in `mtgo stats -i` (everything else is behind "more columns…"); empty = built-in curated list.
