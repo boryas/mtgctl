@@ -13,6 +13,7 @@ pub mod format;
 pub mod label;
 pub mod model;
 pub mod picker;
+pub mod pivot;
 pub mod scan;
 pub mod stats;
 
@@ -178,6 +179,24 @@ enum MtgoCommand {
         #[arg(long, value_name = "N")]
         suggest: Option<usize>,
     },
+    /// Pivot analysis for a staged plan: what happens before the pivot card resolves, after, and when it's never cast.
+    Pivot {
+        /// The pivot card (e.g. Doomsday, Marit Lage, Thassa's Oracle).
+        #[arg(long, default_value = "Doomsday")]
+        card: String,
+        /// The conversion card cast after resolution (default: Thassa's Oracle when card = Doomsday).
+        #[arg(long)]
+        convert: Option<String>,
+        /// SQL WHERE over mtgo_game_view to pick the population, e.g. "my_guess_archetype='Doomsday' AND my_guess_subtype='Tempo'"
+        #[arg(long = "where")]
+        where_sql: Option<String>,
+        /// Minimum games-with for an event row.
+        #[arg(long, default_value_t = 25)]
+        min: i64,
+        /// Rows per direction in each table.
+        #[arg(long, default_value_t = 12)]
+        top: usize,
+    },
     /// List the columns available to `mtgo stats`.
     Columns,
     /// Load the Legacy timeline (bans, set releases) into mtgo_eras and stamp matches with era_id.
@@ -254,6 +273,13 @@ pub fn run(args: MtgoArgs) {
             let conn = &mut crate::db::establish_connection();
             if let Err(e) = label::run_label(conn, &file, check, suggest) {
                 eprintln!("label failed: {e}");
+            }
+        }
+        MtgoCommand::Pivot { card, convert, where_sql, min, top } => {
+            let conn = &mut crate::db::establish_connection();
+            let wher = where_sql.or_else(|| if card == "Doomsday" { Some("my_guess_archetype = 'Doomsday'".to_string()) } else { None });
+            if let Err(e) = pivot::run_pivot(conn, &card, convert.as_deref(), wher.as_deref(), min, top) {
+                eprintln!("pivot failed: {e}");
             }
         }
         MtgoCommand::Columns => {
