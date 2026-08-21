@@ -304,6 +304,9 @@ pub fn name_cluster(top: &[(String, f32, f32)], lands: &std::collections::HashSe
 pub fn summarize(docs: &[Doc], v: &Vectors, labels: &[usize]) -> Vec<ClusterSummary> {
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, &l) in labels.iter().enumerate() {
+        if l == usize::MAX {
+            continue; // unclustered (sparse signature with no close established cluster)
+        }
         groups.entry(l).or_default().push(i);
     }
     let mut out: Vec<ClusterSummary> = groups
@@ -371,7 +374,72 @@ pub fn run_cluster(conn: &mut SqliteConnection, threshold: f32, variant_threshol
         return Ok(());
     }
 
-    let labels = cut(docs.len(), &merges, threshold);
+    let mut labels = cut(docs.len(), &merges, threshold);
+
+    // Sparse signatures (few cards observed — typically short games) cannot discriminate archetypes
+    // and would form or join tiny junk clusters. Cluster on rich signatures only, then attach each
+    // sparse one to the nearest established cluster (≥ MIN_CLUSTER rich members) by centroid
+    // cosine, or leave it unclustered (label = usize::MAX) if nothing is within SPARSE_MAX_DIST.
+    const SPARSE_CARDS: usize = 10;
+    const MIN_CLUSTER: usize = 5;
+    const SPARSE_MAX_DIST: f32 = 0.75;
+    let sparse: Vec<bool> = docs.iter().map(|d| d.cards.len() < SPARSE_CARDS).collect();
+    // rich-member counts per label
+    let mut rich_count: HashMap<usize, usize> = HashMap::new();
+    for (i, &l) in labels.iter().enumerate() {
+        if !sparse[i] {
+            *rich_count.entry(l).or_default() += 1;
+        }
+    }
+    // centroids of established clusters (rich members only), unit-normalised
+    let mut centroids: HashMap<usize, Vec<(u32, f32)>> = HashMap::new();
+    for (&l, &c) in &rich_count {
+        if c < MIN_CLUSTER {
+            continue;
+        }
+        let mut acc: BTreeMap<u32, f32> = BTreeMap::new();
+        for (i, &li) in labels.iter().enumerate() {
+            if li == l && !sparse[i] {
+                for (id, w) in &v.vecs[i] {
+                    *acc.entry(*id).or_default() += *w;
+                }
+            }
+        }
+        let norm = acc.values().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+        centroids.insert(l, acc.into_iter().map(|(id, w)| (id, w / norm)).collect());
+    }
+    let mut reattached = 0;
+    let mut unclustered = 0;
+    for i in 0..docs.len() {
+        if !sparse[i] {
+            continue;
+        }
+        let mut best: Option<(usize, f32)> = None;
+        for (&l, cen) in &centroids {
+            let d = 1.0 - dot(&v.vecs[i], cen);
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((l, d));
+            }
+        }
+        match best {
+            Some((l, d)) if d <= SPARSE_MAX_DIST => {
+                labels[i] = l;
+                reattached += 1;
+            }
+            _ => {
+                labels[i] = usize::MAX;
+                unclustered += 1;
+            }
+        }
+    }
+    // Clusters that were only ever sparse signatures dissolve into "unclustered" too.
+    for l in labels.iter_mut() {
+        if *l != usize::MAX && rich_count.get(l).copied().unwrap_or(0) == 0 {
+            *l = usize::MAX;
+            unclustered += 1;
+        }
+    }
+    eprintln!("{} sparse signatures (<{SPARSE_CARDS} cards): {reattached} attached to the nearest established cluster, {unclustered} left unclustered", sparse.iter().filter(|s| **s).count());
     let summaries = summarize(&docs, &v, &labels);
 
     // Match results for win-rate columns.
