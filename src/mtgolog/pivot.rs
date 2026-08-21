@@ -182,11 +182,11 @@ pub fn run_pivot(conn: &mut SqliteConnection, card: &str, convert: Option<&str>,
         let total_out = pop.iter().filter(|i| outcome(i)).count() as i64;
         let mut rows: Vec<(String, i64, i64, f64)> = counts
             .into_iter()
-            .filter(|(_, (c, _))| *c >= min_n && *c <= total - min_n)
+            .filter(|(_, (c, _))| *c >= min_n)
             .map(|(k, (c, w))| {
                 let with = w as f64 / c as f64;
-                let without = (total_out - w) as f64 / (total - c) as f64;
-                (k.to_string(), c, w, with - without)
+                let without = if total > c { (total_out - w) as f64 / (total - c) as f64 } else { f64::NAN };
+                (k.to_string(), c, w, if without.is_nan() { 0.0 } else { with - without })
             })
             .collect();
         rows.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap());
@@ -200,13 +200,18 @@ pub fn run_pivot(conn: &mut SqliteConnection, card: &str, convert: Option<&str>,
                 t.add_row(vec!["…", "", "", "", ""]);
                 last_pos = false;
             }
-            let without = (total_out - w) as f64 / (total - c) as f64;
+            let (without_s, delta_s) = if total > *c {
+                let without = (total_out - w) as f64 / (total - c) as f64;
+                (format!("{:.1}%", without * 100.0), format!("{:+.1}", d * 100.0))
+            } else {
+                ("(all games)".to_string(), String::new())
+            };
             t.add_row(vec![
                 Cell::new(k),
                 Cell::new(c).set_alignment(CellAlignment::Right),
                 Cell::new(pct_ci(*w, *c)).set_alignment(CellAlignment::Right),
-                Cell::new(format!("{:.1}%", without * 100.0)).set_alignment(CellAlignment::Right),
-                Cell::new(format!("{:+.1}", d * 100.0)).set_alignment(CellAlignment::Right),
+                Cell::new(without_s).set_alignment(CellAlignment::Right),
+                Cell::new(delta_s).set_alignment(CellAlignment::Right),
             ]);
         }
         println!("\n== {title} ({} games, base {outcome_name} {:.1}%; events with ≥{min_n} games)", pop.len(), 100.0 * total_out as f64 / total as f64);
