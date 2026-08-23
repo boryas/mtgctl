@@ -93,13 +93,21 @@ markers = ["Entomb", "Reanimate", "Animate Dead", "Exhume", "Shallow Grave", "Gr
 [[archetype]]
 name = "Cloudpost"
 category = "Non-Blue"
-markers = ["Cloudpost", "Glimmerpost", "Urza's Tower", "Urza's Mine", "Urza's Power Plant"]
+markers = ["Cloudpost", "Glimmerpost"]
 
 [[archetype]]
 name = "Mystic Forge"
 category = "Combo"
 markers = ["Mystic Forge", "Manifold Key", "Urza's Workshop"]
 
+
+[[archetype]]
+name = "Tron"
+category = "Non-Blue"
+markers = ["Urza's Tower", "Urza's Mine", "Urza's Power Plant"]
+  [[archetype.subtype]]
+  name = "Blue"
+  markers = ["Force of Will", "Thundertrap Trainer", "Force of Negation", "Island", "Underground Sea", "Tropical Island", "Volcanic Island"]
 [[archetype]]
 name = "Dredge"
 category = "Combo"
