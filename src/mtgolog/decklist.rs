@@ -23,6 +23,7 @@ diesel::table! {
         id -> Integer,
         hash -> Text,
         name -> Nullable<Text>,
+        auto_name -> Nullable<Text>,
         n_main -> Integer,
         n_side -> Integer,
         first_seen -> Text,
@@ -68,6 +69,7 @@ pub const DDL: &[&str] = &[
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         hash TEXT NOT NULL UNIQUE,          -- canonical (name, qty, sideboard) multiset
         name TEXT,                          -- user-given name (mtgctl mtgo name-list)
+        auto_name TEXT,                     -- Archetype/Subtype v2 (08-21): lineage + version + first-seen
         n_main INTEGER NOT NULL,
         n_side INTEGER NOT NULL,
         first_seen TEXT NOT NULL,
@@ -392,6 +394,9 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
     for stmt in DDL {
         diesel::sql_query(*stmt).execute(conn)?;
     }
+    if diesel::sql_query("SELECT auto_name FROM mtgo_lists LIMIT 0").execute(conn).is_err() {
+        diesel::sql_query("ALTER TABLE mtgo_lists ADD COLUMN auto_name TEXT").execute(conn)?;
+    }
     let mut all: Vec<DeckUsed> = Vec::new();
     for p in session_logs(cfg) {
         all.extend(parse_session_log(&p));
@@ -522,8 +527,45 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
             .execute(conn)?;
         }
     }
+    auto_name_lists(conn, &rules)?;
     let _ = (mtgo_games::table, mtgo_matches::table, mtgo_match_labels::table);
     Ok(st)
+}
+
+/// Meaningful identifiers: lists form a lineage per (archetype, subtype) — labelled straight from
+/// the list's own cards — and are versioned by first-seen date: "Doomsday/Tempo v2 (08-21)".
+/// A user-given name (mtgo name-list) always wins in the view.
+fn auto_name_lists(conn: &mut SqliteConnection, rules: &[super::label::ArchetypeRule]) -> QueryResult<()> {
+    #[derive(QueryableByName)]
+    struct L {
+        #[diesel(sql_type = Integer)]
+        id: i32,
+        #[diesel(sql_type = Text)]
+        first_seen: String,
+    }
+    let lists: Vec<L> = diesel::sql_query("SELECT id, first_seen FROM mtgo_lists ORDER BY first_seen, id").load(conn)?;
+    let mut lineages: BTreeMap<String, Vec<(String, i32)>> = BTreeMap::new();
+    for l in &lists {
+        let names: Vec<PlayedRow> = diesel::sql_query(format!("SELECT name FROM mtgo_list_cards WHERE list_id = {}", l.id)).load(conn)?;
+        let set: BTreeSet<String> = names.into_iter().map(|n| n.name).collect();
+        let g = super::label::guess(rules, &set);
+        let line = match (&g.archetype, &g.subtype) {
+            (Some(a), Some(sb)) => format!("{a}/{sb}"),
+            (Some(a), None) => a.clone(),
+            _ => "unlabelled".to_string(),
+        };
+        lineages.entry(line).or_default().push((l.first_seen.clone(), l.id));
+    }
+    for (line, mut versions) in lineages {
+        versions.sort();
+        let many = versions.len() > 1;
+        for (k, (first_seen, id)) in versions.iter().enumerate() {
+            let date = &first_seen[5..10.min(first_seen.len())];
+            let name = if many { format!("{line} v{} ({date})", k + 1) } else { format!("{line} ({date})") };
+            diesel::sql_query(format!("UPDATE mtgo_lists SET auto_name = '{}' WHERE id = {id}", name.replace('\'', "''"))).execute(conn)?;
+        }
+    }
+    Ok(())
 }
 
 fn fxhash(s: &str) -> u64 {
@@ -553,10 +595,12 @@ struct ListRow {
     matches: i64,
     #[diesel(sql_type = BigInt)]
     games: i64,
-    #[diesel(sql_type = Nullable<Text>)]
-    archetype: Option<String>,
-    #[diesel(sql_type = Nullable<Text>)]
-    subtype: Option<String>,
+    #[diesel(sql_type = Text)]
+    #[allow(dead_code)]
+    archetype: String,
+    #[diesel(sql_type = Text)]
+    #[allow(dead_code)]
+    subtype: String,
 }
 
 pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
@@ -564,33 +608,68 @@ pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     let rows: Vec<ListRow> = diesel::sql_query(
-        "SELECT l.id, l.name, l.n_main, l.n_side, l.first_seen, l.last_seen,
+        "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.n_main, l.n_side, l.first_seen, l.last_seen,
                 (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
                 (SELECT COUNT(*) FROM mtgo_games g WHERE g.list_id = l.id) AS games,
-                (SELECT lb.archetype FROM mtgo_match_labels lb JOIN mtgo_matches m2 ON m2.id = lb.match_id WHERE m2.my_list_id = l.id AND lb.side='me' AND lb.source='list' LIMIT 1) AS archetype,
-                (SELECT lb.subtype FROM mtgo_match_labels lb JOIN mtgo_matches m2 ON m2.id = lb.match_id WHERE m2.my_list_id = l.id AND lb.side='me' AND lb.source='list' LIMIT 1) AS subtype
+                '' AS archetype, '' AS subtype
          FROM mtgo_lists l ORDER BY l.first_seen",
     )
     .load(conn)?;
     let mut t = Table::new();
     t.load_preset(UTF8_FULL_CONDENSED);
-    t.set_header(["id", "name", "archetype", "subtype", "main/side", "first seen", "last seen", "matches (registered)", "games (incl. post-board)"]);
+    t.set_header(["id", "name (my_deck)", "main/side", "first seen", "last seen", "matches", "games", "Δ vs previous version"]);
+    // previous list in the same lineage = same name minus the version suffix
+    let lineage = |n: &str| n.rsplit_once(" v").map(|(a, _)| a.to_string()).unwrap_or_else(|| n.to_string());
+    let mut prev_in_line: HashMap<String, i32> = HashMap::new();
     for r in &rows {
+        let disp = r.name.clone().unwrap_or_else(|| format!("list#{}", r.id));
+        let line = lineage(&disp);
+        let diff = match prev_in_line.get(&line) {
+            Some(&prev) => diff_summary(conn, prev, r.id)?,
+            None => String::new(),
+        };
+        prev_in_line.insert(line, r.id);
         t.add_row(vec![
             Cell::new(r.id),
-            Cell::new(r.name.clone().unwrap_or_default()),
-            Cell::new(r.archetype.clone().unwrap_or_default()),
-            Cell::new(r.subtype.clone().unwrap_or_default()),
+            Cell::new(disp),
             Cell::new(format!("{}/{}", r.n_main, r.n_side)),
             Cell::new(&r.first_seen[..10]),
             Cell::new(&r.last_seen[..10]),
             Cell::new(r.matches).set_alignment(CellAlignment::Right),
             Cell::new(r.games).set_alignment(CellAlignment::Right),
+            Cell::new(diff),
         ]);
     }
     println!("{t}");
     println!("{} distinct lists (a list = exact main+side multiset; post-board configurations are separate lists). `mtgctl mtgo list <id>` prints one; `mtgo name-list <id> <name>` names it.", rows.len());
     Ok(())
+}
+
+/// Compact "+2 Wasteland −2 Bilbo…" summary between two lists (main+side together).
+fn diff_summary(conn: &mut SqliteConnection, a: i32, b: i32) -> QueryResult<String> {
+    let load = |conn: &mut SqliteConnection, id: i32| -> QueryResult<BTreeMap<String, i32>> {
+        let rows: Vec<CardRow> = diesel::sql_query(format!("SELECT name, qty, sideboard FROM mtgo_list_cards WHERE list_id = {id}")).load(conn)?;
+        let mut m = BTreeMap::new();
+        for r in rows {
+            *m.entry(r.name).or_insert(0) += r.qty;
+        }
+        Ok(m)
+    };
+    let (ma, mb) = (load(conn, a)?, load(conn, b)?);
+    let keys: BTreeSet<&String> = ma.keys().chain(mb.keys()).collect();
+    let mut parts = Vec::new();
+    for k in keys {
+        let d = mb.get(k).copied().unwrap_or(0) - ma.get(k).copied().unwrap_or(0);
+        if d != 0 {
+            parts.push(format!("{}{} {}", if d > 0 { "+" } else { "−" }, d.abs(), k));
+        }
+    }
+    let mut out = parts.join(", ");
+    if out.len() > 70 {
+        out.truncate(67);
+        out.push('…');
+    }
+    Ok(out)
 }
 
 #[derive(QueryableByName)]

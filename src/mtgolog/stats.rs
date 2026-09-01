@@ -43,7 +43,7 @@ SELECT
   lo.subtype_marker   AS opp_guess_subtype_marker,
   m.my_list_id        AS my_list_id,
   CASE WHEN m.my_list_id IS NOT NULL THEN 1 ELSE 0 END AS has_decklist,
-  COALESCE(li.name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_deck,
+  COALESCE(li.name, li.auto_name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_deck,
   ll.archetype        AS my_list_archetype,
   ll.subtype          AS my_list_subtype,
   ll.category         AS my_list_category,
