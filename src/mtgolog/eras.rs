@@ -151,6 +151,23 @@ pub fn run_eras(conn: &mut SqliteConnection, path: &Path, only_bans: bool, check
     if unassigned > 0 {
         println!("{unassigned} matches predate the first era (era_id NULL)");
     }
+    // Staleness guard: the timeline is a curated file; warn when play continues well past its last
+    // event (sets land every ~6-7 weeks and B&R announcements are scheduled).
+    if let Some(last_event) = events.iter().map(|e| e.effective.as_str()).max() {
+        let newest: Option<String> = mtgo_matches::table
+            .filter(mtgo_matches::replay.eq(false))
+            .select(diesel::dsl::max(mtgo_matches::start_ts))
+            .first(conn)?;
+        if let Some(newest) = newest {
+            let (a, b) = (chrono::NaiveDate::parse_from_str(last_event, "%Y-%m-%d"), chrono::NaiveDate::parse_from_str(&newest[..10.min(newest.len())], "%Y-%m-%d"));
+            if let (Ok(a), Ok(b)) = (a, b) {
+                let days = (b - a).num_days();
+                if days > 45 {
+                    println!("WARNING: newest match is {days} days past the last timeline event ({last_event}) — definitions/mtgo/legacy_timeline.toml is probably missing a set release or B&R announcement (next scheduled B&R: check magic.wizards.com).");
+                }
+            }
+        }
+    }
 
     if check {
         // Sanity: banned cards should not be seen after their effective date (MTGO applies bans promptly).
