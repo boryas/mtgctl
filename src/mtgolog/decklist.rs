@@ -533,7 +533,8 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
 }
 
 /// Meaningful identifiers: lists form a lineage per (archetype, subtype) — labelled straight from
-/// the list's own cards — and are versioned by first-seen date: "Doomsday/Tempo v2 (08-21)".
+/// the list's own cards — numbered within each era, dated, and annotated with the most-changed
+/// cards vs the previous version: "Doomsday/Tempo e22.2 (08-21, +Jace −Edge)".
 /// A user-given name (mtgo name-list) always wins in the view.
 fn auto_name_lists(conn: &mut SqliteConnection, rules: &[super::label::ArchetypeRule]) -> QueryResult<()> {
     #[derive(QueryableByName)]
@@ -543,6 +544,17 @@ fn auto_name_lists(conn: &mut SqliteConnection, rules: &[super::label::Archetype
         #[diesel(sql_type = Text)]
         first_seen: String,
     }
+    #[derive(QueryableByName)]
+    struct Era {
+        #[diesel(sql_type = Integer)]
+        id: i32,
+        #[diesel(sql_type = Text)]
+        start_date: String,
+    }
+    let mut eras: Vec<Era> = diesel::sql_query("SELECT id, start_date FROM mtgo_eras ORDER BY start_date, id").load(conn).unwrap_or_default();
+    eras.sort_by(|a, b| a.start_date.cmp(&b.start_date));
+    let era_of = |date: &str| eras.iter().rev().find(|e| e.start_date.as_str() <= date).map(|e| e.id);
+
     let lists: Vec<L> = diesel::sql_query("SELECT id, first_seen FROM mtgo_lists ORDER BY first_seen, id").load(conn)?;
     let mut lineages: BTreeMap<String, Vec<(String, i32)>> = BTreeMap::new();
     for l in &lists {
@@ -558,14 +570,58 @@ fn auto_name_lists(conn: &mut SqliteConnection, rules: &[super::label::Archetype
     }
     for (line, mut versions) in lineages {
         versions.sort();
-        let many = versions.len() > 1;
-        for (k, (first_seen, id)) in versions.iter().enumerate() {
+        let mut per_era: HashMap<Option<i32>, usize> = HashMap::new();
+        let mut prev: Option<i32> = None;
+        for (first_seen, id) in &versions {
             let date = &first_seen[5..10.min(first_seen.len())];
-            let name = if many { format!("{line} v{} ({date})", k + 1) } else { format!("{line} ({date})") };
+            let era = era_of(&first_seen[..10.min(first_seen.len())]);
+            let k = per_era.entry(era).or_insert(0);
+            *k += 1;
+            let era_part = match era {
+                Some(e) => format!(" e{e}.{k}"),
+                None => format!(" v{k}"),
+            };
+            // annotation: up to 2 most-changed cards vs the previous version in this lineage
+            let ann = match prev {
+                Some(p) => {
+                    let d = diff_tokens(conn, p, *id, 2)?;
+                    if d.is_empty() { String::new() } else { format!(", {}", d.join(" ")) }
+                }
+                None => String::new(),
+            };
+            let name = format!("{line}{era_part} ({date}{ann})");
             diesel::sql_query(format!("UPDATE mtgo_lists SET auto_name = '{}' WHERE id = {id}", name.replace('\'', "''"))).execute(conn)?;
+            prev = Some(*id);
         }
     }
     Ok(())
+}
+
+/// The `n` most-changed cards between two lists as compact tokens: "+Jace −Edge".
+fn diff_tokens(conn: &mut SqliteConnection, a: i32, b: i32, n: usize) -> QueryResult<Vec<String>> {
+    let load = |conn: &mut SqliteConnection, id: i32| -> QueryResult<BTreeMap<String, i32>> {
+        let rows: Vec<CardRow> = diesel::sql_query(format!("SELECT name, qty, sideboard FROM mtgo_list_cards WHERE list_id = {id}")).load(conn)?;
+        let mut m = BTreeMap::new();
+        for r in rows {
+            *m.entry(r.name).or_insert(0) += r.qty;
+        }
+        Ok(m)
+    };
+    let (ma, mb) = (load(conn, a)?, load(conn, b)?);
+    let keys: BTreeSet<&String> = ma.keys().chain(mb.keys()).collect();
+    let mut diffs: Vec<(i32, String)> = keys
+        .into_iter()
+        .filter_map(|k| {
+            let d = mb.get(k).copied().unwrap_or(0) - ma.get(k).copied().unwrap_or(0);
+            if d == 0 {
+                return None;
+            }
+            let short = k.split(',').next().unwrap_or(k).trim();
+            Some((d, format!("{}{}", if d > 0 { "+" } else { "−" }, short)))
+        })
+        .collect();
+    diffs.sort_by_key(|(d, _)| std::cmp::Reverse(d.abs()));
+    Ok(diffs.into_iter().take(n).map(|(_, t)| t).collect())
 }
 
 fn fxhash(s: &str) -> u64 {
@@ -595,12 +651,6 @@ struct ListRow {
     matches: i64,
     #[diesel(sql_type = BigInt)]
     games: i64,
-    #[diesel(sql_type = Text)]
-    #[allow(dead_code)]
-    archetype: String,
-    #[diesel(sql_type = Text)]
-    #[allow(dead_code)]
-    subtype: String,
 }
 
 pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
@@ -610,16 +660,15 @@ pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
     let rows: Vec<ListRow> = diesel::sql_query(
         "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.n_main, l.n_side, l.first_seen, l.last_seen,
                 (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
-                (SELECT COUNT(*) FROM mtgo_games g WHERE g.list_id = l.id) AS games,
-                '' AS archetype, '' AS subtype
-         FROM mtgo_lists l ORDER BY l.first_seen",
+                (SELECT COUNT(*) FROM mtgo_games g WHERE g.list_id = l.id) AS games
+         FROM mtgo_lists l ORDER BY l.first_seen, l.id",
     )
     .load(conn)?;
     let mut t = Table::new();
     t.load_preset(UTF8_FULL_CONDENSED);
     t.set_header(["id", "name (my_deck)", "main/side", "first seen", "last seen", "matches", "games", "Δ vs previous version"]);
-    // previous list in the same lineage = same name minus the version suffix
-    let lineage = |n: &str| n.rsplit_once(" v").map(|(a, _)| a.to_string()).unwrap_or_else(|| n.to_string());
+    // previous list in the same lineage = same name up to the era/version suffix
+    let lineage = |n: &str| n.split(" e").next().unwrap_or(n).split(" v").next().unwrap_or(n).to_string();
     let mut prev_in_line: HashMap<String, i32> = HashMap::new();
     for r in &rows {
         let disp = r.name.clone().unwrap_or_else(|| format!("list#{}", r.id));
