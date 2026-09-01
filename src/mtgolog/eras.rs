@@ -90,7 +90,9 @@ pub fn run_eras(conn: &mut SqliteConnection, path: &Path, only_bans: bool, check
     // One era per effective date: events sharing a date (e.g. a set + its Commander release,
     // or a ban landing on a release day) are merged into a single era.
     let mut opening: Vec<TimelineEvent> = Vec::new();
-    for e in events.iter().filter(|e| !only_bans || e.kind != "set") {
+    // A B&R announcement that changed nothing in Legacy does not open an era.
+    let effective_event = |e: &TimelineEvent| e.kind != "banlist" || !e.banned.is_empty() || !e.unbanned.is_empty();
+    for e in events.iter().filter(|e| effective_event(e) && (!only_bans || e.kind != "set")) {
         match opening.last_mut() {
             Some(last) if last.effective == e.effective => {
                 let label = |x: &TimelineEvent| if x.code.is_empty() { x.name.clone() } else { x.code.clone() };
