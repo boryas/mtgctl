@@ -1,0 +1,12 @@
+[Unit]
+Description=mtgctl-web (MTGO log analysis)
+After=network-online.target
+
+[Service]
+ExecStart=%h/mtgctl-web/bin/mtgctl-web --data /mnt/mtgctl_data/data serve --listen 127.0.0.1:8090 --web %h/mtgctl-web/web --repo %h/mtgctl-web
+WorkingDirectory=%h/mtgctl-web
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
