@@ -98,7 +98,8 @@ pub const DDL: &[&str] = &[
         list_id INTEGER NOT NULL REFERENCES mtgo_lists(id),
         game_db_id INTEGER,                 -- linked mtgo_games.id
         match_db_id INTEGER,                -- linked mtgo_matches.id
-        event_kind TEXT                     -- e.g. League / Tournament / Constructed (from the duel-scene line)
+        event_kind TEXT,                    -- e.g. League / Tournament / Constructed (from the duel-scene line)
+        event_name TEXT                     -- 'League' or the tournament name ('Legacy Challenge 32')
     )",
     "CREATE TABLE IF NOT EXISTS mtgo_cards (
         catalog_id INTEGER PRIMARY KEY,
@@ -125,6 +126,8 @@ struct DeckUsed {
     source: String,
     match_id: Option<i64>,
     event_kind: Option<String>,
+    /// "League", or the tournament's name ("Legacy Challenge 32"), from the session log
+    event_name: Option<String>,
 }
 
 static TS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d\d):(\d\d):(\d\d) ").unwrap());
@@ -168,8 +171,10 @@ pub fn session_logs(cfg: &MtgoConfig) -> Vec<PathBuf> {
 /// Parse one session log. Lines carry only HH:MM:SS; the date comes from the file's mtime (archived
 /// copies are named after it) minus the number of midnight rollovers observed in the file.
 /// The lines a session log is kept for: registered lists, game/match status (life totals and
-/// zone counts live in its JSON), the duel-scene kind, plus one line per hour so the midnight
-/// rollover count in parse_session_log still sees a dense clock. ~1% of the raw file.
+/// zone counts live in its JSON), the duel-scene kind, the event descriptors (`EventId=` /
+/// `Description=` name an event; a match block's `Description=Tournament:<id> …` or league text
+/// says which event a game belongs to), plus one line per hour so the midnight rollover count in
+/// parse_session_log still sees a dense clock. ~1% of the raw file.
 pub fn session_extract(text: &str) -> String {
     let mut out = String::new();
     let mut last_hour: Option<&str> = None;
@@ -177,7 +182,9 @@ pub fn session_extract(text: &str) -> String {
         let hour = TS.captures(line).map(|_| &line[..2]);
         // substring tests, not the parsing regexes: the collector page applies the same tests, so
         // both sides produce byte-identical extracts for the same raw log
-        let keep = line.contains("Deck Used in Game ID:") || line.contains("Game Play Status Update for Game ID:") || line.contains("CreateAndFlipToDuelScene") || (hour.is_some() && hour != last_hour);
+        let keep = line.contains("Deck Used in Game ID:") || line.contains("Game Play Status Update for Game ID:") || line.contains("CreateAndFlipToDuelScene")
+            || line.starts_with("Description=") || line.starts_with("EventId=") || line.contains("Deck Used to Join Event ID:")
+            || (hour.is_some() && hour != last_hour);
         if keep {
             out.push_str(line);
             out.push('\n');
@@ -229,7 +236,35 @@ fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
     let mut out: Vec<DeckUsed> = Vec::new();
     let mut game_match: HashMap<i64, i64> = HashMap::new();
     let mut pending_scene: Option<usize> = None; // index in out awaiting its "Details:" line
+    // event id → name, from an `EventId=N` line followed by its `Description=`; the match block
+    // before a Deck Used line says `Description=Tournament:N Round:R` or the league blurb.
+    let mut event_names: HashMap<i64, String> = HashMap::new();
+    let mut pending_event_id: Option<i64> = None;
+    let mut current_event: Option<String> = None;
     for line in text.lines() {
+        if let Some(id) = line.strip_prefix("EventId=").and_then(|s| s.trim().parse::<i64>().ok()) {
+            pending_event_id = Some(id);
+            continue;
+        }
+        if let Some(desc) = line.strip_prefix("Description=") {
+            let desc = desc.trim();
+            if let Some(id) = pending_event_id.take() {
+                if !desc.is_empty() && !desc.starts_with("Tournament:") {
+                    event_names.insert(id, desc.to_string());
+                }
+            }
+            current_event = if desc.starts_with("Play up to") {
+                Some("League".to_string())
+            } else if let Some(rest) = desc.strip_prefix("Tournament:") {
+                let id: Option<i64> = rest.split_whitespace().next().and_then(|s| s.parse().ok());
+                Some(id.and_then(|i| event_names.get(&i).cloned()).unwrap_or_else(|| format!("Tournament {}", id.unwrap_or(0))))
+            } else if desc.is_empty() {
+                current_event.clone()
+            } else {
+                Some(desc.to_string())
+            };
+            continue;
+        }
         let Some(c) = TS.captures(line) else {
             continue;
         };
@@ -258,7 +293,7 @@ fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
             if let Some(prev) = out.iter().position(|d| d.game_id == game_id) {
                 out.remove(prev);
             }
-            out.push(DeckUsed { at: NaiveDateTime::new(date, t), game_id, entries, source: name.to_string(), match_id: None, event_kind: None });
+            out.push(DeckUsed { at: NaiveDateTime::new(date, t), game_id, entries, source: name.to_string(), match_id: None, event_kind: None, event_name: current_event.clone() });
             pending_scene = Some(out.len() - 1);
         }
     }
@@ -553,17 +588,21 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
             st.unlinked += 1;
         }
         let ek = d.event_kind.as_deref().map(|e| format!("'{e}'")).unwrap_or("NULL".into());
+        let en = d.event_name.as_deref().map(|e| format!("'{}'", e.replace('\'', "''"))).unwrap_or("NULL".into());
         let mid = d.match_id.map(|m| m.to_string()).unwrap_or("NULL".into());
         diesel::sql_query(format!(
-            "INSERT INTO mtgo_decklists(mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind)
-             VALUES ({}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek})
-             ON CONFLICT(mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
+            "INSERT INTO mtgo_decklists(mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind, event_name)
+             VALUES ({}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek}, {en})
+             ON CONFLICT(mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), event_name = COALESCE(excluded.event_name, mtgo_decklists.event_name), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
             d.game_id, d.source.replace('\'', "''"),
             game_db_id.map(|x| x.to_string()).unwrap_or("NULL".into()), match_db_id.map(|x| x.to_string()).unwrap_or("NULL".into())
         ))
         .execute(conn)?;
         if let Some(gid) = game_db_id {
             diesel::sql_query(format!("UPDATE mtgo_games SET list_id = {list_id} WHERE id = {gid}")).execute(conn)?;
+        }
+        if let (Some(mid), Some(_)) = (match_db_id, d.event_name.as_deref()) {
+            diesel::sql_query(format!("UPDATE mtgo_matches SET event_name = {en} WHERE id = {mid}")).execute(conn)?;
         }
     }
     // match-level list = the list of its earliest linked game (the registered list); label source='list'

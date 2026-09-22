@@ -628,7 +628,7 @@ struct MatchRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_concept: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
-    event_kind: Option<String>,
+    event_name: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Text)]
     match_result: String,
     #[diesel(sql_type = diesel::sql_types::Integer)]
@@ -670,7 +670,7 @@ async fn matches_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Que
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_deck, v.my_concept, v.event_kind, v.match_result, v.my_game_wins, v.opp_game_wins,
+            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_deck, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
                      FROM (SELECT * FROM mtgo_games WHERE match_id = v.match_id ORDER BY game_number) g) AS games
              FROM mtgo_game_view v
@@ -777,6 +777,68 @@ async fn game_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Que
     Ok(Json(r))
 }
 
+#[derive(diesel::QueryableByName, Serialize)]
+struct GameRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    game_id: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    match_id: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    date: String,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opponent: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_cards: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    my_deck: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    event_name: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    game_number: i32,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Bool>)]
+    on_play: Option<bool>,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    my_mulligans: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    opp_mulligans: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    turns: i32,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    winner: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    win_by: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+    minutes: Option<i64>,
+}
+
+/// One row per game the WHERE selects, newest first.
+async fn games_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<MatchesParams>) -> Result<Json<Vec<GameRow>>, ApiError> {
+    let mut q = HashMap::new();
+    if let Some(t) = &p.player {
+        q.insert("player".to_string(), t.clone());
+    }
+    let name = auth(&st, &headers, &q)?;
+    let dir = player_dir(&st, &name);
+    let wher = p.where_sql.filter(|w| !w.trim().is_empty()).map(|w| format!("WHERE {w}")).unwrap_or_default();
+    let limit = p.limit.min(5000);
+    let rows = tokio::task::spawn_blocking(move || -> Result<Vec<GameRow>, String> {
+        use diesel::prelude::*;
+        let conn = &mut dir.connect()?;
+        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
+        stats::ensure_view(conn).map_err(|e| e.to_string())?;
+        diesel::sql_query(format!(
+            "SELECT game_id, match_id, date, opponent, opp_cards, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
+             FROM mtgo_game_view {wher} ORDER BY date DESC, match_id DESC, game_number LIMIT {limit}"
+        ))
+        .load(conn)
+        .map_err(|e| format!("query failed: {e}"))
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(bad)?;
+    Ok(Json(rows))
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -801,6 +863,7 @@ async fn main() {
                 .route("/api/sync", post(sync))
                 .route("/api/stats", get(stats_api))
                 .route("/api/matches", get(matches_api))
+                .route("/api/games", get(games_api))
                 .route("/api/game", get(game_detail))
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))

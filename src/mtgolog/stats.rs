@@ -14,6 +14,7 @@ SELECT
   m.id                AS match_id,
   substr(m.start_ts,1,10) AS date,
   substr(m.start_ts,1,7)  AS month,
+  strftime('%Y-W%W', substr(m.start_ts,1,10)) AS week,
   m.era_id            AS era_id,
   e.name              AS era,
   m.opponent          AS opponent,
@@ -22,6 +23,16 @@ SELECT
   m.opp_game_wins     AS opp_game_wins,
   m.games             AS match_games,
   m.event_name        AS event_name,
+  CASE
+    WHEN m.event_name = 'League' THEN 'League'
+    WHEN m.event_name LIKE '%Challenge%' THEN 'Challenge'
+    WHEN m.event_name LIKE '%Preliminary%' OR m.event_name LIKE '%Prelim%' THEN 'Preliminary'
+    WHEN m.event_name LIKE '%Qualifier%' THEN 'Qualifier'
+    WHEN m.event_name LIKE '%Showcase%' THEN 'Showcase'
+    WHEN m.event_name LIKE '%Last Chance%' THEN 'Last Chance'
+    WHEN m.event_name IS NULL THEN NULL
+    ELSE 'Other'
+  END                 AS event_type,
   m.format            AS format,
   m.my_cluster        AS my_cards_id,
   cm.name             AS my_cards,
