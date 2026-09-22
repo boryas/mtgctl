@@ -5,7 +5,7 @@
 use super::stats::{ensure_view, StatsQuery};
 use super::MtgoConfig;
 use crate::game::fuzzy_multi_select;
-use dialoguer::{Input, MultiSelect};
+use dialoguer::{Input, MultiSelect, Select};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
@@ -14,11 +14,18 @@ use diesel::sqlite::SqliteConnection;
 const LAST_N: &str = "last N matches";
 const NULL_LABEL: &str = "∅ (none)";
 const MORE: &str = "more columns…";
+/// Row orders offered by the picker (flag value, label); same vocabulary as `--sort`.
+const SORTS: &[(&str, &str)] = &[
+    ("games", "size (matches; games in game mode; decks, eras, months by time)"),
+    ("wr", "win rate"),
+    ("key", "key (the group value)"),
+    ("time", "time (first appearance)"),
+];
 
 /// Curated first screen; everything else hides behind "more columns…". Overridable via
 /// [mtgo] picker_filter_columns / picker_groupby_columns in config.toml.
-const DEFAULT_FILTER_COLS: &[&str] = &["my_deck", "my_list_subtype", "opp_guess_archetype", "opp_guess_subtype", "opp_cards", "era", "month", "opponent", "event_kind", "game_number", "on_play", "my_mulligans"];
-const DEFAULT_GROUPBY_COLS: &[&str] = &["opp_guess_archetype", "opp_guess_subtype", "opp_cards", "my_deck", "my_list_subtype", "era", "month", "game_number", "on_play", "my_mulligans", "win_by"];
+const DEFAULT_FILTER_COLS: &[&str] = &["my_concept", "my_deck", "my_list_subtype", "my_experimental", "opp_guess_archetype", "opp_guess_subtype", "opp_cards", "era", "month", "opponent", "event_kind", "game_number", "on_play", "my_mulligans"];
+const DEFAULT_GROUPBY_COLS: &[&str] = &["opp_guess_archetype", "opp_guess_subtype", "opp_cards", "my_deck", "my_concept", "my_list_subtype", "era", "month", "game_number", "on_play", "my_mulligans", "win_by"];
 
 /// Two-tier multi-select: a short curated list (defaults pre-checked) + "more columns…" which opens
 /// a fuzzy finder over the remaining columns. Returns the chosen column names (None = aborted).
@@ -81,7 +88,7 @@ pub fn view_columns(conn: &mut SqliteConnection) -> QueryResult<Vec<String>> {
 }
 
 /// Distinct values of a column with match (and game) counts, most matches first.
-fn column_values(conn: &mut SqliteConnection, col: &str, where_sql: &[String]) -> QueryResult<Vec<(Option<String>, i64, i64)>> {
+pub fn column_values(conn: &mut SqliteConnection, col: &str, where_sql: &[String]) -> QueryResult<Vec<(Option<String>, i64, i64)>> {
     let wher = if where_sql.is_empty() { String::new() } else { format!("WHERE {}", where_sql.join(" AND ")) };
     let sql = format!("SELECT CAST({col} AS TEXT) AS val, COUNT(DISTINCT match_id) AS n, COUNT(*) AS games FROM mtgo_game_view {wher} GROUP BY {col} ORDER BY n DESC, val LIMIT 500");
     let rows: Vec<ValRow> = diesel::sql_query(sql).load(conn)?;
@@ -155,8 +162,15 @@ pub fn pick(conn: &mut SqliteConnection, cfg: &MtgoConfig, base: StatsQuery) -> 
     let primary_g: Vec<String> = if cfg.picker_groupby_columns.is_empty() { DEFAULT_GROUPBY_COLS.iter().map(|s| s.to_string()).collect() } else { cfg.picker_groupby_columns.clone() };
     let Some(gb) = pick_columns("Group by (space to toggle, enter to run)", &cols, &primary_g, &cfg.stats_groupbys, None)? else { return Ok(None) };
 
+    // Step 3: row order; an explicit --sort wins over [mtgo] stats_sort.
+    let current = if base.sort == "games" { cfg.stats_sort.clone().unwrap_or_else(|| "games".into()) } else { base.sort.clone() };
+    let labels: Vec<&str> = SORTS.iter().map(|(_, l)| *l).collect();
+    let default = SORTS.iter().position(|(k, _)| *k == current).unwrap_or(0);
+    let Some(si) = Select::new().with_prompt("Sort rows by").items(&labels).default(default).interact_opt().map_err(|e| e.to_string())? else { return Ok(None) };
+
     let mut q = base;
     q.by = gb;
+    q.sort = SORTS[si].0.to_string();
     q.where_sql = if terms.is_empty() { None } else { Some(terms.join(" AND ")) };
     if q.min_games <= 1 {
         q.min_games = cfg.stats_min_games.unwrap_or(1).max(1);

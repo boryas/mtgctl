@@ -10,7 +10,7 @@ use super::MtgoConfig;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, CellAlignment, Table};
 use diesel::prelude::*;
-use diesel::sql_types::{BigInt, Integer, Nullable, Text};
+use diesel::sql_types::{BigInt, Bool, Integer, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
 use regex::Regex;
 use serde::Deserialize;
@@ -70,6 +70,12 @@ pub const DDL: &[&str] = &[
         hash TEXT NOT NULL UNIQUE,          -- canonical (name, qty, sideboard) multiset
         name TEXT,                          -- user-given name (mtgctl mtgo name-list)
         auto_name TEXT,                     -- Archetype/Subtype v2 (08-21): lineage + version + first-seen
+        fork TEXT,                          -- concept declared at this list (mtgo fork); NULL = inherit from parent
+        fork_experimental BOOLEAN NOT NULL DEFAULT 0, -- the declared concept is a throwaway brew
+        parent_set INTEGER,                 -- mtgo reparent: NULL = auto, 0 = root, else a list id
+        parent_id INTEGER,                  -- derived, see resolve_lineage
+        concept TEXT,                       -- derived
+        experimental BOOLEAN NOT NULL DEFAULT 0, -- derived
         n_main INTEGER NOT NULL,
         n_side INTEGER NOT NULL,
         first_seen TEXT NOT NULL,
@@ -134,7 +140,8 @@ pub fn session_logs(cfg: &MtgoConfig) -> Vec<PathBuf> {
     if let Ok(rd) = std::fs::read_dir(&archive) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) == Some("log") {
+            let n = p.file_name().and_then(|x| x.to_str()).unwrap_or("");
+            if n.ends_with(".log") || n.ends_with(".log.gz") {
                 out.push(p);
             }
         }
@@ -160,8 +167,43 @@ pub fn session_logs(cfg: &MtgoConfig) -> Vec<PathBuf> {
 
 /// Parse one session log. Lines carry only HH:MM:SS; the date comes from the file's mtime (archived
 /// copies are named after it) minus the number of midnight rollovers observed in the file.
+/// The lines a session log is kept for: registered lists, game/match status (life totals and
+/// zone counts live in its JSON), the duel-scene kind, plus one line per hour so the midnight
+/// rollover count in parse_session_log still sees a dense clock. ~1% of the raw file.
+pub fn session_extract(text: &str) -> String {
+    let mut out = String::new();
+    let mut last_hour: Option<&str> = None;
+    for line in text.lines() {
+        let hour = TS.captures(line).map(|_| &line[..2]);
+        // substring tests, not the parsing regexes: the collector page applies the same tests, so
+        // both sides produce byte-identical extracts for the same raw log
+        let keep = line.contains("Deck Used in Game ID:") || line.contains("Game Play Status Update for Game ID:") || line.contains("CreateAndFlipToDuelScene") || (hour.is_some() && hour != last_hour);
+        if keep {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if hour.is_some() {
+            last_hour = hour;
+        }
+    }
+    out
+}
+
+/// Read a session log, gunzipping `.gz` extracts.
+fn read_session_log(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    if path.extension().and_then(|x| x.to_str()) == Some("gz") {
+        use std::io::Read;
+        let mut s = String::new();
+        flate2::read::GzDecoder::new(&bytes[..]).read_to_string(&mut s).ok()?;
+        Some(s)
+    } else {
+        String::from_utf8(bytes).ok()
+    }
+}
+
 fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
-    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Some(text) = read_session_log(path) else { return Vec::new() };
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let end_date: NaiveDate = FNAME
         .captures(name)
@@ -409,16 +451,27 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
     let ids: BTreeSet<i64> = by_game.values().flat_map(|d| d.entries.iter().map(|e| e.catalog_id)).collect();
     let names = resolve_names(conn, cfg, &ids, fetch)?;
     // Rebuild list tables from scratch (cheap; keeps everything consistent with resolver/linking fixes).
-    // User-given list names are keyed by hash so they survive.
+    // User marks (name, fork, parent override) are keyed by hash so they survive.
     #[derive(QueryableByName)]
     struct HN {
         #[diesel(sql_type = Text)]
         hash: String,
-        #[diesel(sql_type = Text)]
-        name: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        name: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        fork: Option<String>,
+        #[diesel(sql_type = Bool)]
+        fork_experimental: bool,
+        #[diesel(sql_type = Nullable<Text>)]
+        parent_hash: Option<String>,
     }
-    let kept: Vec<HN> = diesel::sql_query("SELECT hash, name FROM mtgo_lists WHERE name IS NOT NULL").load(conn)?;
-    let kept_names: HashMap<String, String> = kept.into_iter().map(|r| (r.hash, r.name)).collect();
+    let kept: Vec<HN> = diesel::sql_query(
+        "SELECT l.hash, l.name, l.fork, l.fork_experimental, CASE WHEN l.parent_set = 0 THEN '' ELSE p.hash END AS parent_hash
+         FROM mtgo_lists l LEFT JOIN mtgo_lists p ON p.id = l.parent_set
+         WHERE l.name IS NOT NULL OR l.fork IS NOT NULL OR l.parent_set IS NOT NULL",
+    )
+    .load(conn)?;
+    let kept_marks: HashMap<String, HN> = kept.into_iter().map(|r| (r.hash.clone(), r)).collect();
     for t in ["mtgo_decklists", "mtgo_list_cards", "mtgo_lists"] {
         super::db::truncate(conn, t)?;
     }
@@ -456,8 +509,12 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
                 r.id
             }
             None => {
-                let nm = kept_names.get(&hash).map(|n| format!("'{}'", n.replace('\'', "''"))).unwrap_or("NULL".into());
-                diesel::sql_query(format!("INSERT INTO mtgo_lists(hash, name, n_main, n_side, first_seen, last_seen) VALUES ('{hash}', {nm}, {n_main}, {n_side}, '{seen_at}', '{seen_at}')")).execute(conn)?;
+                let q = |v: &Option<String>| v.as_ref().map(|n| format!("'{}'", n.replace('\'', "''"))).unwrap_or("NULL".into());
+                let (nm, fk, fx) = match kept_marks.get(&hash) {
+                    Some(m) => (q(&m.name), q(&m.fork), m.fork_experimental as i32),
+                    None => ("NULL".to_string(), "NULL".to_string(), 0),
+                };
+                diesel::sql_query(format!("INSERT INTO mtgo_lists(hash, name, fork, fork_experimental, n_main, n_side, first_seen, last_seen) VALUES ('{hash}', {nm}, {fk}, {fx}, {n_main}, {n_side}, '{seen_at}', '{seen_at}')")).execute(conn)?;
                 let r: IdRow = diesel::sql_query("SELECT last_insert_rowid() AS id").get_result(conn)?;
                 for (name, qty, sb, cid) in &cards {
                     diesel::sql_query(format!("INSERT INTO mtgo_list_cards(list_id, catalog_id, name, qty, sideboard) VALUES ({}, {cid}, '{}', {qty}, {})", r.id, name.replace('\'', "''"), *sb as i32)).execute(conn)?;
@@ -527,9 +584,173 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
             .execute(conn)?;
         }
     }
+    for (hash, m) in &kept_marks {
+        let parent = match m.parent_hash.as_deref() {
+            None => continue,
+            Some("") => "0".to_string(),
+            Some(ph) => format!("(SELECT id FROM mtgo_lists WHERE hash = '{ph}')"),
+        };
+        diesel::sql_query(format!("UPDATE mtgo_lists SET parent_set = {parent} WHERE hash = '{hash}'")).execute(conn)?;
+    }
     auto_name_lists(conn, &rules)?;
+    resolve_lineage(conn)?;
     let _ = (mtgo_games::table, mtgo_matches::table, mtgo_match_labels::table);
     Ok(st)
+}
+
+/// A list's parent is the nearest earlier list of the same lineage within this many main-deck
+/// card changes; farther, or a different lineage, starts a new concept.
+pub const MAX_PARENT_DIFF: i32 = 6;
+
+/// "Doomsday/Tempo" from an auto-name "Doomsday/Tempo e19.2 (08-21, …)".
+fn lineage_of(auto_name: &str) -> &str {
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r" (e\d+\.\d+|v\d+) \(").unwrap());
+    RE.find(auto_name).map(|m| &auto_name[..m.start()]).unwrap_or(auto_name)
+}
+
+#[derive(QueryableByName)]
+struct LineageRow {
+    #[diesel(sql_type = Integer)]
+    id: i32,
+    #[diesel(sql_type = Text)]
+    first_seen: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    auto_name: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    fork: Option<String>,
+    #[diesel(sql_type = Bool)]
+    fork_experimental: bool,
+    #[diesel(sql_type = Nullable<Integer>)]
+    parent_set: Option<i32>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    parent_id: Option<i32>,
+    #[diesel(sql_type = Nullable<Text>)]
+    concept: Option<String>,
+}
+
+/// Derive parent_id / concept / experimental for every list. Parent = `parent_set` when given
+/// (0 = root), else per MAX_PARENT_DIFF (ties → the later list). Concept and experimental come
+/// from the nearest ancestor with a `fork`; a chain without one is named "<lineage> (<root MM-DD>)".
+pub fn resolve_lineage(conn: &mut SqliteConnection) -> QueryResult<()> {
+    #[derive(QueryableByName)]
+    struct LC {
+        #[diesel(sql_type = Integer)]
+        list_id: i32,
+        #[diesel(sql_type = Text)]
+        name: String,
+        #[diesel(sql_type = Integer)]
+        qty: i32,
+    }
+    let lists: Vec<LineageRow> = diesel::sql_query("SELECT id, first_seen, auto_name, fork, fork_experimental, parent_set, parent_id, concept FROM mtgo_lists ORDER BY first_seen, id").load(conn)?;
+    let cards: Vec<LC> = diesel::sql_query("SELECT list_id, name, qty FROM mtgo_list_cards WHERE sideboard = 0").load(conn)?;
+    let mut main: HashMap<i32, BTreeMap<String, i32>> = HashMap::new();
+    for c in cards {
+        *main.entry(c.list_id).or_default().entry(c.name).or_insert(0) += c.qty;
+    }
+    let empty = BTreeMap::new();
+    let dist = |a: i32, b: i32| -> i32 {
+        let (ma, mb) = (main.get(&a).unwrap_or(&empty), main.get(&b).unwrap_or(&empty));
+        ma.keys().chain(mb.keys()).collect::<BTreeSet<_>>().into_iter().map(|k| (ma.get(k).copied().unwrap_or(0) - mb.get(k).copied().unwrap_or(0)).abs()).sum::<i32>() / 2
+    };
+    let lineage = |l: &LineageRow| l.auto_name.as_deref().map(lineage_of).unwrap_or("").to_string();
+    let mut resolved: HashMap<i32, (String, bool)> = HashMap::new();
+    for (i, l) in lists.iter().enumerate() {
+        let line = lineage(l);
+        let parent = match l.parent_set {
+            Some(0) => None,
+            Some(p) if resolved.contains_key(&p) => Some(p),
+            Some(p) => {
+                eprintln!("list {}: parent {p} is not an earlier list; treating as root", l.id);
+                None
+            }
+            None => lists[..i]
+                .iter()
+                .filter(|e| lineage(e) == line)
+                .map(|e| (dist(e.id, l.id), e.id))
+                .filter(|(d, _)| *d <= MAX_PARENT_DIFF)
+                .min_by_key(|(d, id)| (*d, std::cmp::Reverse(*id)))
+                .map(|(_, id)| id),
+        };
+        let (concept, experimental) = match (&l.fork, parent) {
+            (Some(f), _) => (f.clone(), l.fork_experimental),
+            (None, Some(p)) => resolved[&p].clone(),
+            (None, None) => (format!("{line} ({})", &l.first_seen[5..10.min(l.first_seen.len())]), false),
+        };
+        diesel::sql_query(format!(
+            "UPDATE mtgo_lists SET parent_id = {}, concept = '{}', experimental = {} WHERE id = {}",
+            parent.map(|p| p.to_string()).unwrap_or("NULL".into()),
+            concept.replace('\'', "''"),
+            experimental as i32,
+            l.id
+        ))
+        .execute(conn)?;
+        resolved.insert(l.id, (concept, experimental));
+    }
+    Ok(())
+}
+
+fn lineage_row(conn: &mut SqliteConnection, id: i32) -> QueryResult<Option<LineageRow>> {
+    diesel::sql_query(format!("SELECT id, first_seen, auto_name, fork, fork_experimental, parent_set, parent_id, concept FROM mtgo_lists WHERE id = {id}")).get_result(conn).optional()
+}
+
+/// The list that declares the concept `id` belongs to: the nearest ancestor with a fork, else the chain root.
+fn concept_root(conn: &mut SqliteConnection, id: i32) -> QueryResult<Option<i32>> {
+    let mut cur = id;
+    loop {
+        let Some(r) = lineage_row(conn, cur)? else { return Ok(None) };
+        match (r.fork, r.parent_id) {
+            (None, Some(p)) => cur = p,
+            _ => return Ok(Some(cur)),
+        }
+    }
+}
+
+/// Declare (or clear) a concept starting at `id`; descendants without their own fork inherit it.
+pub fn fork_list(conn: &mut SqliteConnection, id: i32, name: Option<&str>, experimental: bool) -> Result<(), String> {
+    let set = match name {
+        Some(n) => format!("fork = '{}', fork_experimental = {}", n.replace('\'', "''"), experimental as i32),
+        None => "fork = NULL, fork_experimental = 0".to_string(),
+    };
+    match diesel::sql_query(format!("UPDATE mtgo_lists SET {set} WHERE id = {id}")).execute(conn) {
+        Ok(1) => {}
+        Ok(_) => return Err(format!("no list {id}")),
+        Err(e) => return Err(e.to_string()),
+    }
+    resolve_lineage(conn).map_err(|e| e.to_string())
+}
+
+/// Tag the concept `id` belongs to as experimental (or not); an undeclared chain gets its
+/// derived name as an explicit fork at the root so the tag has somewhere to live.
+pub fn set_experimental(conn: &mut SqliteConnection, id: i32, on: bool) -> Result<i32, String> {
+    let root = concept_root(conn, id).map_err(|e| e.to_string())?.ok_or_else(|| format!("no list {id}"))?;
+    let r = lineage_row(conn, root).map_err(|e| e.to_string())?.ok_or_else(|| format!("no list {root}"))?;
+    let name = r.fork.or(r.concept).unwrap_or_else(|| format!("list#{root}"));
+    fork_list(conn, root, Some(&name), on)?;
+    Ok(root)
+}
+
+/// Override the derived parent: `Some(0)` = root, `None` = back to automatic.
+pub fn reparent(conn: &mut SqliteConnection, id: i32, parent: Option<i32>) -> Result<(), String> {
+    let v = parent.map(|p| p.to_string()).unwrap_or("NULL".into());
+    match diesel::sql_query(format!("UPDATE mtgo_lists SET parent_set = {v} WHERE id = {id}")).execute(conn) {
+        Ok(1) => {}
+        Ok(_) => return Err(format!("no list {id}")),
+        Err(e) => return Err(e.to_string()),
+    }
+    resolve_lineage(conn).map_err(|e| e.to_string())
+}
+
+/// One line: "list 8: concept 'Bilbo DD' (experimental), parent 4".
+pub fn describe(conn: &mut SqliteConnection, id: i32) -> String {
+    match lineage_row(conn, id) {
+        Ok(Some(r)) => format!(
+            "list {id}: concept '{}'{}, parent {}",
+            r.concept.unwrap_or_default(),
+            if r.fork.is_some() && r.fork_experimental { " (experimental)" } else { "" },
+            r.parent_id.map(|p| p.to_string()).unwrap_or("root".into())
+        ),
+        _ => format!("no list {id}"),
+    }
 }
 
 /// Meaningful identifiers: lists form a lineage per (archetype, subtype) — labelled straight from
@@ -639,6 +860,12 @@ struct ListRow {
     id: i32,
     #[diesel(sql_type = Nullable<Text>)]
     name: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    concept: Option<String>,
+    #[diesel(sql_type = Nullable<Integer>)]
+    parent_id: Option<i32>,
+    #[diesel(sql_type = Bool)]
+    experimental: bool,
     #[diesel(sql_type = Integer)]
     n_main: i32,
     #[diesel(sql_type = Integer)]
@@ -658,7 +885,7 @@ pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     let rows: Vec<ListRow> = diesel::sql_query(
-        "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.n_main, l.n_side, l.first_seen, l.last_seen,
+        "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.concept, l.parent_id, l.experimental, l.n_main, l.n_side, l.first_seen, l.last_seen,
                 (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
                 (SELECT COUNT(*) FROM mtgo_games g WHERE g.list_id = l.id) AS games
          FROM mtgo_lists l ORDER BY l.first_seen, l.id",
@@ -666,21 +893,18 @@ pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
     .load(conn)?;
     let mut t = Table::new();
     t.load_preset(UTF8_FULL_CONDENSED);
-    t.set_header(["id", "name (my_deck)", "main/side", "first seen", "last seen", "matches", "games", "Δ vs previous version"]);
-    // previous list in the same lineage = same name up to the era/version suffix
-    let lineage = |n: &str| n.split(" e").next().unwrap_or(n).split(" v").next().unwrap_or(n).to_string();
-    let mut prev_in_line: HashMap<String, i32> = HashMap::new();
+    t.set_header(["id", "name (my_deck)", "concept (my_concept)", "exp", "main/side", "first seen", "last seen", "matches", "games", "Δ vs parent"]);
     for r in &rows {
         let disp = r.name.clone().unwrap_or_else(|| format!("list#{}", r.id));
-        let line = lineage(&disp);
-        let diff = match prev_in_line.get(&line) {
-            Some(&prev) => diff_summary(conn, prev, r.id)?,
+        let diff = match r.parent_id {
+            Some(p) => format!("←{p}: {}", diff_summary(conn, p, r.id)?),
             None => String::new(),
         };
-        prev_in_line.insert(line, r.id);
         t.add_row(vec![
             Cell::new(r.id),
             Cell::new(disp),
+            Cell::new(r.concept.clone().unwrap_or_default()),
+            Cell::new(if r.experimental { "✓" } else { "" }),
             Cell::new(format!("{}/{}", r.n_main, r.n_side)),
             Cell::new(&r.first_seen[..10]),
             Cell::new(&r.last_seen[..10]),
@@ -690,32 +914,28 @@ pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
         ]);
     }
     println!("{t}");
-    println!("{} distinct lists (a list = exact main+side multiset; post-board configurations are separate lists). `mtgctl mtgo list <id>` prints one; `mtgo name-list <id> <name>` names it.", rows.len());
+    println!("{} distinct lists (a list = exact main+side multiset; post-board configurations are separate lists). `mtgctl mtgo list <id>` prints one; `mtgo name-list <id> <name>` names it. Concept = chain of parents (nearest earlier list of the same lineage within {MAX_PARENT_DIFF} main-deck changes); `mtgo fork <id> <name> [--experimental]` declares one, `mtgo reparent <id> <parent|root|auto>` fixes a chain, `mtgo experimental <id>…` tags a concept (exp ✓, my_experimental = 1).", rows.len());
     Ok(())
 }
 
-/// Compact "+2 Wasteland −2 Bilbo…" summary between two lists (main+side together).
+/// Compact "+2 Wasteland −2 Bilbo, SB +1 Duress…" summary between two lists; main first, then side.
 fn diff_summary(conn: &mut SqliteConnection, a: i32, b: i32) -> QueryResult<String> {
-    let load = |conn: &mut SqliteConnection, id: i32| -> QueryResult<BTreeMap<String, i32>> {
+    let load = |conn: &mut SqliteConnection, id: i32| -> QueryResult<BTreeMap<(bool, String), i32>> {
         let rows: Vec<CardRow> = diesel::sql_query(format!("SELECT name, qty, sideboard FROM mtgo_list_cards WHERE list_id = {id}")).load(conn)?;
-        let mut m = BTreeMap::new();
-        for r in rows {
-            *m.entry(r.name).or_insert(0) += r.qty;
-        }
-        Ok(m)
+        Ok(rows.into_iter().map(|r| ((r.sideboard, r.name), r.qty)).collect())
     };
     let (ma, mb) = (load(conn, a)?, load(conn, b)?);
-    let keys: BTreeSet<&String> = ma.keys().chain(mb.keys()).collect();
+    let keys: BTreeSet<&(bool, String)> = ma.keys().chain(mb.keys()).collect();
     let mut parts = Vec::new();
     for k in keys {
         let d = mb.get(k).copied().unwrap_or(0) - ma.get(k).copied().unwrap_or(0);
         if d != 0 {
-            parts.push(format!("{}{} {}", if d > 0 { "+" } else { "−" }, d.abs(), k));
+            parts.push(format!("{}{}{} {}", if k.0 { "SB " } else { "" }, if d > 0 { "+" } else { "−" }, d.abs(), k.1));
         }
     }
     let mut out = parts.join(", ");
-    if out.len() > 70 {
-        out.truncate(67);
+    if out.chars().count() > 70 {
+        out = out.chars().take(67).collect();
         out.push('…');
     }
     Ok(out)
@@ -727,7 +947,7 @@ struct CardRow {
     name: String,
     #[diesel(sql_type = Integer)]
     qty: i32,
-    #[diesel(sql_type = diesel::sql_types::Bool)]
+    #[diesel(sql_type = Bool)]
     sideboard: bool,
 }
 

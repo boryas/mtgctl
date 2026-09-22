@@ -6,16 +6,21 @@
 
 pub mod cards;
 pub mod cluster;
+pub mod colors;
 pub mod db;
 pub mod decklist;
 pub mod eras;
 pub mod event;
 pub mod format;
+pub mod knn;
 pub mod label;
+pub mod ldc;
 pub mod model;
 pub mod picker;
+pub mod pipeline;
 pub mod pivot;
 pub mod scan;
+pub mod skeleton;
 pub mod stats;
 
 use clap::{Args, Subcommand};
@@ -41,6 +46,8 @@ pub struct MtgoConfig {
     pub stats_hist: Vec<String>,
     /// `mtgo stats -i`: default minimum games per row.
     pub stats_min_games: Option<i64>,
+    /// `mtgo stats -i`: row order pre-selected (games | wr | key | time).
+    pub stats_sort: Option<String>,
     /// Directory of archived session logs (mtgo-YYYYmmdd-HHMMSS.log); default ~/.local/share/mtgo/logs.
     pub session_logs_dir: Option<String>,
     /// Marker rules file; default definitions/mtgo/markers.toml.
@@ -159,13 +166,16 @@ enum MtgoCommand {
         /// Comma-separated columns to group by, e.g. opp_cards,on_play
         #[arg(long, value_delimiter = ',')]
         by: Vec<String>,
+        /// One table per value of this column (e.g. --per my_deck --by opp_guess_archetype), instead of joint groups.
+        #[arg(long, value_name = "COL")]
+        per: Option<String>,
         /// SQL WHERE clause over mtgo_game_view, e.g. "my_cards LIKE 'Doomsday%' AND date >= '2026-01-01'"
         #[arg(long = "where")]
         where_sql: Option<String>,
         /// Hide groups with fewer matches (games, when a game-level column is involved).
         #[arg(long, default_value_t = 1)]
         min: i64,
-        /// Row order: size (default: matches, or games in game mode), wr, or key (the group value).
+        /// Row order: size (default: matches, or games in game mode; decks, eras, months and dates default to time), wr, key (the group value), or time (first appearance).
         #[arg(long, default_value = "games")]
         sort: String,
         #[arg(long, default_value_t = 60)]
@@ -209,11 +219,36 @@ enum MtgoCommand {
         #[arg(long)]
         all: bool,
     },
-    /// Guess advisory archetype/subtype/category labels for my side from marker cards (definitions/mtgo/markers.toml).
+    /// Label every match's deck (both sides) by a nearest-anchor vote over its whole card signature; anchors are matches whose deck is known (LDC sheets, hand entries, registered lists, manual labels).
     Label {
+        /// Marker rules, only used with --rules / --suggest.
         #[arg(long, default_value = "definitions/mtgo/markers.toml")]
         file: PathBuf,
-        /// Compare guesses with the hand-entered `matches` table (linked by date + opponent), both sides.
+        /// LDC deck name → deck_types vocabulary.
+        #[arg(long, default_value = "definitions/mtgo/ldc_decks.toml")]
+        ldc_file: PathBuf,
+        /// Neighbours voting per match.
+        #[arg(long, default_value_t = 5)]
+        k: usize,
+        /// Minimum vote margin (best − second)/best to label; below it the match stays unknown.
+        #[arg(long, default_value_t = 0.3)]
+        margin: f32,
+        /// Minimum cosine similarity to the nearest anchor; below it the signature resembles nothing known and stays unknown.
+        #[arg(long, default_value_t = 0.35)]
+        min_sim: f32,
+        /// Use the old ordered single-marker rules instead of the anchor vote.
+        #[arg(long)]
+        rules: bool,
+        /// Print, without writing, every opponent match since this date with its vote, nearest anchors and cards. Without a date: since the last review (stored when a review finishes).
+        #[arg(long, value_name = "YYYY-MM-DD", num_args = 0..=1, default_missing_value = "last")]
+        explain: Option<String>,
+        /// With --explain: only matches that need a human — unknown, skeleton-labelled, or vote margin below 0.6.
+        #[arg(long)]
+        uncertain: bool,
+        /// With --check: only anchors whose match is on or after this date (accuracy on what you labelled recently).
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        since: Option<String>,
+        /// Leave-one-out accuracy/coverage of the vote over the anchors (or, with --rules, the marker check vs hand entries).
         #[arg(long)]
         check: bool,
         /// Print a markers.toml skeleton for clusters (≥ N members) that no rule labels, then exit.
@@ -259,6 +294,57 @@ enum MtgoCommand {
     },
     /// Name a list (shows up as my_deck).
     NameList { id: i32, name: String },
+    /// Declare a concept starting at a list (`mtgo fork 4 "Bilbo DD" --experimental`); later versions chained to it inherit the name and tag.
+    Fork {
+        id: i32,
+        /// Concept name (my_concept); omit with --clear.
+        name: Option<String>,
+        /// The concept is a throwaway brew (my_experimental = 1).
+        #[arg(long)]
+        experimental: bool,
+        /// Remove the declaration; the list rejoins its parent's concept.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Override a list's parent in the concept chain: a list id, `root` (starts a chain) or `auto` (nearest earlier list again).
+    Reparent { id: i32, parent: String },
+    /// Tag the concept each list belongs to as an experimental brew (my_experimental = 1 in mtgo_game_view) so stats can drop them: --where 'my_experimental = 0'.
+    Experimental {
+        ids: Vec<i32>,
+        /// Clear the tag instead.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Validate the labeller's uncertain opponent matches one at a time with the deck typeahead; Enter anchors the match, labels are rebuilt at the end.
+    Review {
+        /// Start date; default: where the last review stopped.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        since: Option<String>,
+        #[arg(long, default_value = "definitions/mtgo/ldc_decks.toml")]
+        ldc_file: PathBuf,
+        #[arg(long, default_value = "definitions/mtgo/markers.toml")]
+        file: PathBuf,
+    },
+    /// Import card colour facts (the card_colors.json written by ~/.local/share/mtgo/ldc/fetch_scryfall.py); `mtgo label` then fills my_colors/opp_colors.
+    CardsImport { file: PathBuf },
+    /// Import MTGGoldfish archetype skeletons (the skeletons.json written by ~/.local/share/mtgo/ldc/fetch_goldfish.py).
+    SkeletonImport { file: PathBuf },
+    /// Import LDC sheet data (the ldc_all.json written by ~/.local/share/mtgo/ldc/parse_ldc.py) into ldc_players.
+    LdcImport { file: PathBuf },
+    /// Hand-label one side of a match; overrides the guess in my_guess_*/opp_guess_* (e.g. `mtgo label-match 3428 opp Tempo --subtype Dimir`).
+    LabelMatch {
+        match_id: i32,
+        /// me | opp
+        side: String,
+        archetype: String,
+        #[arg(long)]
+        subtype: Option<String>,
+        /// Defaults to the archetype's category in markers.toml.
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long, default_value = "definitions/mtgo/markers.toml")]
+        file: PathBuf,
+    },
     /// List the columns available to `mtgo stats`.
     Columns,
     /// Load the Legacy timeline (bans, set releases) into mtgo_eras and stamp matches with era_id.
@@ -301,10 +387,10 @@ pub fn run(args: MtgoArgs) {
                 eprintln!("cluster failed: {e}");
             }
         }
-        MtgoCommand::Stats { by, where_sql, min, sort, limit, full, hist, interactive, all } => {
+        MtgoCommand::Stats { by, per, where_sql, min, sort, limit, full, hist, interactive, all } => {
             let conn = &mut crate::db::establish_connection();
             let (where_sql, scope_desc) = cfg.scope(where_sql, all);
-            let mut q = stats::StatsQuery { by, where_sql, min_games: min, sort, limit, full, hist };
+            let mut q = stats::StatsQuery { by, per, where_sql, min_games: min, sort, limit, full, hist };
             println!("{scope_desc}");
             if interactive {
                 match picker::pick(conn, &cfg, q) {
@@ -335,10 +421,35 @@ pub fn run(args: MtgoArgs) {
                 eprintln!("cards failed: {e}");
             }
         }
-        MtgoCommand::Label { file, check, suggest } => {
+        MtgoCommand::Label { file, ldc_file, k, margin, min_sim, rules, check, suggest, explain, uncertain, since } => {
             let conn = &mut crate::db::establish_connection();
-            if let Err(e) = label::run_label(conn, &file, check, suggest) {
+            let r = if rules || suggest.is_some() { label::run_label(conn, &file, check, suggest).map_err(|e| e.to_string()) } else { knn::run(conn, &ldc_file, &file, cfg.username.as_deref().unwrap_or(""), k, margin, min_sim, check, since.as_deref(), explain.as_deref(), uncertain) };
+            if let Err(e) = r {
                 eprintln!("label failed: {e}");
+            }
+        }
+        MtgoCommand::Review { since, ldc_file, file } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = knn::review(conn, &ldc_file, &file, cfg.username.as_deref().unwrap_or(""), since.as_deref()) {
+                eprintln!("review failed: {e}");
+            }
+        }
+        MtgoCommand::CardsImport { file } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = colors::run_import(conn, &file) {
+                eprintln!("cards-import failed: {e}");
+            }
+        }
+        MtgoCommand::SkeletonImport { file } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = skeleton::run_import(conn, &file) {
+                eprintln!("skeleton-import failed: {e}");
+            }
+        }
+        MtgoCommand::LdcImport { file } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = ldc::run_import(conn, &file) {
+                eprintln!("ldc-import failed: {e}");
             }
         }
         MtgoCommand::Pivot { card, convert, where_sql, min, top, all } => {
@@ -377,6 +488,59 @@ pub fn run(args: MtgoArgs) {
             match diesel::sql_query(format!("UPDATE mtgo_lists SET name = '{}' WHERE id = {id}", name.replace('\'', "''"))).execute(conn) {
                 Ok(1) => println!("list {id} → {name}"),
                 Ok(_) => eprintln!("no list {id}"),
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+        MtgoCommand::Fork { id, name, experimental, clear } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = db::ensure_schema(conn) {
+                eprintln!("{e}");
+                return;
+            }
+            let r = match (clear, name) {
+                (true, _) => decklist::fork_list(conn, id, None, false),
+                (false, Some(n)) => decklist::fork_list(conn, id, Some(&n), experimental),
+                (false, None) => Err("a concept name is required (or --clear)".to_string()),
+            };
+            match r {
+                Ok(()) => println!("{}", decklist::describe(conn, id)),
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+        MtgoCommand::Reparent { id, parent } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = db::ensure_schema(conn) {
+                eprintln!("{e}");
+                return;
+            }
+            let p = match parent.as_str() {
+                "auto" => Ok(None),
+                "root" => Ok(Some(0)),
+                s => s.parse::<i32>().map(Some).map_err(|_| format!("parent must be a list id, root or auto (got '{s}')")),
+            };
+            match p.and_then(|p| decklist::reparent(conn, id, p)) {
+                Ok(()) => println!("{}", decklist::describe(conn, id)),
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+        MtgoCommand::Experimental { ids, off } => {
+            let conn = &mut crate::db::establish_connection();
+            if let Err(e) = db::ensure_schema(conn) {
+                eprintln!("{e}");
+                return;
+            }
+            for id in ids {
+                match decklist::set_experimental(conn, id, !off) {
+                    Ok(root) => println!("{}", decklist::describe(conn, root)),
+                    Err(e) => eprintln!("{e}"),
+                }
+            }
+        }
+        MtgoCommand::LabelMatch { match_id, side, archetype, subtype, category, file } => {
+            let conn = &mut crate::db::establish_connection();
+            let rules = label::load_markers(&file).unwrap_or_default();
+            match label::label_match(conn, &rules, match_id, &side, &archetype, subtype.as_deref(), category.as_deref()) {
+                Ok(()) => println!("match {match_id} {side} → {archetype}{} (source = manual)", subtype.map(|s| format!(" / {}", knn::canon_subtype(&s))).unwrap_or_default()),
                 Err(e) => eprintln!("{e}"),
             }
         }

@@ -92,6 +92,18 @@ pub struct Vectors {
 }
 
 impl Vectors {
+    /// Unit vector with each card weighted by `weight × idf` — the presence scale used by the
+    /// labeller (a card present in a signature weighs exactly its idf).
+    pub fn vector_for_weights(&self, cards: &BTreeMap<String, f32>) -> Vec<(u32, f32)> {
+        let mut v: Vec<(u32, f32)> = cards.iter().filter_map(|(name, w)| self.term_id.get(name).map(|&id| (id, w * self.idf[id as usize]))).collect();
+        v.sort_by_key(|(id, _)| *id);
+        let norm = v.iter().map(|(_, x)| x * x).sum::<f32>().sqrt().max(1e-9);
+        for (_, x) in v.iter_mut() {
+            *x /= norm;
+        }
+        v
+    }
+
     /// TF-IDF unit vector for an arbitrary card map, using this corpus' vocabulary/idf
     /// (cards outside the vocabulary are ignored).
     pub fn vector_for(&self, cards: &BTreeMap<String, f32>) -> Vec<(u32, f32)> {
@@ -109,6 +121,12 @@ impl Vectors {
 }
 
 pub fn vectorize(docs: &[Doc]) -> Vectors {
+    vectorize_with(docs, false)
+}
+
+/// `presence`: every observed card weighs 1 (times idf) instead of ln(1+copies) — copies seen are
+/// noise for identification, and presence scored better in the labeller's leave-one-out check.
+pub fn vectorize_with(docs: &[Doc], presence: bool) -> Vectors {
     let mut term_id: HashMap<String, u32> = HashMap::new();
     let mut terms: Vec<String> = Vec::new();
     let mut df: Vec<u32> = Vec::new();
@@ -133,7 +151,7 @@ pub fn vectorize(docs: &[Doc]) -> Vectors {
         .map(|d| {
             let mut v: Vec<(u32, f32)> = d.cards.iter().map(|(name, w)| {
                 let id = term_id[name];
-                (id, (1.0 + w).ln() * idf[id as usize])
+                (id, if presence { idf[id as usize] } else { (1.0 + w).ln() * idf[id as usize] })
             }).collect();
             v.sort_by_key(|(id, _)| *id);
             let norm = v.iter().map(|(_, x)| x * x).sum::<f32>().sqrt().max(1e-9);
@@ -146,7 +164,7 @@ pub fn vectorize(docs: &[Doc]) -> Vectors {
     Vectors { terms, term_id, vecs, idf }
 }
 
-fn dot(a: &[(u32, f32)], b: &[(u32, f32)]) -> f32 {
+pub(crate) fn dot(a: &[(u32, f32)], b: &[(u32, f32)]) -> f32 {
     let (mut i, mut j, mut s) = (0, 0, 0.0);
     while i < a.len() && j < b.len() {
         match a[i].0.cmp(&b[j].0) {

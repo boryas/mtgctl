@@ -64,13 +64,16 @@ log_dir = "/var/lib/docker/volumes/mtgo-data-bo/_data/wine/AppData/Local/Apps/2.
 username = "boryas"
 # `mtgctl mtgo stats -i` defaults: columns pre-selected as filters / group-bys / histograms
 # (any column of mtgo_game_view — see `mtgctl mtgo columns` — plus "last N matches").
-stats_filters = ["my_deck"]
+stats_filters = ["my_concept"]
 stats_groupbys = ["opp_guess_archetype"]
 stats_hist = []
 stats_min_games = 1
+# Row order pre-selected in `mtgo stats -i`: games (size), wr, key, time.
+stats_sort = "wr"
 # First-screen columns in `mtgo stats -i` (everything else is behind "more columns…"); empty = built-in curated list.
 picker_filter_columns = []
 picker_groupby_columns = []
 # Default scope for stats/cards/pivot/-i: only matches with an exact registered list (from the
 # client's session logs, 2026-08-18 on). Pass --all to include the historical, observation-only matches.
+# Add "AND my_experimental = 0" to drop lists tagged with `mtgctl mtgo experimental <id>…`.
 default_scope = "has_decklist = 1"

@@ -1,0 +1,668 @@
+# LDC deck names (Legacy Data Collection sheets) mapped into the deck_types vocabulary used by mtgo_game_view.
+# `mtgo ldc-import` loads the sheets; `mtgo label` uses each LDC row that names an opponent I faced in that event as a
+# labelled anchor. archetype/subtype are the labels written; category falls back to deck_types, then this file.
+# A name missing here is used verbatim as the archetype (subtype none). Names mapped to nothing are ignored as anchors.
+# `goldfish`: the MTGGoldfish archetype name (metagame page) whose card breakdown is this entry's skeleton; a Goldfish
+# name equal to an LDC name needs no field.
+# [[alias]]: hand-entered deck names (matches.opponent_deck / deck_name) folded into the same vocabulary, so old entries
+# and new ones vote together. Big-mana colorless decks are one archetype, Tron, with subtypes Blue / Mystic Forge / Colorless / Cloudpost.
+
+[[deck]]
+name = "Dimir Tempo"
+archetype = "Tempo"
+subtype = "Dimir"
+category = "Blue"   # 360 player-events
+
+[[deck]]
+name = "Doomsday"
+archetype = "Doomsday"
+category = "Combo"   # 208 player-events
+
+[[deck]]
+name = "Izzet Tempo"
+archetype = "Tempo"
+subtype = "Izzet"
+category = "Blue"   # 150 player-events
+
+[[deck]]
+name = "Rakdos Reanimator"
+archetype = "Reanimator"
+subtype = "Rakdos"
+category = "Combo"   # 148 player-events
+
+[[deck]]
+name = "Tron"
+archetype = "Tron"
+category = "Non-Blue"   # 142 player-events
+
+[[deck]]
+name = "Azorius Tempo"
+archetype = "Tempo"
+subtype = "Azorius"
+category = "Blue"   # 129 player-events
+
+[[deck]]
+name = "Boros Energy"
+archetype = "Energy"
+subtype = "Boros"
+category = "Non-Blue"   # 119 player-events
+
+[[deck]]
+name = "Sneak and Show"
+archetype = "Show and Tell"
+subtype = "Sneak"
+category = "Combo"   # 86 player-events
+
+[[deck]]
+name = "Lands"
+archetype = "Lands"
+category = "Non-Blue"   # 85 player-events
+
+[[deck]]
+name = "Death and Taxes - BW (Yorion)"
+goldfish = "Death and Taxes (Yorion) - Black/White"
+archetype = "Death and Taxes"
+subtype = "Orzhov"
+category = "Non-Blue"   # 75 player-events
+
+[[deck]]
+name = "Mardu Energy"
+archetype = "Energy"
+subtype = "Mardu"
+category = "Non-Blue"   # 71 player-events
+
+[[deck]]
+name = "Other Permanent Combo"
+archetype = "Permanent Combo"
+category = "Combo"   # 66 player-events
+
+[[deck]]
+name = "Beanstalk Control (Non-Yorion)"
+archetype = "Beanstalk"
+category = "Blue"   # 62 player-events
+
+[[deck]]
+name = "Other Control"
+archetype = "Control"
+category = "Blue"   # 59 player-events
+
+[[deck]]
+name = "Aluren"
+archetype = "Aluren"
+category = "Combo"   # 53 player-events
+
+[[deck]]
+name = "8Cast"
+archetype = "Affinity"
+subtype = "8Cast"
+category = "Non-Blue"   # 40 player-events
+
+[[deck]]
+name = "Omni-Tell"
+archetype = "Show and Tell"
+subtype = "Omni"
+category = "Combo"   # 39 player-events
+
+[[deck]]
+name = "Other Tempo"
+archetype = "Tempo"
+category = "Blue"   # 37 player-events
+
+[[deck]]
+name = "Eldrazi"
+archetype = "Stompy"
+subtype = "Eldrazi"
+category = "Non-Blue"   # 37 player-events
+
+[[deck]]
+name = "Mono Black Reanimator"
+archetype = "Reanimator"
+subtype = "Mono Black"
+category = "Combo"   # 32 player-events
+
+[[deck]]
+name = "The EPIC Storm"
+archetype = "Storm"
+subtype = "TES"
+category = "Combo"   # 32 player-events
+
+[[deck]]
+name = "Black Midrange"
+archetype = "Midrange"
+subtype = "Black"
+category = "Non-Blue"   # 31 player-events
+
+[[deck]]
+name = "White Stompy"
+archetype = "Initiative"
+category = "Non-Blue"   # 31 player-events
+
+[[deck]]
+name = "Jeskai Control"
+archetype = "Control"
+subtype = "Jeskai"
+category = "Blue"   # 28 player-events
+
+[[deck]]
+name = "Saga Storm"
+archetype = "Storm"
+subtype = "Black Saga"
+category = "Combo"   # 26 player-events
+
+[[deck]]
+name = "Unknown Deck"
+ignore = true   # 23 player-events
+
+[[deck]]
+name = "Cradle Control"
+archetype = "Cradle Control"
+category = "Non-Blue"   # 22 player-events
+
+[[deck]]
+name = "Mystic Forge Combo"
+archetype = "Tron"
+subtype = "Mystic Forge"
+category = "Combo"   # 21 player-events
+
+[[deck]]
+name = "Other Stompy"
+archetype = "Stompy"
+category = "Non-Blue"   # 21 player-events
+
+[[deck]]
+name = "Dimir Reanimator"
+archetype = "Reanimator"
+subtype = "Dimir"
+category = "Combo"   # 19 player-events
+
+[[deck]]
+name = "Stoneblade"
+archetype = "Midrange"
+subtype = "Stoneforge"
+category = "Blue"   # 19 player-events
+
+[[deck]]
+name = "Cephalid Breakfast"
+archetype = "Cephalid Breakfast"
+category = "Combo"   # 18 player-events
+
+[[deck]]
+name = "Stiflenought"
+archetype = "Stiflenaught"
+category = "Blue"   # 18 player-events
+
+[[deck]]
+name = "Red Stompy"
+archetype = "Stompy"
+subtype = "Moon"
+category = "Non-Blue"   # 17 player-events
+
+[[deck]]
+name = "Hogaak Moonshadow"
+archetype = "Hogaak"
+category = "Non-Blue"   # 17 player-events
+
+[[deck]]
+name = "Death and Taxes - W (Yorion)"
+goldfish = "Death and Taxes (Yorion) - Mono White"
+archetype = "Death and Taxes"
+subtype = "Yorion"
+category = "Non-Blue"   # 16 player-events
+
+[[deck]]
+name = "Living End"
+archetype = "Living End"
+category = "Combo"   # 14 player-events
+
+[[deck]]
+name = "Oops All Spells"
+goldfish = "Oops! All Spells"
+archetype = "Oops! All Spells"
+category = "Combo"   # 13 player-events
+
+[[deck]]
+name = "Dredge"
+archetype = "Dredge"
+category = "Combo"   # 13 player-events
+
+[[deck]]
+name = "Blue Painter"
+archetype = "Painter"
+subtype = "Mono-Blue"
+category = "Combo"   # 11 player-events
+
+[[deck]]
+name = "Sewer-Cam Combo"
+archetype = "Sewer-Cam"
+category = "Combo"   # 11 player-events
+
+[[deck]]
+name = "Esper Vial"
+archetype = "Death and Taxes"
+subtype = "Esper"
+category = "Non-Blue"   # 10 player-events
+
+[[deck]]
+name = "Affinity Stompy"
+archetype = "Affinity"
+category = "Non-Blue"   # 10 player-events
+
+[[deck]]
+name = "Elves"
+archetype = "Combo Elves"
+category = "Combo"   # 10 player-events
+
+[[deck]]
+name = "Creative Technique"
+archetype = "Creative Technique"
+category = "Combo"   # 10 player-events
+
+[[deck]]
+name = "Other Land Based/Fair GSZ"
+archetype = "Lands"
+category = "Non-Blue"   # 10 player-events
+
+[[deck]]
+name = "Naya Stompy"
+archetype = "Stompy"
+subtype = "Naya"
+category = "Non-Blue"   # 9 player-events
+
+[[deck]]
+name = "Other Aggro"
+archetype = "Aggro"
+category = "Non-Blue"   # 9 player-events
+
+[[deck]]
+name = "Necrodominance Combo"
+archetype = "Storm"
+subtype = "Necrodominance"
+category = "Combo"   # 9 player-events
+
+[[deck]]
+name = "Esper Control"
+archetype = "Control"
+subtype = "Esper"
+category = "Blue"   # 8 player-events
+
+[[deck]]
+name = "Beanstalk Control (Yorion)"
+archetype = "Beanstalk"
+subtype = "Yorion"
+category = "Blue"   # 8 player-events
+
+[[deck]]
+name = "Sultai Control"
+archetype = "Control"
+subtype = "Sultai"
+category = "Blue"   # 8 player-events
+
+[[deck]]
+name = "Blue Cloudpost"
+archetype = "Tron"
+subtype = "Blue"
+category = "Non-Blue"   # 7 player-events
+
+[[deck]]
+name = "Loam Pox"
+archetype = "Pox"
+subtype = "Loam"
+category = "Non-Blue"   # 7 player-events
+
+[[deck]]
+name = "High Tide"
+archetype = "High Tide"
+category = "Combo"   # 7 player-events
+
+[[deck]]
+name = "Death's Shadow"
+archetype = "Tempo"
+subtype = "Death's Shadow"
+category = "Blue"   # 6 player-events
+
+[[deck]]
+name = "Nic Fit"
+archetype = "Nic-Fit"
+category = "Non-Blue"   # 5 player-events
+
+[[deck]]
+name = "Ruby Storm"
+archetype = "Storm"
+subtype = "Ruby"
+category = "Combo"   # 5 player-events
+
+[[deck]]
+name = "Red Painter"
+archetype = "Painter"
+subtype = "Mono-Red"
+category = "Combo"   # 5 player-events
+
+[[deck]]
+name = "Selesnya Depths"
+archetype = "Depths"
+subtype = "Selesnya"
+category = "Non-Blue"   # 5 player-events
+
+[[deck]]
+name = "Black Stompy"
+archetype = "Stompy"
+subtype = "Mono-Black"
+category = "Non-Blue"   # 5 player-events
+
+[[deck]]
+name = "Boros Stompy"
+archetype = "Stompy"
+subtype = "Boros"
+category = "Non-Blue"   # 4 player-events
+
+[[deck]]
+name = "Grixis Control"
+archetype = "Control"
+subtype = "Grixis"
+category = "Blue"   # 4 player-events
+
+[[deck]]
+name = "Burn/Red Prowess"
+archetype = "Aggro"
+subtype = "Red"
+category = "Non-Blue"   # 4 player-events
+
+[[deck]]
+name = "Food Chain"
+archetype = "Food Chain"
+category = "Combo"   # 3 player-events
+
+[[deck]]
+name = "Golgari Depths"
+archetype = "Depths"
+subtype = "Golgari"
+category = "Non-Blue"   # 3 player-events
+
+[[deck]]
+name = "The EPIC Gamble"
+archetype = "Storm"
+subtype = "Gamble"
+category = "Combo"   # 3 player-events
+
+[[deck]]
+name = "Gruul Stompy"
+archetype = "Stompy"
+subtype = "Gruul"
+category = "Non-Blue"   # 3 player-events
+
+[[deck]]
+name = "Grixis Tempo"
+archetype = "Tempo"
+subtype = "Grixis"
+category = "Blue"   # 3 player-events
+
+[[deck]]
+name = "Bomberman"
+archetype = "Bomberman"
+category = "Non-Blue"   # 3 player-events
+
+[[deck]]
+name = "Esper Tempo"
+archetype = "Tempo"
+subtype = "Esper"
+category = "Blue"   # 2 player-events
+
+[[deck]]
+name = "Other Graveyard"
+archetype = "Reanimator"
+category = "Combo"   # 2 player-events
+
+[[deck]]
+name = "Paradoxical Outcome"
+archetype = "Paradoxical Outcome"
+category = "Combo"   # 2 player-events
+
+[[deck]]
+name = "Coveted Jewel Combo"
+archetype = "Coveted Jewel"
+category = "Combo"   # 2 player-events
+
+[[deck]]
+name = "Black Phoenix"
+archetype = "Phoenix"
+subtype = "Black"
+category = "Combo"   # 2 player-events
+
+[[deck]]
+name = "Maverick"
+archetype = "Maverick"
+category = "Non-Blue"   # 2 player-events
+
+[[deck]]
+name = "Other Spell Combo"
+archetype = "Storm"
+category = "Combo"   # 1 player-events
+
+[[deck]]
+name = "Enchantress"
+archetype = "Enchantress"
+category = "Combo"   # 1 player-events
+
+[[deck]]
+name = "Standstill"
+archetype = "Landstill"
+category = "Blue"   # 1 player-events
+
+[[deck]]
+name = "Mono Green Cloudpost"
+archetype = "Tron"
+subtype = "Cloudpost"
+category = "Non-Blue"   # 1 player-events
+
+[[deck]]
+name = "Riddlesmith Combo"
+archetype = "Riddlesmith"
+category = "Combo"   # 1 player-events
+
+[[deck]]
+name = "Death and Taxes (60 Card)"
+archetype = "Death and Taxes"
+category = "Non-Blue"   # 1 player-events
+
+[[deck]]
+name = "4C Uro Control (Yorion)"
+archetype = "Control"
+subtype = "4C"
+category = "Blue"   # 1 player-events
+
+[[deck]]
+name = "Chain of Smog Combo"
+archetype = "Chain of Smog"
+category = "Combo"   # 1 player-events
+
+[[deck]]
+name = "Jeskai Tempo"
+archetype = "Tempo"
+subtype = "Jeskai"
+category = "Blue"   # 1 player-events
+
+[[deck]]
+name = "Loam"
+archetype = "Pox"
+subtype = "Loam"
+category = "Non-Blue"   # 1 player-events
+
+[[deck]]
+name = "Other"
+ignore = true   # 1 player-events
+
+[[deck]]
+name = "Rakdos Stompy"
+archetype = "Stompy"
+subtype = "Rakdos"
+category = "Non-Blue"   # 1 player-events
+
+[[deck]]
+name = "Colorless Cloudpost"
+archetype = "Tron"
+subtype = "C"
+category = "Non-Blue"   # 1 player-events
+
+[[deck]]
+name = "Infect"
+archetype = "Tempo"
+subtype = "Infect"
+category = "Blue"   # 1 player-events
+
+[[deck]]
+name = "Other Vial"
+archetype = "Death and Taxes"
+category = "Non-Blue"   # 1 player-events
+
+[[alias]]
+hand = "Cloudpost"
+archetype = "Tron"
+
+[[alias]]
+hand = "Mystic Forge"
+archetype = "Tron"
+subtype = "Mystic Forge"
+
+# ---- Goldfish-only archetype names (skeletons with no LDC counterpart) ----
+
+[[deck]]
+name = "Izzet Delver"
+goldfish = "Izzet Delver"
+archetype = "Tempo"
+subtype = "Izzet"
+category = "Blue"
+
+[[deck]]
+name = "Temur Delver"
+goldfish = "Temur Delver"
+archetype = "Tempo"
+subtype = "Temur"
+category = "Blue"
+
+[[deck]]
+name = "Jund"
+goldfish = "Jund"
+archetype = "Midrange"
+subtype = "Jund"
+category = "Non-Blue"
+
+[[deck]]
+name = "Azorius Control"
+goldfish = "Azorius Control"
+archetype = "Control"
+subtype = "Azorius"
+category = "Blue"
+
+[[deck]]
+name = "Dimir Control"
+goldfish = "Dimir Control"
+archetype = "Control"
+subtype = "Dimir"
+category = "Blue"
+
+[[deck]]
+name = "Jeskai Stoneblade"
+goldfish = "Jeskai Stoneblade"
+archetype = "Midrange"
+subtype = "Stoneforge"
+category = "Blue"
+
+[[deck]]
+name = "Azorius Stoneblade"
+goldfish = "Azorius Stoneblade"
+archetype = "Midrange"
+subtype = "Stoneforge"
+category = "Blue"
+
+[[deck]]
+name = "Naya Initiative"
+goldfish = "Naya Initiative"
+archetype = "Initiative"
+subtype = "Naya"
+category = "Non-Blue"
+
+[[deck]]
+name = "Boros Initiative"
+goldfish = "Boros Initiative"
+archetype = "Initiative"
+subtype = "Boros"
+category = "Non-Blue"
+
+[[deck]]
+name = "Blue Artifacts"
+goldfish = "Blue Artifacts"
+archetype = "Affinity"
+subtype = "8Cast"
+category = "Blue"
+
+[[deck]]
+name = "LED Dredge"
+goldfish = "LED Dredge"
+archetype = "Dredge"
+category = "Combo"
+
+[[deck]]
+name = "Blue Dredge"
+goldfish = "Blue Dredge"
+archetype = "Dredge"
+category = "Combo"
+
+[[deck]]
+name = "Painter"
+goldfish = "Painter"
+archetype = "Painter"
+category = "Combo"
+
+[[deck]]
+name = "Reanimator"
+goldfish = "Reanimator"
+archetype = "Reanimator"
+subtype = "Mono Black"
+category = "Combo"
+
+[[deck]]
+name = "Mono-Black Pox"
+goldfish = "Mono-Black Pox"
+archetype = "Pox"
+subtype = "Mono-Black"
+category = "Non-Blue"
+
+[[deck]]
+name = "Sultai Depths"
+goldfish = "Sultai Depths"
+archetype = "Depths"
+subtype = "Sultai"
+category = "Non-Blue"
+
+[[deck]]
+name = "Ad Nauseam Tendrils"
+goldfish = "Ad Nauseam Tendrils"
+archetype = "Storm"
+subtype = "ANT"
+category = "Combo"
+
+[[deck]]
+name = "Merfolk"
+goldfish = "Merfolk"
+archetype = "Merfolk"
+category = "Blue"
+
+[[deck]]
+name = "Ninjas"
+goldfish = "Ninjas"
+archetype = "Ninjas"
+category = "Blue"
+
+[[deck]]
+name = "Mono Black Midrange"
+goldfish = "Mono Black Midrange"
+archetype = "Midrange"
+subtype = "Black"
+category = "Non-Blue"
+
+[[deck]]
+name = "Tron (Goldfish)"
+goldfish = "Tron"
+archetype = "Tron"
+subtype = "C"   # Goldfish's "Tron" is the colourless Karn deck; LDC's "Tron" covers blue builds too, so it stays variant-less
+category = "Non-Blue"

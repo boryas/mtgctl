@@ -252,6 +252,10 @@ const DDL: &[&str] = &[
         subtype_marker TEXT,
         PRIMARY KEY (match_id, side, source)
     )",
+    "CREATE TABLE IF NOT EXISTS mtgo_state (
+        key TEXT PRIMARY KEY,            -- e.g. explain_reviewed_through
+        value TEXT NOT NULL
+    )",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_games_match ON mtgo_games(match_id)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_game_cards_game ON mtgo_game_cards(game_id)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_game_cards_name ON mtgo_game_cards(name)",
@@ -260,12 +264,18 @@ const DDL: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_mtgo_events_card ON mtgo_events(card)",
 ];
 
+#[derive(QueryableByName)]
+pub struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    pub n: i64,
+}
+
 pub fn ensure_schema(conn: &mut SqliteConnection) -> QueryResult<()> {
-    for stmt in DDL.iter().chain(super::decklist::DDL.iter()) {
+    for stmt in DDL.iter().chain(super::decklist::DDL.iter()).chain(super::ldc::DDL.iter()).chain(super::skeleton::DDL.iter()).chain(super::colors::DDL.iter()) {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     // Columns added after the first release (ALTER if missing).
-    for (table, col, ty) in [("mtgo_matches", "my_variant", "INTEGER"), ("mtgo_matches", "opp_variant", "INTEGER"), ("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER")] {
+    for (table, col, ty) in [("mtgo_matches", "my_variant", "INTEGER"), ("mtgo_matches", "opp_variant", "INTEGER"), ("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT")] {
         if diesel::sql_query(format!("SELECT {col} FROM {table} LIMIT 0")).execute(conn).is_err() {
             diesel::sql_query(format!("ALTER TABLE {table} ADD COLUMN {col} {ty}")).execute(conn)?;
         }
@@ -479,14 +489,15 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
                 st.replays_skipped += 1;
                 continue;
             }
-            // MTGO appends to the log while the match is being played: a file touched in the last
-            // 10 minutes may be incomplete — leave it for the next run.
+            // A log with a final "wins the match" / "Match Tied" line is complete whatever its age.
+            // One without it is still being played — unless it has sat untouched for 10 minutes,
+            // in which case it is a match that never got a result line (disconnect, client crash)
+            // and is imported as unknown.
             let mtime = std::fs::metadata(&l.path).and_then(|m| m.modified()).ok().map(chrono::DateTime::<chrono::Local>::from).map(|t| t.naive_local());
-            if let Some(mt) = mtime {
-                if (now_dt - mt).num_minutes() < 10 {
-                    st.in_progress += 1;
-                    continue;
-                }
+            let finished = !matches!(l.m.result, MatchResult::Unknown);
+            if !finished && mtime.is_some_and(|mt| (now_dt - mt).num_minutes() < 10) {
+                st.in_progress += 1;
+                continue;
             }
             if let Some((id, imported_at)) = existing.get(&l.m.guid) {
                 // Re-import if the file grew after we imported it (e.g. imported mid-match before the guard existed).

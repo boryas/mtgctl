@@ -25,6 +25,8 @@ pub struct ArchetypeRule {
     pub name: String,
     pub category: String,
     pub markers: Vec<String>,
+    /// Cluster fallback may adopt this archetype only if the match showed one of these (empty = always).
+    pub evidence: Vec<String>,
     pub subtype: Vec<SubtypeRule>,
 }
 
@@ -68,15 +70,15 @@ pub fn guess(rules: &[ArchetypeRule], cards: &BTreeSet<String>) -> Guess {
 
 #[derive(Insertable)]
 #[diesel(table_name = mtgo_match_labels)]
-struct NewLabel {
-    match_id: i32,
-    side: &'static str,
-    source: &'static str,
-    archetype: Option<String>,
-    subtype: Option<String>,
-    category: Option<String>,
-    archetype_marker: Option<String>,
-    subtype_marker: Option<String>,
+pub(crate) struct NewLabel {
+    pub match_id: i32,
+    pub side: &'static str,
+    pub source: &'static str,
+    pub archetype: Option<String>,
+    pub subtype: Option<String>,
+    pub category: Option<String>,
+    pub archetype_marker: Option<String>,
+    pub subtype_marker: Option<String>,
 }
 
 /// Signature per match for one side. My side: union of my cards over matches on the same day in
@@ -121,14 +123,26 @@ pub fn run_label(conn: &mut SqliteConnection, path: &Path, check: bool, suggest:
     if let Some(min_size) = suggest {
         return suggest_markers(conn, &rules, min_size);
     }
-    for side in ["me", "opp"] {
+    run_label_sides(conn, &rules, &["me", "opp"])?;
+    if check {
+        check_against_hand_entries(conn, "me")?;
+        check_against_hand_entries(conn, "opp")?;
+    }
+    Ok(())
+}
+
+/// Marker-rule labels for `sides` only (other sides' guess rows are left alone); the cluster
+/// fallback needs opponent labels and runs only when "opp" is included.
+pub fn run_label_sides(conn: &mut SqliteConnection, rules: &[ArchetypeRule], sides: &[&str]) -> QueryResult<()> {
+    let mut opp_sigs: HashMap<i32, BTreeSet<String>> = HashMap::new();
+    for &side in sides {
         let sigs = signatures(conn, side)?;
         let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
         let side_static: &'static str = if side == "me" { "me" } else { "opp" };
         conn.transaction::<_, diesel::result::Error, _>(|conn| {
             diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE side = '{side}' AND source = 'guess'")).execute(conn)?;
             for (mid, cards) in &sigs {
-                let g = guess(&rules, cards);
+                let g = guess(rules, cards);
                 *counts.entry((g.archetype.clone().unwrap_or("(unknown)".into()), g.subtype.clone().unwrap_or("(unknown)".into()))).or_default() += 1;
                 diesel::insert_into(mtgo_match_labels::table)
                     .values(NewLabel { match_id: *mid, side: side_static, source: "guess", archetype: g.archetype, subtype: g.subtype, category: g.category, archetype_marker: g.archetype_marker, subtype_marker: g.subtype_marker })
@@ -149,10 +163,18 @@ pub fn run_label(conn: &mut SqliteConnection, path: &Path, check: bool, suggest:
         if rows.len() > 40 {
             println!("({} more label combinations)", rows.len() - 40);
         }
+        if side == "opp" {
+            opp_sigs = sigs;
+        }
+    }
+    if !sides.contains(&"opp") {
+        return Ok(());
     }
     // Cluster fallback (opponent side): no marker seen, but the opponent's card cluster has a clear
     // majority archetype among its rule-labelled members → adopt it, marked "cluster" so it is
-    // visibly second-hand. Subtype too when the majority agrees on it.
+    // visibly second-hand. Subtype too when the majority agrees on it. An archetype with an
+    // `evidence` list is adopted only if this match showed one of those cards: a sparse signature
+    // that merely sits nearest a cluster is not proof of the cluster's deck.
     #[derive(QueryableByName)]
     struct Member {
         #[diesel(sql_type = Integer)]
@@ -181,6 +203,7 @@ pub fn run_label(conn: &mut SqliteConnection, path: &Path, check: bool, suggest:
         }
     }
     let mut adopted = 0;
+    let mut declined = 0;
     for mm in members.iter().filter(|x| x.archetype.is_none() && x.cluster.is_some()) {
         let peers: Vec<&&Member> = by_cluster[&mm.cluster.unwrap()].iter().filter(|p| p.match_id != mm.match_id && p.archetype.is_some() && p.marker.as_deref() != Some("cluster")).collect();
         if peers.len() < 3 {
@@ -194,6 +217,11 @@ pub fn run_label(conn: &mut SqliteConnection, path: &Path, check: bool, suggest:
         }
         let (arch, n) = arch_votes.iter().max_by_key(|(_, n)| **n).unwrap();
         if (*n as f64) / (peers.len() as f64) < 0.6 {
+            continue;
+        }
+        let evidence = rules.iter().find(|r| r.name == *arch).map(|r| r.evidence.as_slice()).unwrap_or(&[]);
+        if !evidence.is_empty() && !opp_sigs.get(&mm.match_id).is_some_and(|seen| evidence.iter().any(|e| seen.contains(e))) {
+            declined += 1;
             continue;
         }
         // subtype: majority among peers with this archetype
@@ -215,13 +243,28 @@ pub fn run_label(conn: &mut SqliteConnection, path: &Path, check: bool, suggest:
         .execute(conn)?;
         adopted += 1;
     }
-    println!("cluster fallback: {adopted} opponent matches with no marker seen adopted their cluster's majority archetype (archetype_marker = 'cluster')");
+    println!("cluster fallback: {adopted} opponent matches with no marker seen adopted their cluster's majority archetype (archetype_marker = 'cluster'); {declined} declined for lacking the archetype's evidence cards");
     println!("advisory labels from marker cards (source = guess) → mtgo_match_labels; my_guess_* / opp_guess_* columns in mtgo_game_view");
+    Ok(())
+}
 
-    if check {
-        check_against_hand_entries(conn, "me")?;
-        check_against_hand_entries(conn, "opp")?;
+/// Hand-label one side of a match (source = manual). The view prefers this row over the guess.
+pub fn label_match(conn: &mut SqliteConnection, rules: &[ArchetypeRule], match_id: i32, side: &str, archetype: &str, subtype: Option<&str>, category: Option<&str>) -> Result<(), String> {
+    if side != "me" && side != "opp" {
+        return Err(format!("side must be me or opp, not {side}"));
     }
+    let n: i64 = mtgo_matches::table.filter(mtgo_matches::id.eq(match_id)).count().get_result(conn).map_err(|e| e.to_string())?;
+    if n == 0 {
+        return Err(format!("no match {match_id}"));
+    }
+    let subtype_canon = subtype.map(super::knn::canon_subtype).filter(|s| !s.is_empty());
+    let subtype = subtype_canon.as_deref();
+    let category = category.map(str::to_string).or_else(|| rules.iter().find(|r| r.name == archetype).map(|r| r.category.clone()));
+    let side_static: &'static str = if side == "me" { "me" } else { "opp" };
+    diesel::replace_into(mtgo_match_labels::table)
+        .values(NewLabel { match_id, side: side_static, source: "manual", archetype: Some(archetype.to_string()), subtype: subtype.map(str::to_string), category, archetype_marker: Some("manual".into()), subtype_marker: subtype.map(|_| "manual".to_string()) })
+        .execute(conn)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

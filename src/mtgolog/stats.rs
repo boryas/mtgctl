@@ -31,19 +31,23 @@ SELECT
   vm.name             AS my_cards_variant,
   m.opp_variant       AS opp_cards_variant_id,
   vo.name             AS opp_cards_variant,
-  lg.archetype        AS my_guess_archetype,
-  lg.subtype          AS my_guess_subtype,
-  lg.category         AS my_guess_category,
-  lg.archetype_marker AS my_guess_marker,
-  lg.subtype_marker   AS my_guess_subtype_marker,
-  lo.archetype        AS opp_guess_archetype,
-  lo.subtype          AS opp_guess_subtype,
-  lo.category         AS opp_guess_category,
-  lo.archetype_marker AS opp_guess_marker,
-  lo.subtype_marker   AS opp_guess_subtype_marker,
+  CASE WHEN mg.match_id IS NULL THEN lg.archetype        ELSE mg.archetype        END AS my_guess_archetype,
+  CASE WHEN mg.match_id IS NULL THEN lg.subtype          ELSE mg.subtype          END AS my_guess_subtype,
+  CASE WHEN mg.match_id IS NULL THEN lg.category         ELSE mg.category         END AS my_guess_category,
+  CASE WHEN mg.match_id IS NULL THEN lg.archetype_marker ELSE mg.archetype_marker END AS my_guess_marker,
+  CASE WHEN mg.match_id IS NULL THEN lg.subtype_marker   ELSE mg.subtype_marker   END AS my_guess_subtype_marker,
+  CASE WHEN mo.match_id IS NULL THEN lo.archetype        ELSE mo.archetype        END AS opp_guess_archetype,
+  CASE WHEN mo.match_id IS NULL THEN lo.subtype          ELSE mo.subtype          END AS opp_guess_subtype,
+  CASE WHEN mo.match_id IS NULL THEN lo.category         ELSE mo.category         END AS opp_guess_category,
+  CASE WHEN mo.match_id IS NULL THEN lo.archetype_marker ELSE mo.archetype_marker END AS opp_guess_marker,
+  CASE WHEN mo.match_id IS NULL THEN lo.subtype_marker   ELSE mo.subtype_marker   END AS opp_guess_subtype_marker,
+  cme.colors          AS my_colors,
+  cop.colors          AS opp_colors,
   m.my_list_id        AS my_list_id,
   CASE WHEN m.my_list_id IS NOT NULL THEN 1 ELSE 0 END AS has_decklist,
   COALESCE(li.name, li.auto_name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_deck,
+  li.concept          AS my_concept,
+  COALESCE(li.experimental, 0) AS my_experimental,
   ll.archetype        AS my_list_archetype,
   ll.subtype          AS my_list_subtype,
   ll.category         AS my_list_category,
@@ -74,6 +78,10 @@ LEFT JOIN mtgo_variants vo ON vo.id = m.opp_variant
 LEFT JOIN mtgo_eras e ON e.id = m.era_id
 LEFT JOIN mtgo_match_labels lg ON lg.match_id = m.id AND lg.side = 'me' AND lg.source = 'guess'
 LEFT JOIN mtgo_match_labels lo ON lo.match_id = m.id AND lo.side = 'opp' AND lo.source = 'guess'
+LEFT JOIN mtgo_match_labels mg ON mg.match_id = m.id AND mg.side = 'me' AND mg.source = 'manual'
+LEFT JOIN mtgo_match_labels mo ON mo.match_id = m.id AND mo.side = 'opp' AND mo.source = 'manual'
+LEFT JOIN mtgo_match_colors cme ON cme.match_id = m.id AND cme.side = 'me'
+LEFT JOIN mtgo_match_colors cop ON cop.match_id = m.id AND cop.side = 'opp'
 LEFT JOIN mtgo_lists li ON li.id = m.my_list_id
 LEFT JOIN mtgo_match_labels ll ON ll.match_id = m.id AND ll.side = 'me' AND ll.source = 'list'
 LEFT JOIN mtgo_decklists dl ON dl.game_db_id = g.id
@@ -85,38 +93,41 @@ pub fn ensure_view(conn: &mut SqliteConnection) -> QueryResult<()> {
     Ok(())
 }
 
-#[derive(QueryableByName, Debug)]
-struct Row {
+#[derive(QueryableByName, Debug, serde::Serialize)]
+pub struct Row {
     #[diesel(sql_type = Nullable<Text>)]
-    key: Option<String>,
+    pub key: Option<String>,
     #[diesel(sql_type = BigInt)]
-    games: i64,
+    pub games: i64,
     #[diesel(sql_type = BigInt)]
-    decided: i64,
+    pub decided: i64,
     #[diesel(sql_type = BigInt)]
-    wins: i64,
+    pub wins: i64,
     #[diesel(sql_type = BigInt)]
-    matches: i64,
+    pub matches: i64,
     #[diesel(sql_type = BigInt)]
-    match_wins: i64,
+    pub match_wins: i64,
     #[diesel(sql_type = BigInt)]
-    match_decided: i64,
+    pub match_decided: i64,
+    /// first match date in the group — chronological order for decks, eras, months
+    #[diesel(sql_type = Nullable<Text>)]
+    pub first_date: Option<String>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_turns: Option<f64>,
+    pub avg_turns: Option<f64>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_minutes: Option<f64>,
+    pub avg_minutes: Option<f64>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_my_mulls: Option<f64>,
+    pub avg_my_mulls: Option<f64>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_my_mulls_win: Option<f64>,
+    pub avg_my_mulls_win: Option<f64>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_my_mulls_loss: Option<f64>,
+    pub avg_my_mulls_loss: Option<f64>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_opp_mulls: Option<f64>,
+    pub avg_opp_mulls: Option<f64>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_turns_win: Option<f64>,
+    pub avg_turns_win: Option<f64>,
     #[diesel(sql_type = Nullable<Double>)]
-    avg_turns_loss: Option<f64>,
+    pub avg_turns_loss: Option<f64>,
 }
 
 #[derive(QueryableByName)]
@@ -133,6 +144,8 @@ struct HistRow {
 #[derive(Debug, Clone, Default)]
 pub struct StatsQuery {
     pub by: Vec<String>,
+    /// one table per value of this column (a facet), each grouped by `by`
+    pub per: Option<String>,
     pub where_sql: Option<String>,
     pub min_games: i64,
     pub sort: String,
@@ -147,6 +160,9 @@ impl StatsQuery {
         let mut s = String::from("mtgctl mtgo stats");
         if !self.by.is_empty() {
             s.push_str(&format!(" --by {}", self.by.join(",")));
+        }
+        if let Some(p) = &self.per {
+            s.push_str(&format!(" --per {p}"));
         }
         if let Some(w) = &self.where_sql {
             s.push_str(&format!(" --where \"{}\"", w.replace('"', "\\\"")));
@@ -214,14 +230,65 @@ pub fn wilson(wins: i64, n: i64) -> (f64, f64) {
 }
 
 pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()> {
-    super::db::ensure_schema(conn)?;
+    if let Some(per) = &q.per {
+        return run_per(conn, q, per);
+    }
+    run_one(conn, q)
+}
+
+/// `--per col`: the same table once per value of `col`, values in the order they first occurred.
+fn run_per(conn: &mut SqliteConnection, q: &StatsQuery, per: &str) -> QueryResult<()> {
+    if !ident_ok(per) {
+        eprintln!("bad column name: {per}");
+        return Ok(());
+    }
+    #[derive(QueryableByName)]
+    struct V {
+        #[diesel(sql_type = Nullable<Text>)]
+        v: Option<String>,
+        #[diesel(sql_type = BigInt)]
+        n: i64,
+    }
     ensure_view(conn)?;
+    let wher = q.where_sql.as_deref().map(|w| format!("WHERE {w}")).unwrap_or_default();
+    let vals: Vec<V> = diesel::sql_query(format!("SELECT CAST({per} AS TEXT) AS v, COUNT(DISTINCT match_id) AS n FROM mtgo_game_view {wher} GROUP BY v ORDER BY MIN(date), v")).load(conn)?;
+    for val in vals {
+        let cond = match &val.v {
+            Some(v) => format!("{per} = '{}'", v.replace('\'', "''")),
+            None => format!("{per} IS NULL"),
+        };
+        let sub = StatsQuery { per: None, where_sql: Some(match &q.where_sql { Some(w) => format!("({w}) AND {cond}"), None => cond }), ..q.clone() };
+        println!("\n══ {per} = {} ({} matches) ══", val.v.as_deref().unwrap_or("∅"), val.n);
+        run_one(conn, &sub)?;
+    }
+    Ok(())
+}
+
+/// The computed table behind `mtgo stats` (and the web API): groups after --min/--limit,
+/// the rolled-up remainder, the grand total, and per-group histograms keyed by group key.
+#[derive(serde::Serialize)]
+pub struct StatsResult {
+    pub by: Vec<String>,
+    pub rows: Vec<Row>,
+    pub rollup: Option<Row>,
+    pub total: Option<Row>,
+    /// one map per `q.hist` column: group key → [(value, n)] most common first
+    pub hists: Vec<HashMap<String, Vec<(String, i64)>>>,
+    pub all_matches: i64,
+    pub all_games: i64,
+    pub all_groups: usize,
+    pub hidden_groups: usize,
+    pub game_mode: bool,
+}
+
+pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResult, String> {
+    super::db::ensure_schema(conn).map_err(|e| e.to_string())?;
+    ensure_view(conn).map_err(|e| e.to_string())?;
     let by = &q.by;
     let (where_sql, min_games, sort, limit) = (q.where_sql.as_deref(), q.min_games, q.sort.as_str(), q.limit);
     for c in by.iter().chain(q.hist.iter()) {
         if !ident_ok(c) {
-            eprintln!("bad column name: {c}");
-            return Ok(());
+            return Err(format!("bad column name: {c}"));
         }
     }
     // Group key as one text column so the result shape is static.
@@ -239,6 +306,7 @@ pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()>
             COUNT(DISTINCT match_id) AS matches,
             COUNT(DISTINCT CASE WHEN match_result='W' THEN match_id END) AS match_wins,
             COUNT(DISTINCT CASE WHEN match_result IN ('W','L') THEN match_id END) AS match_decided,
+            MIN(date) AS first_date,
             AVG(turns) AS avg_turns,
             AVG(duration_secs)/60.0 AS avg_minutes,
             AVG(my_mulligans) AS avg_my_mulls,
@@ -252,13 +320,7 @@ pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()>
     let sql = format!("SELECT {key_expr} AS key, {select_body} {group}");
     let total_sql = format!("SELECT '(total)' AS key, {select_body}");
     let total: Option<Row> = diesel::sql_query(&total_sql).get_result::<Row>(conn).ok().filter(|r| r.games > 0);
-    let rows: Vec<Row> = match diesel::sql_query(&sql).load(conn) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("query failed: {e}\n{sql}");
-            return Ok(());
-        }
-    };
+    let rows: Vec<Row> = diesel::sql_query(&sql).load(conn).map_err(|e| format!("query failed: {e}\n{sql}"))?;
     let total_games: i64 = rows.iter().map(|r| r.games).sum();
     let all_groups = rows.len();
     let all_games = total_games;
@@ -273,14 +335,18 @@ pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()>
             "SELECT {key_expr} AS key, COALESCE(CAST({hcol} AS TEXT),'∅') AS val, COUNT(*) AS n
              FROM mtgo_game_view {wher} GROUP BY key, val ORDER BY key, n DESC"
         );
-        let hrows: Vec<HistRow> = diesel::sql_query(&hsql).load(conn)?;
+        let hrows: Vec<HistRow> = diesel::sql_query(&hsql).load(conn).map_err(|e| e.to_string())?;
         let mut m: HashMap<String, Vec<(String, i64)>> = HashMap::new();
         for r in hrows {
             m.entry(r.key.unwrap_or_default()).or_default().push((r.val.unwrap_or_default(), r.n));
         }
         hists.push(m);
     }
+    // Decks, versions, eras and dates read best in the order they happened; sizes are for the rest.
+    const CHRONOLOGICAL: &[&str] = &["my_deck", "my_concept", "my_list_id", "game_list_id", "my_cards_variant", "my_cards_variant_id", "era", "era_id", "month", "date"];
+    let sort = if sort == "games" && by.first().map(|c| CHRONOLOGICAL.contains(&c.as_str())).unwrap_or(false) { "time" } else { sort };
     match sort {
+        "time" => rows.sort_by(|a, b| a.first_date.cmp(&b.first_date).then_with(|| natural_cmp(a.key.as_deref().unwrap_or(""), b.key.as_deref().unwrap_or("")))),
         "wr" => rows.sort_by(|a, b| {
             let wa = if a.match_decided > 0 { a.match_wins as f64 / a.match_decided as f64 } else { -1.0 };
             let wb = if b.match_decided > 0 { b.match_wins as f64 / b.match_decided as f64 } else { -1.0 };
@@ -300,18 +366,31 @@ pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()>
         hidden.extend(rows.drain(limit..));
     }
     let rollup = if hidden.is_empty() { None } else { Some(rollup_rows(&hidden)) };
+    Ok(StatsResult { by: by.clone(), rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups: hidden.len(), game_mode: is_game_mode(q) })
+}
+
+fn run_one(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()> {
+    let r = match compute(conn, q) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{e}");
+            return Ok(());
+        }
+    };
+    let StatsResult { by, rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups, .. } = r;
+    let (min_games, limit, where_sql) = (q.min_games, q.limit, q.where_sql.as_deref());
+    let total_games = all_games;
 
     let mut t = Table::new();
     t.load_preset(UTF8_FULL_CONDENSED);
-    let mut header = vec![by.join(" │ ")];
-    if by.is_empty() {
-        header[0] = "all".into();
-    }
+    // the group columns are what a row *is*; a double bar separates them from what was measured
+    let mut header: Vec<String> = if by.is_empty() { vec!["all".into()] } else { by.clone() };
+    header.push("║".into());
     let game_mode = is_game_mode(q) || q.full;
     if game_mode {
-        header.extend(["matches", "match WR (95% CI)", "games", "game WR (95% CI)", "avg turns", "avg min"].map(String::from));
+        header.extend(["matches", "W–L", "match WR", "95% CI", "games", "W–L", "game WR", "95% CI", "avg turns", "avg min"].map(String::from));
     } else {
-        header.extend(["matches", "match WR (95% CI)", "games W–L", "avg min"].map(String::from));
+        header.extend(["matches", "W–L", "match WR", "95% CI", "games W–L", "avg min"].map(String::from));
     }
     if q.full {
         header.extend(["share of games", "avg my mulls (W / L)", "avg opp mulls", "avg turns (W / L)"].map(String::from));
@@ -320,37 +399,54 @@ pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()>
         header.push(format!("{h} (top 5)"));
     }
     t.set_header(header);
-    let wr_ci = |w: i64, n: i64| -> String {
+    let right = |s: String| Cell::new(s).set_alignment(CellAlignment::Right);
+    let pct = |w: i64, n: i64| -> String { if n == 0 { String::new() } else { format!("{:.1}%", 100.0 * w as f64 / n as f64) } };
+    let ci = |w: i64, n: i64| -> String {
         if n == 0 {
             return String::new();
         }
         let (lo, hi) = wilson(w, n);
-        format!("{:.1}% ({:.0}–{:.0})", 100.0 * w as f64 / n as f64, lo * 100.0, hi * 100.0)
+        format!("{:.0}–{:.0}", lo * 100.0, hi * 100.0)
     };
+    let wl = |w: i64, n: i64| format!("{}–{}", w, n - w);
     let f2 = |x: Option<f64>| x.map(|v| format!("{v:.2}")).unwrap_or_default();
     let f1 = |x: Option<f64>| x.map(|v| format!("{v:.1}")).unwrap_or_default();
     for r in rows.iter().chain(rollup.iter()).chain(total.iter()) {
-        let mut row = vec![
-            Cell::new(r.key.clone().unwrap_or_default()),
-            Cell::new(r.matches).set_alignment(CellAlignment::Right),
-            Cell::new(wr_ci(r.match_wins, r.match_decided)).set_alignment(CellAlignment::Right),
-        ];
-        if game_mode {
-            row.push(Cell::new(r.games).set_alignment(CellAlignment::Right));
-            row.push(Cell::new(wr_ci(r.wins, r.decided)).set_alignment(CellAlignment::Right));
-            row.push(Cell::new(f1(r.avg_turns)));
-            row.push(Cell::new(r.avg_minutes.map(|x| format!("{x:.0}")).unwrap_or_default()));
+        let key = r.key.clone().unwrap_or_default();
+        let mut row: Vec<Cell> = if by.len() > 1 && !key.starts_with('(') {
+            let mut parts: Vec<String> = key.split(" │ ").map(String::from).collect();
+            parts.resize(by.len(), String::new());
+            parts.into_iter().map(Cell::new).collect()
         } else {
-            row.push(Cell::new(format!("{}–{}", r.wins, r.decided - r.wins)).set_alignment(CellAlignment::Right));
+            let mut cells = vec![Cell::new(key)];
+            cells.resize_with(by.len().max(1), || Cell::new(""));
+            cells
+        };
+        row.push(Cell::new("║"));
+        row.extend([
+            right(r.matches.to_string()),
+            right(wl(r.match_wins, r.match_decided)),
+            right(pct(r.match_wins, r.match_decided)),
+            right(ci(r.match_wins, r.match_decided)),
+        ]);
+        if game_mode {
+            row.push(right(r.games.to_string()));
+            row.push(right(wl(r.wins, r.decided)));
+            row.push(right(pct(r.wins, r.decided)));
+            row.push(right(ci(r.wins, r.decided)));
+            row.push(right(f1(r.avg_turns)));
+            row.push(right(r.avg_minutes.map(|x| format!("{x:.0}")).unwrap_or_default()));
+        } else {
+            row.push(right(wl(r.wins, r.decided)));
             // minutes per match ≈ avg game minutes × games per match
             let per_match = r.avg_minutes.map(|m| m * r.games as f64 / r.matches.max(1) as f64);
-            row.push(Cell::new(per_match.map(|x| format!("{x:.0}")).unwrap_or_default()));
+            row.push(right(per_match.map(|x| format!("{x:.0}")).unwrap_or_default()));
         }
         if q.full {
-            row.push(Cell::new(format!("{:.1}%", 100.0 * r.games as f64 / total_games.max(1) as f64)).set_alignment(CellAlignment::Right));
-            row.push(Cell::new(format!("{} ({} / {})", f2(r.avg_my_mulls), f2(r.avg_my_mulls_win), f2(r.avg_my_mulls_loss))));
-            row.push(Cell::new(f2(r.avg_opp_mulls)));
-            row.push(Cell::new(format!("{} ({} / {})", f1(r.avg_turns), f1(r.avg_turns_win), f1(r.avg_turns_loss))));
+            row.push(right(format!("{:.1}%", 100.0 * r.games as f64 / total_games.max(1) as f64)));
+            row.push(right(format!("{} ({} / {})", f2(r.avg_my_mulls), f2(r.avg_my_mulls_win), f2(r.avg_my_mulls_loss))));
+            row.push(right(f2(r.avg_opp_mulls)));
+            row.push(right(format!("{} ({} / {})", f1(r.avg_turns), f1(r.avg_turns_win), f1(r.avg_turns_loss))));
         }
         for h in &hists {
             let k = r.key.clone().unwrap_or_default();
@@ -359,6 +455,9 @@ pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()>
         }
         t.add_row(row);
     }
+    if let Some(c) = t.column_mut(by.len().max(1)) {
+        c.set_padding((0, 0));
+    }
     println!("{t}");
     let shown_matches: i64 = rows.iter().map(|r| r.matches).sum();
     let shown_games: i64 = rows.iter().map(|r| r.games).sum();
@@ -366,7 +465,7 @@ pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()>
     println!(
         "filter: {all_matches} matches / {all_games} games in {all_groups} groups; shown: {} groups covering {covering}{}",
         rows.len(),
-        if hidden.is_empty() { String::new() } else { format!("; {} groups rolled up into the last row (--min {min_games}, --limit {limit})", hidden.len()) }
+        if hidden_groups == 0 { String::new() } else { format!("; {hidden_groups} groups rolled up into the last row (--min {min_games}, --limit {limit})") }
     );
     let uses_signature = by.iter().chain(q.hist.iter()).any(|c| SIGNATURE_COLS.contains(&c.as_str()))
         || where_sql.is_some_and(|w| SIGNATURE_COLS.iter().any(|c| w.contains(c)));
@@ -399,6 +498,7 @@ fn rollup_rows(hidden: &[Row]) -> Row {
         matches: hidden.iter().map(|r| r.matches).sum(),
         match_wins: hidden.iter().map(|r| r.match_wins).sum(),
         match_decided: hidden.iter().map(|r| r.match_decided).sum(),
+        first_date: hidden.iter().filter_map(|r| r.first_date.clone()).min(),
         avg_turns: wavg(&|r| r.avg_turns, &|r| r.games),
         avg_minutes: wavg(&|r| r.avg_minutes, &|r| r.games),
         avg_my_mulls: wavg(&|r| r.avg_my_mulls, &|r| r.games),
@@ -441,7 +541,7 @@ pub fn is_game_mode(q: &StatsQuery) -> bool {
 
 /// Columns derived from clustering observed cards (not registered decklists).
 pub const SIGNATURE_COLS: &[&str] = &["my_cards", "opp_cards", "my_cards_variant", "opp_cards_variant", "my_cards_id", "opp_cards_id", "my_cards_variant_id", "opp_cards_variant_id"];
-pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_guess_*/opp_guess_* = advisory labels from marker cards (definitions/mtgo/markers.toml). my_deck/my_list_* = exact registered list (has_decklist=1), from the client's 'Deck Used' session logs — available from 2026-08-18 on.";
+pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_colors/opp_colors = minimal colours proven by the cards shown (WUBRG letters; fetches prove nothing); my_guess_*/opp_guess_* = nearest-anchor labels (`mtgo label`: the whole card signature votes against LDC/hand/list-labelled matches), overridden per match by `mtgo label-match`. my_deck/my_list_* = exact registered list (has_decklist=1), from the client's 'Deck Used' session logs — available from 2026-08-18 on. my_concept = the list's concept (chain of lightly-tweaked versions, see `mtgo lists`; group by it for a stable sample across tweaks); my_experimental = 1 when that concept is a throwaway brew (`mtgo experimental`), exclude with --where 'my_experimental = 0' or in default_scope.";
 
 pub fn print_columns(conn: &mut SqliteConnection) -> QueryResult<()> {
     super::db::ensure_schema(conn)?;

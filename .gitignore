@@ -4,3 +4,5 @@ mtgctl.db
 *.html
 definitions_old/
 pkg/
+web-data/
+target-bullseye/

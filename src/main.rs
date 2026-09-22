@@ -1,15 +1,9 @@
-mod league;
-mod game;
-mod db;
-mod deck;
-mod html_stats;
-mod mtgolog;
-
 use clap::{Parser, Subcommand};
-use league::LeagueArgs;
-use game::GameArgs;
-use deck::DeckArgs;
-use mtgolog::MtgoArgs;
+use mtgctl::deck::{self, DeckArgs};
+use mtgctl::game::{self, GameArgs};
+use mtgctl::league::{self, LeagueArgs};
+use mtgctl::mtgolog::{self, MtgoArgs};
+use mtgctl::db;
 
 #[derive(Parser)]
 #[command(name = "mtgctl")]

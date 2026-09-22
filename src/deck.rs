@@ -184,6 +184,28 @@ pub fn fuzzy_select(prompt: &str, options: &[String]) -> Option<String> {
     }
 }
 
+/// Fuzzy select that keeps its question visible: runs inline (not full-screen, so what was
+/// printed above stays on screen) with `header` shown under the prompt. For review-style prompts
+/// where the choice depends on context the caller just printed.
+pub fn fuzzy_select_framed(prompt: &str, header: &str, options: &[String]) -> Option<String> {
+    let prompt_str = format!("{} (Tab=new): ", prompt);
+    let skim_options = SkimOptionsBuilder::default()
+        .prompt(Some(&prompt_str))
+        .header(Some(header))
+        .height(Some("60%"))
+        .reverse(true)
+        .expect(Some("tab,btab".to_owned()))
+        .build()
+        .unwrap();
+    let input = options.join("\n");
+    let item_reader = SkimItemReader::default();
+    let items = item_reader.of_bufread(Cursor::new(input));
+    match Skim::run_with(&skim_options, Some(items)) {
+        Some(output) if !output.is_abort => handle_skim_output(output),
+        _ => None,
+    }
+}
+
 /// Fuzzy select with a default value pre-filled in the query.
 pub fn fuzzy_select_with_default(prompt: &str, options: &[String], default: &str) -> Option<String> {
     if options.is_empty() {

@@ -4,6 +4,8 @@
 # No marker → unknown (never a default). Names follow the deck_types taxonomy ("Archetype: Subtype").
 # `mtgctl mtgo label --suggest` prints a skeleton for clusters no rule covers; `--check` scores vs hand data.
 # This is a GUESS from cards drawn/played; true decks (my_deck) come from the client's "Deck Used" logs.
+# `evidence`: cards too ambiguous to be markers, but at least one must have been seen before the cluster
+# fallback may hand this archetype to an opponent who showed no marker (empty = no requirement).
 
 # ---- unique-signature combo decks first -------------------------------------------------------
 
@@ -22,6 +24,7 @@ markers = ["Cephalid Illusionist", "Nomads en-Kor", "Shuko"]
 name = "Doomsday"
 category = "Combo"
 markers = ["Doomsday", "Edge of Autumn", "Personal Tutor", "Spoils of the Vault"]
+evidence = ["Dark Ritual", "Cabal Ritual", "Lion's Eye Diamond", "Thassa's Oracle", "Street Wraith", "Lotus Petal"]
   [[archetype.subtype]]
   name = "Turbo"
   markers = ["Personal Tutor", "Spoils of the Vault"]
@@ -138,6 +141,7 @@ markers = ["Painter's Servant", "Grindstone", "Goblin Welder", "Goblin Engineer"
 name = "Stiflenaught"
 category = "Blue"
 markers = ["Phyrexian Dreadnought", "Dress Down", "Torpor Orb"]
+evidence = ["Stifle"]
 
 # ---- lands & non-blue --------------------------------------------------------------------------
 
@@ -299,7 +303,7 @@ markers = ["Stoneforge Mystic", "Phelia, Exuberant Shepherd", "Stifle", "Batters
 [[archetype]]
 name = "Tempo"
 category = "Blue"
-markers = ["Dragon's Rage Channeler", "Delver of Secrets", "Cori-Steel Cutter", "Nethergoyf", "Kaito, Bane of Nightmares", "Murktide Regent"]
+markers = ["Dragon's Rage Channeler", "Delver of Secrets", "Cori-Steel Cutter", "Nethergoyf", "Kaito, Bane of Nightmares", "Murktide Regent", "Bilbo, Thief in the Night"]
   [[archetype.subtype]]
   name = "Grixis"
   markers = ["Badlands", "Blood Crypt", "Raucous Theater"]

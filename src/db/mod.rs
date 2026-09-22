@@ -13,6 +13,14 @@ pub fn establish_connection() -> SqliteConnection {
         .unwrap_or_else(|_| panic!("Error connecting to {}", database_url))
 }
 
+/// Connect to a specific database file (the web server keeps one per player).
+pub fn establish_connection_at(path: &std::path::Path) -> Result<SqliteConnection, String> {
+    let url = path.to_string_lossy().to_string();
+    let mut c = SqliteConnection::establish(&url).map_err(|e| format!("{url}: {e}"))?;
+    diesel::sql_query("PRAGMA busy_timeout = 10000").execute(&mut c).map_err(|e| e.to_string())?;
+    Ok(c)
+}
+
 pub fn create_database_if_not_exists() -> Result<(), Box<dyn std::error::Error>> {
     let database_url = env::var("DATABASE_URL")
         .unwrap_or_else(|_| "mtgctl.db".to_string());
