@@ -542,10 +542,13 @@ pub const INFER_REVEAL_SPELL: f64 = 0.78;
 /// Rate at which a slot of a real list differs from its reference (my lists against their nearest
 /// reference, and pairs of references of one deck). Results are the same from 0.09 to 0.25.
 pub const INFER_VARIATION: f64 = 0.094;
-/// Surprise, nats per revealed card under the best deck, above which no reference explains the
-/// rollout: the 95th percentile of my registered-list matches scored under their own deck. At the
-/// 99th every deck without a reference gets named as its nearest neighbour.
-pub const INFER_UNFIT: f64 = 3.03;
+/// Mismatch, nats per revealed card from the revealed cards' own terms under the best reference
+/// (the draw bookkeeping is left out: it is the same for every deck and grows with the cards a
+/// pilot drew but never played), above which no reference explains the rollout. The 98th
+/// percentile of my registered-list matches scored under their own deck; at the 95th, Doomsday and
+/// Cradle lists a few cards off their anchors were refused, at the 99th decks without a reference
+/// are named as their nearest neighbour.
+pub const INFER_UNFIT: f64 = 0.27;
 /// Posterior mass a deck, or the decks of one archetype together, needs to be named.
 pub const INFER_NAME: f64 = 0.9;
 /// Decks with at least this posterior are listed as candidates.
@@ -571,7 +574,7 @@ pub struct Inference {
     pub reference_id: Option<i32>,
     /// posterior of the best deck (flat prior over decks)
     pub posterior: f64,
-    /// nats per revealed card under the best deck; above INFER_UNFIT nothing is named
+    /// mismatch of the revealed cards under the best reference, see INFER_UNFIT; above it nothing is named
     pub surprise: f64,
     /// decks with posterior ≥ INFER_CANDIDATE, best first, empty when the rollout fits nothing
     pub candidates: Vec<(String, f64)>,
@@ -631,35 +634,38 @@ fn lchoose(q: f64, k: f64) -> f64 {
 /// card at rate 1 - INFER_VARIATION, else a background card, so a revealed card the reference lacks
 /// costs the variation rate rather than everything. Lands never hide; a drawn spell hides at
 /// 1 - INFER_REVEAL_SPELL, so a four-of never revealed costs exactly the chance it was not drawn or was held.
-fn loglik_game(pool: &BTreeMap<String, i32>, g: &GameSeen, bg: &Background, lands: &Fetches) -> f64 {
+fn loglik_game(pool: &BTreeMap<String, i32>, g: &GameSeen, bg: &Background, lands: &Fetches) -> (f64, f64) {
     let n_pool: i32 = pool.values().sum();
     let n_pool_f = n_pool as f64;
     let is_land = |c: &str| c == FETCH || lands.contains(c);
     let m: i32 = g.revealed.values().sum();
     let n = ((g.draws as f64 * INFER_DRAW_MULT).round() as i32).max(m).min(n_pool);
     let mut ll = -lchoose(n_pool_f, n as f64);
+    let mut cards = 0.0;
     for (c, k) in &g.revealed {
         let q = pool.get(c).copied().unwrap_or(0);
         let qe = (1.0 - INFER_VARIATION) * q as f64 + INFER_VARIATION * n_pool_f * bg.of(c);
         let r = if is_land(c) { 1.0 } else { INFER_REVEAL_SPELL };
-        ll += if *k <= q {
+        let t = if *k <= q {
             lchoose(qe, *k as f64)
         } else {
             (if q > 0 { lchoose(qe, q as f64) } else { 0.0 }) + (*k - q) as f64 * (INFER_VARIATION * n_pool_f * bg.of(c)).min(0.5).ln()
-        };
-        ll += *k as f64 * r.ln();
+        } + *k as f64 * r.ln();
+        ll += t;
+        cards += t;
     }
     let spells_left: i32 = pool.iter().filter(|(c, _)| !is_land(c)).map(|(c, q)| (q - g.revealed.get(c).copied().unwrap_or(0)).max(0)).sum();
     let h = (n - m).max(0).min(spells_left);
-    ll + lchoose(spells_left as f64, h as f64) + h as f64 * (1.0 - INFER_REVEAL_SPELL).ln()
+    (ll + lchoose(spells_left as f64, h as f64) + h as f64 * (1.0 - INFER_REVEAL_SPELL).ln(), cards)
 }
 
-fn loglik_ref(x: &RefList, games: &[GameSeen], bg: &Background, lands: &Fetches) -> f64 {
+/// (log-likelihood, the revealed cards' own terms) of a match's games under one reference.
+fn loglik_ref(x: &RefList, games: &[GameSeen], bg: &Background, lands: &Fetches) -> (f64, f64) {
     let mut post_board: BTreeMap<String, i32> = x.main.clone();
     for (n, q) in &x.side {
         *post_board.entry(n.clone()).or_default() += q;
     }
-    games.iter().map(|g| loglik_game(if g.game_number == 1 { &x.main } else { &post_board }, g, bg, lands)).sum()
+    games.iter().map(|g| loglik_game(if g.game_number == 1 { &x.main } else { &post_board }, g, bg, lands)).fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
 }
 
 /// Score a match's games for one side against every reference. Deck = mixture of its references
@@ -681,7 +687,8 @@ pub fn infer(games: &[GameSeen], r: &References) -> Inference {
     if n_seen == 0 || r.refs.is_empty() {
         return empty(seen);
     }
-    let lls: Vec<f64> = r.refs.iter().map(|x| loglik_ref(x, games, &bg, &r.lands)).collect();
+    let scored: Vec<(f64, f64)> = r.refs.iter().map(|x| loglik_ref(x, games, &bg, &r.lands)).collect();
+    let lls: Vec<f64> = scored.iter().map(|s| s.0).collect();
     let mut by_deck: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, x) in r.refs.iter().enumerate() {
         by_deck.entry(x.deck.as_str()).or_default().push(i);
@@ -698,9 +705,9 @@ pub fn infer(games: &[GameSeen], r: &References) -> Inference {
     let top = deck_ll[0].0;
     let z: f64 = deck_ll.iter().map(|(l, _, _)| (l - top).exp()).sum();
     let post: Vec<(String, f64, usize)> = deck_ll.iter().map(|(l, d, b)| (d.to_string(), (l - top).exp() / z, *b)).collect();
-    let surprise = -top / n_seen as f64;
-    let fits = surprise <= INFER_UNFIT;
     let (best_deck, best_p, best_ref) = (&post[0].0, post[0].1, post[0].2);
+    let surprise = -scored[best_ref].1 / n_seen as f64;
+    let fits = surprise <= INFER_UNFIT;
     let mut by_arch: BTreeMap<&str, f64> = BTreeMap::new();
     for (_, p, b) in &post {
         *by_arch.entry(r.refs[*b].archetype.as_str()).or_default() += p;
