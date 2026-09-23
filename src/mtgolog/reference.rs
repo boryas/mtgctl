@@ -574,8 +574,11 @@ pub struct Inference {
     pub reference_id: Option<i32>,
     /// posterior of the best deck (flat prior over decks)
     pub posterior: f64,
-    /// mismatch of the revealed cards under the best reference, see INFER_UNFIT; above it nothing is named
+    /// mismatch of the revealed cards under the best reference, see INFER_UNFIT; above it no deck is named
     pub surprise: f64,
+    /// mismatch under the best archetype's pooled lists (most copies of each card any of its references
+    /// runs, main and side apart): a hybrid of two lists of one archetype is inside the pool
+    pub archetype_surprise: f64,
     /// decks with posterior ≥ INFER_CANDIDATE, best first, empty when the rollout fits nothing
     pub candidates: Vec<(String, f64)>,
     pub runner_up_deck: Option<String>,
@@ -672,7 +675,7 @@ fn loglik_ref(x: &RefList, games: &[GameSeen], bg: &Background, lands: &Fetches)
 /// (equal weights: a list that placed twice is two references), archetype = its decks together.
 pub fn infer(games: &[GameSeen], r: &References) -> Inference {
     let n_seen: i32 = games.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
-    let empty = |seen: Vec<String>| Inference { deck: None, archetype: None, reference_id: None, posterior: 0.0, surprise: 0.0, candidates: vec![], runner_up_deck: None, runner_up_posterior: 0.0, n_seen, misfit: vec![], seen };
+    let empty = |seen: Vec<String>| Inference { deck: None, archetype: None, reference_id: None, posterior: 0.0, surprise: 0.0, archetype_surprise: 0.0, candidates: vec![], runner_up_deck: None, runner_up_posterior: 0.0, n_seen, misfit: vec![], seen };
     let bg = Background::new(&r.refs);
     let mut all: BTreeMap<String, i32> = BTreeMap::new();
     for g in games {
@@ -713,6 +716,20 @@ pub fn infer(games: &[GameSeen], r: &References) -> Inference {
         *by_arch.entry(r.refs[*b].archetype.as_str()).or_default() += p;
     }
     let (arch, arch_p) = by_arch.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(a, p)| (a.to_string(), *p)).unwrap();
+    let (mut pool_main, mut pool_side): (BTreeMap<String, i32>, BTreeMap<String, i32>) = (BTreeMap::new(), BTreeMap::new());
+    for x in r.refs.iter().filter(|x| x.archetype == arch) {
+        for (n, q) in &x.main {
+            let e = pool_main.entry(n.clone()).or_insert(0);
+            *e = (*e).max(*q);
+        }
+        for (n, q) in &x.side {
+            let e = pool_side.entry(n.clone()).or_insert(0);
+            *e = (*e).max(*q);
+        }
+    }
+    let pooled = RefList { id: 0, archetype: arch.clone(), deck: String::new(), era: String::new(), main: pool_main, side: pool_side, colors: String::new() };
+    let archetype_surprise = -loglik_ref(&pooled, games, &bg, &r.lands).1 / n_seen as f64;
+    let arch_fits = fits || archetype_surprise <= INFER_UNFIT;
     let x = &r.refs[best_ref];
     let mut misfit: Vec<(i32, String)> = all
         .iter()
@@ -722,10 +739,11 @@ pub fn infer(games: &[GameSeen], r: &References) -> Inference {
     misfit.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     Inference {
         deck: (fits && best_p >= INFER_NAME).then(|| best_deck.clone()),
-        archetype: (fits && arch_p >= INFER_NAME).then_some(arch),
+        archetype: (arch_fits && arch_p >= INFER_NAME).then_some(arch),
         reference_id: fits.then_some(x.id),
         posterior: best_p,
         surprise,
+        archetype_surprise,
         candidates: if fits { post.iter().filter(|(_, p, _)| *p >= INFER_CANDIDATE).map(|(d, p, _)| (d.clone(), *p)).collect() } else { vec![] },
         runner_up_deck: post.get(1).map(|(d, _, _)| d.clone()),
         runner_up_posterior: post.get(1).map_or(0.0, |(_, p, _)| *p),
@@ -746,7 +764,8 @@ pub const MATCH_DECKS_DDL: &str = "CREATE TABLE IF NOT EXISTS match_decks (
         candidates TEXT NOT NULL,              -- '|'-joined decks with posterior >= INFER_CANDIDATE, best first ('' = unfit)
         candidate_posteriors TEXT NOT NULL DEFAULT '',  -- '|'-joined posteriors matching candidates
         posterior REAL NOT NULL,               -- of the best deck
-        surprise REAL NOT NULL,                -- nats per revealed card under the best deck
+        surprise REAL NOT NULL,                -- mismatch under the best reference, see INFER_UNFIT
+        archetype_surprise REAL NOT NULL DEFAULT 0,  -- mismatch under the best archetype's pooled lists
         runner_up_deck TEXT,
         runner_up_posterior REAL NOT NULL DEFAULT 0,
         n_seen INTEGER NOT NULL,
@@ -874,15 +893,15 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
         let cands: Vec<String> = i.candidates.iter().map(|(d, _)| d.clone()).collect();
         let posts: Vec<String> = i.candidates.iter().map(|(_, p)| format!("{p:.2}")).collect();
         diesel::sql_query(format!(
-            "INSERT INTO match_decks(match_id, side, source, deck, archetype, candidates, candidate_posteriors, posterior, surprise, runner_up_deck, runner_up_posterior, n_seen, misfit, seen) VALUES ({id}, '{side}', '{source}', {}, {}, {}, {}, {:.3}, {:.3}, {}, {:.3}, {}, {}, {})",
-            o(&i.deck), o(&i.archetype), q(&cands.join("|")), q(&posts.join("|")), i.posterior, i.surprise, o(&i.runner_up_deck), i.runner_up_posterior, i.n_seen, q(&i.misfit.join("|")), q(&i.seen.join("|"))
+            "INSERT INTO match_decks(match_id, side, source, deck, archetype, candidates, candidate_posteriors, posterior, surprise, archetype_surprise, runner_up_deck, runner_up_posterior, n_seen, misfit, seen) VALUES ({id}, '{side}', '{source}', {}, {}, {}, {}, {:.3}, {:.3}, {:.3}, {}, {:.3}, {}, {}, {})",
+            o(&i.deck), o(&i.archetype), q(&cands.join("|")), q(&posts.join("|")), i.posterior, i.surprise, i.archetype_surprise, o(&i.runner_up_deck), i.runner_up_posterior, i.n_seen, q(&i.misfit.join("|")), q(&i.seen.join("|"))
         ))
         .execute(conn)
     };
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         for m in &matches {
             if m.list_deck.is_some() {
-                let listed = Inference { deck: m.list_deck.clone(), archetype: m.list_archetype.clone(), reference_id: None, posterior: 1.0, surprise: 0.0, candidates: vec![(m.list_deck.clone().unwrap(), 1.0)], runner_up_deck: None, runner_up_posterior: 0.0, n_seen: 0, misfit: vec![], seen: vec![] };
+                let listed = Inference { deck: m.list_deck.clone(), archetype: m.list_archetype.clone(), reference_id: None, posterior: 1.0, surprise: 0.0, archetype_surprise: 0.0, candidates: vec![(m.list_deck.clone().unwrap(), 1.0)], runner_up_deck: None, runner_up_posterior: 0.0, n_seen: 0, misfit: vec![], seen: vec![] };
                 ins(conn, m.id, "me", "list", &listed)?;
                 counts.me_list += 1;
             } else if let Some(gs) = pooled.get(&m.id) {

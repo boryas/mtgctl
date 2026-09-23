@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=41"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=42"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists &amp; concepts</a><a href="reference.html">reference decklists</a></nav>
@@ -59,7 +59,7 @@
 </main>
 </div>
 <aside id="preview" hidden></aside>
-<script src="common.js?v=41"></script>
+<script src="common.js?v=42"></script>
 <script>
 // The columns a person can filter or group on, by level. Anything not listed (ids, empty
 // legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
@@ -97,11 +97,11 @@ const seenCell = r => r.opp_seen ? r.opp_seen.split('|').join(', ') : NONE;
 // Deck and archetype are shown only when the inference is sure of them; the candidates are the decks not ruled out, most likely first.
 const NONE = '<span class="muted">—</span>';
 const COLOR_NAMES = { W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green' };
-// Why no single deck: no known deck explains the cards, or the odds are split; then what the closest list does not run.
+// Why no single deck: no list fits (the archetype's pooled lists may still), or the odds are split; then what the closest list does not run.
 function why(r) {
   if (r.opp_deck) return '';
   const parts = [];
-  if (r.opp_surprise != null && r.opp_surprise > 0.27) parts.push(`no known deck explains these cards (mismatch ${r.opp_surprise.toFixed(2)}; over 0.27 is a poor match)`);
+  if (r.opp_surprise != null && r.opp_surprise > 0.27) parts.push(r.opp_archetype ? `no single list fits (mismatch ${r.opp_surprise.toFixed(2)}; over 0.27 is poor), but the cards sit inside ${r.opp_archetype}'s lists together` : `no known deck explains these cards (mismatch ${r.opp_surprise.toFixed(2)}; over 0.27 is a poor match)`);
   else if (r.opp_posterior != null) parts.push(`${(r.opp_posterior * 100).toFixed(0)}% likely; a deck is named at 90%`);
   if (r.opp_misfit) parts.push(`cards the closest list does not run: ${r.opp_misfit.split('|').join(', ')}`);
   return parts.length ? `<br><small class="muted">${parts.join('; ')}</small>` : '';

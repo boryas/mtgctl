@@ -68,6 +68,7 @@ SELECT
   od.candidate_posteriors AS opp_candidate_posteriors,
   od.posterior        AS opp_posterior,
   od.surprise         AS opp_surprise,
+  od.archetype_surprise AS opp_archetype_surprise,
   od.misfit           AS opp_misfit,
   od.seen             AS opp_seen,
   li.concept          AS my_concept,
