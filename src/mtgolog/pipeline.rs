@@ -104,7 +104,7 @@ pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<Sy
     let lists_assigned = assigned.iter().filter(|a| a.deck.is_some()).count();
     steps.push(format!("decks: {lists_assigned} of {} lists named by {} reference decklists", assigned.len(), refs.refs.len()));
     let md = super::reference::label_matches(conn, &refs).map_err(|e| format!("match decks: {e}"))?;
-    steps.push(format!("match decks: mine from list {}, from cards {}; opponents named {}, archetype only {}", md.me_list, md.me_cards, md.opp_named, md.opp_archetype_only));
+    steps.push(format!("match decks: mine from list {}, from cards {} ({} placed on a registered list); opponents named {}, archetype only {}", md.me_list, md.me_cards, md.me_list_inferred, md.opp_named, md.opp_archetype_only));
 
     super::cluster::run_cluster(conn, 0.65, 0.4, false, false, false, usize::MAX, "cutoff", false).map_err(|e| format!("cluster: {e}"))?;
     steps.push("cluster: ok".into());

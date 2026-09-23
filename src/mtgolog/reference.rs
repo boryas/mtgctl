@@ -769,6 +769,7 @@ pub const MATCH_DECKS_DDL: &str = "CREATE TABLE IF NOT EXISTS match_decks (
         runner_up_deck TEXT,
         runner_up_posterior REAL NOT NULL DEFAULT 0,
         n_seen INTEGER NOT NULL,
+        list_id INTEGER,                       -- me: the registered list inferred for an unlinked match (see infer_list)
         misfit TEXT NOT NULL DEFAULT '',       -- '|'-joined cards revealed that the best reference lacks, largest excess first
         seen TEXT NOT NULL DEFAULT '',         -- '|'-joined cards revealed, rarest first
         PRIMARY KEY (match_id, side)
@@ -867,9 +868,84 @@ pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i3
     pooled
 }
 
+#[derive(QueryableByName)]
+struct ListCardRow {
+    #[diesel(sql_type = Integer)]
+    list_id: i32,
+    #[diesel(sql_type = Text)]
+    name: String,
+    #[diesel(sql_type = Integer)]
+    qty: i32,
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    sideboard: bool,
+}
+#[derive(QueryableByName)]
+struct ListSeenRow {
+    #[diesel(sql_type = Integer)]
+    id: i32,
+    #[diesel(sql_type = Text)]
+    first_seen: String,
+}
+#[derive(QueryableByName)]
+struct ListDeckRow {
+    #[diesel(sql_type = Integer)]
+    list_id: i32,
+    #[diesel(sql_type = Nullable<Text>)]
+    deck: Option<String>,
+    #[diesel(sql_type = Nullable<Text>)]
+    archetype: Option<String>,
+}
+
+/// A registered list as a hypothesis: its own "deck" named `list#<id>` (id negated as the reference
+/// id) under its assigned archetype, available to matches from the day the client first reported it.
+pub struct PlayerList {
+    pub list: RefList,
+    /// YYYY-MM-DD
+    pub first_seen: String,
+}
+
+/// The player's registered lists as hypotheses next to the references, so an unlinked match can be
+/// placed on the exact list it was played with.
+pub fn player_lists(conn: &mut SqliteConnection, fetches: &Fetches) -> QueryResult<Vec<PlayerList>> {
+    let cards: Vec<ListCardRow> = diesel::sql_query("SELECT list_id, name, qty, sideboard FROM mtgo_list_cards").load(conn)?;
+    let seen: Vec<ListSeenRow> = diesel::sql_query("SELECT id, COALESCE(substr(first_seen, 1, 10), '') AS first_seen FROM mtgo_lists").load(conn)?;
+    let first_seen: std::collections::HashMap<i32, String> = seen.into_iter().map(|r| (r.id, r.first_seen)).collect();
+    let decks: Vec<ListDeckRow> = diesel::sql_query("SELECT list_id, deck, archetype FROM list_assignments").load(conn)?;
+    let assigned: std::collections::HashMap<i32, (Option<String>, Option<String>)> = decks.into_iter().map(|d| (d.list_id, (d.deck, d.archetype))).collect();
+    let mut lists: BTreeMap<i32, (BTreeMap<String, i32>, BTreeMap<String, i32>)> = BTreeMap::new();
+    for c in cards {
+        let e = lists.entry(c.list_id).or_default();
+        *(if c.sideboard { &mut e.1 } else { &mut e.0 }).entry(c.name).or_default() += c.qty;
+    }
+    Ok(lists
+        .into_iter()
+        .map(|(id, (main, side))| {
+            let (_, arch) = assigned.get(&id).cloned().unwrap_or((None, None));
+            PlayerList { list: RefList { id: -id, archetype: arch.unwrap_or_else(|| "unassigned list".into()), deck: format!("list#{id}"), era: String::new(), main: canon(&main, fetches), side: canon(&side, fetches), colors: String::new() }, first_seen: first_seen.get(&id).cloned().unwrap_or_default() }
+        })
+        .collect())
+}
+
+/// The registered list a match on `date` was played with, when one of the player's lists known by
+/// then beats every reference and every other list: (list id, posterior).
+pub fn infer_list(games: &[GameSeen], date: &str, refs: &References, lists: &[PlayerList]) -> Option<(i32, f64)> {
+    let usable: Vec<RefList> = lists.iter().filter(|l| !l.first_seen.is_empty() && l.first_seen.as_str() <= date).map(|l| l.list.clone()).collect();
+    if usable.is_empty() {
+        return None;
+    }
+    let mut all = References { refs: refs.refs.clone(), produces: Default::default(), fetches: refs.fetches.clone(), lands: refs.lands.clone(), eras: vec![] };
+    all.refs.extend(usable);
+    let i = infer(games, &all);
+    let deck = i.deck?;
+    let id: i32 = deck.strip_prefix("list#")?.parse().ok()?;
+    Some((id, i.posterior))
+}
+
 pub struct MatchDeckCounts {
     pub me_list: usize,
     pub me_cards: usize,
+    /// unlinked matches placed on one of the player's registered lists
+    pub me_list_inferred: usize,
     pub opp_named: usize,
     pub opp_archetype_only: usize,
 }
@@ -887,14 +963,19 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
     let me = games_by_match(conn, "me", &refs.fetches)?;
     let opp = games_by_match(conn, "opp", &refs.fetches)?;
     let pooled = pool_runs(&matches.iter().map(|m| (m.id, m.date.clone())).collect::<Vec<_>>(), &me, refs);
-    let mut counts = MatchDeckCounts { me_list: 0, me_cards: 0, opp_named: 0, opp_archetype_only: 0 };
-    let ins = |conn: &mut SqliteConnection, id: i32, side: &str, source: &str, i: &Inference| -> QueryResult<usize> {
+    let mut counts = MatchDeckCounts { me_list: 0, me_cards: 0, me_list_inferred: 0, opp_named: 0, opp_archetype_only: 0 };
+    let lists = player_lists(conn, &refs.fetches)?;
+    let list_deck: std::collections::HashMap<i32, (Option<String>, Option<String>)> = {
+        let rows: Vec<ListDeckRow> = diesel::sql_query("SELECT list_id, deck, archetype FROM list_assignments").load(conn)?;
+        rows.into_iter().map(|d| (d.list_id, (d.deck, d.archetype))).collect()
+    };
+    let ins = |conn: &mut SqliteConnection, id: i32, side: &str, source: &str, i: &Inference, list_id: Option<i32>| -> QueryResult<usize> {
         let o = |v: &Option<String>| v.as_ref().map(|s| q(s)).unwrap_or("NULL".into());
         let cands: Vec<String> = i.candidates.iter().map(|(d, _)| d.clone()).collect();
         let posts: Vec<String> = i.candidates.iter().map(|(_, p)| format!("{p:.2}")).collect();
         diesel::sql_query(format!(
-            "INSERT INTO match_decks(match_id, side, source, deck, archetype, candidates, candidate_posteriors, posterior, surprise, archetype_surprise, runner_up_deck, runner_up_posterior, n_seen, misfit, seen) VALUES ({id}, '{side}', '{source}', {}, {}, {}, {}, {:.3}, {:.3}, {:.3}, {}, {:.3}, {}, {}, {})",
-            o(&i.deck), o(&i.archetype), q(&cands.join("|")), q(&posts.join("|")), i.posterior, i.surprise, i.archetype_surprise, o(&i.runner_up_deck), i.runner_up_posterior, i.n_seen, q(&i.misfit.join("|")), q(&i.seen.join("|"))
+            "INSERT INTO match_decks(match_id, side, source, deck, archetype, candidates, candidate_posteriors, posterior, surprise, archetype_surprise, runner_up_deck, runner_up_posterior, n_seen, list_id, misfit, seen) VALUES ({id}, '{side}', '{source}', {}, {}, {}, {}, {:.3}, {:.3}, {:.3}, {}, {:.3}, {}, {}, {}, {})",
+            o(&i.deck), o(&i.archetype), q(&cands.join("|")), q(&posts.join("|")), i.posterior, i.surprise, i.archetype_surprise, o(&i.runner_up_deck), i.runner_up_posterior, i.n_seen, list_id.map_or("NULL".to_string(), |l| l.to_string()), q(&i.misfit.join("|")), q(&i.seen.join("|"))
         ))
         .execute(conn)
     };
@@ -902,18 +983,30 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
         for m in &matches {
             if m.list_deck.is_some() {
                 let listed = Inference { deck: m.list_deck.clone(), archetype: m.list_archetype.clone(), reference_id: None, posterior: 1.0, surprise: 0.0, archetype_surprise: 0.0, candidates: vec![(m.list_deck.clone().unwrap(), 1.0)], runner_up_deck: None, runner_up_posterior: 0.0, n_seen: 0, misfit: vec![], seen: vec![] };
-                ins(conn, m.id, "me", "list", &listed)?;
+                ins(conn, m.id, "me", "list", &listed, None)?;
                 counts.me_list += 1;
             } else if let Some(gs) = pooled.get(&m.id) {
-                let i = infer(gs, refs);
-                ins(conn, m.id, "me", "cards", &i)?;
-                if i.deck.is_some() || i.archetype.is_some() {
-                    counts.me_cards += 1;
+                // the list from this match alone: a run pools across version switches a card apart, which the fit test cannot see
+                if let Some((lid, p)) = infer_list(&me[&m.id], &m.date, refs, &lists) {
+                    // the games were played with a registered list: its assigned deck, if it has one
+                    let (deck, arch) = list_deck.get(&lid).cloned().unwrap_or((None, None));
+                    let i = Inference { deck: deck.clone(), archetype: arch, reference_id: None, posterior: p, surprise: 0.0, archetype_surprise: 0.0, candidates: deck.iter().map(|d| (d.clone(), p)).collect(), runner_up_deck: None, runner_up_posterior: 0.0, n_seen: gs.iter().map(|g| g.revealed.values().sum::<i32>()).sum(), misfit: vec![], seen: vec![] };
+                    ins(conn, m.id, "me", "cards", &i, Some(lid))?;
+                    counts.me_list_inferred += 1;
+                    if i.deck.is_some() || i.archetype.is_some() {
+                        counts.me_cards += 1;
+                    }
+                } else {
+                    let i = infer(gs, refs);
+                    ins(conn, m.id, "me", "cards", &i, None)?;
+                    if i.deck.is_some() || i.archetype.is_some() {
+                        counts.me_cards += 1;
+                    }
                 }
             }
             if let Some(gs) = opp.get(&m.id) {
                 let i = infer(gs, refs);
-                ins(conn, m.id, "opp", "cards", &i)?;
+                ins(conn, m.id, "opp", "cards", &i, None)?;
                 if i.deck.is_some() {
                     counts.opp_named += 1;
                 } else if i.archetype.is_some() {

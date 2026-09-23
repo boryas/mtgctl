@@ -1026,6 +1026,33 @@ async fn main() {
             if pool_run {
                 games = r::pool_runs(&truth.iter().map(|t| (t.match_id, t.date.clone())).collect::<Vec<_>>(), &games, &refs);
             }
+            if side == "me" {
+                // list-level check: with the player's lists as hypotheses, does a match linked by the session log land on its own list?
+                let lists = r::player_lists(conn, &refs.fetches).unwrap();
+                #[derive(diesel::QueryableByName)]
+                struct Linked { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Integer)] list_id: i32, #[diesel(sql_type = diesel::sql_types::Text)] date: String }
+                let linked: Vec<Linked> = diesel::sql_query("SELECT id AS match_id, my_list_id AS list_id, COALESCE(substr(start_ts,1,10), '') AS date FROM mtgo_matches WHERE my_list_id IS NOT NULL AND replay = 0").load(conn).unwrap();
+                let (mut lr, mut lw, mut ln) = (0, 0, 0);
+                let mut misses: Vec<String> = vec![];
+                let by_id: HashMap<i32, &r::RefList> = lists.iter().map(|l| (-l.list.id, &l.list)).collect();
+                for l in &linked {
+                    let Some(gs) = games.get(&l.match_id) else { continue };
+                    match r::infer_list(gs, &l.date, &refs, &lists) {
+                        Some((id, _)) if id == l.list_id => lr += 1,
+                        Some((id, p)) => {
+                            lw += 1;
+                            if let (Some(a), Some(b)) = (by_id.get(&l.list_id), by_id.get(&id)) {
+                                let seen: std::collections::BTreeMap<String, i32> = gs.iter().flat_map(|g| g.revealed.iter()).map(|(n, q)| (n.clone(), *q)).collect();
+                                let decisive: Vec<String> = seen.keys().filter(|c| (a.main.get(*c).copied().unwrap_or(0) + a.side.get(*c).copied().unwrap_or(0)) != (b.main.get(*c).copied().unwrap_or(0) + b.side.get(*c).copied().unwrap_or(0))).cloned().collect();
+                                if misses.len() < 8 { misses.push(format!("match {} truth list#{} → list#{} at {:.2}: main dist {}, side dist {}, {} games, cards seen that differ: {}", l.match_id, l.list_id, id, p, r::distance(&a.main, &b.main), r::distance(&a.side, &b.side), gs.len(), decisive.join(", "))); }
+                            }
+                        }
+                        None => ln += 1,
+                    }
+                }
+                println!("linked matches placed on a registered list: right {lr}, wrong {lw}, no list {ln} of {}", lr + lw + ln);
+                for m in misses { println!("  {m}"); }
+            }
             let (mut right, mut wrong, mut amb, mut unfit, mut known) = (0, 0, 0, 0, 0);
             let mut confusion: std::collections::BTreeMap<(String, String), usize> = Default::default();
             let mut soft: std::collections::BTreeMap<String, usize> = Default::default();

@@ -54,7 +54,7 @@ SELECT
   CASE WHEN mo.match_id IS NULL THEN lo.subtype_marker   ELSE mo.subtype_marker   END AS opp_guess_subtype_marker,
   cme.colors          AS my_colors,
   cop.colors          AS opp_colors,
-  m.my_list_id        AS my_list_id,
+  COALESCE(m.my_list_id, md.list_id) AS my_list_id,
   CASE WHEN m.my_list_id IS NOT NULL THEN 1 ELSE 0 END AS has_decklist,
   COALESCE(li.name, li.auto_name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_list,
   md.deck             AS my_deck,
@@ -107,10 +107,10 @@ LEFT JOIN mtgo_match_labels mg ON mg.match_id = m.id AND mg.side = 'me' AND mg.s
 LEFT JOIN mtgo_match_labels mo ON mo.match_id = m.id AND mo.side = 'opp' AND mo.source = 'manual'
 LEFT JOIN mtgo_match_colors cme ON cme.match_id = m.id AND cme.side = 'me'
 LEFT JOIN mtgo_match_colors cop ON cop.match_id = m.id AND cop.side = 'opp'
-LEFT JOIN mtgo_lists li ON li.id = m.my_list_id
-LEFT JOIN list_assignments la ON la.list_id = m.my_list_id
 LEFT JOIN match_decks md ON md.match_id = m.id AND md.side = 'me'
 LEFT JOIN match_decks od ON od.match_id = m.id AND od.side = 'opp'
+LEFT JOIN mtgo_lists li ON li.id = COALESCE(m.my_list_id, md.list_id)
+LEFT JOIN list_assignments la ON la.list_id = COALESCE(m.my_list_id, md.list_id)
 LEFT JOIN mtgo_match_labels ll ON ll.match_id = m.id AND ll.side = 'me' AND ll.source = 'list'
 LEFT JOIN mtgo_decklists dl ON dl.game_db_id = g.id
 WHERE m.replay = 0";
