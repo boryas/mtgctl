@@ -220,9 +220,13 @@ pub fn move_deck(conn: &mut SqliteConnection, deck: &str, archetype: &str) -> Re
     Ok(())
 }
 
+/// Remove a reference; a deck left without references and an archetype left without decks go with it.
 pub fn remove(conn: &mut SqliteConnection, id: i32) -> QueryResult<usize> {
     diesel::sql_query(format!("DELETE FROM reference_cards WHERE reference_id = {id}")).execute(conn)?;
-    diesel::sql_query(format!("DELETE FROM reference_decklists WHERE id = {id}")).execute(conn)
+    let n = diesel::sql_query(format!("DELETE FROM reference_decklists WHERE id = {id}")).execute(conn)?;
+    diesel::sql_query("DELETE FROM decks WHERE id NOT IN (SELECT deck_id FROM reference_decklists)").execute(conn)?;
+    diesel::sql_query("DELETE FROM archetypes WHERE id NOT IN (SELECT archetype_id FROM decks)").execute(conn)?;
+    Ok(n)
 }
 
 #[cfg(test)]
@@ -275,14 +279,20 @@ pub struct RefList {
 }
 
 pub struct References {
+    /// main and side already passed through `canon`
     pub refs: Vec<RefList>,
     pub produces: Produces,
+    pub fetches: Fetches,
+    /// every land known to the card facts (reveal rate 1: a drawn land is played)
+    pub lands: Fetches,
     /// (start, name) of every timeline era, for placing lists and references in the same era
     pub eras: Vec<(String, String)>,
 }
 
 pub fn load_references(conn: &mut SqliteConnection, eras: &[(String, String)]) -> QueryResult<References> {
     let produces = load_produces(conn)?;
+    let fetches = load_fetches(conn)?;
+    let lands = load_lands(conn)?;
     let mut refs = Vec::new();
     for r in list(conn)? {
         let (mut main, mut side) = (BTreeMap::new(), BTreeMap::new());
@@ -290,9 +300,10 @@ pub fn load_references(conn: &mut SqliteConnection, eras: &[(String, String)]) -
             (if c.sideboard { &mut side } else { &mut main }).insert(c.name, c.qty);
         }
         let colors = mana_colors(&main, &side, &produces);
+        let (main, side) = (canon(&main, &fetches), canon(&side, &fetches));
         refs.push(RefList { id: r.id, archetype: r.archetype, deck: r.deck, era: r.era_start.unwrap_or_default(), main, side, colors });
     }
-    Ok(References { refs, produces, eras: eras.to_vec() })
+    Ok(References { refs, produces, fetches, lands, eras: eras.to_vec() })
 }
 
 /// Re-resolve every reference's era from its list date (or the date in its name) against the timeline.
@@ -336,6 +347,7 @@ pub struct Assignment {
 /// among equally near references it prefers one from that era, then the smaller sideboard distance.
 pub fn assign_one(list_id: i32, main: &BTreeMap<String, i32>, side: &BTreeMap<String, i32>, era: &str, r: &References) -> Assignment {
     let colors = mana_colors(main, side, &r.produces);
+    let (main, side) = (&canon(main, &r.fetches), &canon(side, &r.fetches));
     // score = main-deck distance + a penalty per colour of mana the two disagree on
     let mut scored: Vec<(i32, i32, &RefList)> = r.refs.iter().map(|x| (distance(main, &x.main) + COLOR_PENALTY * color_diff(&colors, &x.colors), distance(side, &x.side), x)).collect();
     scored.sort_by_key(|(dm, ds, x)| (*dm, if x.era == era { 0 } else { 1 }, *ds));
@@ -415,12 +427,54 @@ pub const FACTS_DDL: &str = "CREATE TABLE IF NOT EXISTS card_facts (
         name TEXT PRIMARY KEY,
         colors TEXT NOT NULL,      -- WUBRG letters of the card itself ('' for lands/colourless)
         produces TEXT NOT NULL,    -- WUBRG letters a land makes ('' for fetches, Cavern, non-lands)
-        land BOOLEAN NOT NULL
+        land BOOLEAN NOT NULL,
+        fetch BOOLEAN NOT NULL DEFAULT 0  -- sacrificed to find a land: interchangeable with every other fetch, see FETCH
     )";
+/// Fetch lands are interchangeable (which basics a list fetches is a colour question, not a card
+/// question), so every fetch land is scored under this one name in references and rollouts alike.
+pub const FETCH: &str = "fetch land";
+pub type Fetches = std::collections::HashSet<String>;
+
+/// Rewrite a card multiset with every fetch land merged into FETCH.
+pub fn canon(cards: &BTreeMap<String, i32>, fetches: &Fetches) -> BTreeMap<String, i32> {
+    let mut out = BTreeMap::new();
+    for (n, q) in cards {
+        *out.entry(if fetches.contains(n) { FETCH.to_string() } else { n.clone() }).or_default() += q;
+    }
+    out
+}
+
+fn ensure_facts(conn: &mut SqliteConnection) -> QueryResult<()> {
+    diesel::sql_query(FACTS_DDL).execute(conn)?;
+    let _ = diesel::sql_query("ALTER TABLE card_facts ADD COLUMN fetch BOOLEAN NOT NULL DEFAULT 0").execute(conn);
+    Ok(())
+}
+
+pub fn load_lands(conn: &mut SqliteConnection) -> QueryResult<Fetches> {
+    ensure_facts(conn)?;
+    #[derive(QueryableByName)]
+    struct R {
+        #[diesel(sql_type = Text)]
+        name: String,
+    }
+    let rows: Vec<R> = diesel::sql_query("SELECT name FROM card_facts WHERE land = 1").load(conn)?;
+    Ok(rows.into_iter().map(|r| r.name).collect())
+}
+
+pub fn load_fetches(conn: &mut SqliteConnection) -> QueryResult<Fetches> {
+    ensure_facts(conn)?;
+    #[derive(QueryableByName)]
+    struct R {
+        #[diesel(sql_type = Text)]
+        name: String,
+    }
+    let rows: Vec<R> = diesel::sql_query("SELECT name FROM card_facts WHERE fetch = 1").load(conn)?;
+    Ok(rows.into_iter().map(|r| r.name).collect())
+}
 
 /// Load `card_colors.json` (name → {c, p, land}, written by fetch_scryfall.py) into the shared db.
 pub fn import_card_facts(conn: &mut SqliteConnection, path: &std::path::Path) -> Result<usize, String> {
-    diesel::sql_query(FACTS_DDL).execute(conn).map_err(|e| e.to_string())?;
+    ensure_facts(conn).map_err(|e| e.to_string())?;
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     let obj = v.as_object().ok_or("expected an object of name → {c, p, land}")?;
@@ -430,7 +484,8 @@ pub fn import_card_facts(conn: &mut SqliteConnection, path: &std::path::Path) ->
             let c = f.get("c").and_then(|x| x.as_str()).unwrap_or("");
             let p = f.get("p").and_then(|x| x.as_str()).unwrap_or("");
             let land = f.get("land").and_then(|x| x.as_bool()).unwrap_or(false);
-            diesel::sql_query(format!("INSERT OR REPLACE INTO card_facts(name, colors, produces, land) VALUES ({}, {}, {}, {})", q(name), q(c), q(p), land as i32)).execute(conn)?;
+            let fetch = f.get("f").and_then(|x| x.as_bool()).unwrap_or(false);
+            diesel::sql_query(format!("INSERT OR REPLACE INTO card_facts(name, colors, produces, land, fetch) VALUES ({}, {}, {}, {}, {})", q(name), q(c), q(p), land as i32, fetch as i32)).execute(conn)?;
             n += 1;
         }
         Ok(())
@@ -443,7 +498,7 @@ pub fn import_card_facts(conn: &mut SqliteConnection, path: &std::path::Path) ->
 pub type Produces = std::collections::HashMap<String, String>;
 
 pub fn load_produces(conn: &mut SqliteConnection) -> QueryResult<Produces> {
-    diesel::sql_query(FACTS_DDL).execute(conn)?;
+    ensure_facts(conn)?;
     #[derive(QueryableByName)]
     struct R {
         #[diesel(sql_type = Text)]
@@ -476,106 +531,200 @@ fn color_diff(a: &str, b: &str) -> i32 {
     sa.symmetric_difference(&sb).count() as i32
 }
 
-// ---- inference from the cards actually seen (a match's rollout), for lists that were never
-// ---- registered and for opponents: containment of what was seen inside each reference ----
+// ---- inference from the cards revealed in a match: the likelihood of what was revealed, game by
+// ---- game, under each reference decklist; a deck is the mixture of its references ----
 
-/// Below this weighted coverage the rollout does not fit any reference well enough to name
-/// (0.70: on 53 LDC-labelled opponents, 0 wrong of 24 named; errors begin at 0.60).
-pub const INFER_MIN_COVERAGE: f64 = 0.70;
-/// The best reference must beat the best reference of any other deck by this much coverage,
-/// and by at least INFER_MIN_MARGIN_CARDS cards' worth of evidence (one card seen out of twelve
-/// is 8% and proves nothing); closer than that the decks it could be are reported instead of one.
-pub const INFER_MIN_MARGIN: f64 = 0.08;
-pub const INFER_MIN_MARGIN_CARDS: f64 = 2.0;
-/// Coverage lost per colour of mana the seen lands make that the reference cannot.
-pub const INFER_COLOR_PENALTY: f64 = 0.15;
+/// Cards really drawn per nominal draw (7 - mulligans + turns - 1 on the play): lands are played
+/// whenever drawn, so the land reveal rate on my registered-list games measures the cantrip surplus.
+pub const INFER_DRAW_MULT: f64 = 1.22;
+/// Chance a drawn spell is revealed, my registered-list games after the draw multiplier; lands 1.
+pub const INFER_REVEAL_SPELL: f64 = 0.78;
+/// Rate at which a slot of a real list differs from its reference (my lists against their nearest
+/// reference, and pairs of references of one deck). Results are the same from 0.09 to 0.25.
+pub const INFER_VARIATION: f64 = 0.094;
+/// Surprise, nats per revealed card under the best deck, above which no reference explains the
+/// rollout: the 95th percentile of my registered-list matches scored under their own deck. At the
+/// 99th every deck without a reference gets named as its nearest neighbour.
+pub const INFER_UNFIT: f64 = 3.03;
+/// Posterior mass a deck, or the decks of one archetype together, needs to be named.
+pub const INFER_NAME: f64 = 0.9;
+/// Decks with at least this posterior are listed as candidates.
+pub const INFER_CANDIDATE: f64 = 0.05;
+
+/// One game's evidence for one side.
+#[derive(Debug, Clone)]
+pub struct GameSeen {
+    pub game_number: i32,
+    /// nominal cards drawn: 7 - mulligans + turns - 1 on the play
+    pub draws: i32,
+    /// name → copies revealed (played), fetch lands already merged into FETCH
+    pub revealed: BTreeMap<String, i32>,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Inference {
-    /// the single deck, when the evidence is clear
+    /// the single deck, when its posterior clears INFER_NAME and the rollout fits
     pub deck: Option<String>,
+    /// the archetype, when its decks' posteriors together clear INFER_NAME and the rollout fits
     pub archetype: Option<String>,
+    /// the best-fitting reference of the best deck
     pub reference_id: Option<i32>,
-    pub coverage: f64,
-    /// decks within the margin of the best, including it, when the answer is not single
-    pub candidates: Vec<String>,
-    /// archetypes of the candidates; one entry = the archetype is known even if the deck is not
-    pub archetypes: Vec<String>,
+    /// posterior of the best deck (flat prior over decks)
+    pub posterior: f64,
+    /// nats per revealed card under the best deck; above INFER_UNFIT nothing is named
+    pub surprise: f64,
+    /// decks with posterior ≥ INFER_CANDIDATE, best first, empty when the rollout fits nothing
+    pub candidates: Vec<(String, f64)>,
     pub runner_up_deck: Option<String>,
-    pub runner_up_coverage: f64,
-    pub colors: String,
+    pub runner_up_posterior: f64,
     pub n_seen: i32,
+    /// cards revealed that the best reference lacks or has fewer of, largest excess first, at most six
+    pub misfit: Vec<String>,
+    /// every card revealed, rarest across references first ("name" or "name ×n")
+    pub seen: Vec<String>,
 }
 
-/// Card weights: a card in few references says more than one in all of them; a card in none
-/// still counts against every reference (it is evidence of some other deck).
-fn card_weights(refs: &[RefList]) -> std::collections::HashMap<String, f64> {
-    let mut df: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-    for r in refs {
-        for name in r.main.keys().chain(r.side.keys()) {
-            *df.entry(name.as_str()).or_default() += 1;
-        }
-    }
-    let n = refs.len().max(1) as f64;
-    df.into_iter().map(|(k, d)| (k.to_string(), 1.0 + (n / d as f64).ln())).collect()
+/// Slot frequency of every card across all references; a card in none gets one slot in all of them.
+struct Background {
+    freq: std::collections::HashMap<String, f64>,
+    floor: f64,
 }
-
-/// `seen` is name → copies seen (main and sideboard cards alike; a rollout does not know which).
-pub fn infer(seen: &BTreeMap<String, i32>, r: &References) -> Inference {
-    let weights = card_weights(&r.refs);
-    let unknown_w = 1.0 + ((r.refs.len().max(1) + 1) as f64).ln();
-    let w = |name: &str| weights.get(name).copied().unwrap_or(unknown_w);
-    let total: f64 = seen.iter().map(|(n, q)| w(n) * *q as f64).sum();
-    let colors = mana_colors(seen, &BTreeMap::new(), &r.produces);
-    let n_seen: i32 = seen.values().sum();
-    if total == 0.0 || r.refs.is_empty() {
-        return Inference { deck: None, archetype: None, reference_id: None, coverage: 0.0, candidates: vec![], archetypes: vec![], runner_up_deck: None, runner_up_coverage: 0.0, colors, n_seen };
-    }
-    let mut scored: Vec<(f64, &RefList)> = r
-        .refs
-        .iter()
-        .map(|x| {
-            let covered: f64 = seen.iter().map(|(n, q)| w(n) * (*q).min(x.main.get(n).copied().unwrap_or(0) + x.side.get(n).copied().unwrap_or(0)) as f64).sum();
-            let missing_colors = colors.chars().filter(|c| !x.colors.contains(*c)).count() as f64;
-            (covered / total - INFER_COLOR_PENALTY * missing_colors, x)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    let (best_cov, best) = scored[0];
-    let runner = scored.iter().find(|(_, x)| x.deck != best.deck);
-    let (runner_cov, runner_deck) = runner.map(|(c, x)| (*c, Some(x.deck.clone()))).unwrap_or((0.0, None));
-    // margin: the larger of the fixed fraction and two average-weight cards of evidence
-    let avg_w = total / n_seen.max(1) as f64;
-    let margin = INFER_MIN_MARGIN.max(INFER_MIN_MARGIN_CARDS * avg_w / total);
-    let fits = best_cov >= INFER_MIN_COVERAGE;
-    let clear = runner.map_or(true, |(c, _)| best_cov - c >= margin);
-    let mut candidates: Vec<String> = Vec::new();
-    let mut archetypes: Vec<String> = Vec::new();
-    if fits {
-        for (c, x) in &scored {
-            if best_cov - c < margin {
-                if !candidates.contains(&x.deck) {
-                    candidates.push(x.deck.clone());
-                }
-                if !archetypes.contains(&x.archetype) {
-                    archetypes.push(x.archetype.clone());
-                }
+impl Background {
+    fn new(refs: &[RefList]) -> Background {
+        let mut copies: std::collections::HashMap<String, f64> = Default::default();
+        let mut slots = 0.0;
+        for r in refs {
+            for (n, q) in r.main.iter().chain(r.side.iter()) {
+                *copies.entry(n.clone()).or_default() += *q as f64;
+                slots += *q as f64;
             }
         }
+        let slots = slots.max(1.0);
+        Background { freq: copies.into_iter().map(|(n, c)| (n, c / slots)).collect(), floor: 1.0 / slots }
     }
-    // the deck needs a clear winner; the archetype only needs every candidate to agree
-    let archetype = if fits && archetypes.len() == 1 { Some(archetypes[0].clone()) } else { None };
+    fn of(&self, name: &str) -> f64 {
+        self.freq.get(name).copied().unwrap_or(0.0).max(self.floor)
+    }
+}
+
+/// log Γ(x), Lanczos approximation (g = 7, n = 9); exact to ~1e-13 for x > 0.
+fn lgamma(x: f64) -> f64 {
+    const C: [f64; 9] = [0.999_999_999_999_809_9, 676.520_368_121_885_1, -1_259.139_216_722_402_8, 771.323_428_777_653_1, -176.615_029_162_140_6, 12.507_343_278_686_905, -0.138_571_095_265_720_12, 9.984_369_578_019_572e-6, 1.505_632_735_149_311_6e-7];
+    if x < 0.5 {
+        return (std::f64::consts::PI / (std::f64::consts::PI * x).sin()).ln() - lgamma(1.0 - x);
+    }
+    let x = x - 1.0;
+    let mut a = C[0];
+    let t = x + 7.5;
+    for (i, c) in C.iter().enumerate().skip(1) {
+        a += c / (x + i as f64);
+    }
+    0.5 * (2.0 * std::f64::consts::PI).ln() + (x + 0.5) * t.ln() - t + a.ln()
+}
+/// log of the binomial coefficient for a possibly fractional q ≥ k.
+fn lchoose(q: f64, k: f64) -> f64 {
+    lgamma(q + 1.0) - lgamma(k + 1.0) - lgamma(q - k + 1.0)
+}
+
+/// Log-likelihood of one game's revealed cards under a pool (main deck, or main + side after game
+/// one). The drawn cards are the revealed ones plus hidden ones; a slot of the list is the reference's
+/// card at rate 1 - INFER_VARIATION, else a background card, so a revealed card the reference lacks
+/// costs the variation rate rather than everything. Lands never hide; a drawn spell hides at
+/// 1 - INFER_REVEAL_SPELL, so a four-of never revealed costs exactly the chance it was not drawn or was held.
+fn loglik_game(pool: &BTreeMap<String, i32>, g: &GameSeen, bg: &Background, lands: &Fetches) -> f64 {
+    let n_pool: i32 = pool.values().sum();
+    let n_pool_f = n_pool as f64;
+    let is_land = |c: &str| c == FETCH || lands.contains(c);
+    let m: i32 = g.revealed.values().sum();
+    let n = ((g.draws as f64 * INFER_DRAW_MULT).round() as i32).max(m).min(n_pool);
+    let mut ll = -lchoose(n_pool_f, n as f64);
+    for (c, k) in &g.revealed {
+        let q = pool.get(c).copied().unwrap_or(0);
+        let qe = (1.0 - INFER_VARIATION) * q as f64 + INFER_VARIATION * n_pool_f * bg.of(c);
+        let r = if is_land(c) { 1.0 } else { INFER_REVEAL_SPELL };
+        ll += if *k <= q {
+            lchoose(qe, *k as f64)
+        } else {
+            (if q > 0 { lchoose(qe, q as f64) } else { 0.0 }) + (*k - q) as f64 * (INFER_VARIATION * n_pool_f * bg.of(c)).min(0.5).ln()
+        };
+        ll += *k as f64 * r.ln();
+    }
+    let spells_left: i32 = pool.iter().filter(|(c, _)| !is_land(c)).map(|(c, q)| (q - g.revealed.get(c).copied().unwrap_or(0)).max(0)).sum();
+    let h = (n - m).max(0).min(spells_left);
+    ll + lchoose(spells_left as f64, h as f64) + h as f64 * (1.0 - INFER_REVEAL_SPELL).ln()
+}
+
+fn loglik_ref(x: &RefList, games: &[GameSeen], bg: &Background, lands: &Fetches) -> f64 {
+    let mut post_board: BTreeMap<String, i32> = x.main.clone();
+    for (n, q) in &x.side {
+        *post_board.entry(n.clone()).or_default() += q;
+    }
+    games.iter().map(|g| loglik_game(if g.game_number == 1 { &x.main } else { &post_board }, g, bg, lands)).sum()
+}
+
+/// Score a match's games for one side against every reference. Deck = mixture of its references
+/// (equal weights: a list that placed twice is two references), archetype = its decks together.
+pub fn infer(games: &[GameSeen], r: &References) -> Inference {
+    let n_seen: i32 = games.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
+    let empty = |seen: Vec<String>| Inference { deck: None, archetype: None, reference_id: None, posterior: 0.0, surprise: 0.0, candidates: vec![], runner_up_deck: None, runner_up_posterior: 0.0, n_seen, misfit: vec![], seen };
+    let bg = Background::new(&r.refs);
+    let mut all: BTreeMap<String, i32> = BTreeMap::new();
+    for g in games {
+        for (n, q) in &g.revealed {
+            let e = all.entry(n.clone()).or_insert(0);
+            *e = (*e).max(*q);
+        }
+    }
+    let mut seen: Vec<(f64, String)> = all.iter().map(|(n, q)| (bg.of(n), if *q > 1 { format!("{n} ×{q}") } else { n.clone() })).collect();
+    seen.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
+    let seen: Vec<String> = seen.into_iter().map(|(_, s)| s).collect();
+    if n_seen == 0 || r.refs.is_empty() {
+        return empty(seen);
+    }
+    let lls: Vec<f64> = r.refs.iter().map(|x| loglik_ref(x, games, &bg, &r.lands)).collect();
+    let mut by_deck: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, x) in r.refs.iter().enumerate() {
+        by_deck.entry(x.deck.as_str()).or_default().push(i);
+    }
+    let mut deck_ll: Vec<(f64, &str, usize)> = by_deck
+        .iter()
+        .map(|(d, idx)| {
+            let m = idx.iter().map(|i| lls[*i]).fold(f64::NEG_INFINITY, f64::max);
+            let best = *idx.iter().max_by(|a, b| lls[**a].partial_cmp(&lls[**b]).unwrap()).unwrap();
+            (m + (idx.iter().map(|i| (lls[*i] - m).exp()).sum::<f64>() / idx.len() as f64).ln(), *d, best)
+        })
+        .collect();
+    deck_ll.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let top = deck_ll[0].0;
+    let z: f64 = deck_ll.iter().map(|(l, _, _)| (l - top).exp()).sum();
+    let post: Vec<(String, f64, usize)> = deck_ll.iter().map(|(l, d, b)| (d.to_string(), (l - top).exp() / z, *b)).collect();
+    let surprise = -top / n_seen as f64;
+    let fits = surprise <= INFER_UNFIT;
+    let (best_deck, best_p, best_ref) = (&post[0].0, post[0].1, post[0].2);
+    let mut by_arch: BTreeMap<&str, f64> = BTreeMap::new();
+    for (_, p, b) in &post {
+        *by_arch.entry(r.refs[*b].archetype.as_str()).or_default() += p;
+    }
+    let (arch, arch_p) = by_arch.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(a, p)| (a.to_string(), *p)).unwrap();
+    let x = &r.refs[best_ref];
+    let mut misfit: Vec<(i32, String)> = all
+        .iter()
+        .map(|(n, q)| (q - x.main.get(n).copied().unwrap_or(0) - x.side.get(n).copied().unwrap_or(0), n.clone()))
+        .filter(|(e, _)| *e > 0)
+        .collect();
+    misfit.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     Inference {
-        deck: (fits && clear).then(|| best.deck.clone()),
-        archetype,
-        reference_id: (fits && clear).then_some(best.id),
-        coverage: best_cov,
-        candidates,
-        archetypes,
-        runner_up_deck: runner_deck,
-        runner_up_coverage: runner_cov,
-        colors,
+        deck: (fits && best_p >= INFER_NAME).then(|| best_deck.clone()),
+        archetype: (fits && arch_p >= INFER_NAME).then_some(arch),
+        reference_id: fits.then_some(x.id),
+        posterior: best_p,
+        surprise,
+        candidates: if fits { post.iter().filter(|(_, p, _)| *p >= INFER_CANDIDATE).map(|(d, p, _)| (d.clone(), *p)).collect() } else { vec![] },
+        runner_up_deck: post.get(1).map(|(d, _, _)| d.clone()),
+        runner_up_posterior: post.get(1).map_or(0.0, |(_, p, _)| *p),
         n_seen,
+        misfit: misfit.into_iter().take(6).map(|(_, n)| n).collect(),
+        seen,
     }
 }
 
@@ -584,21 +733,41 @@ pub fn infer(seen: &BTreeMap<String, i32>, r: &References) -> Inference {
 pub const MATCH_DECKS_DDL: &str = "CREATE TABLE IF NOT EXISTS match_decks (
         match_id INTEGER NOT NULL,
         side TEXT NOT NULL,                    -- me | opp
-        source TEXT NOT NULL,                  -- list (registered list named by a reference) | cards (inferred from the rollout)
-        deck TEXT,                             -- NULL when ambiguous or unknown
-        archetype TEXT,                        -- set whenever every candidate deck shares it
-        candidates TEXT NOT NULL,              -- '|'-joined decks the rollout could be ('' = none fits)
-        coverage REAL NOT NULL,
-        runner_up_deck TEXT,                   -- best reference of another deck, and its coverage
-        runner_up_coverage REAL NOT NULL DEFAULT 0,
+        source TEXT NOT NULL,                  -- list (registered list named by a reference) | cards (inferred from the games)
+        deck TEXT,                             -- NULL when ambiguous or unfit
+        archetype TEXT,                        -- NULL when ambiguous across archetypes or unfit
+        candidates TEXT NOT NULL,              -- '|'-joined decks with posterior >= INFER_CANDIDATE, best first ('' = unfit)
+        candidate_posteriors TEXT NOT NULL DEFAULT '',  -- '|'-joined posteriors matching candidates
+        posterior REAL NOT NULL,               -- of the best deck
+        surprise REAL NOT NULL,                -- nats per revealed card under the best deck
+        runner_up_deck TEXT,
+        runner_up_posterior REAL NOT NULL DEFAULT 0,
         n_seen INTEGER NOT NULL,
+        misfit TEXT NOT NULL DEFAULT '',       -- '|'-joined cards revealed that the best reference lacks, largest excess first
+        seen TEXT NOT NULL DEFAULT '',         -- '|'-joined cards revealed, rarest first
         PRIMARY KEY (match_id, side)
     )";
 
 #[derive(QueryableByName)]
-struct SeenRow {
+struct GameRow {
+    #[diesel(sql_type = Integer)]
+    id: i32,
     #[diesel(sql_type = Integer)]
     match_id: i32,
+    #[diesel(sql_type = Integer)]
+    game_number: i32,
+    #[diesel(sql_type = Nullable<diesel::sql_types::Bool>)]
+    on_play: Option<bool>,
+    #[diesel(sql_type = Integer)]
+    turns: i32,
+    #[diesel(sql_type = Integer)]
+    mulligans: i32,
+}
+
+#[derive(QueryableByName)]
+struct RevealedRow {
+    #[diesel(sql_type = Integer)]
+    game_id: i32,
     #[diesel(sql_type = Text)]
     name: String,
     #[diesel(sql_type = Integer)]
@@ -617,41 +786,49 @@ struct MatchRow {
     list_archetype: Option<String>,
 }
 
-/// Cards seen per match for one side: name → most copies in any one game.
-fn seen_by_match(conn: &mut SqliteConnection, side: &str) -> QueryResult<std::collections::HashMap<i32, BTreeMap<String, i32>>> {
-    let rows: Vec<SeenRow> = diesel::sql_query(format!("SELECT match_id, name, COALESCE(MAX(instances), 1) AS qty FROM mtgo_game_cards WHERE side = '{side}' AND played = 1 GROUP BY match_id, name")).load(conn)?;
-    let mut out: std::collections::HashMap<i32, BTreeMap<String, i32>> = std::collections::HashMap::new();
-    for r in rows {
-        out.entry(r.match_id).or_default().insert(r.name, r.qty);
+/// Every game of every match for one side, with what that side revealed; games with nothing
+/// revealed still count (their draws are evidence of absence).
+pub fn games_by_match(conn: &mut SqliteConnection, side: &str, fetches: &Fetches) -> QueryResult<std::collections::HashMap<i32, Vec<GameSeen>>> {
+    let mull = if side == "me" { "my_mulligans" } else { "opp_mulligans" };
+    let games: Vec<GameRow> = diesel::sql_query(format!("SELECT id, match_id, game_number, on_play, COALESCE(turns, 0) AS turns, COALESCE({mull}, 0) AS mulligans FROM mtgo_games ORDER BY match_id, game_number")).load(conn)?;
+    let revealed: Vec<RevealedRow> = diesel::sql_query(format!("SELECT game_id, name, COALESCE(MAX(instances), 1) AS qty FROM mtgo_game_cards WHERE side = '{side}' AND played = 1 GROUP BY game_id, name")).load(conn)?;
+    let mut by_game: std::collections::HashMap<i32, BTreeMap<String, i32>> = Default::default();
+    for r in revealed {
+        *by_game.entry(r.game_id).or_default().entry(if fetches.contains(&r.name) { FETCH.to_string() } else { r.name }).or_default() += r.qty;
     }
+    let mut out: std::collections::HashMap<i32, Vec<GameSeen>> = Default::default();
+    for g in games {
+        let me_on_play = g.on_play.unwrap_or(false);
+        let on_play = if side == "me" { me_on_play } else { !me_on_play };
+        let draws = (7 - g.mulligans + g.turns - on_play as i32).max(1);
+        out.entry(g.match_id).or_default().push(GameSeen { game_number: g.game_number, draws, revealed: by_game.remove(&g.id).unwrap_or_default() });
+    }
+    out.retain(|_, gs| gs.iter().any(|g| !g.revealed.is_empty()));
     Ok(out)
 }
 
-/// My side plays one list for a run of matches: within a day, in time order, pool the cards of
-/// consecutive matches while the pooled evidence still fits some reference; a switch breaks the run.
-fn pool_runs(matches: &[MatchRow], seen: &std::collections::HashMap<i32, BTreeMap<String, i32>>, refs: &References) -> std::collections::HashMap<i32, BTreeMap<String, i32>> {
+/// My side plays one list for a run of matches: within a day, in time order, pool the games of
+/// consecutive matches while the pooled games still fit some deck; a switch breaks the run.
+pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i32, Vec<GameSeen>>, refs: &References) -> std::collections::HashMap<i32, Vec<GameSeen>> {
     let mut days: std::collections::BTreeMap<&str, Vec<i32>> = Default::default();
-    for m in matches {
-        if seen.contains_key(&m.id) {
-            days.entry(m.date.as_str()).or_default().push(m.id);
+    for (id, date) in matches {
+        if games.contains_key(id) {
+            days.entry(date.as_str()).or_default().push(*id);
         }
     }
     let mut pooled = std::collections::HashMap::new();
     for ids in days.values_mut() {
         ids.sort();
-        let (mut run, mut acc): (Vec<i32>, BTreeMap<String, i32>) = (vec![], BTreeMap::new());
+        let (mut run, mut acc): (Vec<i32>, Vec<GameSeen>) = (vec![], vec![]);
         for id in ids.iter() {
-            let s = &seen[id];
+            let gs = &games[id];
             let mut trial = acc.clone();
-            for (n, q) in s {
-                let e = trial.entry(n.clone()).or_insert(0);
-                *e = (*e).max(*q);
-            }
-            if !run.is_empty() && infer(&trial, refs).coverage < INFER_MIN_COVERAGE {
+            trial.extend(gs.iter().cloned());
+            if !run.is_empty() && infer(&trial, refs).surprise > INFER_UNFIT {
                 for r in run.drain(..) {
                     pooled.insert(r, acc.clone());
                 }
-                acc = s.clone();
+                acc = gs.clone();
             } else {
                 acc = trial;
             }
@@ -672,7 +849,7 @@ pub struct MatchDeckCounts {
 }
 
 /// Rewrite match_decks for a player: my side from the registered list when it is named, else from
-/// the pooled rollout; the opponent from their rollout per match.
+/// the pooled games; the opponent from their games per match.
 pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryResult<MatchDeckCounts> {
     diesel::sql_query("DROP TABLE IF EXISTS match_decks").execute(conn)?;
     diesel::sql_query(MATCH_DECKS_DDL).execute(conn)?;
@@ -681,29 +858,36 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
          FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 ORDER BY m.start_ts",
     )
     .load(conn)?;
-    let me = seen_by_match(conn, "me")?;
-    let opp = seen_by_match(conn, "opp")?;
-    let pooled = pool_runs(&matches, &me, refs);
+    let me = games_by_match(conn, "me", &refs.fetches)?;
+    let opp = games_by_match(conn, "opp", &refs.fetches)?;
+    let pooled = pool_runs(&matches.iter().map(|m| (m.id, m.date.clone())).collect::<Vec<_>>(), &me, refs);
     let mut counts = MatchDeckCounts { me_list: 0, me_cards: 0, opp_named: 0, opp_archetype_only: 0 };
-    let ins = |conn: &mut SqliteConnection, id: i32, side: &str, source: &str, deck: &Option<String>, arch: &Option<String>, cands: &[String], cov: f64, ru: &Option<String>, ruc: f64, n: i32| -> QueryResult<usize> {
+    let ins = |conn: &mut SqliteConnection, id: i32, side: &str, source: &str, i: &Inference| -> QueryResult<usize> {
         let o = |v: &Option<String>| v.as_ref().map(|s| q(s)).unwrap_or("NULL".into());
-        diesel::sql_query(format!("INSERT INTO match_decks(match_id, side, source, deck, archetype, candidates, coverage, runner_up_deck, runner_up_coverage, n_seen) VALUES ({id}, '{side}', '{source}', {}, {}, {}, {cov:.3}, {}, {ruc:.3}, {n})", o(deck), o(arch), q(&cands.join("|")), o(ru))).execute(conn)
+        let cands: Vec<String> = i.candidates.iter().map(|(d, _)| d.clone()).collect();
+        let posts: Vec<String> = i.candidates.iter().map(|(_, p)| format!("{p:.2}")).collect();
+        diesel::sql_query(format!(
+            "INSERT INTO match_decks(match_id, side, source, deck, archetype, candidates, candidate_posteriors, posterior, surprise, runner_up_deck, runner_up_posterior, n_seen, misfit, seen) VALUES ({id}, '{side}', '{source}', {}, {}, {}, {}, {:.3}, {:.3}, {}, {:.3}, {}, {}, {})",
+            o(&i.deck), o(&i.archetype), q(&cands.join("|")), q(&posts.join("|")), i.posterior, i.surprise, o(&i.runner_up_deck), i.runner_up_posterior, i.n_seen, q(&i.misfit.join("|")), q(&i.seen.join("|"))
+        ))
+        .execute(conn)
     };
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         for m in &matches {
             if m.list_deck.is_some() {
-                ins(conn, m.id, "me", "list", &m.list_deck, &m.list_archetype, &[m.list_deck.clone().unwrap()], 1.0, &None, 0.0, 0)?;
+                let listed = Inference { deck: m.list_deck.clone(), archetype: m.list_archetype.clone(), reference_id: None, posterior: 1.0, surprise: 0.0, candidates: vec![(m.list_deck.clone().unwrap(), 1.0)], runner_up_deck: None, runner_up_posterior: 0.0, n_seen: 0, misfit: vec![], seen: vec![] };
+                ins(conn, m.id, "me", "list", &listed)?;
                 counts.me_list += 1;
-            } else if let Some(s) = pooled.get(&m.id) {
-                let i = infer(s, refs);
-                ins(conn, m.id, "me", "cards", &i.deck, &i.archetype, &i.candidates, i.coverage, &i.runner_up_deck, i.runner_up_coverage, i.n_seen)?;
+            } else if let Some(gs) = pooled.get(&m.id) {
+                let i = infer(gs, refs);
+                ins(conn, m.id, "me", "cards", &i)?;
                 if i.deck.is_some() || i.archetype.is_some() {
                     counts.me_cards += 1;
                 }
             }
-            if let Some(s) = opp.get(&m.id) {
-                let i = infer(s, refs);
-                ins(conn, m.id, "opp", "cards", &i.deck, &i.archetype, &i.candidates, i.coverage, &i.runner_up_deck, i.runner_up_coverage, i.n_seen)?;
+            if let Some(gs) = opp.get(&m.id) {
+                let i = infer(gs, refs);
+                ins(conn, m.id, "opp", "cards", &i)?;
                 if i.deck.is_some() {
                     counts.opp_named += 1;
                 } else if i.archetype.is_some() {

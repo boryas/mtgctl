@@ -731,6 +731,16 @@ struct MatchRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_deck_candidates: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_candidate_posteriors: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Double>)]
+    opp_posterior: Option<f64>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Double>)]
+    opp_surprise: Option<f64>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_misfit: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_seen: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_concept: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     event_name: Option<String>,
@@ -775,7 +785,7 @@ async fn matches_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Que
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
+            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_misfit, v.opp_seen, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
                      FROM (SELECT * FROM mtgo_games WHERE match_id = v.match_id ORDER BY game_number) g) AS games
              FROM mtgo_game_view v
@@ -897,6 +907,20 @@ struct GameRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_deck: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_archetype: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_deck_candidates: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_candidate_posteriors: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Double>)]
+    opp_posterior: Option<f64>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Double>)]
+    opp_surprise: Option<f64>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_misfit: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_seen: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_list: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_deck: Option<String>,
@@ -936,7 +960,7 @@ async fn games_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT game_id, match_id, date, opponent, opp_cards, opp_deck, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
+            "SELECT game_id, match_id, date, opponent, opp_cards, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_misfit, opp_seen, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
              FROM mtgo_game_view {wher} ORDER BY date DESC, match_id DESC, game_number LIMIT {limit}"
         ))
         .load(conn)
@@ -984,7 +1008,7 @@ async fn main() {
             let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             match mtgctl::mtgolog::reference::import_card_facts(conn, &file) { Ok(n) => println!("{n} cards"), Err(e) => { eprintln!("{e}"); std::process::exit(1) } }
         }
-        Cmd::Infer { player, side, pool_day, pool_run } => {
+        Cmd::Infer { player, side, pool_run, .. } => {
             use diesel::prelude::*;
             use mtgctl::mtgolog::reference as r;
             let shared = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
@@ -992,69 +1016,36 @@ async fn main() {
             let dir = PlayerDir::new(cli.data.join("players").join(&player));
             let conn = &mut dir.connect().unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             #[derive(diesel::QueryableByName)]
-            struct Seen { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Text)] name: String, #[diesel(sql_type = diesel::sql_types::Integer)] qty: i32 }
-            #[derive(diesel::QueryableByName)]
             struct Truth { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)] deck: Option<String>, #[diesel(sql_type = diesel::sql_types::Text)] date: String }
-            // copies seen = the most instances of the card in any one game of the match
-            let seen: Vec<Seen> = diesel::sql_query(format!("SELECT c.match_id, c.name, COALESCE(MAX(c.instances), 1) AS qty FROM mtgo_game_cards c WHERE c.side = '{side}' AND c.played = 1 GROUP BY c.match_id, c.name")).load(conn).unwrap();
-            let mut by_match: HashMap<i32, std::collections::BTreeMap<String, i32>> = HashMap::new();
-            for s in seen { by_match.entry(s.match_id).or_default().insert(s.name, s.qty); }
-            let truth: Vec<Truth> = diesel::sql_query("SELECT m.id AS match_id, a.deck, COALESCE(substr(m.start_ts,1,10), '') AS date FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0").load(conn).unwrap();
+            let truth: Vec<Truth> = diesel::sql_query("SELECT m.id AS match_id, a.deck, COALESCE(substr(m.start_ts,1,10), '') AS date FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 ORDER BY m.start_ts").load(conn).unwrap();
+            let mut games = r::games_by_match(conn, &side, &refs.fetches).unwrap();
             if pool_run {
-                let mut days: std::collections::BTreeMap<String, Vec<i32>> = Default::default();
-                for t in &truth { if by_match.contains_key(&t.match_id) { days.entry(t.date.clone()).or_default().push(t.match_id); } }
-                let mut pooled: HashMap<i32, std::collections::BTreeMap<String, i32>> = HashMap::new();
-                for (_, ids) in days.iter_mut() {
-                    ids.sort();
-                    let mut run: Vec<i32> = vec![]; let mut acc: std::collections::BTreeMap<String, i32> = Default::default();
-                    let flush = |run: &mut Vec<i32>, acc: &std::collections::BTreeMap<String, i32>, pooled: &mut HashMap<i32, std::collections::BTreeMap<String, i32>>| { for id in run.iter() { pooled.insert(*id, acc.clone()); } run.clear(); };
-                    for id in ids.iter() {
-                        let s = &by_match[id];
-                        let mut trial = acc.clone(); for (n, q) in s { let e = trial.entry(n.clone()).or_insert(0); *e = (*e).max(*q); }
-                        let fits = r::infer(&trial, &refs).coverage >= r::INFER_MIN_COVERAGE || run.is_empty();
-                        if !fits { flush(&mut run, &acc, &mut pooled); acc = s.clone(); } else { acc = trial; }
-                        run.push(*id);
-                    }
-                    flush(&mut run, &acc, &mut pooled);
-                }
-                for (id, s) in pooled { by_match.insert(id, s); }
-            } else if pool_day {
-                // evidence for a match = union over the day's matches (max copies seen of each card)
-                let mut by_day: HashMap<String, std::collections::BTreeMap<String, i32>> = HashMap::new();
-                for t in &truth { if let Some(s) = by_match.get(&t.match_id) { let d = by_day.entry(t.date.clone()).or_default(); for (n, q) in s { let e = d.entry(n.clone()).or_insert(0); *e = (*e).max(*q); } } }
-                for t in &truth { if let Some(d) = by_day.get(&t.date) { by_match.insert(t.match_id, d.clone()); } }
+                games = r::pool_runs(&truth.iter().map(|t| (t.match_id, t.date.clone())).collect::<Vec<_>>(), &games, &refs);
             }
-            let (mut right, mut wrong, mut amb, mut unk, mut known) = (0, 0, 0, 0, 0);
+            let (mut right, mut wrong, mut amb, mut unfit, mut known) = (0, 0, 0, 0, 0);
             let mut confusion: std::collections::BTreeMap<(String, String), usize> = Default::default();
             let mut soft: std::collections::BTreeMap<String, usize> = Default::default();
-            let mut soft_by_month: std::collections::BTreeMap<(String, String), usize> = Default::default();
             let mut examples: Vec<String> = vec![];
             for t in &truth {
-                let Some(s) = by_match.get(&t.match_id) else { continue };
-                let inf = r::infer(s, &refs);
-                let got = inf.deck.clone().unwrap_or_else(|| if inf.candidates.len() > 1 { format!("{} (deck ambiguous: {})", inf.archetype.clone().unwrap_or_else(|| "archetype ambiguous".into()), inf.candidates.join("|")) } else { "unknown".into() });
+                let Some(gs) = games.get(&t.match_id) else { continue };
+                let inf = r::infer(gs, &refs);
+                let got = inf.deck.clone().unwrap_or_else(|| if inf.candidates.is_empty() { format!("unfit (surprise {:.2})", inf.surprise) } else { format!("{} ({})", inf.archetype.clone().unwrap_or_else(|| "archetype ambiguous".into()), inf.candidates.iter().map(|(d, p)| format!("{d} {p:.2}")).collect::<Vec<_>>().join(", ")) });
                 if side == "me" && t.deck.is_some() {
                     known += 1;
                     let truth_deck = t.deck.clone().unwrap();
-                    if inf.deck.as_deref() == Some(truth_deck.as_str()) { right += 1 } else if inf.deck.is_some() { wrong += 1; if examples.len() < 6 { examples.push(format!("{} truth {} → {} (cov {:.2}, runner {} {:.2}, {} cards, {})", t.date, truth_deck, got, inf.coverage, inf.runner_up_deck.clone().unwrap_or_default(), inf.runner_up_coverage, inf.n_seen, inf.colors)); } } else if !inf.candidates.is_empty() { amb += 1 } else { unk += 1 }
+                    if inf.deck.as_deref() == Some(truth_deck.as_str()) { right += 1 } else if inf.deck.is_some() { wrong += 1; if examples.len() < 8 { examples.push(format!("{} truth {} → {} (posterior {:.2}, surprise {:.2}, {} cards revealed, not in it: {})", t.date, truth_deck, got, inf.posterior, inf.surprise, inf.n_seen, inf.misfit.join(", "))); } } else if !inf.candidates.is_empty() { amb += 1 } else { unfit += 1 }
                     *confusion.entry((truth_deck, got)).or_default() += 1;
                 } else {
                     *soft.entry(got.clone()).or_default() += 1;
-                    *soft_by_month.entry((t.date[..7].to_string(), got)).or_default() += 1;
                 }
             }
             if side == "me" {
-                println!("known-list matches: {known}: right {right}, wrong {wrong}, ambiguous {amb}, unknown {unk}  (accuracy when named: {:.0}%)", if right + wrong > 0 { 100.0 * right as f64 / (right + wrong) as f64 } else { 0.0 });
-                for ((t, g), n) in &confusion { println!("  truth {:<12} → {:<40} {n}", t, g); }
+                println!("known-list matches: {known}: right {right}, wrong {wrong}, ambiguous {amb}, unfit {unfit}  (accuracy when named: {:.0}%)", if right + wrong > 0 { 100.0 * right as f64 / (right + wrong) as f64 } else { 0.0 });
+                for ((t, g), n) in &confusion { println!("  truth {:<12} → {:<60} {n}", t, g); }
                 for e in examples { println!("  miss: {e}"); }
             }
-            println!("
-{} matches without a known list:", soft.values().sum::<usize>());
-            for (g, n) in &soft { println!("  {:<40} {n}", g); }
-            println!("
-by month (soft):");
-            let mut months: Vec<&String> = soft_by_month.keys().map(|(m, _)| m).collect(); months.sort(); months.dedup();
-            for m in months { let row: Vec<String> = soft_by_month.iter().filter(|((mm, _), _)| mm == m).map(|((_, g), n)| format!("{}:{}", g.chars().take(14).collect::<String>(), n)).collect(); println!("  {m}  {}", row.join("  ")); }
+            println!("\n{} matches without a known list:", soft.values().sum::<usize>());
+            for (g, n) in &soft { println!("  {:<60} {n}", g); }
         }
         Cmd::Assign { player } => {
             use mtgctl::mtgolog::reference as r;

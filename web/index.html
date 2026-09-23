@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=34"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=39"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists &amp; concepts</a><a href="reference.html">reference decklists</a></nav>
@@ -59,11 +59,11 @@
 </main>
 </div>
 <aside id="preview" hidden></aside>
-<script src="common.js?v=34"></script>
+<script src="common.js?v=39"></script>
 <script>
 // The columns a person can filter or group on, by level. Anything not listed (ids, empty
 // legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
-const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck known from', my_concept: 'my concept', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_cards: 'opponent cards seen (cluster)', opp_cards_variant: 'opponent cards seen (fine)', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era', my_cards: 'my cards seen (cluster)' };
+const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck known from', my_concept: 'my concept', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_cards: 'opponent cluster', opp_cards_variant: 'opponent cluster (fine)', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era', my_cards: 'my cluster' };
 const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast' };
 const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
 const CURATED_G = ['opp_deck','opp_archetype','opp_cards','my_deck','my_archetype','my_concept','my_list','event_type','opponent','month','game_number','on_play','my_mulligans','win_by'];
@@ -89,10 +89,28 @@ const STATS = {
 const statValue = (s, a) => a[1] ? a[0] / a[1] : null;
 const DEFAULT_STATS = ['matches', 'share', 'mwl', 'mwr'];
 // Columns of the rows view (match rows, and game rows under a per-game filter); the choice is remembered.
-const ROW_COLS = { date: 'date', opponent: 'opponent', opp_deck: 'opponent deck', opp_cards: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', result: 'result', games: 'games' };
-const GAME_ROW_COLS = { date: 'date', opponent: 'opponent', opp_deck: 'opponent deck', opp_cards: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', game: 'game', pd: 'play/draw', mulls: 'mulligans', turns: 'turns', min: 'minutes', result: 'result', how: 'how it ended' };
-const ROW_DEFAULT_OFF = new Set(['opp_cards']);
-const TEXT_COLS = new Set(['opponent', 'opp_deck', 'opp_cards', 'my_deck', 'my_list', 'event']);
+const ROW_COLS = { date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_seen: 'opponent cards seen', opp_cards: 'opponent cluster', my_deck: 'my deck', my_list: 'my list', event: 'event', result: 'result', games: 'games' };
+const GAME_ROW_COLS = { date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_seen: 'opponent cards seen', opp_cards: 'opponent cluster', my_deck: 'my deck', my_list: 'my list', event: 'event', game: 'game', pd: 'play/draw', mulls: 'mulligans', turns: 'turns', min: 'minutes', result: 'result', how: 'how it ended' };
+const ROW_DEFAULT_OFF = new Set(['opp_cards', 'opp_seen']);
+const TEXT_COLS = new Set(['opponent', 'opp_deck', 'opp_cands', 'opp_arch', 'opp_seen', 'opp_cards', 'my_deck', 'my_list', 'event']);
+const seenCell = r => r.opp_seen ? r.opp_seen.split('|').join(', ') : NONE;
+// Deck and archetype are shown only when the inference is sure of them; the candidates are the decks not ruled out, most likely first.
+const NONE = '<span class="muted">—</span>';
+const COLOR_NAMES = { W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green' };
+// Why no single deck: nothing fits (surprise over the bar), or the posterior is split; then what the best reference lacks.
+function why(r) {
+  if (r.opp_deck) return '';
+  const parts = [];
+  if (r.opp_surprise != null && r.opp_surprise > 3.03) parts.push(`no reference fits (surprise ${r.opp_surprise.toFixed(2)}, bar 3.03)`);
+  else if (r.opp_posterior != null) parts.push(`best ${(r.opp_posterior * 100).toFixed(0)}% (needs 90%)`);
+  if (r.opp_misfit) parts.push(`not in the nearest: ${r.opp_misfit.split('|').join(', ')}`);
+  return parts.length ? `<br><small class="muted">${parts.join('; ')}</small>` : '';
+}
+const cands = r => {
+  if (!r.opp_deck_candidates) return NONE + why(r);
+  const ps = (r.opp_candidate_posteriors || '').split('|');
+  return `<span class="muted">${r.opp_deck_candidates.split('|').map((d, i) => ps[i] ? `${d} ${Math.round(ps[i] * 100)}%` : d).join(' · ')}</span>` + why(r);
+};
 function rowCols(game) {
   const defs = game ? GAME_ROW_COLS : ROW_COLS; const key = game ? 'mtgctl.gamecols' : 'mtgctl.rowcols';
   let on = null; try { on = JSON.parse(localStorage.getItem(key)); } catch (e) {}
@@ -518,7 +536,7 @@ async function showMatches(seq) {
       if (stale(seq)) return;
       const { defs, set } = rowCols(true);
       const cell = {
-        date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || '<span class="muted">—</span>', opp_cards: g => g.opp_cards || '<span class="muted">unknown</span>', my_deck: g => g.my_deck || '<span class="muted">—</span>',
+        date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || NONE, opp_cands: cands, opp_arch: g => g.opp_archetype || NONE, opp_seen: seenCell, opp_cards: g => g.opp_cards || '<span class="muted">unknown</span>', my_deck: g => g.my_deck || '<span class="muted">—</span>',
         my_list: g => g.my_list ? `<a class="key" data-col="my_list" data-val="${g.my_list.replace(/"/g, '&quot;')}" href="lists.html">${g.my_list}</a>` : '<span class="muted">no list</span>', event: g => g.event_name || '',
         game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
         turns: g => g.turns, min: g => g.minutes ?? '', result: g => `<b>${g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?'}</b>`, how: g => g.win_by || '' };
@@ -535,7 +553,7 @@ async function showMatches(seq) {
     const { defs, set } = rowCols(false);
     const cell = {
       date: r => r.date, opponent: r => r.opponent || '',
-      opp_deck: r => r.opp_deck || (r.opp_archetype ? `<span class="muted">${r.opp_archetype} (${(r.opp_deck_candidates || '').split('|').length} decks)</span>` : '<span class="muted">—</span>'),
+      opp_deck: r => r.opp_deck || NONE, opp_cands: cands, opp_arch: r => r.opp_archetype || NONE, opp_seen: seenCell,
       opp_cards: r => r.opp_cards || '<span class="muted">unknown</span>',
       my_deck: r => r.my_deck ? `${r.my_deck}${r.my_deck_source === 'cards' ? ' <span class="muted">(inferred)</span>' : ''}` : (r.my_archetype ? `<span class="muted">${r.my_archetype} (deck ambiguous)</span>` : '<span class="muted">—</span>'),
       my_list: r => r.my_list ? `<a class="key" data-col="my_list" data-val="${r.my_list.replace(/"/g, '&quot;')}" href="lists.html">${r.my_list}</a>` : `<span class="muted">${r.my_concept || 'no list'}</span>`,
