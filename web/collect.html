@@ -1,0 +1,138 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl upload</title><link rel="stylesheet" href="style.css?v=34"></head>
+<body>
+<h1>mtgctl · add my logs</h1>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists &amp; concepts</a><a href="reference.html">reference decklists</a></nav>
+<div class="box">
+  <div id="known" class="muted">…</div>
+  <p style="margin:12px 0"><button id="pick" style="font-size:16px;padding:8px 16px">Add my logs</button>
+     <input type="file" id="dirinput" webkitdirectory multiple hidden>
+     <span class="muted">choose the MTGO client folder <code>…\AppData\Local\Apps\2.0</code>, or the same folder under your wine prefix. Keep archived session logs somewhere? Add that folder too, as a second pick.</span></p>
+  <p><progress id="prog" value="0" max="1" hidden></progress> <span id="status"></span> <span id="phase" class="muted"></span></p>
+  <div id="result"></div>
+  <p class="muted">Nothing to install and no account: your MTGO username is read from the logs. The page finds your match logs and the client's session log, uploads only what the server does not have yet, and updates your results. Session logs are reduced to the lines that name your registered list before upload.</p>
+</div>
+<script src="common.js?v=34"></script>
+<script>
+const status = document.getElementById('status'), prog = document.getElementById('prog'), result = document.getElementById('result'), phase = document.getElementById('phase');
+// Progress: determinate (done/total) while reading and uploading, indeterminate with a clock while the server works.
+const fmtMB = b => (b / 1048576).toFixed(1) + ' MB';
+let tick = null;
+function progress(text, done, total, sub) {
+  prog.hidden = false;
+  if (total == null) { prog.removeAttribute('value'); } else { prog.max = Math.max(total, 1); prog.value = done; }
+  status.textContent = text; phase.textContent = sub || '';
+}
+function startClock(text) { const t0 = Date.now(); clearInterval(tick); tick = setInterval(() => { status.textContent = `${text} ${Math.round((Date.now() - t0) / 1000)}s`; }, 1000); progress(text, null, null); }
+function stopClock() { clearInterval(tick); tick = null; }
+const yieldUI = () => new Promise(r => setTimeout(r, 0));
+const isGame = n => /^Match_GameLog_.*\.dat$/.test(n);
+const isSession = n => n === 'mtgo.log' || /^mtgo-\d{8}-\d{6}\.log$/.test(n);
+document.getElementById('pick').onclick = async () => {
+  if (window.showDirectoryPicker) {
+    try { const dir = await showDirectoryPicker({ mode: 'read' }); await addLogs(walkFsa(dir)); } catch (e) { if (e.name !== 'AbortError') fail(e); }
+  } else document.getElementById('dirinput').click();
+};
+document.getElementById('dirinput').onchange = e => addLogs((async function* () { for (const f of e.target.files) yield f; })()).catch(fail);
+window.addEventListener('error', e => fail(e));
+function fail(e) { stopClock(); prog.hidden = true; phase.textContent = ''; status.innerHTML = `<span class="err">${e.message || e}</span>`; }
+function when(ts) { if (!ts) return ''; const d = new Date(ts.replace(' ', 'T')); const days = Math.floor((Date.now() - d) / 864e5); return days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`; }
+async function showKnown() {
+  const el = document.getElementById('known');
+  if (!getPlayer()) { el.textContent = 'First time here: add your logs and the page will tell you who you are.'; return; }
+  try {
+    const s = await api('api/summary');
+    el.innerHTML = s.matches ? `<b>${getPlayer()}</b>: ${s.matches} matches on file, latest ${when(s.latest_match)}; ${s.lists} registered lists, latest <b>${s.latest_list || '?'}</b>. <a href="index.html">see stats</a>` : `<b>${getPlayer()}</b>: no matches on file yet.`;
+  } catch (e) { el.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+async function sha256(buf) { const h = await crypto.subtle.digest('SHA-256', buf); return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join(''); }
+// Same reduction the server applies to a raw session log (decklist::session_extract).
+function sessionExtract(text) {
+  const out = []; let lastHour = null;
+  for (let line of text.split('\n')) {
+    line = line.replace(/\r$/, '');
+    const m = /^(\d\d):\d\d:\d\d /.exec(line); const hour = m ? m[1] : null;
+    if (line.includes('Deck Used in Game ID:') || line.includes('Game Play Status Update for Game ID:') || line.includes('CreateAndFlipToDuelScene')
+        || line.startsWith('Description=') || line.startsWith('EventId=') || line.includes('Deck Used to Join Event ID:')
+        || (hour && hour !== lastHour)) out.push(line);
+    if (hour) lastHour = hour;
+  }
+  return out.join('\n') + '\n';
+}
+async function gzip(str) { const cs = new CompressionStream('gzip'); const w = cs.writable.getWriter(); w.write(new TextEncoder().encode(str)); w.close(); return new Blob([await new Response(cs.readable).arrayBuffer()], { type: 'application/gzip' }); }
+async function* walkFsa(dir, depth = 0) {
+  if (depth > 10) return;
+  for await (const [name, h] of dir.entries()) {
+    if (h.kind === 'directory') yield* walkFsa(h, depth + 1);
+    else if (isGame(name) || isSession(name)) yield await h.getFile();
+  }
+}
+// The one action: identify, upload what is new, update results, report in match terms.
+async function addLogs(files) {
+  result.innerHTML = '';
+  progress('reading the folder…', null, null);
+  const all = []; for await (const f of files) { all.push(f); if (all.length % 500 === 0) { phase.textContent = `${all.length} files seen`; await yieldUI(); } }
+  const games = all.filter(f => isGame(f.name)), sessions = all.filter(f => isSession(f.name));
+  if (!games.length && !sessions.length) throw new Error('no MTGO logs in that folder — pick the client folder Apps\\2.0 (match logs) or a folder of archived mtgo-*.log session logs');
+  // A folder with only session logs (an archive) rides on the identity from an earlier pick.
+  if (games.length) {
+    progress('working out who you are…', null, null, `${games.length} match logs, ${sessions.length} session logs`);
+    const fd = new FormData(); for (const f of games.slice(-12)) fd.append('file', f, f.name);
+    const who = await api('api/detect', { method: 'POST', body: fd });
+    setPlayer(who.name);
+  } else if (!getPlayer()) {
+    throw new Error('that folder has only session logs; add the MTGO client folder first so the page knows who you are');
+  }
+  progress(`you are ${getPlayer()} · checking what the server already has…`, null, null, `${games.length} match logs, ${sessions.length} session logs in this folder`);
+  const before = await api('api/summary');
+  const manifest = await api('api/manifest');
+  const have = new Map(manifest.filter(f => f.kind === 'game').map(f => [f.name, f]));
+  const haveHash = new Set(manifest.filter(f => f.kind === 'session').map(f => f.sha256));
+  const newest = new Map();
+  for (const f of games) { const p = newest.get(f.name); if (!p || f.lastModified > p.lastModified) newest.set(f.name, f); }
+  const todo = [];
+  for (const f of newest.values()) { const h = have.get(f.name); if (!h || f.size > h.size || f.lastModified > h.mtime + 1000) todo.push(['game', f]); }
+  const sessBytes = sessions.reduce((a, f) => a + f.size, 0); let readBytes = 0;
+  for (let i = 0; i < sessions.length; i++) {
+    const f = sessions[i];
+    progress(`reading session logs ${i + 1} of ${sessions.length}…`, readBytes, sessBytes, `${fmtMB(readBytes)} of ${fmtMB(sessBytes)}`);
+    await yieldUI();
+    const buf = await f.arrayBuffer(); const h = await sha256(buf); readBytes += f.size;
+    if (haveHash.has(h)) continue; haveHash.add(h);
+    const gz = await gzip(sessionExtract(new TextDecoder().decode(buf)));
+    todo.push(['session-extract', { name: f.name, lastModified: f.lastModified, size: gz.size, blob: gz, sha256: h }]);
+  }
+  const nGames = todo.filter(t => t[0] === 'game').length, nSess = todo.length - nGames;
+  const totalBytes = todo.reduce((a, t) => a + t[1].size, 0); let sent = 0;
+  const MAX_BATCH = 48 * 1024 * 1024;
+  for (let i = 0; i < todo.length;) {
+    const fd = new FormData(); let bytes = 0, j = i;
+    for (; j < todo.length && (j === i || bytes + todo[j][1].size <= MAX_BATCH); j++) {
+      const [kind, f] = todo[j];
+      fd.append('kind', kind); fd.append('name', f.name); fd.append('mtime', String(f.lastModified));
+      if (f.sha256) fd.append('sha256', f.sha256);
+      fd.append('file', f.blob || f, f.name); bytes += f.size;
+    }
+    progress(`uploading ${i + 1}–${j} of ${todo.length} new files…`, sent, totalBytes, `${fmtMB(sent)} of ${fmtMB(totalBytes)}`);
+    await api('api/upload', { method: 'POST', body: fd });
+    sent += bytes; i = j;
+  }
+  progress(todo.length ? `uploaded ${todo.length} files (${fmtMB(totalBytes)})` : 'nothing new to upload', totalBytes, Math.max(totalBytes, 1));
+  startClock(todo.length ? 'updating your results…' : 'checking your results…');
+  const rep = await api('api/sync', { method: 'POST' });
+  stopClock();
+  const after = await api('api/summary');
+  prog.hidden = true; status.textContent = ''; phase.textContent = '';
+  const newMatches = after.matches - before.matches;
+  const lines = [];
+  lines.push(newMatches > 0 ? `<b>${newMatches} new match${newMatches > 1 ? 'es' : ''}</b> added (latest ${when(after.latest_match)}).` : `No new matches — your latest is from ${when(after.latest_match)}.`);
+  if (nSess) lines.push(`${nSess} session log${nSess > 1 ? 's' : ''} read; ${after.matches_with_list - before.matches_with_list} more match${after.matches_with_list - before.matches_with_list === 1 ? '' : 'es'} now know which list you played.`);
+  if (rep.in_progress) lines.push(`${rep.in_progress} match${rep.in_progress > 1 ? 'es' : ''} not finished yet (no result in the log) — add logs again when done.`);
+  if (after.latest_list) lines.push(`Latest list: <b>${after.latest_list}</b>.`);
+  lines.push(`<a href="index.html">see stats</a> · <a href="lists.html">see lists</a>`);
+  result.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+  await showKnown();
+}
+showKnown();
+</script>
+</body></html>

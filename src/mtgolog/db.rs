@@ -271,7 +271,7 @@ pub struct CountRow {
 }
 
 pub fn ensure_schema(conn: &mut SqliteConnection) -> QueryResult<()> {
-    for stmt in DDL.iter().chain(super::decklist::DDL.iter()).chain(super::ldc::DDL.iter()).chain(super::skeleton::DDL.iter()).chain(super::colors::DDL.iter()) {
+    for stmt in DDL.iter().chain(super::decklist::DDL.iter()).chain(super::ldc::DDL.iter()).chain(super::skeleton::DDL.iter()).chain(super::colors::DDL.iter()).chain([super::reference::ASSIGN_DDL, super::reference::MATCH_DECKS_DDL].iter()) {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     // Columns added after the first release (ALTER if missing).

@@ -56,7 +56,15 @@ SELECT
   cop.colors          AS opp_colors,
   m.my_list_id        AS my_list_id,
   CASE WHEN m.my_list_id IS NOT NULL THEN 1 ELSE 0 END AS has_decklist,
-  COALESCE(li.name, li.auto_name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_deck,
+  COALESCE(li.name, li.auto_name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_list,
+  md.deck             AS my_deck,
+  md.archetype        AS my_archetype,
+  md.source           AS my_deck_source,
+  CASE WHEN md.source = 'list' AND md.deck IS NOT NULL THEN 'hard' WHEN md.deck IS NOT NULL OR md.archetype IS NOT NULL THEN 'inferred' ELSE 'none' END AS my_deck_grade,
+  CASE WHEN la.deck IS NOT NULL THEN 1 ELSE 0 END AS my_deck_known,
+  od.deck             AS opp_deck,
+  od.archetype        AS opp_archetype,
+  od.candidates       AS opp_deck_candidates,
   li.concept          AS my_concept,
   COALESCE(li.experimental, 0) AS my_experimental,
   ll.archetype        AS my_list_archetype,
@@ -94,6 +102,9 @@ LEFT JOIN mtgo_match_labels mo ON mo.match_id = m.id AND mo.side = 'opp' AND mo.
 LEFT JOIN mtgo_match_colors cme ON cme.match_id = m.id AND cme.side = 'me'
 LEFT JOIN mtgo_match_colors cop ON cop.match_id = m.id AND cop.side = 'opp'
 LEFT JOIN mtgo_lists li ON li.id = m.my_list_id
+LEFT JOIN list_assignments la ON la.list_id = m.my_list_id
+LEFT JOIN match_decks md ON md.match_id = m.id AND md.side = 'me'
+LEFT JOIN match_decks od ON od.match_id = m.id AND od.side = 'opp'
 LEFT JOIN mtgo_match_labels ll ON ll.match_id = m.id AND ll.side = 'me' AND ll.source = 'list'
 LEFT JOIN mtgo_decklists dl ON dl.game_db_id = g.id
 WHERE m.replay = 0";
@@ -354,7 +365,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
         hists.push(m);
     }
     // Decks, versions, eras and dates read best in the order they happened; sizes are for the rest.
-    const CHRONOLOGICAL: &[&str] = &["my_deck", "my_concept", "my_list_id", "game_list_id", "my_cards_variant", "my_cards_variant_id", "era", "era_id", "month", "date"];
+    const CHRONOLOGICAL: &[&str] = &["my_list", "my_concept", "my_list_id", "game_list_id", "my_cards_variant", "my_cards_variant_id", "era", "era_id", "month", "date"];
     let sort = if sort == "games" && by.first().map(|c| CHRONOLOGICAL.contains(&c.as_str())).unwrap_or(false) { "time" } else { sort };
     match sort {
         "time" => rows.sort_by(|a, b| a.first_date.cmp(&b.first_date).then_with(|| natural_cmp(a.key.as_deref().unwrap_or(""), b.key.as_deref().unwrap_or("")))),
@@ -552,7 +563,7 @@ pub fn is_game_mode(q: &StatsQuery) -> bool {
 
 /// Columns derived from clustering observed cards (not registered decklists).
 pub const SIGNATURE_COLS: &[&str] = &["my_cards", "opp_cards", "my_cards_variant", "opp_cards_variant", "my_cards_id", "opp_cards_id", "my_cards_variant_id", "opp_cards_variant_id"];
-pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_colors/opp_colors = minimal colours proven by the cards shown (WUBRG letters; fetches prove nothing); my_guess_*/opp_guess_* = nearest-anchor labels (`mtgo label`: the whole card signature votes against LDC/hand/list-labelled matches), overridden per match by `mtgo label-match`. my_deck/my_list_* = exact registered list (has_decklist=1), from the client's 'Deck Used' session logs — available from 2026-08-18 on. my_concept = the list's concept (chain of lightly-tweaked versions, see `mtgo lists`; group by it for a stable sample across tweaks); my_experimental = 1 when that concept is a throwaway brew (`mtgo experimental`), exclude with --where 'my_experimental = 0' or in default_scope.";
+pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_colors/opp_colors = minimal colours proven by the cards shown (WUBRG letters; fetches prove nothing); my_guess_*/opp_guess_* = nearest-anchor labels (`mtgo label`: the whole card signature votes against LDC/hand/list-labelled matches), overridden per match by `mtgo label-match`. my_list/my_list_* = exact registered list (has_decklist=1); my_deck/my_archetype = the deck named by the nearest reference decklist (my_deck_known=1), from the client's 'Deck Used' session logs — available from 2026-08-18 on. my_concept = the list's concept (chain of lightly-tweaked versions, see `mtgo lists`; group by it for a stable sample across tweaks); my_experimental = 1 when that concept is a throwaway brew (`mtgo experimental`), exclude with --where 'my_experimental = 0' or in default_scope.";
 
 pub fn print_columns(conn: &mut SqliteConnection) -> QueryResult<()> {
     super::db::ensure_schema(conn)?;

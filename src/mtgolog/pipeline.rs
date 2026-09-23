@@ -49,13 +49,17 @@ impl PlayerDir {
 pub struct Reference {
     pub markers: PathBuf,
     pub card_names: Option<PathBuf>,
+    /// the shared database (reference decklists, card facts)
+    pub shared_db: PathBuf,
+    /// bans and set releases that open eras
+    pub timeline: PathBuf,
 }
 
 impl Reference {
-    /// `repo` holds `definitions/mtgo/markers.toml` and `deploy/mtgo_cards_seed.sql`.
-    pub fn locate(repo: &Path) -> Self {
+    /// `repo` holds `definitions/mtgo/markers.toml` and `deploy/mtgo_cards_seed.sql`; `data` holds `shared.db`.
+    pub fn locate(repo: &Path, data: &Path) -> Self {
         let seed = repo.join("deploy/mtgo_cards_seed.sql");
-        Reference { markers: repo.join("definitions/mtgo/markers.toml"), card_names: seed.exists().then_some(seed) }
+        Reference { markers: repo.join("definitions/mtgo/markers.toml"), card_names: seed.exists().then_some(seed), shared_db: data.join("shared.db"), timeline: repo.join("definitions/mtgo/legacy_timeline.toml") }
     }
 }
 
@@ -68,6 +72,7 @@ pub struct SyncReport {
     pub failed: usize,
     pub lists: usize,
     pub linked_games: usize,
+    pub lists_assigned: usize,
     pub steps: Vec<String>,
 }
 
@@ -92,11 +97,20 @@ pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<Sy
     let dl = super::decklist::run_decklists(conn, &cfg, true, false).map_err(|e| format!("decklists: {e}"))?;
     steps.push(format!("decklists: {} lists, {} games linked, {} unlinked", dl.lists, dl.linked, dl.unlinked));
 
+    let shared = &mut crate::db::establish_connection_at(&reference.shared_db)?;
+    let eras = super::eras::eras_from_file(&reference.timeline)?;
+    let refs = super::reference::load_references(shared, &eras).map_err(|e| format!("references: {e}"))?;
+    let assigned = super::reference::assign_player(conn, &refs).map_err(|e| format!("assign: {e}"))?;
+    let lists_assigned = assigned.iter().filter(|a| a.deck.is_some()).count();
+    steps.push(format!("decks: {lists_assigned} of {} lists named by {} reference decklists", assigned.len(), refs.refs.len()));
+    let md = super::reference::label_matches(conn, &refs).map_err(|e| format!("match decks: {e}"))?;
+    steps.push(format!("match decks: mine from list {}, from cards {}; opponents named {}, archetype only {}", md.me_list, md.me_cards, md.opp_named, md.opp_archetype_only));
+
     super::cluster::run_cluster(conn, 0.65, 0.4, false, false, false, usize::MAX, "cutoff", false).map_err(|e| format!("cluster: {e}"))?;
     steps.push("cluster: ok".into());
 
     // Guessed opponent labels are not part of this pipeline; clear any left by an older build.
     diesel::sql_query("DELETE FROM mtgo_match_labels WHERE source = 'guess'").execute(conn).map_err(|e| e.to_string())?;
 
-    Ok(SyncReport { imported: st.matches, refreshed: st.refreshed, skipped: st.skipped, in_progress: st.in_progress, failed: st.failed, lists: dl.lists, linked_games: dl.linked, steps })
+    Ok(SyncReport { imported: st.matches, refreshed: st.refreshed, skipped: st.skipped, in_progress: st.in_progress, failed: st.failed, lists: dl.lists, linked_games: dl.linked, lists_assigned, steps })
 }

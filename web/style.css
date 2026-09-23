@@ -80,3 +80,7 @@ th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { backgrou
 #pFilters .vals { max-height: 170px; }
 .panels fieldset { padding: 6px 10px 8px; }
 .box h3 { margin-bottom: 4px; }
+.deckname { background: #e8efff; border-radius: 4px; padding: 0 6px; font-weight: 600; }
+/* long text cells (deck names, cards seen, list versions) wrap within a bounded width; numbers stay on one line */
+.results td:first-child, .results td.l, .results td.text { white-space: normal; max-width: 300px; overflow-wrap: anywhere; }
+.results .tabwrap { overflow-x: auto; max-width: 100%; }

@@ -6,3 +6,4 @@ definitions_old/
 pkg/
 web-data/
 target-bullseye/
+!web/*.html

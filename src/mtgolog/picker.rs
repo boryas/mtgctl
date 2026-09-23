@@ -24,8 +24,8 @@ const SORTS: &[(&str, &str)] = &[
 
 /// Curated first screen; everything else hides behind "more columns…". Overridable via
 /// [mtgo] picker_filter_columns / picker_groupby_columns in config.toml.
-const DEFAULT_FILTER_COLS: &[&str] = &["my_concept", "my_deck", "my_list_subtype", "my_experimental", "opp_guess_archetype", "opp_guess_subtype", "opp_cards", "era", "month", "opponent", "event_kind", "game_number", "on_play", "my_mulligans"];
-const DEFAULT_GROUPBY_COLS: &[&str] = &["opp_guess_archetype", "opp_guess_subtype", "opp_cards", "my_deck", "my_concept", "my_list_subtype", "era", "month", "game_number", "on_play", "my_mulligans", "win_by"];
+const DEFAULT_FILTER_COLS: &[&str] = &["my_deck", "my_archetype", "my_concept", "my_list", "my_list_subtype", "my_experimental", "opp_guess_archetype", "opp_guess_subtype", "opp_cards", "era", "month", "opponent", "event_kind", "game_number", "on_play", "my_mulligans"];
+const DEFAULT_GROUPBY_COLS: &[&str] = &["opp_guess_archetype", "opp_guess_subtype", "opp_cards", "my_deck", "my_concept", "my_list", "my_list_subtype", "era", "month", "game_number", "on_play", "my_mulligans", "win_by"];
 
 /// Two-tier multi-select: a short curated list (defaults pre-checked) + "more columns…" which opens
 /// a fuzzy finder over the remaining columns. Returns the chosen column names (None = aborted).

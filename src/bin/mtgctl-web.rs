@@ -38,6 +38,50 @@ struct Cli {
 enum Cmd {
     /// Replace raw session logs stored by older builds with gzipped extracts.
     CompactSessions,
+    /// Add a reference decklist to the shared database from a decklist file (`4 Brainstorm` lines, sideboard after a blank line or a `Sideboard` heading).
+    RefAdd {
+        #[arg(long)]
+        archetype: String,
+        #[arg(long)]
+        deck: String,
+        /// How the list is known, e.g. "Legacy Challenge 32 2026-09-06 5th, boryas".
+        #[arg(long)]
+        name: String,
+        /// YYYY-MM-DD the list was played; its era (bans/sets) is resolved from the timeline.
+        #[arg(long)]
+        date: String,
+        /// URL or note.
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        by: Option<String>,
+        file: PathBuf,
+    },
+    /// List the reference decklists.
+    RefList,
+    /// Remove a reference decklist by id.
+    RefRemove { id: i32 },
+    /// Re-resolve every reference's era from its list date against the timeline.
+    RefReera,
+    /// Move a deck under another archetype, e.g. `ref-move Elves "GSZ/Cradle"`.
+    RefMove { deck: String, archetype: String },
+    /// Assign a player's registered lists to decks via the nearest reference decklist and print the decisions.
+    Assign { player: String },
+    /// Load card facts (card_colors.json from fetch_scryfall.py: colours, colours lands produce) into the shared database.
+    CardsImport { file: PathBuf },
+    /// Infer my deck per match from the cards I played; score it against the matches whose list is known, then summarise the rest.
+    Infer {
+        player: String,
+        /// me (default) or opp
+        #[arg(long, default_value = "me")]
+        side: String,
+        /// Pool the cards seen over all matches of a day before inferring (my side plays one list per session).
+        #[arg(long)]
+        pool_day: bool,
+        /// Pool over runs of consecutive matches in a day while the pooled cards still fit one reference (a list switch breaks the run).
+        #[arg(long)]
+        pool_run: bool,
+    },
     Serve {
         #[arg(long, default_value = "127.0.0.1:8090")]
         listen: String,
@@ -111,6 +155,18 @@ fn detect_me(logs: &[Vec<u8>]) -> Option<(String, usize, usize)> {
     counts.into_iter().max_by_key(|(_, c)| *c).map(|(p, c)| (p, c, parsed))
 }
 
+/// Eras from the repo timeline (the CLI runs from the repo root or ~/mtgctl-web, both hold definitions/).
+fn timeline_eras() -> Vec<(String, String)> {
+    mtgctl::mtgolog::eras::eras_from_file(Path::new("definitions/mtgo/legacy_timeline.toml")).unwrap_or_else(|e| { eprintln!("timeline: {e}"); std::process::exit(1) })
+}
+
+/// The shared database: reference decklists (and, later, everything that is not one player's).
+fn shared_db(data: &Path) -> Result<diesel::SqliteConnection, String> {
+    std::fs::create_dir_all(data).map_err(|e| e.to_string())?;
+    let conn = mtgctl::db::establish_connection_at(&data.join("shared.db"))?;
+    Ok(conn)
+}
+
 fn player_dir(state: &AppState, name: &str) -> PlayerDir {
     PlayerDir::new(state.data.join("players").join(name))
 }
@@ -173,6 +229,23 @@ async fn client_log(body: Bytes) -> StatusCode {
     let text = String::from_utf8_lossy(&body[..body.len().min(4000)]).replace('\n', " ");
     eprintln!("client-log: {text}");
     StatusCode::NO_CONTENT
+}
+
+/// The reference decklists, read-only, with cards when `?id=` is given.
+async fn reference_api(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<serde_json::Value>, ApiError> {
+    let data = st.data.clone();
+    let id: Option<i32> = q.get("id").and_then(|s| s.parse().ok());
+    let v = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let conn = &mut shared_db(&data)?;
+        Ok(match id {
+            Some(id) => serde_json::to_value(mtgctl::mtgolog::reference::cards(conn, id).map_err(|e| e.to_string())?).unwrap(),
+            None => serde_json::to_value(mtgctl::mtgolog::reference::list(conn).map_err(|e| e.to_string())?).unwrap(),
+        })
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(internal)?;
+    Ok(Json(v))
 }
 
 /// Every player with data on this server.
@@ -482,6 +555,18 @@ struct ListRow {
     last_seen: String,
     #[diesel(sql_type = diesel::sql_types::BigInt)]
     matches: i64,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    deck: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    archetype: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
+    deck_score: Option<i32>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    runner_up_deck: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
+    runner_up_dist: Option<i32>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    colors: Option<String>,
 }
 
 async fn lists(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ListRow>>, ApiError> {
@@ -493,8 +578,9 @@ async fn lists(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Has
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(
             "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.concept, l.parent_id, l.experimental, l.first_seen, l.last_seen,
-                    (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches
-             FROM mtgo_lists l ORDER BY l.first_seen, l.id",
+                    (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
+                    a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors
+             FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id ORDER BY l.first_seen, l.id",
         )
         .load::<ListRow>(conn)
         .map_err(|e| e.to_string())
@@ -525,6 +611,12 @@ struct ListDetail {
     first_seen: String,
     last_seen: String,
     matches: i64,
+    deck: Option<String>,
+    archetype: Option<String>,
+    deck_score: Option<i32>,
+    runner_up_deck: Option<String>,
+    runner_up_dist: Option<i32>,
+    colors: Option<String>,
     cards: Vec<ListCard>,
     /// vs the parent: (name, sideboard, qty in parent, qty here), only where they differ
     diff: Vec<(String, bool, i32, i32)>,
@@ -541,8 +633,9 @@ async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Que
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         let rows: Vec<ListRow> = diesel::sql_query(format!(
             "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.concept, l.parent_id, l.experimental, l.first_seen, l.last_seen,
-                    (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches
-             FROM mtgo_lists l WHERE l.id = {id}"
+                    (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
+                    a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors
+             FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id WHERE l.id = {id}"
         ))
         .load(conn)
         .map_err(|e| e.to_string())?;
@@ -564,7 +657,7 @@ async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Que
                 }
             }
         }
-        Ok(ListDetail { id: l.id, name: l.name, concept: l.concept, parent_id: l.parent_id, experimental: l.experimental, first_seen: l.first_seen, last_seen: l.last_seen, matches: l.matches, cards, diff })
+        Ok(ListDetail { id: l.id, name: l.name, concept: l.concept, parent_id: l.parent_id, experimental: l.experimental, first_seen: l.first_seen, last_seen: l.last_seen, matches: l.matches, deck: l.deck, archetype: l.archetype, deck_score: l.deck_score, runner_up_deck: l.runner_up_deck, runner_up_dist: l.runner_up_dist, colors: l.colors, cards, diff })
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -624,7 +717,19 @@ struct MatchRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_cards: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    my_list: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_deck: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    my_archetype: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    my_deck_source: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_deck: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_archetype: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_deck_candidates: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_concept: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
@@ -670,7 +775,7 @@ async fn matches_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Que
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_deck, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
+            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
                      FROM (SELECT * FROM mtgo_games WHERE match_id = v.match_id ORDER BY game_number) g) AS games
              FROM mtgo_game_view v
@@ -790,6 +895,10 @@ struct GameRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_cards: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_deck: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    my_list: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_deck: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     event_name: Option<String>,
@@ -827,7 +936,7 @@ async fn games_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT game_id, match_id, date, opponent, opp_cards, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
+            "SELECT game_id, match_id, date, opponent, opp_cards, opp_deck, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
              FROM mtgo_game_view {wher} ORDER BY date DESC, match_id DESC, game_number LIMIT {limit}"
         ))
         .load(conn)
@@ -843,6 +952,133 @@ async fn games_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query
 async fn main() {
     let cli = Cli::parse();
     match cli.command {
+        Cmd::RefAdd { archetype, deck, name, date, source, by, file } => {
+            let text = std::fs::read_to_string(&file).unwrap_or_else(|e| { eprintln!("{}: {e}", file.display()); std::process::exit(1) });
+            let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let eras = timeline_eras();
+            match mtgctl::mtgolog::reference::add(conn, &mtgctl::mtgolog::reference::NewReference { archetype: &archetype, deck: &deck, name: &name, date: &date, source: source.as_deref(), added_by: by.as_deref(), text: &text }, &eras) {
+                Ok(id) => { let era = mtgctl::mtgolog::eras::era_for(&eras, &date).map(|(_, n)| n.as_str()).unwrap_or("?"); println!("reference decklist #{id}: {archetype} / {deck} — {name} (era: {era})") }
+                Err(e) => { eprintln!("{e}"); std::process::exit(1) }
+            }
+        }
+        Cmd::RefMove { deck, archetype } => {
+            let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            match mtgctl::mtgolog::reference::move_deck(conn, &deck, &archetype) { Ok(()) => println!("{deck} → {archetype}"), Err(e) => { eprintln!("{e}"); std::process::exit(1) } }
+        }
+        Cmd::RefReera => {
+            let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            match mtgctl::mtgolog::reference::reassign_eras(conn, &timeline_eras()) { Ok(n) => println!("{n} references re-placed in eras"), Err(e) => eprintln!("{e}") }
+        }
+        Cmd::RefList => {
+            let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            match mtgctl::mtgolog::reference::list(conn) {
+                Ok(rows) => for r in rows { println!("#{:<3} {:<18} {:<26} {:<30} {}/{}  {}", r.id, r.archetype, r.deck, r.era, r.n_main, r.n_side, r.name); },
+                Err(e) => eprintln!("{e}"),
+            }
+        }
+        Cmd::RefRemove { id } => {
+            let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            match mtgctl::mtgolog::reference::remove(conn, id) { Ok(1) => println!("removed #{id}"), Ok(_) => println!("no reference #{id}"), Err(e) => eprintln!("{e}") }
+        }
+        Cmd::CardsImport { file } => {
+            let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            match mtgctl::mtgolog::reference::import_card_facts(conn, &file) { Ok(n) => println!("{n} cards"), Err(e) => { eprintln!("{e}"); std::process::exit(1) } }
+        }
+        Cmd::Infer { player, side, pool_day, pool_run } => {
+            use diesel::prelude::*;
+            use mtgctl::mtgolog::reference as r;
+            let shared = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let refs = r::load_references(shared, &timeline_eras()).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let dir = PlayerDir::new(cli.data.join("players").join(&player));
+            let conn = &mut dir.connect().unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            #[derive(diesel::QueryableByName)]
+            struct Seen { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Text)] name: String, #[diesel(sql_type = diesel::sql_types::Integer)] qty: i32 }
+            #[derive(diesel::QueryableByName)]
+            struct Truth { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)] deck: Option<String>, #[diesel(sql_type = diesel::sql_types::Text)] date: String }
+            // copies seen = the most instances of the card in any one game of the match
+            let seen: Vec<Seen> = diesel::sql_query(format!("SELECT c.match_id, c.name, COALESCE(MAX(c.instances), 1) AS qty FROM mtgo_game_cards c WHERE c.side = '{side}' AND c.played = 1 GROUP BY c.match_id, c.name")).load(conn).unwrap();
+            let mut by_match: HashMap<i32, std::collections::BTreeMap<String, i32>> = HashMap::new();
+            for s in seen { by_match.entry(s.match_id).or_default().insert(s.name, s.qty); }
+            let truth: Vec<Truth> = diesel::sql_query("SELECT m.id AS match_id, a.deck, COALESCE(substr(m.start_ts,1,10), '') AS date FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0").load(conn).unwrap();
+            if pool_run {
+                let mut days: std::collections::BTreeMap<String, Vec<i32>> = Default::default();
+                for t in &truth { if by_match.contains_key(&t.match_id) { days.entry(t.date.clone()).or_default().push(t.match_id); } }
+                let mut pooled: HashMap<i32, std::collections::BTreeMap<String, i32>> = HashMap::new();
+                for (_, ids) in days.iter_mut() {
+                    ids.sort();
+                    let mut run: Vec<i32> = vec![]; let mut acc: std::collections::BTreeMap<String, i32> = Default::default();
+                    let flush = |run: &mut Vec<i32>, acc: &std::collections::BTreeMap<String, i32>, pooled: &mut HashMap<i32, std::collections::BTreeMap<String, i32>>| { for id in run.iter() { pooled.insert(*id, acc.clone()); } run.clear(); };
+                    for id in ids.iter() {
+                        let s = &by_match[id];
+                        let mut trial = acc.clone(); for (n, q) in s { let e = trial.entry(n.clone()).or_insert(0); *e = (*e).max(*q); }
+                        let fits = r::infer(&trial, &refs).coverage >= r::INFER_MIN_COVERAGE || run.is_empty();
+                        if !fits { flush(&mut run, &acc, &mut pooled); acc = s.clone(); } else { acc = trial; }
+                        run.push(*id);
+                    }
+                    flush(&mut run, &acc, &mut pooled);
+                }
+                for (id, s) in pooled { by_match.insert(id, s); }
+            } else if pool_day {
+                // evidence for a match = union over the day's matches (max copies seen of each card)
+                let mut by_day: HashMap<String, std::collections::BTreeMap<String, i32>> = HashMap::new();
+                for t in &truth { if let Some(s) = by_match.get(&t.match_id) { let d = by_day.entry(t.date.clone()).or_default(); for (n, q) in s { let e = d.entry(n.clone()).or_insert(0); *e = (*e).max(*q); } } }
+                for t in &truth { if let Some(d) = by_day.get(&t.date) { by_match.insert(t.match_id, d.clone()); } }
+            }
+            let (mut right, mut wrong, mut amb, mut unk, mut known) = (0, 0, 0, 0, 0);
+            let mut confusion: std::collections::BTreeMap<(String, String), usize> = Default::default();
+            let mut soft: std::collections::BTreeMap<String, usize> = Default::default();
+            let mut soft_by_month: std::collections::BTreeMap<(String, String), usize> = Default::default();
+            let mut examples: Vec<String> = vec![];
+            for t in &truth {
+                let Some(s) = by_match.get(&t.match_id) else { continue };
+                let inf = r::infer(s, &refs);
+                let got = inf.deck.clone().unwrap_or_else(|| if inf.candidates.len() > 1 { format!("{} (deck ambiguous: {})", inf.archetype.clone().unwrap_or_else(|| "archetype ambiguous".into()), inf.candidates.join("|")) } else { "unknown".into() });
+                if side == "me" && t.deck.is_some() {
+                    known += 1;
+                    let truth_deck = t.deck.clone().unwrap();
+                    if inf.deck.as_deref() == Some(truth_deck.as_str()) { right += 1 } else if inf.deck.is_some() { wrong += 1; if examples.len() < 6 { examples.push(format!("{} truth {} → {} (cov {:.2}, runner {} {:.2}, {} cards, {})", t.date, truth_deck, got, inf.coverage, inf.runner_up_deck.clone().unwrap_or_default(), inf.runner_up_coverage, inf.n_seen, inf.colors)); } } else if !inf.candidates.is_empty() { amb += 1 } else { unk += 1 }
+                    *confusion.entry((truth_deck, got)).or_default() += 1;
+                } else {
+                    *soft.entry(got.clone()).or_default() += 1;
+                    *soft_by_month.entry((t.date[..7].to_string(), got)).or_default() += 1;
+                }
+            }
+            if side == "me" {
+                println!("known-list matches: {known}: right {right}, wrong {wrong}, ambiguous {amb}, unknown {unk}  (accuracy when named: {:.0}%)", if right + wrong > 0 { 100.0 * right as f64 / (right + wrong) as f64 } else { 0.0 });
+                for ((t, g), n) in &confusion { println!("  truth {:<12} → {:<40} {n}", t, g); }
+                for e in examples { println!("  miss: {e}"); }
+            }
+            println!("
+{} matches without a known list:", soft.values().sum::<usize>());
+            for (g, n) in &soft { println!("  {:<40} {n}", g); }
+            println!("
+by month (soft):");
+            let mut months: Vec<&String> = soft_by_month.keys().map(|(m, _)| m).collect(); months.sort(); months.dedup();
+            for m in months { let row: Vec<String> = soft_by_month.iter().filter(|((mm, _), _)| mm == m).map(|((_, g), n)| format!("{}:{}", g.chars().take(14).collect::<String>(), n)).collect(); println!("  {m}  {}", row.join("  ")); }
+        }
+        Cmd::Assign { player } => {
+            use mtgctl::mtgolog::reference as r;
+            let shared = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let refs = r::load_references(shared, &timeline_eras()).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let dir = PlayerDir::new(cli.data.join("players").join(&player));
+            let conn = &mut dir.connect().unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let names: HashMap<i32, String> = {
+                use diesel::prelude::*;
+                #[derive(diesel::QueryableByName)]
+                struct N { #[diesel(sql_type = diesel::sql_types::Integer)] id: i32, #[diesel(sql_type = diesel::sql_types::Text)] name: String }
+                diesel::sql_query("SELECT id, COALESCE(name, auto_name, 'list#' || id) AS name FROM mtgo_lists").load::<N>(conn).unwrap_or_default().into_iter().map(|n| (n.id, n.name)).collect()
+            };
+            match r::assign_player(conn, &refs) {
+                Ok(asg) => {
+                    for r in &refs.refs { println!("reference #{} {:<12} colours {}", r.id, r.deck, r.colors); }
+                    println!("{:<4} {:<58} {:<6} {:<12} {:>5} {:>4}  runner-up", "list", "name", "mana", "deck", "score", "side");
+                    for a in asg {
+                        println!("{:<4} {:<58} {:<6} {:<12} {:>5} {:>4}  {}", a.list_id, names.get(&a.list_id).map(|s| s.chars().take(58).collect::<String>()).unwrap_or_default(), a.colors, a.deck.clone().unwrap_or_else(|| "—".into()), a.dist_main, a.dist_side, a.runner_up_deck.map(|d| format!("{d} at {}", a.runner_up_dist.unwrap_or(0))).unwrap_or_default());
+                    }
+                }
+                Err(e) => eprintln!("{e}"),
+            }
+        }
         Cmd::CompactSessions => {
             if let Err(e) = compact_sessions(&cli.data) {
                 eprintln!("{e}");
@@ -851,10 +1087,11 @@ async fn main() {
         }
         Cmd::Serve { listen, web, repo } => {
             std::fs::create_dir_all(cli.data.join("players")).expect("data dir");
-            let state = Arc::new(AppState { data: cli.data.clone(), reference: Reference::locate(&repo), sync_locks: Mutex::new(HashMap::new()) });
+            let state = Arc::new(AppState { data: cli.data.clone(), reference: Reference::locate(&repo, &cli.data), sync_locks: Mutex::new(HashMap::new()) });
             let app = Router::new()
                 .route("/api/me", get(me))
                 .route("/api/players", get(players))
+                .route("/api/reference", get(reference_api))
                 .route("/api/client-log", post(client_log))
                 .route("/api/detect", post(detect))
                 .route("/api/summary", get(summary))

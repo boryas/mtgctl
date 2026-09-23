@@ -1,0 +1,61 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl lists</title><link rel="stylesheet" href="style.css?v=34"></head>
+<body>
+<h1>mtgctl · my lists</h1>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists &amp; concepts</a><a href="reference.html">reference decklists</a></nav>
+<div id="playerbar" class="box"></div>
+<p class="muted">Registered lists as MTGO saw them, grouped by concept (a chain of lightly tweaked versions). Each version is named after the nearest <a href="reference.html">reference decklist</a> when one is close enough and clearly closest; otherwise it has no deck and counts as soft data. Hover a card to zoom; click a list to open its cards.</p>
+<div id="out"></div>
+<script src="common.js?v=34"></script>
+<script>
+(async () => {
+  const out = document.getElementById('out');
+  try {
+    if (!await playerBar(document.getElementById('playerbar'))) { out.textContent = 'no player data on this server yet'; return; }
+    const lists = await api('api/lists');
+    const byConcept = new Map();
+    for (const l of lists) { const k = l.concept || '(unnamed)'; if (!byConcept.has(k)) byConcept.set(k, []); byConcept.get(k).push(l); }
+    const want = /[#&]list=(\d+)/.exec(location.hash);
+    for (const [concept, ls] of byConcept) {
+      const h = document.createElement('h2'); h.className = 'concept';
+      const total = ls.reduce((a, l) => a + l.matches, 0);
+      h.innerHTML = `${concept} ${ls[0].experimental ? '<span class="muted">(experimental)</span>' : ''} <span class="muted">· ${ls.length} version${ls.length > 1 ? 's' : ''}, ${total} matches</span> <a class="peek" href="${statsLink('my_concept', concept)}">stats for this concept ↗</a>`;
+      out.appendChild(h);
+      for (const l of ls) {
+        const d = document.createElement('details'); d.className = 'list'; d.id = 'list-' + l.id;
+        const named = l.deck ? `<span class="deckname">${l.deck}</span> <span class="muted">(${l.deck_score} from the reference${l.runner_up_deck ? `, ${l.runner_up_deck} at ${l.runner_up_dist}` : ''})</span>` : `<span class="muted">no deck${l.runner_up_deck ? ` — nearest ${l.runner_up_deck} at ${l.runner_up_dist}` : ''}</span>`;
+        d.innerHTML = `<summary><b>${l.name || 'list#' + l.id}</b> ${named} <span class="muted">#${l.id} · ${l.colors || ''} · ${l.first_seen.slice(0, 10)} → ${l.last_seen.slice(0, 10)} · ${l.matches} matches${l.parent_id ? ' · from #' + l.parent_id : ' · root'}</span> <a class="peek" href="${statsLink('my_list', l.name || 'list#' + l.id)}">stats ↗</a></summary><div class="body muted">…</div>`;
+        let loaded = false;
+        d.addEventListener('toggle', async () => {
+          if (!d.open || loaded) return; loaded = true;
+          const body = d.querySelector('.body'); body.className = 'body';
+          try {
+            const r = await api(`api/list?id=${l.id}`);
+            body.innerHTML = '';
+            if (r.diff.length) {
+              const delta = document.createElement('div'); delta.className = 'delta';
+              const outC = document.createElement('div'); outC.className = 'cards'; const inC = document.createElement('div'); inC.className = 'cards';
+              for (const [n, sb, a, b] of r.diff) { const el = cardEl(n, Math.abs(b - a), b < a ? 'out' : 'in'); if (sb) el.title += ' (sideboard)'; (b < a ? outC : inC).appendChild(el); }
+              delta.innerHTML = `<span class="muted">vs #${r.parent_id}:</span> `;
+              if (outC.children.length) { delta.append('out '); delta.appendChild(outC); }
+              if (inC.children.length) { delta.append(' in '); delta.appendChild(inC); }
+              delta.appendChild(document.createElement('div')).className = 'muted'; delta.lastChild.textContent = diffText(r.diff);
+              body.appendChild(delta);
+            }
+            for (const sb of [false, true]) {
+              const cs = r.cards.filter(c => c.sideboard === sb); if (!cs.length) continue;
+              const h4 = document.createElement('div'); h4.className = 'muted'; h4.textContent = sb ? `sideboard (${cs.reduce((a, c) => a + c.qty, 0)})` : `main (${cs.reduce((a, c) => a + c.qty, 0)})`; body.appendChild(h4);
+              const grid = document.createElement('div'); grid.className = 'cards';
+              for (const c of cs) grid.appendChild(cardEl(c.name, c.qty)); body.appendChild(grid);
+            }
+            loadImages(body);
+          } catch (e) { body.innerHTML = `<span class="err">${e.message}</span>`; }
+        });
+        out.appendChild(d);
+        if (want && +want[1] === l.id) { d.open = true; setTimeout(() => d.scrollIntoView({ block: 'start' }), 50); }
+      }
+    }
+  } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
+})();
+</script>
+</body></html>

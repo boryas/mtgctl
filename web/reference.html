@@ -1,0 +1,37 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl reference decklists</title><link rel="stylesheet" href="style.css?v=34"></head>
+<body>
+<h1>mtgctl · reference decklists</h1>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists &amp; concepts</a><a href="reference.html">reference decklists</a></nav>
+<p class="muted">Concrete lists with published results that stand for a deck. Eras are the timeline's ban and set-release boundaries. Every registered list is named after the nearest one by main-deck distance (plus a penalty per colour of mana they disagree on), when that is within 15 and at least 4 clearer than any other deck's best reference.</p>
+<div id="out">…</div>
+<script src="common.js?v=34"></script>
+<script>
+(async () => {
+  const out = document.getElementById('out');
+  try {
+    const refs = await api('api/reference');
+    const byArch = new Map();
+    for (const r of refs) { if (!byArch.has(r.archetype)) byArch.set(r.archetype, []); byArch.get(r.archetype).push(r); }
+    out.innerHTML = '';
+    for (const [arch, rs] of byArch) {
+      const h = document.createElement('h2'); h.className = 'concept'; h.textContent = arch; out.appendChild(h);
+      for (const r of rs) {
+        const d = document.createElement('details'); d.className = 'list';
+        d.innerHTML = `<summary><span class="deckname">${r.deck}</span> <b>${r.name}</b> <span class="muted">${r.list_date || ''} · era ${r.era} · ${r.n_main}/${r.n_side}${r.added_by ? ' · added by ' + r.added_by : ''}</span>${r.source ? ` <a class="peek" href="${r.source}" target="_blank" rel="noopener">source ↗</a>` : ''} <a class="peek" href="index.html#my_deck=${encodeURIComponent(r.deck)}">stats for this deck ↗</a></summary><div class="body muted">…</div>`;
+        let loaded = false;
+        d.addEventListener('toggle', async () => {
+          if (!d.open || loaded) return; loaded = true;
+          const body = d.querySelector('.body'); body.className = 'body'; body.innerHTML = '';
+          const cards = await api(`api/reference?id=${r.id}`);
+          for (const sb of [false, true]) { const cs = cards.filter(c => c.sideboard === sb); if (!cs.length) continue; const t = document.createElement('div'); t.className = 'muted'; t.textContent = sb ? 'sideboard' : 'main'; body.appendChild(t); const g = document.createElement('div'); g.className = 'cards'; for (const c of cs) g.appendChild(cardEl(c.name, c.qty)); body.appendChild(g); }
+          loadImages(body);
+        });
+        out.appendChild(d);
+      }
+    }
+    if (!refs.length) out.textContent = 'no reference decklists yet';
+  } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
+})();
+</script>
+</body></html>

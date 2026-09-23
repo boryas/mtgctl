@@ -76,22 +76,30 @@ struct EraRow {
     matches: i64,
 }
 
-/// `--only-bans`: only banlist changes (and manual entries) open eras; set releases are kept in
-/// the table as kind=set but do not get an era of their own.
-pub fn run_eras(conn: &mut SqliteConnection, path: &Path, only_bans: bool, check: bool) -> QueryResult<()> {
-    super::db::ensure_schema(conn)?;
-    let events = match load_timeline(path) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("{e}");
-            return Ok(());
-        }
-    };
-    // One era per effective date: events sharing a date (e.g. a set + its Commander release,
-    // or a ban landing on a release day) are merged into a single era.
+/// A B&R announcement that changed nothing in Legacy does not open an era.
+fn effective_event(e: &TimelineEvent) -> bool {
+    e.kind != "banlist" || !e.banned.is_empty() || !e.unbanned.is_empty()
+}
+
+/// Era name as shown everywhere: set code + name, or the announcement's name.
+pub fn era_name(e: &TimelineEvent) -> String {
+    if e.code.is_empty() { e.name.clone() } else { format!("{} {}", e.code, e.name) }
+}
+
+/// (start date, name) of every era in the timeline file, oldest first.
+pub fn eras_from_file(path: &Path) -> Result<Vec<(String, String)>, String> {
+    Ok(opening_events(&load_timeline(path)?, false).iter().map(|e| (e.effective.clone(), era_name(e))).collect())
+}
+
+/// The era a date falls in: the latest era starting on or before it.
+pub fn era_for<'a>(eras: &'a [(String, String)], date: &str) -> Option<&'a (String, String)> {
+    eras.iter().rev().find(|(start, _)| start.as_str() <= date)
+}
+
+/// One era per effective date: events sharing a date (e.g. a set + its Commander release, or a
+/// ban landing on a release day) are merged into a single era.
+pub fn opening_events(events: &[TimelineEvent], only_bans: bool) -> Vec<TimelineEvent> {
     let mut opening: Vec<TimelineEvent> = Vec::new();
-    // A B&R announcement that changed nothing in Legacy does not open an era.
-    let effective_event = |e: &TimelineEvent| e.kind != "banlist" || !e.banned.is_empty() || !e.unbanned.is_empty();
     for e in events.iter().filter(|e| effective_event(e) && (!only_bans || e.kind != "set")) {
         match opening.last_mut() {
             Some(last) if last.effective == e.effective => {
@@ -109,13 +117,29 @@ pub fn run_eras(conn: &mut SqliteConnection, path: &Path, only_bans: bool, check
             _ => opening.push(e.clone()),
         }
     }
+    opening
+}
+
+/// `--only-bans`: only banlist changes (and manual entries) open eras; set releases are kept in
+/// the table as kind=set but do not get an era of their own.
+pub fn run_eras(conn: &mut SqliteConnection, path: &Path, only_bans: bool, check: bool) -> QueryResult<()> {
+    super::db::ensure_schema(conn)?;
+    let events = match load_timeline(path) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("{e}");
+            return Ok(());
+        }
+    };
+    let opening = opening_events(&events, only_bans);
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         truncate(conn, "mtgo_eras")?;
+
         for e in &opening {
             diesel::insert_into(mtgo_eras::table)
                 .values(NewEra {
                     start_date: e.effective.clone(),
-                    name: if e.code.is_empty() { e.name.clone() } else { format!("{} {}", e.code, e.name) },
+                    name: era_name(e),
                     kind: e.kind.clone(),
                     banned: e.banned.join(", "),
                     unbanned: e.unbanned.join(", "),

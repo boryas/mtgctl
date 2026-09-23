@@ -1,0 +1,552 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=34"></head>
+<body>
+<h1>mtgctl · results</h1>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists &amp; concepts</a><a href="reference.html">reference decklists</a></nav>
+<div class="layout">
+<aside class="panels">
+  <fieldset class="box" id="pView">
+    <h3 class="toggle"><span class="caret">▾</span> View <span class="psum muted"></span></h3>
+    <div class="pbody">
+    <div><label><input type="radio" name="view" value="table" checked> table</label> <label><input type="radio" name="view" value="series"> time series</label> <label><input type="radio" name="view" value="rows"> rows</label></div>
+    <div class="optgroup" id="optTable">
+      <div>sort <select id="sort"><option value="games">size</option><option value="wr">win rate</option><option value="key">key</option><option value="time">time</option></select></div>
+    </div>
+    <div class="optgroup" id="optSeries" hidden>
+      <div>per <select id="bucket"><option value="week">week</option><option value="month" selected>month</option><option value="date">day</option></select> · smoothing <select id="smooth"><option value="1">none</option><option value="3">3 buckets</option><option value="5">5 buckets</option><option value="9">9 buckets</option></select></div>
+      <div>max lines <input id="topn" type="number" value="6" size="2"></div>
+    </div>
+    <div class="optgroup" id="optRows" hidden>
+      <div>newest <input id="rowlimit" type="number" value="500" size="4"></div>
+    </div>
+    </div>
+  </fieldset>
+  <fieldset class="box" id="pFilters">
+    <h3 class="toggle"><span class="caret">▾</span> Filters <span class="psum muted"></span></h3>
+    <div class="pbody">
+    <div>player <select id="playerSel"></select></div>
+    <div>column <select id="fcol"></select> <span class="muted">(match or per game)</span></div>
+    <div>my deck known from: <select id="scope"><option value="hard">registered list (hard)</option><option value="inferred">list or my cards (adds inferred)</option><option value="all">anything (all matches)</option></select></div>
+    <div>from <input type="date" id="dfrom"> to <input type="date" id="dto"></div>
+    <div class="vals" id="fvals"></div>
+    <div class="chips" id="fchips"></div>
+    <div class="muted">click a chip to remove it</div>
+    <div class="sec"><div class="sechead">on output statistics <span class="muted">(applied to groups)</span></div>
+      <div><select id="ofstat"></select> <select id="ofop"><option>≥</option><option>≤</option><option>&gt;</option><option>&lt;</option></select> <input id="ofval" type="text" size="5" placeholder="5 or 60%"> <button id="ofadd">add</button></div>
+      <div class="chips" id="ofchips"></div>
+    </div>
+    </div>
+  </fieldset>
+  <fieldset class="box" id="pGroup">
+    <h3 class="toggle"><span class="caret">▾</span> Group by <span class="psum muted"></span></h3>
+    <div class="pbody">
+    <div class="sec"><div class="sechead">match</div><div id="gMatch"></div><div>more: <select id="gmoreM"><option value="">…</option></select></div></div>
+    <div class="sec"><div class="sechead">per game</div><div id="gGame"></div><div>more: <select id="gmoreG"><option value="">…</option></select></div></div>
+    </div>
+  </fieldset>
+  <fieldset class="box" id="pStats">
+    <h3 class="toggle"><span class="caret">▾</span> Output <span class="psum muted"></span></h3>
+    <div class="pbody">
+    <div class="sec" id="sMatchSec"><div class="sechead">match <span id="sMatchWhy" class="muted"></span></div><div id="sMatch"></div></div>
+    <div class="sec" id="sGameSec"><div class="sechead">per game / either</div><div id="sGame"></div></div>
+    <div class="sec" id="sRowsSec" hidden><div class="sechead">columns <span class="muted" id="sRowsWhy"></span></div><div id="sRows"></div></div>
+    </div>
+  </fieldset>
+</aside>
+<main class="results">
+  <div id="summary" class="muted"><span id="busy"></span></div>
+  <div id="out"></div>
+</main>
+</div>
+<aside id="preview" hidden></aside>
+<script src="common.js?v=34"></script>
+<script>
+// The columns a person can filter or group on, by level. Anything not listed (ids, empty
+// legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
+const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck known from', my_concept: 'my concept', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_cards: 'opponent cards seen (cluster)', opp_cards_variant: 'opponent cards seen (fine)', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era', my_cards: 'my cards seen (cluster)' };
+const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast' };
+const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
+const CURATED_G = ['opp_deck','opp_archetype','opp_cards','my_deck','my_archetype','my_concept','my_list','event_type','opponent','month','game_number','on_play','my_mulligans','win_by'];
+const CURATED_F = ['my_deck','my_archetype','my_deck_grade','my_concept','my_list','my_experimental','opp_deck','opp_archetype','opp_cards','event_type','event_name','opponent','month','game_number','on_play','my_mulligans'];
+const GAME_COLS = Object.keys(GAME_COLS_L);
+// Output statistics. `level` says which view mode a statistic belongs to: match statistics are
+// meaningless once a per-game column is in the query, and vice versa for game statistics.
+// Every statistic is a ratio num/den of additive quantities, so a smoothing window pools the
+// parts rather than averaging ratios; `plot` says whether it makes sense as a line.
+const STATS = {
+  matches:   { label: 'matches',        level: 'match', acc: (r, t) => [r.matches, 1],               fmt: v => v.toFixed(v % 1 ? 1 : 0), plot: true },
+  share:     { label: 'share',          level: 'any',   acc: (r, t) => [r.n, Math.max(t, 1)],         fmt: v => (100 * v).toFixed(0) + '%', bar: true, plot: false },
+  mwl:       { label: 'match W–L',      level: 'match', acc: r => [r.match_wins, r.match_decided],    fmt: (v, a) => `${a[0]}–${a[1] - a[0]}`, plot: false, pair: true },
+  mwr:       { label: 'match WR',       level: 'match', acc: r => [r.match_wins, r.match_decided],    fmt: v => v == null ? '' : (100 * v).toFixed(1) + '%', ci: true, plot: true, rate: true },
+  games:     { label: 'games',          level: 'any',   acc: r => [r.games, 1],                       fmt: v => v.toFixed(v % 1 ? 1 : 0), plot: true },
+  gwl:       { label: 'game W–L',       level: 'any',   acc: r => [r.wins, r.decided],                fmt: (v, a) => `${a[0]}–${a[1] - a[0]}`, plot: false, pair: true },
+  gwr:       { label: 'game WR',        level: 'any',   acc: r => [r.wins, r.decided],                fmt: v => v == null ? '' : (100 * v).toFixed(1) + '%', ci: true, plot: true, rate: true },
+  turns:     { label: 'avg turns',      level: 'any',   acc: r => [(r.avg_turns || 0) * r.games, r.avg_turns == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(1), plot: true },
+  minutes:   { label: 'avg minutes',    level: 'any',   acc: r => [(r.avg_minutes || 0) * r.games, r.avg_minutes == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(0), plot: true },
+  mymulls:   { label: 'avg my mulligans', level: 'any', acc: r => [(r.avg_my_mulls || 0) * r.games, r.avg_my_mulls == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(2), plot: true },
+  oppmulls:  { label: 'avg opp mulligans', level: 'any', acc: r => [(r.avg_opp_mulls || 0) * r.games, r.avg_opp_mulls == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(2), plot: true },
+};
+const statValue = (s, a) => a[1] ? a[0] / a[1] : null;
+const DEFAULT_STATS = ['matches', 'share', 'mwl', 'mwr'];
+// Columns of the rows view (match rows, and game rows under a per-game filter); the choice is remembered.
+const ROW_COLS = { date: 'date', opponent: 'opponent', opp_deck: 'opponent deck', opp_cards: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', result: 'result', games: 'games' };
+const GAME_ROW_COLS = { date: 'date', opponent: 'opponent', opp_deck: 'opponent deck', opp_cards: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', game: 'game', pd: 'play/draw', mulls: 'mulligans', turns: 'turns', min: 'minutes', result: 'result', how: 'how it ended' };
+const ROW_DEFAULT_OFF = new Set(['opp_cards']);
+const TEXT_COLS = new Set(['opponent', 'opp_deck', 'opp_cards', 'my_deck', 'my_list', 'event']);
+function rowCols(game) {
+  const defs = game ? GAME_ROW_COLS : ROW_COLS; const key = game ? 'mtgctl.gamecols' : 'mtgctl.rowcols';
+  let on = null; try { on = JSON.parse(localStorage.getItem(key)); } catch (e) {}
+  const set = new Set(on || Object.keys(defs).filter(c => !ROW_DEFAULT_OFF.has(c)));
+  return { defs, key, set };
+}
+let columns = [], filters = {}; // col → Set(values or null)
+let outFilters = []; // [{stat, op, value}] applied to aggregated groups, after the query
+const OPS = { '≥': (a, b) => a >= b, '≤': (a, b) => a <= b, '>': (a, b) => a > b, '<': (a, b) => a < b };
+function parseOutVal(stat, text) { const t = text.trim(); const pct = t.endsWith('%'); const n = parseFloat(t); if (isNaN(n)) return null; return STATS[stat].rate || STATS[stat].bar ? (pct || n > 1 ? n / 100 : n) : n; }
+// A group passes when every output filter holds for it; `rr` is the stats row with `n` set.
+function passesOut(rr, total) {
+  return outFilters.every(f => { const s = STATS[f.stat]; const v = statValue(s, s.acc(rr, total)); return v != null && OPS[f.op](v, f.value); });
+}
+function renderOutChips() {
+  const el = document.getElementById('ofchips'); el.innerHTML = '';
+  outFilters.forEach((f, i) => { const s = document.createElement('span'); s.textContent = `${STATS[f.stat].label} ${f.op} ${STATS[f.stat].rate || STATS[f.stat].bar ? (100 * f.value).toFixed(0) + '%' : f.value}`; s.onclick = () => { outFilters.splice(i, 1); renderOutChips(); schedule(); }; el.appendChild(s); });
+}
+let listIndex = null;
+async function lists() {
+  if (!listIndex) {
+    const rows = await api('api/lists'); listIndex = { byName: new Map(), byConcept: new Map() };
+    for (const r of rows) { const n = r.name || 'list#' + r.id; listIndex.byName.set(n, r); const k = r.concept || '(unnamed)'; if (!listIndex.byConcept.has(k)) listIndex.byConcept.set(k, []); listIndex.byConcept.get(k).push(r); }
+  }
+  return listIndex;
+}
+const view = () => document.querySelector('input[name=view]:checked').value;
+const chosenStats = () => [...document.querySelectorAll('input[name=stat]:checked')].map(i => i.value);
+const gameQuery = () => [...groupBy(), ...Object.keys(filters).filter(c => filters[c].size)].some(c => GAME_COLS.includes(c));
+const groupBy = () => [...document.querySelectorAll('input[name=g]:checked')].map(i => i.value);
+
+// Player is a filter like any other (one database per player for now, so single-choice).
+async function initPlayer() {
+  let known = []; try { known = await api('api/players'); } catch (e) {}
+  let cur = getPlayer(); if (cur && !known.includes(cur)) known.push(cur);
+  if (!cur && known.length) { cur = known[0]; setPlayer(cur); }
+  const sel = document.getElementById('playerSel');
+  sel.innerHTML = known.map(p => `<option ${p === cur ? 'selected' : ''}>${p}</option>`).join('');
+  sel.onchange = () => { setPlayer(sel.value); listIndex = null; loadValues(); schedule(); };
+  return cur;
+}
+async function init() {
+  const cur = await initPlayer();
+  if (!cur) { setSummary('no player data on this server yet'); return; }
+  columns = (await api('api/columns')).filter(c => LABEL[c]);
+  const opt = c => `<option value="${c}">${LABEL[c]}${GAME_COLS_L[c] ? ' (per game)' : ''}</option>`;
+  // Every panel is split the same way: match-level things, then per-game things.
+  const mcols = columns.filter(c => MATCH_COLS[c]), gcolsAll = columns.filter(c => GAME_COLS_L[c]);
+  const order = (cs, cur) => [...cur.filter(c => cs.includes(c)), ...cs.filter(c => !cur.includes(c))];
+  const fcol = document.getElementById('fcol');
+  fcol.innerHTML = `<optgroup label="match">${order(mcols, CURATED_F).map(c => `<option value="${c}">${LABEL[c]}</option>`).join('')}</optgroup><optgroup label="per game">${order(gcolsAll, CURATED_F).map(c => `<option value="${c}">${LABEL[c]}</option>`).join('')}</optgroup>`;
+  fcol.onchange = loadValues;
+  const gl = c => `<label><input type="checkbox" name="g" value="${c}" ${c === 'opp_deck' ? 'checked' : ''}> ${LABEL[c]}</label><br>`;
+  document.getElementById('gMatch').innerHTML = CURATED_G.filter(c => mcols.includes(c)).map(gl).join('');
+  document.getElementById('gGame').innerHTML = CURATED_G.filter(c => gcolsAll.includes(c)).map(gl).join('');
+  for (const [id, cs] of [['gmoreM', mcols], ['gmoreG', gcolsAll]]) {
+    const more = document.getElementById(id);
+    more.innerHTML += cs.filter(c => !CURATED_G.includes(c)).map(c => `<option value="${c}">${LABEL[c]}</option>`).join('');
+    more.onchange = () => { if (more.value) { document.getElementById(id === 'gmoreM' ? 'gMatch' : 'gGame').innerHTML += gl(more.value).replace('checked', '').replace('<input', '<input checked'); more.value = ''; renderStatChoices(); tableSort = null; schedule(); } };
+  }
+  document.getElementById('pGroup').addEventListener('change', renderStatChoices);
+  const sl = ([k, s]) => `<label><input type="checkbox" name="stat" value="${k}" ${DEFAULT_STATS.includes(k) ? 'checked' : ''}> ${s.label}</label><br>`;
+  document.getElementById('sMatch').innerHTML = Object.entries(STATS).filter(([, s]) => s.level === 'match').map(sl).join('');
+  document.getElementById('sGame').innerHTML = Object.entries(STATS).filter(([, s]) => s.level !== 'match').map(sl).join('');
+  document.getElementById('ofstat').innerHTML = Object.entries(STATS).filter(([, s]) => !s.pair).map(([k, s]) => `<option value="${k}">${s.label}</option>`).join('');
+  document.getElementById('ofadd').onclick = () => {
+    const stat = document.getElementById('ofstat').value, op = document.getElementById('ofop').value, value = parseOutVal(stat, document.getElementById('ofval').value);
+    if (value == null) return; outFilters.push({ stat, op, value }); document.getElementById('ofval').value = ''; renderOutChips(); schedule();
+  };
+  document.getElementById('ofval').onkeydown = e => { if (e.key === 'Enter') document.getElementById('ofadd').click(); };
+  document.querySelectorAll('input[name=view]').forEach(r => r.onchange = syncViewOpts);
+  const pre = /^#([a-z_]+)=(.*)$/.exec(decodeURIComponent(location.hash || ''));
+  if (pre && columns.includes(pre[1])) { filters[pre[1]] = new Set([pre[2]]); fcol.value = pre[1]; renderChips(); }
+  const _pre = pre;
+  await loadValues();
+  renderStatChoices(); syncViewOpts();
+  // Live: any change in any panel re-renders (debounced); a stale response never overwrites a newer one.
+  document.getElementById('scope').onchange = () => { loadValues(); schedule(); };
+  document.getElementById('scope').value = 'hard';
+  document.getElementById('dfrom').onchange = () => { loadValues(); schedule(); }; document.getElementById('dto').onchange = () => { loadValues(); schedule(); };
+  for (const id of ['pGroup', 'pStats']) document.getElementById(id).addEventListener('change', () => { tableSort = null; schedule(); });
+  document.getElementById('pView').addEventListener('change', schedule);
+  document.getElementById('sort').addEventListener('change', () => { tableSort = null; });
+  for (const id of ['topn', 'rowlimit']) document.getElementById(id).addEventListener('input', schedule);
+  document.querySelectorAll('input[name=view]').forEach(r => r.addEventListener('change', schedule));
+  schedule();
+}
+// Collapsible panels: the heading toggles the body and shows a one-line summary of the panel's
+// state while collapsed; state is remembered per panel, and phones start with everything collapsed.
+const PANEL_KEY = 'mtgctl.panels';
+function panelState() { try { return JSON.parse(localStorage.getItem(PANEL_KEY) || '{}'); } catch (e) { return {}; } }
+function setPanel(id, open) { const st = panelState(); st[id] = open; try { localStorage.setItem(PANEL_KEY, JSON.stringify(st)); } catch (e) {} applyPanels(); }
+function applyPanels() {
+  const st = panelState(), narrow = window.innerWidth < 1100;
+  for (const f of document.querySelectorAll('.panels fieldset')) {
+    // first visit: only Filters open on a desktop, everything stowed on a phone; headings carry the state
+    const open = st[f.id] ?? (!narrow && f.id === 'pFilters');
+    f.classList.toggle('collapsed', !open);
+    f.querySelector('.caret').textContent = open ? '▾' : '▸';
+  }
+  summarizePanels();
+}
+function summarizePanels() {
+  const sum = (id, text) => { const el = document.querySelector(`#${id} .psum`); if (el) el.textContent = text; };
+  const chips = Object.entries(filters).flatMap(([c, vs]) => [...vs].map(v => `${LABEL[c] || c} = ${v === null ? '∅' : v}`));
+  const range = [document.getElementById('dfrom').value, document.getElementById('dto').value].filter(Boolean).join(' → ');
+  const ochips = outFilters.map(f => `${STATS[f.stat].label} ${f.op} ${STATS[f.stat].rate || STATS[f.stat].bar ? (100 * f.value).toFixed(0) + '%' : f.value}`);
+  sum('pFilters', [getPlayer(), { hard: 'hard data', inferred: 'hard + inferred', all: 'all matches' }[document.getElementById('scope').value], range, ...chips, ...ochips].filter(Boolean).join(' · '));
+  sum('pGroup', groupBy().map(c => LABEL[c]).join(', ') || 'none');
+  sum('pStats', view() === 'rows' ? `${rowCols(gameQuery()).set.size} columns` : (chosenStats().map(k => STATS[k].label).join(', ') || 'none'));
+  const v = view();
+  const vname = { table: "table", series: "time series", rows: "rows" }[v];
+  sum('pView', v === 'table' ? `${vname} · sort ${document.getElementById('sort').selectedOptions[0].text}` : v === 'series' ? `${vname} · per ${document.getElementById('bucket').value}, smoothing ${document.getElementById('smooth').selectedOptions[0].text}, ${document.getElementById('topn').value} lines` : `${vname} · newest ${document.getElementById('rowlimit').value}`);
+}
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.panels h3.toggle').forEach(h => h.onclick = () => setPanel(h.parentElement.id, h.parentElement.classList.contains('collapsed')));
+  applyPanels();
+});
+function setSummary(text) { const el = document.getElementById('summary'); el.innerHTML = '<span id="busy"></span>'; el.append(text); }
+let runTimer = null, runSeq = 0;
+function schedule() { clearTimeout(runTimer); runTimer = setTimeout(run, 150); summarizePanels(); }
+async function run() {
+  const seq = ++runSeq; document.getElementById('busy').textContent = '… ';
+  try { await runView(seq); } finally { if (seq === runSeq) document.getElementById('busy').textContent = ''; }
+}
+const stale = seq => seq !== runSeq;
+// Nothing moves between modes: panels a mode does not read are greyed, not hidden.
+function syncViewOpts() {
+  const v = view();
+  document.getElementById('pGroup').disabled = v === 'rows';
+  // Output: statistics for table and time series, columns for rows
+  document.getElementById('sMatchSec').hidden = v === 'rows'; document.getElementById('sGameSec').hidden = v === 'rows'; document.getElementById('sRowsSec').hidden = v !== 'rows';
+  if (v === 'rows') renderRowCols();
+  document.getElementById('optTable').hidden = v !== 'table';
+  document.getElementById('optSeries').hidden = v !== 'series';
+  document.getElementById('optRows').hidden = v !== 'rows';
+  document.querySelectorAll('input[name=stat]').forEach(i => { const s = STATS[i.value]; i.parentElement.classList.toggle('noplot', v === 'series' && !s.plot); });
+}
+// A column toggle redraws the rows it already has; only a changed query refetches.
+let rowsCache = { url: null, rows: null };
+async function cachedRows(url) {
+  const key = `${getPlayer()}|${url}`;
+  if (rowsCache.url !== key) rowsCache = { url: key, rows: await api(url) };
+  return rowsCache.rows;
+}
+function renderRowCols() {
+  const game = gameQuery(); const { defs, key, set } = rowCols(game);
+  document.getElementById('sRowsWhy').textContent = game ? '(per-game rows)' : '(one row per match)';
+  const el = document.getElementById('sRows');
+  el.innerHTML = Object.entries(defs).map(([k, l]) => `<label><input type="checkbox" name="rowcol" value="${k}" ${set.has(k) ? 'checked' : ''}> ${l}</label><br>`).join('');
+  el.querySelectorAll('input').forEach(i => i.onchange = () => { const on = [...el.querySelectorAll('input:checked')].map(x => x.value); try { localStorage.setItem(key, JSON.stringify(on)); } catch (e) {} schedule(); });
+}
+// The whole match-statistics section is disabled while the query touches anything per game.
+function renderStatChoices() {
+  const game = gameQuery();
+  const sec = document.getElementById('sMatchSec'); sec.classList.toggle('off', game);
+  document.getElementById('sMatchWhy').textContent = game ? 'not meaningful with a per-game filter or grouping' : '';
+  document.querySelectorAll('#sMatch input[name=stat]').forEach(i => { i.disabled = game; if (game) i.checked = false; });
+  if (game && ![...document.querySelectorAll('input[name=stat]:checked')].length) ['games', 'share', 'gwl', 'gwr'].forEach(k => document.querySelector(`input[name=stat][value=${k}]`).checked = true);
+}
+function whereSql(exceptCol) {
+  const terms = [];
+  const scope = document.getElementById('scope').value;
+  if (scope === 'hard') terms.push("my_deck_grade = 'hard'"); else if (scope === 'inferred') terms.push("my_deck_grade IN ('hard', 'inferred')");
+  const from = document.getElementById('dfrom').value, to = document.getElementById('dto').value;
+  if (from) terms.push(`date >= '${from}'`);
+  if (to) terms.push(`date <= '${to}'`);
+  for (const [col, vals] of Object.entries(filters)) {
+    if (col === exceptCol || !vals.size) continue;
+    const vs = [...vals].filter(v => v !== null).map(v => `'${String(v).replace(/'/g, "''")}'`);
+    const parts = [];
+    if (vs.length) parts.push(vs.length === 1 ? `${col} = ${vs[0]}` : `${col} IN (${vs.join(', ')})`);
+    if (vals.has(null)) parts.push(`${col} IS NULL`);
+    terms.push(parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`);
+  }
+  return terms.join(' AND ');
+}
+const PEEKABLE = { my_list: 'my_list', my_concept: 'my_concept', my_deck: 'my_deck', opp_deck: 'my_deck' };
+let refIndex = null; // deck name → [reference rows]
+async function references() {
+  if (!refIndex) { refIndex = new Map(); for (const r of await api('api/reference')) { if (!refIndex.has(r.deck)) refIndex.set(r.deck, []); refIndex.get(r.deck).push(r); } }
+  return refIndex;
+}
+async function loadValues() {
+  const col = document.getElementById('fcol').value;
+  const box = document.getElementById('fvals');
+  box.innerHTML = '…';
+  try {
+    const vals = await api(`api/values?col=${encodeURIComponent(col)}&where=${encodeURIComponent(whereSql(col))}`);
+    const cur = filters[col] || new Set();
+    box.innerHTML = vals.map(v => {
+      const key = v.value === null ? '∅' : v.value;
+      const peek = PEEKABLE[col] && v.value !== null ? `<span class="peek" data-peek="${key.replace(/"/g, '&quot;')}">view</span>` : '';
+      const count = GAME_COLS.includes(col) ? `${v.games} games` : `${v.matches} matches`;
+      return `<label><input type="checkbox" data-col="${col}" data-null="${v.value === null}" value="${key.replace(/"/g, '&quot;')}" ${cur.has(v.value) ? 'checked' : ''}> ${key} <span class="muted">⟨${count}⟩</span>${peek}</label>`;
+    }).join('');
+    box.querySelectorAll('[data-peek]').forEach(s => hoverable(s, () => preview(col, s.dataset.peek)));
+    box.querySelectorAll('input').forEach(i => i.onchange = () => {
+      const s = filters[col] || (filters[col] = new Set());
+      const v = i.dataset.null === 'true' ? null : i.value;
+      i.checked ? s.add(v) : s.delete(v);
+      renderChips(); renderStatChoices(); if (view() === 'rows') renderRowCols(); schedule();
+    });
+  } catch (e) { box.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+function renderChips() {
+  const el = document.getElementById('fchips');
+  el.innerHTML = '';
+  for (const [col, vals] of Object.entries(filters)) for (const v of vals) {
+    const s = document.createElement('span');
+    s.textContent = `${LABEL[col] || col} = ${v === null ? '∅' : v}`;
+    s.onclick = () => { vals.delete(v); renderChips(); renderStatChoices(); loadValues(); schedule(); };
+    el.appendChild(s);
+  }
+}
+// ---- side panel (hover to show, click to pin) ----
+let pinned = false, hideTimer = null;
+const panel = () => document.getElementById('preview');
+function hidePreview() { if (!pinned) { panel().hidden = true; } }
+function scheduleHide() { clearTimeout(hideTimer); hideTimer = setTimeout(hidePreview, 250); }
+function cancelHide() { clearTimeout(hideTimer); }
+function closeBtn() { return pinned ? `<span class="peek" style="float:right" onclick="pinned=false;document.getElementById('preview').hidden=true">close ✕</span>` : ''; }
+function hoverable(el, show) { el.onmouseenter = () => { cancelHide(); if (!pinned) show(); }; el.onmouseleave = scheduleHide; el.onclick = e => { e.preventDefault(); pinned = true; show(); }; }
+document.addEventListener('DOMContentLoaded', () => { const p = panel(); p.onmouseenter = cancelHide; p.onmouseleave = scheduleHide; });
+function renderGrid(p, cards) {
+  for (const sb of [false, true]) {
+    const cs = cards.filter(c => c.sideboard === sb); if (!cs.length) continue;
+    const h = document.createElement('div'); h.className = 'muted'; h.textContent = sb ? 'sideboard' : 'main'; p.appendChild(h);
+    const g = document.createElement('div'); g.className = 'cards mini'; for (const c of cs) g.appendChild(cardEl(c.name, c.qty)); p.appendChild(g);
+  }
+  loadImages(p);
+}
+async function preview(col, val) {
+  const p = panel(); p.hidden = false; p.innerHTML = '…';
+  try {
+    const ix = await lists(); const close = closeBtn();
+    if (col === 'my_concept') {
+      const ls = ix.byConcept.get(val) || [];
+      p.innerHTML = `${close}<h4>${val}</h4>`;
+      if (ls.length) { const r = await api(`api/list?id=${ls[ls.length - 1].id}`); p.innerHTML += `<div class="muted">latest version: ${ls[ls.length - 1].name}</div>`; renderGrid(p, r.cards); }
+      const vs = document.createElement('div'); vs.style.marginTop = '8px';
+      vs.innerHTML = `<div class="muted">${ls.length} versions</div>` + ls.map(l => `<div>· <a href="lists.html#list=${l.id}">${l.name || 'list#' + l.id}</a> <span class="muted">${l.first_seen.slice(0, 10)}, ${l.matches} matches</span></div>`).join('');
+      p.appendChild(vs); return;
+    }
+    if (col === 'my_deck') {
+      const rs = (await references()).get(val) || [];
+      p.innerHTML = `${close}<h4>${val}</h4><div class="muted">${rs.length} reference decklist${rs.length === 1 ? '' : 's'}</div>`;
+      for (const ref of rs) {
+        const cards = await api(`api/reference?id=${ref.id}`);
+        const h = document.createElement('div'); h.innerHTML = `<b>${ref.name}</b> <span class="muted">${ref.list_date || ''}, era ${ref.era}</span>${ref.source ? ` <a href="${ref.source}" target="_blank" rel="noopener">source ↗</a>` : ''}`; h.style.marginTop = '6px'; p.appendChild(h);
+        renderGrid(p, cards);
+      }
+      return;
+    }
+    const l = ix.byName.get(val);
+    if (!l) { p.innerHTML = `${close}<div class="muted">no list named ${val}</div>`; return; }
+    const r = await api(`api/list?id=${l.id}`);
+    const named = r.deck ? `<b>${r.deck}</b> <span class="muted">(${r.deck_score} from the reference${r.runner_up_deck ? `, ${r.runner_up_deck} at ${r.runner_up_dist}` : ''})</span>` : `<span class="muted">no deck${r.runner_up_deck ? ` — nearest ${r.runner_up_deck} at ${r.runner_up_dist}` : ''}</span>`;
+    p.innerHTML = `${close}<h4><a href="lists.html#list=${l.id}">${val}</a></h4><div>${named}</div><div class="muted">${r.concept || ''} · ${r.first_seen.slice(0, 10)} → ${r.last_seen.slice(0, 10)} · ${r.matches} matches</div>` + (r.diff.length ? `<div style="margin:4px 0"><b>vs #${r.parent_id}:</b> ${diffText(r.diff)}</div>` : '');
+    renderGrid(p, r.cards);
+  } catch (e) { p.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+const QUIET = new Set(['Draws', 'Turn', 'Joined', 'SkipsDraw', 'Other', 'Triggers']);
+async function showGame(id) {
+  pinned = true; const p = panel(); p.hidden = false; p.innerHTML = '…';
+  try {
+    const d = await api(`api/game?id=${id}`); const g = d.game;
+    p.innerHTML = `${closeBtn()}<h4>Game ${g.game_number} vs ${g.opponent || '?'} · ${g.start_ts.slice(0, 16)}</h4><div class="muted">${g.on_play ? 'on the play' : 'on the draw'} · mulligans ${g.my_mulligans}/${g.opp_mulligans} · ${g.turns} turns · ${g.winner === 'me' ? 'won' : 'lost'}${g.win_by ? ' by ' + g.win_by : ''}</div>`;
+    for (const side of ['me', 'opp']) {
+      const cs = d.cards.filter(c => c.side === side); if (!cs.length) continue;
+      const h = document.createElement('div'); h.className = 'muted'; h.style.marginTop = '6px'; h.textContent = side === 'me' ? 'I played' : 'they played'; p.appendChild(h);
+      const grid = document.createElement('div'); grid.className = 'cards mini';
+      for (const c of cs) { const el = cardEl(c.name, c.plays); el.title = `${c.name} — first on turn ${c.first_turn ?? '?'}`; grid.appendChild(el); }
+      p.appendChild(grid);
+    }
+    const all = document.createElement('label'); all.className = 'muted'; all.style.display = 'block'; all.style.marginTop = '8px'; all.innerHTML = `<input type="checkbox" id="evAll"> show every line`; p.appendChild(all);
+    const log = document.createElement('div'); log.className = 'log'; p.appendChild(log);
+    const render = () => { const every = document.getElementById('evAll').checked; let turn = -1, html = ''; for (const e of d.events) { if (!every && QUIET.has(e.kind)) continue; if (e.turn !== turn) { turn = e.turn; html += `<div class="turn">turn ${turn}</div>`; } html += `<div class="ev ${e.side || ''}">${e.text}</div>`; } log.innerHTML = html; };
+    document.getElementById('evAll').onchange = render; render();
+    loadImages(p);
+  } catch (e) { p.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+// ---- views ----
+function keyCell(col, k, key) {
+  return `<td>${PEEKABLE[col] && !key.startsWith('(') ? `<a class="key" href="lists.html" data-col="${col}" data-val="${k.replace(/"/g, '&quot;')}">${k}</a>` : k}</td>`;
+}
+function wireKeys(out) {
+  out.querySelectorAll('a.key').forEach(a => hoverable(a, () => preview(a.dataset.col, a.dataset.val)));
+  out.querySelectorAll('[data-game]').forEach(s => { s.style.cursor = 'pointer'; s.onclick = () => showGame(+s.dataset.game); });
+}
+async function runView(seq) {
+  const v = view();
+  if (v === 'rows') return showMatches(seq);
+  if (v === 'series') return showSeries(seq);
+  return showTable(seq);
+}
+// Clicking a table heading sorts by that column (again: reverse); the Options sort is the
+// order the server hands rows over in, and applies until a heading is clicked.
+let tableSort = null; // { col: index into the header, dir: 1 | -1 }
+async function showTable(seq) {
+  const by = groupBy(), out = document.getElementById('out');
+  const chosen = chosenStats();
+  if (!chosen.length) { out.innerHTML = '<span class="err">pick at least one output statistic</span>'; return; }
+  try {
+    const params = new URLSearchParams({ by: by.join(','), where: whereSql(), sort: document.getElementById('sort').value, min: '1', limit: '5000', full: 'true' });
+    const r = await api('api/stats?' + params);
+    if (stale(seq)) return;
+    const total = r.game_mode ? r.all_games : r.all_matches;
+    const asRow = x => Object.assign({ n: r.game_mode ? x.games : x.matches }, x);
+    const kept = r.rows.filter(x => passesOut(asRow(x), total)); const hiddenN = r.rows.length - kept.length;
+    r.rows = kept; r.rollup = null;
+    const head = [...(by.length ? by.map(c => LABEL[c] || c) : ['all'])];
+    for (const k of chosen) { head.push(STATS[k].label); if (STATS[k].ci) head.push('95% CI'); }
+    // one record per row: cells (html) and sort keys (per header column)
+    const mk = x => {
+      const key = x.key || ''; const keys = by.length > 1 && !key.startsWith('(') ? key.split(' │ ') : [key];
+      while (keys.length < Math.max(by.length, 1)) keys.push('');
+      const cells = keys.map((k, i) => keyCell(by[i], k, key)); const sortv = keys.map(k => k.toLowerCase());
+      const rr = Object.assign({ n: r.game_mode ? x.games : x.matches }, x);
+      for (const k of chosen) {
+        const s = STATS[k]; const a = s.acc(rr, total); const val = statValue(s, a);
+        if (s.bar && !key.startsWith('(')) cells.push(`<td class="share"><span style="width:${(100 * val).toFixed(0)}%"></span>${s.fmt(val, a)}</td>`);
+        else cells.push(`<td>${key === '(total)' && s.bar ? '' : (val == null && !s.pair ? '' : s.fmt(val, a))}</td>`);
+        sortv.push(s.pair ? a[0] : (val == null ? -Infinity : val));
+        if (s.ci) { const c = s.rate ? wilson(a[0], a[1]) : null; cells.push(`<td>${c ? `${c[0].toFixed(0)}–${c[1].toFixed(0)}` : ''}</td>`); sortv.push(c ? c[0] : -Infinity); }
+      }
+      return { key, cells, sortv, total: key.startsWith('(') };
+    };
+    let recs = r.rows.map(mk); const tail = [...(r.rollup ? [r.rollup] : []), ...(r.total ? [r.total] : [])].map(mk);
+    if (tableSort && tableSort.col < head.length) {
+      const { col, dir } = tableSort;
+      recs.sort((a, b) => { const x = a.sortv[col], y = b.sortv[col]; return (typeof x === 'string' ? x.localeCompare(y, undefined, { numeric: true }) : x - y) * dir; });
+    }
+    let html = '<table><tr>' + head.map((h, i) => `<th class="sortable" data-col="${i}">${h}${tableSort && tableSort.col === i ? (tableSort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
+    for (const x of [...recs, ...tail]) html += `<tr class="${x.total ? 'total' : ''}">${x.cells.join('')}</tr>`;
+    out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
+    out.querySelectorAll('th.sortable').forEach(th => th.onclick = () => {
+      const col = +th.dataset.col;
+      // numeric columns start descending (biggest first), key columns ascending
+      const numeric = recs.length && typeof recs[0].sortv[col] !== 'string';
+      tableSort = tableSort && tableSort.col === col ? { col, dir: -tableSort.dir } : { col, dir: numeric ? -1 : 1 };
+      schedule();
+    });
+    setSummary(`${r.game_mode ? 'per-game view: ' : ''}${r.all_matches} matches / ${r.all_games} games in ${r.all_groups} groups${hiddenN ? `, ${hiddenN} hidden by output filters` : ''}; where: ${whereSql() || '(none)'}`);
+  } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+// Time series: the same group-by and output statistics as the table; the bucket is prepended to
+// the group-by, one chart per plottable statistic, one line per group (largest N kept), and a
+// smoothing window that pools each statistic's numerator and denominator over neighbouring buckets.
+async function showSeries(seq) {
+  const out = document.getElementById('out');
+  const bucket = document.getElementById('bucket').value, win = +document.getElementById('smooth').value || 1, topn = +document.getElementById('topn').value || 6;
+  const groups = groupBy(), stats = chosenStats().filter(k => STATS[k].plot);
+  if (!stats.length) { out.innerHTML = '<span class="err">pick at least one plottable output (counts, rates, averages)</span>'; return; }
+  try {
+    const r = await api('api/stats?' + new URLSearchParams({ by: [bucket, ...groups].join(','), where: whereSql(), sort: 'key', min: '1', limit: '20000', full: 'true' }));
+    if (stale(seq)) return;
+    const rows = new Map(); const size = new Map(); const buckets = new Set();
+    for (const x of r.rows) {
+      if (!x.key || x.key.startsWith('(')) continue;
+      const parts = x.key.split(' │ '); const b = parts[0]; const g = groups.length ? parts.slice(1).join(' │ ') : 'all';
+      const rr = Object.assign({ n: r.game_mode ? x.games : x.matches }, x);
+      if (!rows.has(g)) rows.set(g, new Map()); rows.get(g).set(b, rr); size.set(g, (size.get(g) || 0) + rr.n); buckets.add(b);
+    }
+    // totals per group over the whole range, for the output filters
+    const totalsOf = g => { const t = { matches: 0, match_wins: 0, match_decided: 0, games: 0, wins: 0, decided: 0, avg_turns: null, avg_minutes: null, avg_my_mulls: null, avg_opp_mulls: null }; let tg = 0, tm = 0, tmi = 0, tmm = 0, tom = 0;
+      for (const x of rows.get(g).values()) { t.matches += x.matches; t.match_wins += x.match_wins; t.match_decided += x.match_decided; t.games += x.games; t.wins += x.wins; t.decided += x.decided; if (x.avg_turns != null) { tm += x.avg_turns * x.games; } if (x.avg_minutes != null) tmi += x.avg_minutes * x.games; if (x.avg_my_mulls != null) tmm += x.avg_my_mulls * x.games; if (x.avg_opp_mulls != null) tom += x.avg_opp_mulls * x.games; tg += x.games; }
+      if (tg) { t.avg_turns = tm / tg; t.avg_minutes = tmi / tg; t.avg_my_mulls = tmm / tg; t.avg_opp_mulls = tom / tg; }
+      t.n = r.game_mode ? t.games : t.matches; return t; };
+    const grandTotal = r.game_mode ? r.all_games : r.all_matches;
+    const qualified = [...size.entries()].filter(([g]) => passesOut(totalsOf(g), grandTotal));
+    const names = qualified.sort((a, b) => b[1] - a[1]).slice(0, topn).map(e => e[0]);
+    const xs = [...buckets].sort();
+    if (!xs.length || !names.length) { out.innerHTML = '<span class="muted">nothing in range</span>'; return; }
+    let html = '';
+    for (const k of stats) {
+      const st = STATS[k];
+      const series = names.map(g => {
+        const m = rows.get(g); const accs = xs.map(b => m.get(b) ? st.acc(m.get(b), 1) : null);
+        const data = xs.map((b, i) => {
+          if (!accs[i] && win === 1) return null;
+          let num = 0, den = 0, n = 0; const h = Math.floor(win / 2);
+          for (let j = Math.max(0, i - h); j <= Math.min(xs.length - 1, i + h); j++) if (accs[j]) { num += accs[j][0]; den += accs[j][1]; n += m.get(xs[j]).n; }
+          const v = den ? num / den : null; return v == null ? null : { v, n };
+        });
+        return { name: g, data };
+      });
+      html += `<h3 class="charttitle">${st.label}${win > 1 ? ` <span class="muted">(smoothed over ${win} ${bucket === 'date' ? 'days' : bucket + 's'})</span>` : ''}</h3>` + chart(xs, series, st);
+    }
+    out.innerHTML = html + `<div class="muted">${names.length} of ${size.size} groups shown (largest by ${r.game_mode ? 'games' : 'matches'}${qualified.length < size.size ? `, ${size.size - qualified.length} hidden by output filters` : ''}); hover a point for the value and sample size</div>`;
+    setSummary(`per ${bucket}${groups.length ? ' by ' + groups.map(c => LABEL[c]).join(', ') : ''}; ${r.all_matches} matches / ${r.all_games} games; where: ${whereSql() || '(none)'}`);
+  } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+const PALETTE = ['#2a6fdb', '#d9534f', '#3a9d5d', '#e8a33d', '#8e5ec9', '#1fa2b3', '#b5651d', '#777'];
+function chart(xs, series, stat) {
+  const W = Math.max(640, Math.min(1200, xs.length * 40)), H = 320, L = 56, R = 16, T = 16, B = 56;
+  const isRate = !!stat.rate;
+  const all = series.flatMap(s => s.data.filter(Boolean).map(p => p.v));
+  const ymin = isRate ? 0 : 0, ymax = isRate ? 1 : Math.max(1, ...all) * 1.05;
+  const x = i => L + (xs.length === 1 ? 0 : i * (W - L - R) / (xs.length - 1)), y = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
+  let svg = `<svg class="chart" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">`;
+  for (let k = 0; k <= 4; k++) { const v = ymin + (ymax - ymin) * k / 4; svg += `<line x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}" class="grid"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end" class="tick">${isRate ? (100 * v).toFixed(0) + '%' : (Number.isInteger(ymax) ? v.toFixed(0) : v.toFixed(1))}</text>`; }
+  const step = Math.ceil(xs.length / 12);
+  xs.forEach((b, i) => { if (i % step === 0 || i === xs.length - 1) svg += `<text x="${x(i)}" y="${H - B + 16}" text-anchor="end" transform="rotate(-35 ${x(i)} ${H - B + 16})" class="tick">${b}</text>`; });
+  series.forEach((s, si) => {
+    const c = PALETTE[si % PALETTE.length];
+    const segs = []; let seg = [];
+    s.data.forEach((p, i) => { if (p) seg.push(`${x(i)},${y(p.v)}`); else if (seg.length) { segs.push(seg); seg = []; } }); if (seg.length) segs.push(seg);
+    for (const sg of segs) svg += `<polyline points="${sg.join(' ')}" fill="none" stroke="${c}" stroke-width="2"/>`;
+    s.data.forEach((p, i) => { if (p) svg += `<circle cx="${x(i)}" cy="${y(p.v)}" r="3.5" fill="${c}"><title>${s.name}\n${xs[i]}: ${stat.fmt(p.v)} (n=${p.n})</title></circle>`; });
+  });
+  svg += '</svg>';
+  const legend = series.map((s, si) => `<span class="lg"><i style="background:${PALETTE[si % PALETTE.length]}"></i>${s.name}</span>`).join('');
+  return `<div class="chartwrap">${svg}<div class="legend">${legend}</div></div>`;
+}
+// Rows: one per match, or one per game when the filters touch anything per game.
+async function showMatches(seq) {
+  const out = document.getElementById('out');
+  try {
+    const limit = +document.getElementById('rowlimit').value || 500;
+    if (gameQuery()) {
+      const rows = await cachedRows('api/games?' + new URLSearchParams({ where: whereSql(), limit: String(limit) }));
+      if (stale(seq)) return;
+      const { defs, set } = rowCols(true);
+      const cell = {
+        date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || '<span class="muted">—</span>', opp_cards: g => g.opp_cards || '<span class="muted">unknown</span>', my_deck: g => g.my_deck || '<span class="muted">—</span>',
+        my_list: g => g.my_list ? `<a class="key" data-col="my_list" data-val="${g.my_list.replace(/"/g, '&quot;')}" href="lists.html">${g.my_list}</a>` : '<span class="muted">no list</span>', event: g => g.event_name || '',
+        game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
+        turns: g => g.turns, min: g => g.minutes ?? '', result: g => `<b>${g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?'}</b>`, how: g => g.win_by || '' };
+      const cols = Object.keys(defs).filter(c => set.has(c));
+      let html = '<table><tr>' + cols.map(c => `<th>${c === 'mulls' ? 'mulls (me/opp)' : defs[c]}</th>`).join('') + '</tr>';
+      for (const g of rows) html += '<tr>' + cols.map(c => `<td${TEXT_COLS.has(c) ? ' class="text"' : ''}>${cell[c](g)}</td>`).join('') + '</tr>';
+      out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
+      setSummary(`per-game rows: ${rows.length} games${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
+      return;
+    }
+    const rows = await cachedRows('api/matches?' + new URLSearchParams({ where: whereSql(), limit: String(limit) }));
+    if (stale(seq)) return;
+    const game = g => { const [id, n, pd, m, t, w, by] = g.split(':'); return `<span class="g ${w === 'me' ? 'gw' : 'gl'}" data-game="${id}" title="game ${n}: ${pd}, ${m} mulligan${m === '1' ? '' : 's'}, ${t} turns, ${w === 'me' ? 'won' : 'lost'}${by ? ' by ' + by : ''} — click for the log">${w === 'me' ? 'W' : 'L'}<small>${pd === 'play' ? 'p' : 'd'}${m !== '0' ? 'm' + m : ''}·${t}</small></span>`; };
+    const { defs, set } = rowCols(false);
+    const cell = {
+      date: r => r.date, opponent: r => r.opponent || '',
+      opp_deck: r => r.opp_deck || (r.opp_archetype ? `<span class="muted">${r.opp_archetype} (${(r.opp_deck_candidates || '').split('|').length} decks)</span>` : '<span class="muted">—</span>'),
+      opp_cards: r => r.opp_cards || '<span class="muted">unknown</span>',
+      my_deck: r => r.my_deck ? `${r.my_deck}${r.my_deck_source === 'cards' ? ' <span class="muted">(inferred)</span>' : ''}` : (r.my_archetype ? `<span class="muted">${r.my_archetype} (deck ambiguous)</span>` : '<span class="muted">—</span>'),
+      my_list: r => r.my_list ? `<a class="key" data-col="my_list" data-val="${r.my_list.replace(/"/g, '&quot;')}" href="lists.html">${r.my_list}</a>` : `<span class="muted">${r.my_concept || 'no list'}</span>`,
+      event: r => r.event_name || '', result: r => `<b>${r.match_result}</b> ${r.my_game_wins}–${r.opp_game_wins}`, games: r => (r.games || '').split('|').filter(Boolean).map(game).join(' ') };
+    const cols = Object.keys(defs).filter(c => set.has(c));
+    let html = '<table><tr>' + cols.map(c => `<th>${c === 'games' ? 'games (W/L, play/draw, mulls, turns)' : defs[c]}</th>`).join('') + '</tr>';
+    for (const r of rows) html += '<tr>' + cols.map(c => `<td${TEXT_COLS.has(c) ? ' class="text"' : ''}>${cell[c](r)}</td>`).join('') + '</tr>';
+    out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
+    setSummary(`${rows.length} matches${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
+  } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+init().catch(e => { document.getElementById('summary').innerHTML = `<span class="err">${e.message}</span>`; });
+</script>
+</body></html>

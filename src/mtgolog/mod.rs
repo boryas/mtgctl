@@ -18,6 +18,7 @@ pub mod ldc;
 pub mod model;
 pub mod picker;
 pub mod pipeline;
+pub mod reference;
 pub mod pivot;
 pub mod scan;
 pub mod skeleton;

@@ -64,7 +64,7 @@ log_dir = "/var/lib/docker/volumes/mtgo-data-bo/_data/wine/AppData/Local/Apps/2.
 username = "boryas"
 # `mtgctl mtgo stats -i` defaults: columns pre-selected as filters / group-bys / histograms
 # (any column of mtgo_game_view — see `mtgctl mtgo columns` — plus "last N matches").
-stats_filters = ["my_concept"]
+stats_filters = ["my_deck"]
 stats_groupbys = ["opp_guess_archetype"]
 stats_hist = []
 stats_min_games = 1
