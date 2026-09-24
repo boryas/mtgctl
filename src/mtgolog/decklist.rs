@@ -475,6 +475,8 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
         diesel::sql_query("ALTER TABLE mtgo_lists ADD COLUMN auto_name TEXT").execute(conn)?;
     }
     let mut all: Vec<DeckUsed> = Vec::new();
+    let timing = std::env::var_os("MTGCTL_TIMING").is_some();
+    let t0 = std::time::Instant::now();
     for p in session_logs(cfg) {
         all.extend(parse_session_log(&p));
     }
@@ -484,7 +486,11 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
         by_game.insert(d.game_id, d);
     }
     let ids: BTreeSet<i64> = by_game.values().flat_map(|d| d.entries.iter().map(|e| e.catalog_id)).collect();
+    if timing { eprintln!("decklists: parse sessions {:.1}s", t0.elapsed().as_secs_f64()); }
+    let t1 = std::time::Instant::now();
     let names = resolve_names(conn, cfg, &ids, fetch)?;
+    if timing { eprintln!("decklists: resolve names {:.1}s", t1.elapsed().as_secs_f64()); }
+    let t2 = std::time::Instant::now();
     // Rebuild list tables from scratch (cheap; keeps everything consistent with resolver/linking fixes).
     // User marks (name, fork, parent override) are keyed by hash so they survive.
     #[derive(QueryableByName)]
@@ -506,123 +512,128 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
     )
     .load(conn)?;
     let kept_marks: HashMap<String, HN> = kept.into_iter().map(|r| (r.hash.clone(), r)).collect();
-    for t in ["mtgo_decklists", "mtgo_list_cards", "mtgo_lists"] {
-        super::db::truncate(conn, t)?;
-    }
-    diesel::sql_query("UPDATE mtgo_games SET list_id = NULL").execute(conn)?;
-    diesel::sql_query("UPDATE mtgo_matches SET my_list_id = NULL").execute(conn)?;
-    diesel::sql_query("DELETE FROM mtgo_match_labels WHERE side = 'me' AND source = 'list'").execute(conn)?;
-    let unknown_names = ids.iter().filter(|id| !names.contains_key(id)).count();
-
-    let games: Vec<GameStart> = diesel::sql_query("SELECT g.id, g.match_id, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE m.replay = 0").load(conn)?;
-    let mut game_times: Vec<(NaiveDateTime, GameStart)> = games.into_iter().filter_map(|g| NaiveDateTime::parse_from_str(&g.start_ts, "%Y-%m-%d %H:%M:%S").ok().map(|t| (t, g))).collect();
-    game_times.sort_by_key(|(t, _)| *t);
-
-    let mut st = DecklistStats { lines: by_game.len(), lists: 0, linked: 0, unlinked: 0, mismatched: 0, unknown_names };
-    let mut touched_matches: HashSet<i32> = HashSet::new();
-    for d in by_game.values() {
-        // canonical list hash
-        // merge printings of the same card: (name, sideboard) → (qty, lowest catalog id)
-        let mut merged: BTreeMap<(String, bool), (i64, i64)> = BTreeMap::new();
-        for e in &d.entries {
-            let name = names.get(&e.catalog_id).cloned().unwrap_or_else(|| format!("mtgo#{}", e.catalog_id));
-            let ent = merged.entry((name, e.in_sideboard)).or_insert((0, e.catalog_id));
-            ent.0 += e.quantity;
-            ent.1 = ent.1.min(e.catalog_id);
+    // one transaction: hundreds of inserts and lookups, each its own fsync otherwise
+    let st = conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        for t in ["mtgo_decklists", "mtgo_list_cards", "mtgo_lists"] {
+            super::db::truncate(conn, t)?;
         }
-        let cards: Vec<(String, i64, bool, i64)> = merged.into_iter().map(|((n, sb), (q, cid))| (n, q, sb, cid)).collect();
-        let key = cards.iter().map(|(n, q, sb, _)| format!("{n}|{q}|{}", *sb as u8)).collect::<Vec<_>>().join(";");
-        let hash = format!("{:016x}", fxhash(&key));
-        let n_main: i64 = cards.iter().filter(|c| !c.2).map(|c| c.1).sum();
-        let n_side: i64 = cards.iter().filter(|c| c.2).map(|c| c.1).sum();
-        let seen_at = d.at.format("%Y-%m-%d %H:%M:%S").to_string();
-        let existing: Option<IdRow> = diesel::sql_query(format!("SELECT id FROM mtgo_lists WHERE hash = '{hash}'")).get_result(conn).optional()?;
-        let list_id = match existing {
-            Some(r) => {
-                diesel::sql_query(format!("UPDATE mtgo_lists SET first_seen = MIN(first_seen, '{seen_at}'), last_seen = MAX(last_seen, '{seen_at}') WHERE id = {}", r.id)).execute(conn)?;
-                r.id
+        diesel::sql_query("UPDATE mtgo_games SET list_id = NULL").execute(conn)?;
+        diesel::sql_query("UPDATE mtgo_matches SET my_list_id = NULL").execute(conn)?;
+        diesel::sql_query("DELETE FROM mtgo_match_labels WHERE side = 'me' AND source = 'list'").execute(conn)?;
+        let unknown_names = ids.iter().filter(|id| !names.contains_key(id)).count();
+
+        let games: Vec<GameStart> = diesel::sql_query("SELECT g.id, g.match_id, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE m.replay = 0").load(conn)?;
+        let mut game_times: Vec<(NaiveDateTime, GameStart)> = games.into_iter().filter_map(|g| NaiveDateTime::parse_from_str(&g.start_ts, "%Y-%m-%d %H:%M:%S").ok().map(|t| (t, g))).collect();
+        game_times.sort_by_key(|(t, _)| *t);
+
+        let mut st = DecklistStats { lines: by_game.len(), lists: 0, linked: 0, unlinked: 0, mismatched: 0, unknown_names };
+        let mut touched_matches: HashSet<i32> = HashSet::new();
+        for d in by_game.values() {
+            // canonical list hash
+            // merge printings of the same card: (name, sideboard) → (qty, lowest catalog id)
+            let mut merged: BTreeMap<(String, bool), (i64, i64)> = BTreeMap::new();
+            for e in &d.entries {
+                let name = names.get(&e.catalog_id).cloned().unwrap_or_else(|| format!("mtgo#{}", e.catalog_id));
+                let ent = merged.entry((name, e.in_sideboard)).or_insert((0, e.catalog_id));
+                ent.0 += e.quantity;
+                ent.1 = ent.1.min(e.catalog_id);
             }
-            None => {
-                let q = |v: &Option<String>| v.as_ref().map(|n| format!("'{}'", n.replace('\'', "''"))).unwrap_or("NULL".into());
-                let (nm, fk, fx) = match kept_marks.get(&hash) {
-                    Some(m) => (q(&m.name), q(&m.fork), m.fork_experimental as i32),
-                    None => ("NULL".to_string(), "NULL".to_string(), 0),
-                };
-                diesel::sql_query(format!("INSERT INTO mtgo_lists(hash, name, fork, experimental, n_main, n_side, first_seen, last_seen) VALUES ('{hash}', {nm}, {fk}, {fx}, {n_main}, {n_side}, '{seen_at}', '{seen_at}')")).execute(conn)?;
-                let r: IdRow = diesel::sql_query("SELECT last_insert_rowid() AS id").get_result(conn)?;
-                for (name, qty, sb, cid) in &cards {
-                    diesel::sql_query(format!("INSERT INTO mtgo_list_cards(list_id, catalog_id, name, qty, sideboard) VALUES ({}, {cid}, '{}', {qty}, {})", r.id, name.replace('\'', "''"), *sb as i32)).execute(conn)?;
+            let cards: Vec<(String, i64, bool, i64)> = merged.into_iter().map(|((n, sb), (q, cid))| (n, q, sb, cid)).collect();
+            let key = cards.iter().map(|(n, q, sb, _)| format!("{n}|{q}|{}", *sb as u8)).collect::<Vec<_>>().join(";");
+            let hash = format!("{:016x}", fxhash(&key));
+            let n_main: i64 = cards.iter().filter(|c| !c.2).map(|c| c.1).sum();
+            let n_side: i64 = cards.iter().filter(|c| c.2).map(|c| c.1).sum();
+            let seen_at = d.at.format("%Y-%m-%d %H:%M:%S").to_string();
+            let existing: Option<IdRow> = diesel::sql_query(format!("SELECT id FROM mtgo_lists WHERE hash = '{hash}'")).get_result(conn).optional()?;
+            let list_id = match existing {
+                Some(r) => {
+                    diesel::sql_query(format!("UPDATE mtgo_lists SET first_seen = MIN(first_seen, '{seen_at}'), last_seen = MAX(last_seen, '{seen_at}') WHERE id = {}", r.id)).execute(conn)?;
+                    r.id
                 }
-                st.lists += 1;
-                r.id
+                None => {
+                    let q = |v: &Option<String>| v.as_ref().map(|n| format!("'{}'", n.replace('\'', "''"))).unwrap_or("NULL".into());
+                    let (nm, fk, fx) = match kept_marks.get(&hash) {
+                        Some(m) => (q(&m.name), q(&m.fork), m.fork_experimental as i32),
+                        None => ("NULL".to_string(), "NULL".to_string(), 0),
+                    };
+                    diesel::sql_query(format!("INSERT INTO mtgo_lists(hash, name, fork, experimental, n_main, n_side, first_seen, last_seen) VALUES ('{hash}', {nm}, {fk}, {fx}, {n_main}, {n_side}, '{seen_at}', '{seen_at}')")).execute(conn)?;
+                    let r: IdRow = diesel::sql_query("SELECT last_insert_rowid() AS id").get_result(conn)?;
+                    for (name, qty, sb, cid) in &cards {
+                        diesel::sql_query(format!("INSERT INTO mtgo_list_cards(list_id, catalog_id, name, qty, sideboard) VALUES ({}, {cid}, '{}', {qty}, {})", r.id, name.replace('\'', "''"), *sb as i32)).execute(conn)?;
+                    }
+                    st.lists += 1;
+                    r.id
+                }
+            };
+            // link to the imported game that starts within ±90 s
+            let mut best: Option<(i64, &GameStart)> = None;
+            for (t, g) in &game_times {
+                let dt = (*t - d.at).num_seconds().abs();
+                if dt <= 90 && best.map_or(true, |(b, _)| dt < b) {
+                    best = Some((dt, g));
+                }
             }
-        };
-        // link to the imported game that starts within ±90 s
-        let mut best: Option<(i64, &GameStart)> = None;
-        for (t, g) in &game_times {
-            let dt = (*t - d.at).num_seconds().abs();
-            if dt <= 90 && best.map_or(true, |(b, _)| dt < b) {
-                best = Some((dt, g));
-            }
-        }
-        let (mut game_db_id, mut match_db_id) = (None, None);
-        if let Some((_, g)) = best {
-            // validate: cards I played in that game must (mostly) be in the list
-            let played: Vec<PlayedRow> = diesel::sql_query(format!("SELECT DISTINCT name FROM mtgo_game_cards WHERE game_id = {} AND side = 'me' AND played = 1", g.id)).load(conn)?;
-            let list_names: HashSet<&str> = cards.iter().map(|c| c.0.as_str()).collect();
-            let hits = played.iter().filter(|p| list_names.contains(p.name.as_str())).count();
-            let ok = played.is_empty() || hits as f64 / played.len() as f64 >= 0.8;
-            if ok {
-                game_db_id = Some(g.id);
-                match_db_id = Some(g.match_id);
-                touched_matches.insert(g.match_id);
-                st.linked += 1;
+            let (mut game_db_id, mut match_db_id) = (None, None);
+            if let Some((_, g)) = best {
+                // validate: cards I played in that game must (mostly) be in the list
+                let played: Vec<PlayedRow> = diesel::sql_query(format!("SELECT DISTINCT name FROM mtgo_game_cards WHERE game_id = {} AND side = 'me' AND played = 1", g.id)).load(conn)?;
+                let list_names: HashSet<&str> = cards.iter().map(|c| c.0.as_str()).collect();
+                let hits = played.iter().filter(|p| list_names.contains(p.name.as_str())).count();
+                let ok = played.is_empty() || hits as f64 / played.len() as f64 >= 0.8;
+                if ok {
+                    game_db_id = Some(g.id);
+                    match_db_id = Some(g.match_id);
+                    touched_matches.insert(g.match_id);
+                    st.linked += 1;
+                } else {
+                    st.mismatched += 1;
+                    if verbose {
+                        eprintln!("  game {} at {}: only {hits}/{} played cards in list — not linked", d.game_id, seen_at, played.len());
+                    }
+                }
             } else {
-                st.mismatched += 1;
-                if verbose {
-                    eprintln!("  game {} at {}: only {hits}/{} played cards in list — not linked", d.game_id, seen_at, played.len());
-                }
+                st.unlinked += 1;
             }
-        } else {
-            st.unlinked += 1;
-        }
-        let ek = d.event_kind.as_deref().map(|e| format!("'{e}'")).unwrap_or("NULL".into());
-        let en = d.event_name.as_deref().map(|e| format!("'{}'", e.replace('\'', "''"))).unwrap_or("NULL".into());
-        let mid = d.match_id.map(|m| m.to_string()).unwrap_or("NULL".into());
-        diesel::sql_query(format!(
-            "INSERT INTO mtgo_decklists(mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind, event_name)
-             VALUES ({}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek}, {en})
-             ON CONFLICT(mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), event_name = COALESCE(excluded.event_name, mtgo_decklists.event_name), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
-            d.game_id, d.source.replace('\'', "''"),
-            game_db_id.map(|x| x.to_string()).unwrap_or("NULL".into()), match_db_id.map(|x| x.to_string()).unwrap_or("NULL".into())
-        ))
-        .execute(conn)?;
-        if let Some(gid) = game_db_id {
-            diesel::sql_query(format!("UPDATE mtgo_games SET list_id = {list_id} WHERE id = {gid}")).execute(conn)?;
-        }
-        if let (Some(mid), Some(_)) = (match_db_id, d.event_name.as_deref()) {
-            diesel::sql_query(format!("UPDATE mtgo_matches SET event_name = {en} WHERE id = {mid}")).execute(conn)?;
-        }
-    }
-    // match-level list = the list of its earliest linked game (the registered list); label source='list'
-    let rules = super::label::load_markers(&cfg.markers_path()).unwrap_or_default();
-    for mid in touched_matches {
-        let first: Option<IdRow> = diesel::sql_query(format!("SELECT g.list_id AS id FROM mtgo_games g WHERE g.match_id = {mid} AND g.list_id IS NOT NULL ORDER BY g.game_number LIMIT 1")).get_result(conn).optional()?;
-        if let Some(r) = first {
-            diesel::sql_query(format!("UPDATE mtgo_matches SET my_list_id = {} WHERE id = {mid}", r.id)).execute(conn)?;
-            let names: Vec<PlayedRow> = diesel::sql_query(format!("SELECT name FROM mtgo_list_cards WHERE list_id = {}", r.id)).load(conn)?;
-            let set: BTreeSet<String> = names.into_iter().map(|n| n.name).collect();
-            let g = super::label::guess(&rules, &set);
-            diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE match_id = {mid} AND side = 'me' AND source = 'list'")).execute(conn)?;
-            let q = |v: &Option<String>| v.as_ref().map(|x| format!("'{}'", x.replace('\'', "''"))).unwrap_or("NULL".into());
+            let ek = d.event_kind.as_deref().map(|e| format!("'{e}'")).unwrap_or("NULL".into());
+            let en = d.event_name.as_deref().map(|e| format!("'{}'", e.replace('\'', "''"))).unwrap_or("NULL".into());
+            let mid = d.match_id.map(|m| m.to_string()).unwrap_or("NULL".into());
             diesel::sql_query(format!(
-                "INSERT INTO mtgo_match_labels(match_id, side, source, archetype, subtype, category, archetype_marker, subtype_marker) VALUES ({mid}, 'me', 'list', {}, {}, {}, {}, {})",
-                q(&g.archetype), q(&g.subtype), q(&g.category), q(&g.archetype_marker), q(&g.subtype_marker)
+                "INSERT INTO mtgo_decklists(mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind, event_name)
+                 VALUES ({}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek}, {en})
+                 ON CONFLICT(mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), event_name = COALESCE(excluded.event_name, mtgo_decklists.event_name), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
+                d.game_id, d.source.replace('\'', "''"),
+                game_db_id.map(|x| x.to_string()).unwrap_or("NULL".into()), match_db_id.map(|x| x.to_string()).unwrap_or("NULL".into())
             ))
             .execute(conn)?;
+            if let Some(gid) = game_db_id {
+                diesel::sql_query(format!("UPDATE mtgo_games SET list_id = {list_id} WHERE id = {gid}")).execute(conn)?;
+            }
+            if let (Some(mid), Some(_)) = (match_db_id, d.event_name.as_deref()) {
+                diesel::sql_query(format!("UPDATE mtgo_matches SET event_name = {en} WHERE id = {mid}")).execute(conn)?;
+            }
         }
-    }
-    let _ = (mtgo_games::table, mtgo_matches::table, mtgo_match_labels::table);
+        // match-level list = the list of its earliest linked game (the registered list); label source='list'
+        let rules = super::label::load_markers(&cfg.markers_path()).unwrap_or_default();
+        for mid in touched_matches {
+            let first: Option<IdRow> = diesel::sql_query(format!("SELECT g.list_id AS id FROM mtgo_games g WHERE g.match_id = {mid} AND g.list_id IS NOT NULL ORDER BY g.game_number LIMIT 1")).get_result(conn).optional()?;
+            if let Some(r) = first {
+                diesel::sql_query(format!("UPDATE mtgo_matches SET my_list_id = {} WHERE id = {mid}", r.id)).execute(conn)?;
+                let names: Vec<PlayedRow> = diesel::sql_query(format!("SELECT name FROM mtgo_list_cards WHERE list_id = {}", r.id)).load(conn)?;
+                let set: BTreeSet<String> = names.into_iter().map(|n| n.name).collect();
+                let g = super::label::guess(&rules, &set);
+                diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE match_id = {mid} AND side = 'me' AND source = 'list'")).execute(conn)?;
+                let q = |v: &Option<String>| v.as_ref().map(|x| format!("'{}'", x.replace('\'', "''"))).unwrap_or("NULL".into());
+                diesel::sql_query(format!(
+                    "INSERT INTO mtgo_match_labels(match_id, side, source, archetype, subtype, category, archetype_marker, subtype_marker) VALUES ({mid}, 'me', 'list', {}, {}, {}, {}, {})",
+                    q(&g.archetype), q(&g.subtype), q(&g.category), q(&g.archetype_marker), q(&g.subtype_marker)
+                ))
+                .execute(conn)?;
+            }
+        }
+        let _ = (mtgo_games::table, mtgo_matches::table, mtgo_match_labels::table);
+        Ok(st)
+    })?;
+    if timing { eprintln!("decklists: rebuild + link {:.1}s", t2.elapsed().as_secs_f64()); }
     Ok(st)
 }
 

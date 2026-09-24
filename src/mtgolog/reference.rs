@@ -946,7 +946,7 @@ pub fn games_by_match(conn: &mut SqliteConnection, side: &str, fetches: &Fetches
 
 /// My side plays one list for a run of matches: within a day, in time order, pool the games of
 /// consecutive matches while the pooled games still fit some deck; a switch breaks the run.
-pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i32, Vec<GameSeen>>, refs: &References) -> std::collections::HashMap<i32, Vec<GameSeen>> {
+pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i32, Vec<GameSeen>>, refs: &References) -> std::collections::HashMap<i32, (Vec<GameSeen>, Vec<(f64, f64)>)> {
     let mut days: std::collections::BTreeMap<&str, Vec<i32>> = Default::default();
     for (id, date) in matches {
         if games.contains_key(id) {
@@ -967,7 +967,7 @@ pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i3
             let n: i32 = trial.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
             if !run.is_empty() && decide(&revealed_all(&trial), n, &trial_sc, &trial, refs).surprise > INFER_UNFIT {
                 for r in run.drain(..) {
-                    pooled.insert(r, acc.clone());
+                    pooled.insert(r, (acc.clone(), acc_sc.clone()));
                 }
                 acc = gs.clone();
                 acc_sc = sc[id].clone();
@@ -978,7 +978,7 @@ pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i3
             run.push(*id);
         }
         for r in run {
-            pooled.insert(r, acc.clone());
+            pooled.insert(r, (acc.clone(), acc_sc.clone()));
         }
     }
     pooled
@@ -1085,9 +1085,15 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
          FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 ORDER BY m.start_ts",
     )
     .load(conn)?;
+    let timing = std::env::var_os("MTGCTL_TIMING").is_some();
+    let t = std::time::Instant::now();
     let me = games_by_match(conn, "me", &refs.fetches)?;
     let opp = games_by_match(conn, "opp", &refs.fetches)?;
+    if timing { eprintln!("label: load games {:.1}s", t.elapsed().as_secs_f64()); }
+    let t = std::time::Instant::now();
     let pooled = pool_runs(&matches.iter().map(|m| (m.id, m.date.clone())).collect::<Vec<_>>(), &me, refs);
+    if timing { eprintln!("label: pool runs {:.1}s", t.elapsed().as_secs_f64()); }
+    let t = std::time::Instant::now();
     let mut counts = MatchDeckCounts { me_list: 0, me_cards: 0, me_list_inferred: 0, opp_named: 0, opp_archetype_only: 0 };
     let lists = player_lists(conn, &refs.fetches)?;
     let with_lists = refs.with_lists(&lists);
@@ -1116,6 +1122,8 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
         ))
         .execute(conn)
     };
+    if timing { eprintln!("label: player lists {:.1}s", t.elapsed().as_secs_f64()); }
+    let t = std::time::Instant::now();
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         for m in &matches {
             if m.list_deck.is_some() {
@@ -1123,7 +1131,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
                 let listed = Inference { deck: m.list_deck.clone(), archetype: m.list_archetype.clone(), reference_id: la.and_then(|a| a.reference_id), posterior: 1.0, surprise: 0.0, archetype_surprise: 0.0, candidates: vec![(m.list_deck.clone().unwrap(), 1.0)], runner_up_deck: None, runner_up_posterior: 0.0, n_seen: 0, misfit: vec![], seen: vec![], colors: la.and_then(|a| a.colors.clone()).unwrap_or_default() };
                 ins(conn, m.id, "me", "list", &listed, None)?;
                 counts.me_list += 1;
-            } else if let Some(gs) = pooled.get(&m.id) {
+            } else if let Some((gs, gsc)) = pooled.get(&m.id) {
                 // the list from this match alone: a run pools across version switches a card apart, which the fit test cannot see
                 if let Some((lid, p)) = infer_list(&me[&m.id], &m.date, &with_lists) {
                     // the games were played with a registered list: its assigned deck, if it has one
@@ -1136,7 +1144,8 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
                         counts.me_cards += 1;
                     }
                 } else {
-                    let i = infer(gs, refs);
+                    let n: i32 = gs.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
+                    let i = decide(&revealed_all(gs), n, gsc, gs, refs);
                     ins(conn, m.id, "me", "cards", &i, None)?;
                     if i.deck.is_some() || i.archetype.is_some() {
                         counts.me_cards += 1;
@@ -1155,5 +1164,6 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
         }
         Ok(())
     })?;
+    if timing { eprintln!("label: score + insert {:.1}s", t.elapsed().as_secs_f64()); }
     Ok(counts)
 }

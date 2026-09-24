@@ -91,6 +91,13 @@ pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<Sy
     let conn = &mut dir.connect()?;
     super::db::ensure_schema(conn).map_err(|e| e.to_string())?;
     let mut steps = Vec::new();
+    let t0 = std::time::Instant::now();
+    let mut lap = t0;
+    let mut timed = |steps: &mut Vec<String>, msg: String| {
+        let now = std::time::Instant::now();
+        steps.push(format!("{msg} [{:.1}s]", (now - lap).as_secs_f64()));
+        lap = now;
+    };
 
     if let Some(seed) = &reference.card_names {
         for stmt in std::fs::read_to_string(seed).map_err(|e| e.to_string())?.lines().filter(|l| l.starts_with("INSERT")) {
@@ -98,23 +105,23 @@ pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<Sy
         }
     }
     let st = super::db::import(conn, &cfg, &dir.logs(), false, true).map_err(|e| format!("import: {e}"))?;
-    steps.push(format!("import: {} new, {} refreshed, {} skipped, {} in progress, {} failed", st.matches, st.refreshed, st.skipped, st.in_progress, st.failed));
+    timed(&mut steps, format!("import: {} new, {} refreshed, {} skipped, {} in progress, {} failed", st.matches, st.refreshed, st.skipped, st.in_progress, st.failed));
 
     // fetch = true: list catalog ids are printings the game logs never name; Scryfall fills them once per player DB.
     let dl = super::decklist::run_decklists(conn, &cfg, true, false).map_err(|e| format!("decklists: {e}"))?;
-    steps.push(format!("decklists: {} lists, {} games linked, {} unlinked", dl.lists, dl.linked, dl.unlinked));
+    timed(&mut steps, format!("decklists: {} lists, {} games linked, {} unlinked", dl.lists, dl.linked, dl.unlinked));
 
     let shared = &mut crate::db::establish_connection_at(&reference.shared_db)?;
     let eras = super::eras::eras_from_file(&reference.timeline)?;
     let refs = super::reference::load_references(shared, &eras).map_err(|e| format!("references: {e}"))?;
     let assigned = super::reference::assign_player(conn, &refs).map_err(|e| format!("assign: {e}"))?;
     let lists_assigned = assigned.iter().filter(|a| a.deck.is_some()).count();
-    steps.push(format!("decks: {lists_assigned} of {} lists named by {} reference decklists", assigned.len(), refs.refs.len()));
+    timed(&mut steps, format!("decks: {lists_assigned} of {} lists named by {} reference decklists", assigned.len(), refs.refs.len()));
     let md = super::reference::label_matches(conn, &refs).map_err(|e| format!("match decks: {e}"))?;
-    steps.push(format!("match decks: mine from list {}, from cards {} ({} placed on a registered list); opponents named {}, archetype only {}", md.me_list, md.me_cards, md.me_list_inferred, md.opp_named, md.opp_archetype_only));
+    timed(&mut steps, format!("match decks: mine from list {}, from cards {} ({} placed on a registered list); opponents named {}, archetype only {}", md.me_list, md.me_cards, md.me_list_inferred, md.opp_named, md.opp_archetype_only));
 
     super::cluster::run_cluster(conn, 0.65, 0.4, false, false, false, usize::MAX, "cutoff", false).map_err(|e| format!("cluster: {e}"))?;
-    steps.push("cluster: ok".into());
+    timed(&mut steps, "cluster: ok".into());
 
     // Guessed opponent labels are not part of this pipeline; clear any left by an older build.
     diesel::sql_query("DELETE FROM mtgo_match_labels WHERE source = 'guess'").execute(conn).map_err(|e| e.to_string())?;

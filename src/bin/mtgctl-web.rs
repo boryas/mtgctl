@@ -1118,7 +1118,7 @@ async fn main() {
             let truth: Vec<Truth> = diesel::sql_query("SELECT m.id AS match_id, a.deck, COALESCE(substr(m.start_ts,1,10), '') AS date FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 ORDER BY m.start_ts").load(conn).unwrap();
             let mut games = r::games_by_match(conn, &side, &refs.fetches).unwrap();
             if pool_run {
-                games = r::pool_runs(&truth.iter().map(|t| (t.match_id, t.date.clone())).collect::<Vec<_>>(), &games, &refs);
+                games = r::pool_runs(&truth.iter().map(|t| (t.match_id, t.date.clone())).collect::<Vec<_>>(), &games, &refs).into_iter().map(|(k, (g, _))| (k, g)).collect();
             }
             if side == "me" {
                 // list-level check: with the player's lists as hypotheses, does a match linked by the session log land on its own list?
