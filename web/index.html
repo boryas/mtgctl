@@ -55,7 +55,7 @@
 <script>
 // The columns a person can filter or group on, by level. Anything not listed (ids, empty
 // legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
-const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', my_seen: 'my cards seen', opp_seen: 'opponent cards seen', player: 'player', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
+const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', my_seen: 'my cards seen', opp_seen: 'opponent cards seen', player: 'player', opponent: 'opponent', match_result: 'match result', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
 const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast' };
 const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
 const CURATED_G = ['opp_archetype','opp_deck','opp_colors','my_deck','my_archetype','my_list','event_type','player','opponent','month','game_number','on_play','my_mulligans','win_by'];
@@ -641,6 +641,42 @@ function chart(xs, series, stat) {
   const legend = series.map((s, si) => `<span class="lg"><i style="background:${PALETTE[si % PALETTE.length]}"></i>${s.name}</span>`).join('');
   return `<div class="chartwrap">${svg}<div class="legend">${legend}</div></div>`;
 }
+// A rows-view column's filter field and raw value (for sorting and for the filter a double-click
+// adds); columns without a field sort only, those without either (games, cards seen) do neither.
+const ROW_FIELD = {
+  date: ['date', r => r.date], opponent: ['opponent', r => r.opponent], opp_deck: ['opp_deck', r => r.opp_deck], opp_cands: ['opp_deck_candidates', r => r.opp_deck_candidates],
+  opp_arch: ['opp_archetype', r => r.opp_archetype], opp_col: ['opp_colors', r => r.opp_colors], my_deck: ['my_deck', r => r.my_deck], my_list: ['my_list', r => r.my_list],
+  event: ['event_name', r => r.event_name], result: ['match_result', r => r.match_result], game: ['game_number', g => g.game_number],
+  pd: ['on_play', g => g.on_play == null ? null : g.on_play ? '1' : '0'], mulls: ['my_mulligans', g => g.my_mulligans], turns: ['turns', g => g.turns], min: ['minutes', g => g.minutes], how: ['win_by', g => g.win_by],
+};
+const GAME_ROW_FIELD = Object.assign({}, ROW_FIELD, { result: [null, g => g.winner] });
+// Adds `field is value` (`is not` when `not`) unless that exact filter is already there.
+function addValueFilter(field, v, not) {
+  const k = FIELDS[field] && FIELDS[field].kind;
+  if (!k || (v == null && (k === 'colors' || k === 'date'))) return;
+  const f = k === 'date' ? { field, op: 'between', not: false, values: [v, v] } : k === 'colors' ? { field, op: 'exact', not, values: [v] } : { field, op: 'is', not, values: [v == null ? null : String(v)] };
+  if (filters.some(x => x.field === f.field && x.op === f.op && !!x.not === !!f.not && JSON.stringify(x.values) === JSON.stringify(f.values))) return;
+  closeEditor(); editing = null; filters.push(f); renderFilters(); filtersChanged();
+}
+let rowSort = null; // { col: a rows-view column key, dir: 1 | -1 }; sorts the rows already fetched
+function rowTable(out, rows, cols, defs, cell, fields) {
+  if (rowSort && cols.includes(rowSort.col) && fields[rowSort.col]) {
+    const get = fields[rowSort.col][1], { dir } = rowSort;
+    // missing values last in either direction
+    rows = rows.slice().sort((a, b) => { const x = get(a), y = get(b), mx = x == null || x === '', my = y == null || y === ''; if (mx || my) return mx - my; return dir * (typeof x === 'number' && typeof y === 'number' ? x - y : natural(String(x), String(y))); });
+  }
+  let html = '<table><tr>' + cols.map(c => `<th${fields[c] ? ` class="sortable" data-c="${c}"` : ''}>${defs[c]}${rowSort && rowSort.col === c ? (rowSort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
+  rows.forEach((r, i) => { html += `<tr data-i="${i}">` + cols.map(c => `<td data-c="${c}"${TEXT_COLS.has(c) ? ' class="text"' : ''}${fields[c] && fields[c][0] ? ' title="double-click: filter on this value (shift: exclude it)"' : ''}>${cell[c](r)}</td>`).join('') + '</tr>'; });
+  out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
+  out.querySelectorAll('th.sortable').forEach(th => th.onclick = () => { const c = th.dataset.c; rowSort = rowSort && rowSort.col === c ? { col: c, dir: -rowSort.dir } : { col: c, dir: 1 }; rowTable(out, rows, cols, defs, cell, fields); });
+  out.querySelector('table').ondblclick = e => {
+    const td = e.target.closest('td[data-c]'); if (!td) return;
+    const fd = fields[td.dataset.c]; if (!fd || !fd[0]) return;
+    window.getSelection().removeAllRanges();
+    addValueFilter(fd[0], fd[1](rows[+td.parentElement.dataset.i]), e.shiftKey);
+  };
+}
+const natural = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 // Rows: one per match, or one per game when the filters touch anything per game.
 async function showMatches(seq) {
   const out = document.getElementById('out');
@@ -656,9 +692,7 @@ async function showMatches(seq) {
         game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
         turns: g => g.turns, min: g => g.minutes ?? '', result: g => `<b>${g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?'}</b>`, how: g => g.win_by || '' };
       const cols = Object.keys(defs).filter(c => set.has(c));
-      let html = '<table><tr>' + cols.map(c => `<th>${c === 'mulls' ? 'mulls (me/opp)' : defs[c]}</th>`).join('') + '</tr>';
-      for (const g of rows) html += '<tr>' + cols.map(c => `<td${TEXT_COLS.has(c) ? ' class="text"' : ''}>${cell[c](g)}</td>`).join('') + '</tr>';
-      out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
+      rowTable(out, rows, cols, Object.assign({}, defs, { mulls: 'mulls (me/opp)' }), cell, GAME_ROW_FIELD);
       setSummary(`per-game rows: ${rows.length} games${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
       return;
     }
@@ -673,9 +707,7 @@ async function showMatches(seq) {
       my_list: r => r.my_list ? `<a class="key" data-col="my_list" data-val="${r.my_list.replace(/"/g, '&quot;')}" href="lists.html">${r.my_list}</a>` : `<span class="muted">no list</span>`,
       event: r => r.event_name || '', result: r => `<b>${r.match_result}</b> ${r.my_game_wins}–${r.opp_game_wins}`, games: r => (r.games || '').split('|').filter(Boolean).map(game).join(' ') };
     const cols = Object.keys(defs).filter(c => set.has(c));
-    let html = '<table><tr>' + cols.map(c => `<th>${c === 'games' ? 'games (W/L, play/draw, mulls, turns)' : defs[c]}</th>`).join('') + '</tr>';
-    for (const r of rows) html += '<tr>' + cols.map(c => `<td${TEXT_COLS.has(c) ? ' class="text"' : ''}>${cell[c](r)}</td>`).join('') + '</tr>';
-    out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
+    rowTable(out, rows, cols, Object.assign({}, defs, { games: 'games (W/L, play/draw, mulls, turns)' }), cell, ROW_FIELD);
     setSummary(`${rows.length} matches${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
   } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
 }
