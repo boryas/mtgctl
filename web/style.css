@@ -89,3 +89,16 @@ th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { backgrou
 .copywrap { position: relative; }
 .copywrap pre.copy { margin: 6px 0; padding-right: 64px; white-space: pre-wrap; word-break: break-all; }
 .copywrap button { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; cursor: pointer; }
+/* the filter list: one row per filter, its editor opens under it */
+.frow { display: flex; align-items: baseline; gap: 6px; padding: 3px 6px; margin: 3px 0; background: #eef; border-radius: 6px; }
+.frow .ftext { flex: 1; cursor: pointer; overflow-wrap: anywhere; }
+.frow.idle { background: #f3f3f3; color: #777; font-style: italic; }
+.frow.open { border-radius: 6px 6px 0 0; }
+.frow .fx { border: none; background: none; cursor: pointer; color: #888; font-size: 14px; padding: 0 2px; }
+.frow .fx:hover { color: #b00; }
+.fedit { border: 1px solid #dde; border-top: none; border-radius: 0 0 6px 6px; padding: 6px; margin: -3px 0 6px; background: #fff; display: flex; flex-direction: column; gap: 5px; }
+.fedit .ffield { max-width: 100%; }
+.fedit .vals { max-height: 220px; }
+.fedit .chips span:hover { text-decoration: line-through; }
+.fbtns { text-align: right; }
+.fdiv { margin-top: 8px; }
