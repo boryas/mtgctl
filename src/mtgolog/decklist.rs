@@ -501,9 +501,8 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
         parent_hash: Option<String>,
     }
     let kept: Vec<HN> = diesel::sql_query(
-        "SELECT l.hash, l.name, l.fork, l.fork_experimental, CASE WHEN l.parent_set = 0 THEN '' ELSE p.hash END AS parent_hash
-         FROM mtgo_lists l LEFT JOIN mtgo_lists p ON p.id = l.parent_set
-         WHERE l.name IS NOT NULL OR l.fork IS NOT NULL OR l.parent_set IS NOT NULL",
+        "SELECT l.hash, l.name, l.fork, l.experimental AS fork_experimental, NULL AS parent_hash
+         FROM mtgo_lists l WHERE l.name IS NOT NULL OR l.experimental = 1",
     )
     .load(conn)?;
     let kept_marks: HashMap<String, HN> = kept.into_iter().map(|r| (r.hash.clone(), r)).collect();
@@ -549,7 +548,7 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
                     Some(m) => (q(&m.name), q(&m.fork), m.fork_experimental as i32),
                     None => ("NULL".to_string(), "NULL".to_string(), 0),
                 };
-                diesel::sql_query(format!("INSERT INTO mtgo_lists(hash, name, fork, fork_experimental, n_main, n_side, first_seen, last_seen) VALUES ('{hash}', {nm}, {fk}, {fx}, {n_main}, {n_side}, '{seen_at}', '{seen_at}')")).execute(conn)?;
+                diesel::sql_query(format!("INSERT INTO mtgo_lists(hash, name, fork, experimental, n_main, n_side, first_seen, last_seen) VALUES ('{hash}', {nm}, {fk}, {fx}, {n_main}, {n_side}, '{seen_at}', '{seen_at}')")).execute(conn)?;
                 let r: IdRow = diesel::sql_query("SELECT last_insert_rowid() AS id").get_result(conn)?;
                 for (name, qty, sb, cid) in &cards {
                     diesel::sql_query(format!("INSERT INTO mtgo_list_cards(list_id, catalog_id, name, qty, sideboard) VALUES ({}, {cid}, '{}', {qty}, {})", r.id, name.replace('\'', "''"), *sb as i32)).execute(conn)?;
