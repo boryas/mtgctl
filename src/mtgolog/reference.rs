@@ -310,12 +310,27 @@ pub struct References {
     pub all_cards: Vec<BTreeMap<String, i32>>,
     /// per archetype, the most copies of each card any of its references runs, main and side apart
     pub pools: std::collections::HashMap<String, (BTreeMap<String, i32>, BTreeMap<String, i32>)>,
+    /// the most copies of a card any reference runs, main and side together, when above four
+    pub max_copies: std::collections::HashMap<String, i32>,
 }
 
 impl References {
     /// Derive the scoring tables from `refs`; call after any change to `refs`.
     pub fn prepare(&mut self) {
         self.bg = Background::new(&self.refs);
+        self.max_copies.clear();
+        for x in &self.refs {
+            let mut all: BTreeMap<&str, i32> = BTreeMap::new();
+            for (n, q) in x.main.iter().chain(x.side.iter()) {
+                *all.entry(n.as_str()).or_default() += q;
+            }
+            for (n, q) in all {
+                if q > 4 {
+                    let e = self.max_copies.entry(n.to_string()).or_insert(0);
+                    *e = (*e).max(q);
+                }
+            }
+        }
         self.all_cards = self
             .refs
             .iter()
@@ -340,9 +355,14 @@ impl References {
             }
         }
     }
+    /// Copies of a card a list can hold: four, or the most any reference runs (basics). A revealed
+    /// count above that is the same object recast or reshuffled (Throes of Chaos, Emrakul), not evidence.
+    pub fn cap(&self, name: &str, k: i32) -> i32 {
+        k.min(self.max_copies.get(name).copied().unwrap_or(4))
+    }
     /// The references plus the player's registered lists as extra hypotheses (see `player_lists`).
     pub fn with_lists(&self, lists: &[PlayerList]) -> References {
-        let mut r = References { refs: self.refs.clone(), produces: self.produces.clone(), fetches: self.fetches.clone(), lands: self.lands.clone(), eras: vec![], bg: Background::default(), all_cards: vec![], pools: Default::default() };
+        let mut r = References { refs: self.refs.clone(), produces: self.produces.clone(), fetches: self.fetches.clone(), lands: self.lands.clone(), eras: vec![], bg: Background::default(), all_cards: vec![], pools: Default::default(), max_copies: Default::default() };
         r.refs.extend(lists.iter().map(|l| l.list.clone()));
         r.prepare();
         r
@@ -363,7 +383,7 @@ pub fn load_references(conn: &mut SqliteConnection, eras: &[(String, String)]) -
         let (main, side) = (canon(&main, &fetches), canon(&side, &fetches));
         refs.push(RefList { id: r.id, archetype: r.archetype, deck: r.deck, era: r.era_start.unwrap_or_default(), main, side, colors });
     }
-    let mut r = References { refs, produces, fetches, lands, eras: eras.to_vec(), bg: Background::default(), all_cards: vec![], pools: Default::default() };
+    let mut r = References { refs, produces, fetches, lands, eras: eras.to_vec(), bg: Background::default(), all_cards: vec![], pools: Default::default(), max_copies: Default::default() };
     r.prepare();
     Ok(r)
 }
@@ -944,6 +964,15 @@ pub fn games_by_match(conn: &mut SqliteConnection, side: &str, fetches: &Fetches
     Ok(out)
 }
 
+/// Revealed counts capped at what a list can hold, see `References::cap`.
+pub fn cap_revealed(games: &mut [GameSeen], r: &References) {
+    for g in games {
+        for (n, k) in g.revealed.iter_mut() {
+            *k = r.cap(n, *k);
+        }
+    }
+}
+
 /// My side plays one list for a run of matches: within a day, in time order, pool the games of
 /// consecutive matches while the pooled games still fit some deck; a switch breaks the run.
 pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i32, Vec<GameSeen>>, refs: &References) -> std::collections::HashMap<i32, (Vec<GameSeen>, Vec<(f64, f64)>)> {
@@ -1087,8 +1116,11 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
     .load(conn)?;
     let timing = std::env::var_os("MTGCTL_TIMING").is_some();
     let t = std::time::Instant::now();
-    let me = games_by_match(conn, "me", &refs.fetches)?;
-    let opp = games_by_match(conn, "opp", &refs.fetches)?;
+    let mut me = games_by_match(conn, "me", &refs.fetches)?;
+    let mut opp = games_by_match(conn, "opp", &refs.fetches)?;
+    for gs in me.values_mut().chain(opp.values_mut()) {
+        cap_revealed(gs, refs);
+    }
     if timing { eprintln!("label: load games {:.1}s", t.elapsed().as_secs_f64()); }
     let t = std::time::Instant::now();
     let pooled = pool_runs(&matches.iter().map(|m| (m.id, m.date.clone())).collect::<Vec<_>>(), &me, refs);
