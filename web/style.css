@@ -102,3 +102,4 @@ th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { backgrou
 .fedit .chips span:hover { text-decoration: line-through; }
 .fbtns { text-align: right; }
 .fdiv { margin-top: 8px; }
+.fedit input.bad { outline: 2px solid #c33; }

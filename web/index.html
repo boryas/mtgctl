@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=46"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=47"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="windows/">windows uploader</a></nav>
@@ -260,6 +260,22 @@ function editor(f, i, textEl) {
   if (k) valueEditor(f, i, box.querySelector('.fval'), touch);
   return box;
 }
+// A comparison typed as text: a leading <, <=, ≤, >, >=, ≥ sets the op (when the kind has it); a value
+// `parse` rejects marks the box and leaves the filter without values.
+const TYPED_OP = { '<=': '≤', '≤': '≤', '>=': '≥', '≥': '≥', '<': '<', '>': '>' };
+function comparisonInput(f, el, touch, placeholder, shown, parse) {
+  const inp = textInput(f, touch, placeholder); inp.value = shown;
+  inp.oninput = () => {
+    const [, sym, rest] = /^\s*(<=|>=|≤|≥|<|>)?\s*(.*?)\s*$/.exec(inp.value);
+    const op = sym && TYPED_OP[sym];
+    if (op && KINDS[kindOf(f)].ops[op]) { f.op = op; const sel = el.parentElement.querySelector('.fop'); if (sel) sel.value = op; }
+    const v = rest === '' ? null : parse(rest);
+    f.values = v == null ? [] : [v];
+    inp.classList.toggle('bad', rest !== '' && v == null);
+    touch();
+  };
+  el.appendChild(inp);
+}
 function textInput(f, touch, placeholder, list) {
   const inp = document.createElement('input'); inp.type = 'text'; inp.size = 24; inp.placeholder = placeholder; inp.value = f.values[0] ?? '';
   if (list) inp.setAttribute('list', list);
@@ -271,12 +287,10 @@ function valueEditor(f, i, el, touch) {
   const k = kindOf(f);
   if ((k === 'col' || k === 'num') && f.op === 'is') return pickValues(f, i, el, touch);
   if (k === 'col' || (k === 'card' && f.op === 'contains')) return el.appendChild(textInput(f, touch, 'part of a name'));
-  if (k === 'num') return el.appendChild(textInput(f, touch, 'a number'));
+  if (k === 'num') return comparisonInput(f, el, touch, 'a number', f.values[0] ?? '', t => /^-?\d+(\.\d+)?$/.test(t) ? t : null);
   if (k === 'stat') {
-    const inp = textInput(f, touch, STATS[f.field.slice(5)].rate || STATS[f.field.slice(5)].bar ? '60%' : '5');
-    inp.value = f.values.length ? (STATS[f.field.slice(5)].rate || STATS[f.field.slice(5)].bar ? `${Math.round(100 * f.values[0])}%` : f.values[0]) : '';
-    inp.oninput = () => { const v = parseOutVal(f.field.slice(5), inp.value); f.values = v == null ? [] : [v]; touch(); };
-    return el.appendChild(inp);
+    const stat = f.field.slice(5), pct = STATS[stat].rate || STATS[stat].bar;
+    return comparisonInput(f, el, touch, pct ? '60%' : '5', f.values.length ? (pct ? `${Math.round(100 * f.values[0])}%` : f.values[0]) : '', t => parseOutVal(stat, t));
   }
   if (k === 'card') {
     // several names: any of them (OR); suggestions are every card either side has revealed
