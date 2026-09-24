@@ -1123,6 +1123,7 @@ async fn main() {
             if side == "me" {
                 // list-level check: with the player's lists as hypotheses, does a match linked by the session log land on its own list?
                 let lists = r::player_lists(conn, &refs.fetches).unwrap();
+                let with_lists = refs.with_lists(&lists);
                 #[derive(diesel::QueryableByName)]
                 struct Linked { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Integer)] list_id: i32, #[diesel(sql_type = diesel::sql_types::Text)] date: String }
                 let linked: Vec<Linked> = diesel::sql_query("SELECT id AS match_id, my_list_id AS list_id, COALESCE(substr(start_ts,1,10), '') AS date FROM mtgo_matches WHERE my_list_id IS NOT NULL AND replay = 0").load(conn).unwrap();
@@ -1131,7 +1132,7 @@ async fn main() {
                 let by_id: HashMap<i32, &r::RefList> = lists.iter().map(|l| (-l.list.id, &l.list)).collect();
                 for l in &linked {
                     let Some(gs) = games.get(&l.match_id) else { continue };
-                    match r::infer_list(gs, &l.date, &refs, &lists) {
+                    match r::infer_list(gs, &l.date, &with_lists) {
                         Some((id, _)) if id == l.list_id => lr += 1,
                         Some((id, p)) => {
                             lw += 1;

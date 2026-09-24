@@ -304,6 +304,49 @@ pub struct References {
     pub lands: Fetches,
     /// (start, name) of every timeline era, for placing lists and references in the same era
     pub eras: Vec<(String, String)>,
+    /// scoring tables derived from `refs`, see `prepare`
+    pub bg: Background,
+    /// per reference, main + side together (the pool after game one)
+    pub all_cards: Vec<BTreeMap<String, i32>>,
+    /// per archetype, the most copies of each card any of its references runs, main and side apart
+    pub pools: std::collections::HashMap<String, (BTreeMap<String, i32>, BTreeMap<String, i32>)>,
+}
+
+impl References {
+    /// Derive the scoring tables from `refs`; call after any change to `refs`.
+    pub fn prepare(&mut self) {
+        self.bg = Background::new(&self.refs);
+        self.all_cards = self
+            .refs
+            .iter()
+            .map(|x| {
+                let mut all = x.main.clone();
+                for (n, q) in &x.side {
+                    *all.entry(n.clone()).or_default() += q;
+                }
+                all
+            })
+            .collect();
+        self.pools.clear();
+        for x in &self.refs {
+            let (pm, ps) = self.pools.entry(x.archetype.clone()).or_default();
+            for (n, q) in &x.main {
+                let e = pm.entry(n.clone()).or_insert(0);
+                *e = (*e).max(*q);
+            }
+            for (n, q) in &x.side {
+                let e = ps.entry(n.clone()).or_insert(0);
+                *e = (*e).max(*q);
+            }
+        }
+    }
+    /// The references plus the player's registered lists as extra hypotheses (see `player_lists`).
+    pub fn with_lists(&self, lists: &[PlayerList]) -> References {
+        let mut r = References { refs: self.refs.clone(), produces: self.produces.clone(), fetches: self.fetches.clone(), lands: self.lands.clone(), eras: vec![], bg: Background::default(), all_cards: vec![], pools: Default::default() };
+        r.refs.extend(lists.iter().map(|l| l.list.clone()));
+        r.prepare();
+        r
+    }
 }
 
 pub fn load_references(conn: &mut SqliteConnection, eras: &[(String, String)]) -> QueryResult<References> {
@@ -320,7 +363,9 @@ pub fn load_references(conn: &mut SqliteConnection, eras: &[(String, String)]) -
         let (main, side) = (canon(&main, &fetches), canon(&side, &fetches));
         refs.push(RefList { id: r.id, archetype: r.archetype, deck: r.deck, era: r.era_start.unwrap_or_default(), main, side, colors });
     }
-    Ok(References { refs, produces, fetches, lands, eras: eras.to_vec() })
+    let mut r = References { refs, produces, fetches, lands, eras: eras.to_vec(), bg: Background::default(), all_cards: vec![], pools: Default::default() };
+    r.prepare();
+    Ok(r)
 }
 
 /// Re-resolve every reference's era from its list date (or the date in its name) against the timeline.
@@ -640,7 +685,8 @@ pub struct Inference {
 }
 
 /// Slot frequency of every card across all references; a card in none gets one slot in all of them.
-struct Background {
+#[derive(Default)]
+pub struct Background {
     freq: std::collections::HashMap<String, f64>,
     floor: f64,
 }
@@ -662,11 +708,12 @@ impl Background {
     }
 }
 
-/// log Γ(x), Lanczos approximation (g = 7, n = 9); exact to ~1e-13 for x > 0.
+/// log |Γ(x)|, Lanczos approximation (g = 7, n = 9); exact to ~1e-13 for x > 0, and by reflection
+/// for x < 0.5 (a fully revealed 12-of takes q - k + 1 below zero, where Γ is negative).
 fn lgamma(x: f64) -> f64 {
     const C: [f64; 9] = [0.999_999_999_999_809_9, 676.520_368_121_885_1, -1_259.139_216_722_402_8, 771.323_428_777_653_1, -176.615_029_162_140_6, 12.507_343_278_686_905, -0.138_571_095_265_720_12, 9.984_369_578_019_572e-6, 1.505_632_735_149_311_6e-7];
     if x < 0.5 {
-        return (std::f64::consts::PI / (std::f64::consts::PI * x).sin()).ln() - lgamma(1.0 - x);
+        return (std::f64::consts::PI / (std::f64::consts::PI * x).sin().abs()).ln() - lgamma(1.0 - x);
     }
     let x = x - 1.0;
     let mut a = C[0];
@@ -712,20 +759,18 @@ fn loglik_game(pool: &BTreeMap<String, i32>, g: &GameSeen, bg: &Background, land
 }
 
 /// (log-likelihood, the revealed cards' own terms) of a match's games under one reference.
-fn loglik_ref(x: &RefList, games: &[GameSeen], bg: &Background, lands: &Fetches) -> (f64, f64) {
-    let mut post_board: BTreeMap<String, i32> = x.main.clone();
-    for (n, q) in &x.side {
-        *post_board.entry(n.clone()).or_default() += q;
-    }
-    games.iter().map(|g| loglik_game(if g.game_number == 1 { &x.main } else { &post_board }, g, bg, lands)).fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
+fn loglik_ref(main: &BTreeMap<String, i32>, all: &BTreeMap<String, i32>, games: &[GameSeen], bg: &Background, lands: &Fetches) -> (f64, f64) {
+    games.iter().map(|g| loglik_game(if g.game_number == 1 { main } else { all }, g, bg, lands)).fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
 }
 
-/// Score a match's games for one side against every reference. Deck = mixture of its references
-/// (equal weights: a list that placed twice is two references), archetype = its decks together.
-pub fn infer(games: &[GameSeen], r: &References) -> Inference {
-    let n_seen: i32 = games.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
-    let empty = |seen: Vec<String>, colors: String| Inference { deck: None, archetype: None, reference_id: None, posterior: 0.0, surprise: 0.0, archetype_surprise: 0.0, candidates: vec![], runner_up_deck: None, runner_up_posterior: 0.0, n_seen, misfit: vec![], seen, colors };
-    let bg = Background::new(&r.refs);
+/// Per reference, (log-likelihood, the revealed cards' own terms) of a match's games. Games are
+/// independent given the list, so the scores of pooled matches are the sums of their scores.
+pub fn scores(games: &[GameSeen], r: &References) -> Vec<(f64, f64)> {
+    r.refs.iter().zip(&r.all_cards).map(|(x, all)| loglik_ref(&x.main, all, games, &r.bg, &r.lands)).collect()
+}
+
+/// name → most copies revealed in any one game, over a match's games.
+pub fn revealed_all(games: &[GameSeen]) -> BTreeMap<String, i32> {
     let mut all: BTreeMap<String, i32> = BTreeMap::new();
     for g in games {
         for (n, q) in &g.revealed {
@@ -733,14 +778,28 @@ pub fn infer(games: &[GameSeen], r: &References) -> Inference {
             *e = (*e).max(*q);
         }
     }
+    all
+}
+
+/// Score a match's games for one side against every reference. Deck = mixture of its references
+/// (equal weights: a list that placed twice is two references), archetype = its decks together.
+pub fn infer(games: &[GameSeen], r: &References) -> Inference {
+    let n_seen: i32 = games.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
+    decide(&revealed_all(games), n_seen, &scores(games, r), games, r)
+}
+
+/// The decision from per-reference scores: `all` and `n_seen` describe the revealed cards, `games`
+/// is only needed for the archetype pool's own score.
+pub fn decide(all: &BTreeMap<String, i32>, n_seen: i32, scored: &[(f64, f64)], games: &[GameSeen], r: &References) -> Inference {
+    let empty = |seen: Vec<String>, colors: String| Inference { deck: None, archetype: None, reference_id: None, posterior: 0.0, surprise: 0.0, archetype_surprise: 0.0, candidates: vec![], runner_up_deck: None, runner_up_posterior: 0.0, n_seen, misfit: vec![], seen, colors };
+    let bg = &r.bg;
     let mut seen: Vec<(f64, String)> = all.iter().map(|(n, q)| (bg.of(n), if *q > 1 { format!("{n} ×{q}") } else { n.clone() })).collect();
     seen.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.cmp(&b.1)));
     let seen: Vec<String> = seen.into_iter().map(|(_, s)| s).collect();
-    let colors = mana_colors(&all, &BTreeMap::new(), &r.produces);
-    if n_seen == 0 || r.refs.is_empty() {
+    let colors = mana_colors(all, &BTreeMap::new(), &r.produces);
+    if n_seen == 0 || r.refs.is_empty() || scored.iter().all(|s| s.0 == f64::NEG_INFINITY) {
         return empty(seen, colors);
     }
-    let scored: Vec<(f64, f64)> = r.refs.iter().map(|x| loglik_ref(x, games, &bg, &r.lands)).collect();
     let lls: Vec<f64> = scored.iter().map(|s| s.0).collect();
     let mut by_deck: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, x) in r.refs.iter().enumerate() {
@@ -750,11 +809,12 @@ pub fn infer(games: &[GameSeen], r: &References) -> Inference {
         .iter()
         .map(|(d, idx)| {
             let m = idx.iter().map(|i| lls[*i]).fold(f64::NEG_INFINITY, f64::max);
-            let best = *idx.iter().max_by(|a, b| lls[**a].partial_cmp(&lls[**b]).unwrap()).unwrap();
-            (m + (idx.iter().map(|i| (lls[*i] - m).exp()).sum::<f64>() / idx.len() as f64).ln(), *d, best)
+            let best = *idx.iter().max_by(|a, b| lls[**a].total_cmp(&lls[**b])).unwrap();
+            let ll = if m == f64::NEG_INFINITY { m } else { m + (idx.iter().map(|i| (lls[*i] - m).exp()).sum::<f64>() / idx.len() as f64).ln() };
+            (ll, *d, best)
         })
         .collect();
-    deck_ll.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    deck_ll.sort_by(|a, b| b.0.total_cmp(&a.0));
     let top = deck_ll[0].0;
     let z: f64 = deck_ll.iter().map(|(l, _, _)| (l - top).exp()).sum();
     let post: Vec<(String, f64, usize)> = deck_ll.iter().map(|(l, d, b)| (d.to_string(), (l - top).exp() / z, *b)).collect();
@@ -766,19 +826,16 @@ pub fn infer(games: &[GameSeen], r: &References) -> Inference {
         *by_arch.entry(r.refs[*b].archetype.as_str()).or_default() += p;
     }
     let (arch, arch_p) = by_arch.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(a, p)| (a.to_string(), *p)).unwrap();
-    let (mut pool_main, mut pool_side): (BTreeMap<String, i32>, BTreeMap<String, i32>) = (BTreeMap::new(), BTreeMap::new());
-    for x in r.refs.iter().filter(|x| x.archetype == arch) {
-        for (n, q) in &x.main {
-            let e = pool_main.entry(n.clone()).or_insert(0);
-            *e = (*e).max(*q);
+    let archetype_surprise = match r.pools.get(&arch) {
+        Some((pm, ps)) => {
+            let mut pall = pm.clone();
+            for (n, q) in ps {
+                *pall.entry(n.clone()).or_default() += q;
+            }
+            -loglik_ref(pm, &pall, games, bg, &r.lands).1 / n_seen as f64
         }
-        for (n, q) in &x.side {
-            let e = pool_side.entry(n.clone()).or_insert(0);
-            *e = (*e).max(*q);
-        }
-    }
-    let pooled = RefList { id: 0, archetype: arch.clone(), deck: String::new(), era: String::new(), main: pool_main, side: pool_side, colors: String::new() };
-    let archetype_surprise = -loglik_ref(&pooled, games, &bg, &r.lands).1 / n_seen as f64;
+        None => f64::INFINITY,
+    };
     let arch_fits = fits || archetype_surprise <= INFER_UNFIT;
     let x = &r.refs[best_ref];
     let mut misfit: Vec<(i32, String)> = all
@@ -897,20 +954,26 @@ pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i3
         }
     }
     let mut pooled = std::collections::HashMap::new();
+    let sc: std::collections::HashMap<i32, Vec<(f64, f64)>> = games.iter().map(|(id, gs)| (*id, scores(gs, refs))).collect();
+    let add = |a: &[(f64, f64)], b: &[(f64, f64)]| -> Vec<(f64, f64)> { a.iter().zip(b).map(|(x, y)| (x.0 + y.0, x.1 + y.1)).collect() };
     for ids in days.values_mut() {
         ids.sort();
-        let (mut run, mut acc): (Vec<i32>, Vec<GameSeen>) = (vec![], vec![]);
+        let (mut run, mut acc, mut acc_sc): (Vec<i32>, Vec<GameSeen>, Vec<(f64, f64)>) = (vec![], vec![], vec![]);
         for id in ids.iter() {
             let gs = &games[id];
             let mut trial = acc.clone();
             trial.extend(gs.iter().cloned());
-            if !run.is_empty() && infer(&trial, refs).surprise > INFER_UNFIT {
+            let trial_sc = if run.is_empty() { sc[id].clone() } else { add(&acc_sc, &sc[id]) };
+            let n: i32 = trial.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
+            if !run.is_empty() && decide(&revealed_all(&trial), n, &trial_sc, &trial, refs).surprise > INFER_UNFIT {
                 for r in run.drain(..) {
                     pooled.insert(r, acc.clone());
                 }
                 acc = gs.clone();
+                acc_sc = sc[id].clone();
             } else {
                 acc = trial;
+                acc_sc = trial_sc;
             }
             run.push(*id);
         }
@@ -978,21 +1041,26 @@ pub fn player_lists(conn: &mut SqliteConnection, fetches: &Fetches) -> QueryResu
         .into_iter()
         .map(|(id, (main, side))| {
             let (_, arch) = assigned.get(&id).cloned().unwrap_or((None, None));
-            PlayerList { list: RefList { id: -id, archetype: arch.unwrap_or_else(|| "unassigned list".into()), deck: format!("list#{id}"), era: String::new(), main: canon(&main, fetches), side: canon(&side, fetches), colors: String::new() }, first_seen: first_seen.get(&id).cloned().unwrap_or_default() }
+            PlayerList { list: RefList { id: -id, archetype: arch.unwrap_or_else(|| "unassigned list".into()), deck: format!("list#{id}"), era: first_seen.get(&id).cloned().unwrap_or_default(), main: canon(&main, fetches), side: canon(&side, fetches), colors: String::new() }, first_seen: first_seen.get(&id).cloned().unwrap_or_default() }
         })
         .collect())
 }
 
 /// The registered list a match on `date` was played with, when one of the player's lists known by
-/// then beats every reference and every other list: (list id, posterior).
-pub fn infer_list(games: &[GameSeen], date: &str, refs: &References, lists: &[PlayerList]) -> Option<(i32, f64)> {
-    let usable: Vec<RefList> = lists.iter().filter(|l| !l.first_seen.is_empty() && l.first_seen.as_str() <= date).map(|l| l.list.clone()).collect();
-    if usable.is_empty() {
+/// then beats every reference and every other list: (list id, posterior). `all` is
+/// `refs.with_lists(lists)`; a list first seen after `date` (its `era`) is not a hypothesis.
+pub fn infer_list(games: &[GameSeen], date: &str, all: &References) -> Option<(i32, f64)> {
+    if !all.refs.iter().any(|x| x.id < 0 && !x.era.is_empty() && x.era.as_str() <= date) {
         return None;
     }
-    let mut all = References { refs: refs.refs.clone(), produces: Default::default(), fetches: refs.fetches.clone(), lands: refs.lands.clone(), eras: vec![] };
-    all.refs.extend(usable);
-    let i = infer(games, &all);
+    let mut sc = scores(games, all);
+    for (s, x) in sc.iter_mut().zip(&all.refs) {
+        if x.id < 0 && (x.era.is_empty() || x.era.as_str() > date) {
+            *s = (f64::NEG_INFINITY, 0.0);
+        }
+    }
+    let n_seen: i32 = games.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
+    let i = decide(&revealed_all(games), n_seen, &sc, games, all);
     let deck = i.deck?;
     let id: i32 = deck.strip_prefix("list#")?.parse().ok()?;
     Some((id, i.posterior))
@@ -1022,6 +1090,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
     let pooled = pool_runs(&matches.iter().map(|m| (m.id, m.date.clone())).collect::<Vec<_>>(), &me, refs);
     let mut counts = MatchDeckCounts { me_list: 0, me_cards: 0, me_list_inferred: 0, opp_named: 0, opp_archetype_only: 0 };
     let lists = player_lists(conn, &refs.fetches)?;
+    let with_lists = refs.with_lists(&lists);
     let list_deck: std::collections::HashMap<i32, ListDeckRow> = {
         let rows: Vec<ListDeckRow> = diesel::sql_query("SELECT list_id, deck, archetype, reference_id, colors FROM list_assignments").load(conn)?;
         rows.into_iter().map(|d| (d.list_id, d)).collect()
@@ -1056,7 +1125,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
                 counts.me_list += 1;
             } else if let Some(gs) = pooled.get(&m.id) {
                 // the list from this match alone: a run pools across version switches a card apart, which the fit test cannot see
-                if let Some((lid, p)) = infer_list(&me[&m.id], &m.date, refs, &lists) {
+                if let Some((lid, p)) = infer_list(&me[&m.id], &m.date, &with_lists) {
                     // the games were played with a registered list: its assigned deck, if it has one
                     let la = list_deck.get(&lid);
                     let deck = la.and_then(|a| a.deck.clone());
