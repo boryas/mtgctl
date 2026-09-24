@@ -162,6 +162,16 @@ fn timeline_eras() -> Vec<(String, String)> {
     mtgctl::mtgolog::eras::eras_from_file(Path::new("definitions/mtgo/legacy_timeline.toml")).unwrap_or_else(|e| { eprintln!("timeline: {e}"); std::process::exit(1) })
 }
 
+/// The Windows scripts are meant to be read in the browser before they are run: serve them as text.
+async fn plain_text_scripts(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let script = req.uri().path().ends_with(".ps1") || req.uri().path().ends_with(".cmd");
+    let mut res = next.run(req).await;
+    if script && res.status().is_success() {
+        res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain; charset=utf-8"));
+    }
+    res
+}
+
 /// The shared database: reference decklists (and, later, everything that is not one player's).
 fn shared_db(data: &Path) -> Result<diesel::SqliteConnection, String> {
     std::fs::create_dir_all(data).map_err(|e| e.to_string())?;
@@ -1182,6 +1192,7 @@ async fn main() {
                 .route("/api/lists", get(lists))
                 .route("/api/list", get(list_detail))
                 .fallback_service(ServeDir::new(&web))
+                .layer(axum::middleware::from_fn(plain_text_scripts))
                 // pages and scripts change together on every deploy; never serve a stale script against a new page
                 .layer(SetResponseHeaderLayer::overriding(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache")))
                 .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))

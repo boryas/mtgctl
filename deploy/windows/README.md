@@ -12,6 +12,12 @@ Either way it downloads the uploader, registers it to run every 30 minutes and a
 first upload. The first run reads every match log you have and can take a few minutes; after
 that it is seconds. It works out who you are from your match logs; nothing else is needed.
 
+Read before you run: [install.ps1](install.ps1) downloads the other two and registers the tasks;
+[mtgctl-upload.ps1](mtgctl-upload.ps1) finds the logs, works out your name, and uploads what the
+server lacks; [play-mtgo.ps1](play-mtgo.ps1) starts the client and uploads when it exits;
+[install-mtgctl.cmd](install-mtgctl.cmd) is the one PowerShell line in a double-clickable file.
+Nothing leaves your machine except your MTGO logs, and only to the stats server.
+
 Files live in `%LOCALAPPDATA%\mtgctl`; progress is in `upload.log` there.
 
 To remove: `schtasks /Delete /TN "mtgctl upload" /F`, `schtasks /Delete /TN "mtgctl upload at logon" /F`,
