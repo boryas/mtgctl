@@ -1,6 +1,5 @@
-//! One player's upload directory → their database. Deliberately minimal: parse the game logs,
-//! link the registered lists, cluster the card signatures. Opponent identification is a cluster
-//! name a human gives; no marker rules, reference dumps or anchor votes are involved.
+//! One player's upload directory → their database: parse the game logs, link the registered
+//! lists, and name both sides' decks against the reference decklists.
 use super::MtgoConfig;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
@@ -83,7 +82,7 @@ pub struct SyncReport {
     pub steps: Vec<String>,
 }
 
-/// Run the pipeline for one player: import → decklists → cluster. Each step's own console
+/// Run the pipeline for one player: import → decklists → reference decks. Each step's own console
 /// output goes to the server log.
 pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<SyncReport, String> {
     dir.ensure().map_err(|e| e.to_string())?;
@@ -119,9 +118,6 @@ pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<Sy
     timed(&mut steps, format!("decks: {lists_assigned} of {} lists named by {} reference decklists", assigned.len(), refs.refs.len()));
     let md = super::reference::label_matches(conn, &refs).map_err(|e| format!("match decks: {e}"))?;
     timed(&mut steps, format!("match decks: mine from list {}, from cards {} ({} placed on a registered list); opponents named {}, archetype only {}", md.me_list, md.me_cards, md.me_list_inferred, md.opp_named, md.opp_archetype_only));
-
-    super::cluster::run_cluster(conn, 0.65, 0.4, false, false, false, usize::MAX, "cutoff", false).map_err(|e| format!("cluster: {e}"))?;
-    timed(&mut steps, "cluster: ok".into());
 
     // Guessed opponent labels are not part of this pipeline; clear any left by an older build.
     diesel::sql_query("DELETE FROM mtgo_match_labels WHERE source = 'guess'").execute(conn).map_err(|e| e.to_string())?;
