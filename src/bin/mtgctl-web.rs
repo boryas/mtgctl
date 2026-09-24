@@ -164,10 +164,15 @@ fn timeline_eras() -> Vec<(String, String)> {
 
 /// The Windows scripts are meant to be read in the browser before they are run: serve them as text.
 async fn plain_text_scripts(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
-    let script = req.uri().path().ends_with(".ps1") || req.uri().path().ends_with(".cmd");
+    let (ps1, cmd) = (req.uri().path().ends_with(".ps1"), req.uri().path().ends_with(".cmd"));
     let mut res = next.run(req).await;
-    if script && res.status().is_success() {
-        res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain; charset=utf-8"));
+    if res.status().is_success() {
+        if ps1 {
+            res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain; charset=utf-8"));
+        } else if cmd {
+            // the double-click installer: always a download (its text is shown on the collector page)
+            res.headers_mut().insert(axum::http::header::CONTENT_DISPOSITION, axum::http::HeaderValue::from_static("attachment; filename=\"install-mtgctl.cmd\""));
+        }
     }
     res
 }
