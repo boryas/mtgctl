@@ -353,6 +353,12 @@ fn store_file(dir: &PlayerDir, kind: &str, name: &str, mtime_ms: u64, raw_sha: O
             if !ok {
                 return Err("not a Match_GameLog_*.dat name".into());
             }
+            // never store chat: refuse chat files whatever their name, drop chat records from a game log
+            match mtgctl::mtgolog::format::strip_chat(bytes) {
+                Ok(None) => {}
+                Ok(Some(clean)) => return store_file(dir, kind, name, mtime_ms, raw_sha, &clean, session_hashes),
+                Err(e) => return Err(format!("not a game log ({e})")),
+            }
             let p = dir.logs().join(base);
             if let Ok(md) = std::fs::metadata(&p) {
                 let old_mtime = md.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);

@@ -141,6 +141,54 @@ pub fn parse_bytes(buf: &[u8]) -> Result<RawLog, FormatError> {
     Ok(RawLog { version, guid, kind, records })
 }
 
+/// A game log with every chat record removed. Chat records carry a sender; live game logs carry none
+/// and replays carry the acting player on every record, so only a mix is chat. Returns None when nothing
+/// had to go, Err for anything that is not a game log (a chat file has kind 3). A truncated tail (a log
+/// still being written) is kept as it is.
+pub fn strip_chat(buf: &[u8]) -> Result<Option<Vec<u8>>, FormatError> {
+    let mut c = Cursor { buf, pos: 0 };
+    let version = c.u16()?;
+    if version != 1 {
+        return Err(FormatError::BadVersion(version));
+    }
+    c.str()?;
+    if c.u16()? != 4 {
+        return Err(FormatError::BadVersion(3));
+    }
+    c.str()?;
+    let head = c.pos;
+    let mut spans: Vec<(usize, usize, bool)> = Vec::new();
+    let mut tail = buf.len();
+    while !c.at_end() {
+        let start = c.pos;
+        let rec = (|| -> Result<bool, FormatError> {
+            c.i64()?;
+            let sender = c.str()?;
+            c.str()?;
+            Ok(!sender.is_empty())
+        })();
+        match rec {
+            Ok(has_sender) => spans.push((start, c.pos, has_sender)),
+            Err(_) => {
+                tail = start;
+                break;
+            }
+        }
+    }
+    let with = spans.iter().filter(|s| s.2).count();
+    if with == 0 || with == spans.len() {
+        return Ok(None);
+    }
+    let mut out = buf[..head].to_vec();
+    for (a, b, has_sender) in &spans {
+        if !has_sender {
+            out.extend_from_slice(&buf[*a..*b]);
+        }
+    }
+    out.extend_from_slice(&buf[tail..]);
+    Ok(Some(out))
+}
+
 pub fn read_log(path: &Path) -> Result<RawLog, FormatError> {
     let buf = fs::read(path)?;
     parse_bytes(&buf)
@@ -189,5 +237,43 @@ mod tests {
         assert_eq!(log.records[1].sender, "boryas");
         assert_eq!(log.records[1].text.len(), 200);
         assert_eq!(log.records[1].ts.to_string(), "2026-01-01 00:00:01");
+    }
+
+    fn w7(out: &mut Vec<u8>, s: &str) {
+        let mut n = s.len();
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            if n == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn frame(kind: u16, recs: &[(&str, &str)]) -> Vec<u8> {
+        let mut b = vec![1, 0];
+        w7(&mut b, "g");
+        b.extend_from_slice(&kind.to_le_bytes());
+        w7(&mut b, "g");
+        for (s, t) in recs {
+            b.extend_from_slice(&0i64.to_le_bytes());
+            w7(&mut b, s);
+            w7(&mut b, t);
+        }
+        b
+    }
+
+    #[test]
+    fn strips_only_chat_records() {
+        let live = frame(4, &[("", "@PTurn 1: a"), ("", "@Pa draws a card.")]);
+        assert!(strip_chat(&live).unwrap().is_none());
+        let replay = frame(4, &[("a", "Turn 1"), ("b", "draws")]);
+        assert!(strip_chat(&replay).unwrap().is_none());
+        let mixed = frame(4, &[("", "@PTurn 1: a"), ("b", "gl hf"), ("", "@Pa draws a card.")]);
+        let out = strip_chat(&mixed).unwrap().unwrap();
+        assert_eq!(out, frame(4, &[("", "@PTurn 1: a"), ("", "@Pa draws a card.")]));
+        assert!(strip_chat(&frame(3, &[("b", "hello")])).is_err());
     }
 }

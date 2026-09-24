@@ -17,7 +17,8 @@ New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 $logFile = Join-Path $StateDir 'upload.log'
 function Log($msg) { $line = "{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg; Add-Content -Path $logFile -Value $line; if (-not $Quiet) { Write-Host $line } }
 $stateFile = Join-Path $StateDir 'state.json'
-$state = if (Test-Path $stateFile) { Get-Content $stateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{ player = $null } }
+$state = if (Test-Path $stateFile) { Get-Content $stateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{ player = $null; last_change = $null } }
+if (-not ($state.PSObject.Properties.Name -contains 'last_change')) { $state | Add-Member -NotePropertyName last_change -NotePropertyValue $null }
 $Server = $Server.TrimEnd('/') + '/'
 
 # ---- multipart/form-data by hand: works on PowerShell 5.1 (no -Form) and needs no curl
@@ -75,6 +76,9 @@ foreach ($root in $roots) {
     $sessions += Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'mtgo.log' -or $_.Name -match '^mtgo-\d{8}-\d{6}\.log$' }
 }
 if (-not $games -and -not $sessions) { Log "no MTGO logs under $($roots -join ', ')"; exit 1 }
+# nothing on disk changed since the last run: no network at all (the timed task runs overnight too)
+$latest = (($games + $sessions) | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum.ToString('o')
+if ($state.player -and $state.last_change -and $latest -le $state.last_change) { if (-not $Quiet) { Log 'no log changed since the last run' }; exit 0 }
 
 # ---- who: the newest match logs name the player
 if (-not $state.player) {
@@ -82,7 +86,7 @@ if (-not $state.player) {
     $parts = @()
     foreach ($f in ($games | Sort-Object LastWriteTimeUtc | Select-Object -Last 12)) { $parts += @{ name = 'file'; filename = $f.Name; bytes = [System.IO.File]::ReadAllBytes($f.FullName) } }
     $who = Send-Multipart ($Server + 'api/detect') $null $parts
-    $state = [pscustomobject]@{ player = $who.name }
+    $state.player = $who.name
     $state | ConvertTo-Json | Set-Content $stateFile
     Log "you are $($state.player)"
 }
@@ -127,6 +131,10 @@ while ($i -lt $todo.Count) {
     Log ("uploaded {0}-{1} of {2} ({3:N1} MB)" -f ($i + 1), $j, $todo.Count, ($bytes / 1MB))
     $i = $j
 }
+
+$state.last_change = $latest
+$state | ConvertTo-Json | Set-Content $stateFile
+if ($todo.Count -eq 0) { Log "nothing new; latest match on file $($before.latest_match)"; exit 0 }
 
 # ---- refresh the results and say what changed, in match terms
 $rep = Api 'api/sync' 'Post'

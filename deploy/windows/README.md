@@ -7,8 +7,8 @@ Open PowerShell (Start menu, type "PowerShell") and paste:
 Or download [install-mtgctl.cmd](install-mtgctl.cmd), double-click it and click *Run* when
 Windows asks; it runs the same line.
 
-Either way it downloads the uploader, registers it to run every 30 minutes and at logon, puts a
-**Play MTGO** shortcut on your desktop that uploads when you close the client, and runs the
+Either way it downloads the uploader, puts a **Play MTGO** shortcut on your desktop that starts
+the client and uploads when you close it, registers an upload at logon as a fallback, and runs the
 first upload. The first run reads every match log you have and can take a few minutes; after
 that it is seconds. It works out who you are from your match logs; nothing else is needed.
 
@@ -20,5 +20,5 @@ Nothing leaves your machine except your MTGO logs, and only to the stats server.
 
 Files live in `%LOCALAPPDATA%\mtgctl`; progress is in `upload.log` there.
 
-To remove: `schtasks /Delete /TN "mtgctl upload" /F`, `schtasks /Delete /TN "mtgctl upload at logon" /F`,
+To remove: `schtasks /Delete /TN "mtgctl upload at logon" /F`,
 then delete `%LOCALAPPDATA%\mtgctl` and the desktop shortcut.
