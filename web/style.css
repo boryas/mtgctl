@@ -103,3 +103,7 @@ th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { backgrou
 .fbtns { text-align: right; }
 .fdiv { margin-top: 8px; }
 .fedit input.bad { outline: 2px solid #c33; }
+.dpick { position: relative; white-space: nowrap; }
+.dpick .dcal { border: none; background: none; cursor: pointer; padding: 0 2px; }
+/* the calendar's anchor: present for showPicker, invisible */
+.dpick .dnative { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; }

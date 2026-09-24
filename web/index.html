@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=47"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=48"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="windows/">windows uploader</a></nav>
@@ -25,7 +25,7 @@
     <h3 class="toggle"><span class="caret">▾</span> Filters <span class="psum muted"></span></h3>
     <div class="pbody">
     <div id="flist"></div>
-    <div><button id="fadd">+ filter</button> <span class="muted">every filter must hold; click one to change it</span></div>
+    <div id="faddrow"></div>
     <datalist id="cardnames"></datalist>
     </div>
   </fieldset>
@@ -245,15 +245,50 @@ function renderFilters() {
 function closeEditor() {
   if (editing !== null && filters[editing] && !active(filters[editing])) { filters.splice(editing, 1); editing = null; filtersChanged(); }
 }
+function fieldSelect(cur) {
+  const groups = {};
+  for (const [k, d] of Object.entries(FIELDS)) (groups[d.group] = groups[d.group] || []).push([k, d]);
+  return `<select class="ffield"><option value="">choose a field…</option>${Object.entries(groups).map(([g, fs]) => `<optgroup label="${g}">${fs.map(([k, d]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${d.label}</option>`).join('')}</optgroup>`).join('')}</select>`;
+}
+function newFilter(field) {
+  const k = FIELDS[field] && FIELDS[field].kind;
+  return { field, op: k ? Object.keys(KINDS[k].ops)[0] : '', not: false, values: k === 'date' ? ['', ''] : [] };
+}
+// "+ filter" turns into the field picker in place; picking a field adds the filter with its editor open.
+function renderAdd(picking) {
+  const el = document.getElementById('faddrow');
+  if (!picking) {
+    el.innerHTML = '<button id="fadd">+ filter</button> <span class="muted">every filter must hold; click one to change it</span>';
+    el.querySelector('#fadd').onclick = () => { closeEditor(); editing = null; renderFilters(); renderAdd(true); };
+    return;
+  }
+  el.innerHTML = `${fieldSelect('')} <button class="fcancel">cancel</button>`;
+  const sel = el.querySelector('.ffield');
+  sel.onchange = () => { if (!sel.value) return; filters.push(newFilter(sel.value)); editing = filters.length - 1; renderAdd(false); renderFilters(); };
+  sel.onkeydown = e => { if (e.key === 'Escape') renderAdd(false); };
+  el.querySelector('.fcancel').onclick = () => renderAdd(false);
+  sel.focus(); try { sel.showPicker(); } catch (e) {}
+}
+// '2026', '2026-08', '8/2026', '2026-08-15', '8/15/2026' → the first day of that period, or with `end` the last; null if not a date.
+function parseDay(t, end) {
+  let y, m, d, x;
+  if ((x = /^(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?$/.exec(t.trim()))) [, y, m, d] = x;
+  else if ((x = /^(\d{1,2})\/(?:(\d{1,2})\/)?(\d{4})$/.exec(t.trim()))) [, m, d, y] = x;
+  else return null;
+  y = +y; m = m ? +m : (end ? 12 : 1);
+  if (m < 1 || m > 12) return null;
+  const last = new Date(y, m, 0).getDate();
+  d = d ? +d : (end ? last : 1);
+  if (d < 1 || d > last) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
 function editor(f, i, textEl) {
   const box = document.createElement('div'); box.className = 'fedit';
   const touch = () => { textEl.textContent = filterText(f); textEl.parentElement.classList.toggle('idle', !active(f)); filtersChanged(); };
-  const groups = {};
-  for (const [k, d] of Object.entries(FIELDS)) (groups[d.group] = groups[d.group] || []).push([k, d]);
-  const fieldSel = `<select class="ffield"><option value="">choose a field…</option>${Object.entries(groups).map(([g, fs]) => `<optgroup label="${g}">${fs.map(([k, d]) => `<option value="${k}" ${k === f.field ? 'selected' : ''}>${d.label}</option>`).join('')}</optgroup>`).join('')}</select>`;
+  const fieldSel = fieldSelect(f.field);
   const k = kindOf(f), K = k && KINDS[k];
   box.innerHTML = `<div>${fieldSel}${K ? ` ${Object.keys(K.ops).length > 1 ? `<select class="fop">${Object.entries(K.ops).map(([o, l]) => `<option value="${o}" ${o === f.op ? 'selected' : ''}>${l}</option>`).join('')}</select> ` : ''}${K.negatable ? `<label><input type="checkbox" class="fnot" ${f.not ? 'checked' : ''}> not</label>` : ''}` : ''}</div><div class="fval"></div><div class="fbtns"><button class="fdone">done</button></div>`;
-  box.querySelector('.ffield').onchange = e => { f.field = e.target.value; f.op = f.field ? Object.keys(KINDS[kindOf(f)].ops)[0] : ''; f.not = false; f.values = kindOf(f) === 'date' ? ['', ''] : []; renderFilters(); filtersChanged(); };
+  box.querySelector('.ffield').onchange = e => { Object.assign(f, newFilter(e.target.value)); renderFilters(); filtersChanged(); };
   const not = box.querySelector('.fnot'); if (not) not.onchange = () => { f.not = not.checked; touch(); };
   const op = box.querySelector('.fop'); if (op) op.onchange = () => { const was = f.op; f.op = op.value; if ((was === 'is') !== (f.op === 'is') || k === 'num') f.values = []; renderFilters(); filtersChanged(); };
   box.querySelector('.fdone').onclick = () => { closeEditor(); editing = null; renderFilters(); };
@@ -310,8 +345,17 @@ function valueEditor(f, i, el, touch) {
     return;
   }
   if (k === 'date') {
-    el.innerHTML = `<input type="date" class="d0" value="${f.values[0] || ''}"> → <input type="date" class="d1" value="${f.values[1] || ''}">`;
-    el.querySelectorAll('input').forEach((d, j) => d.onchange = () => { f.values[j] = d.value; touch(); });
+    // typed (a year or month means its first day as "from", its last as "to"), or picked from the calendar
+    el.innerHTML = [0, 1].map(j => `<span class="dpick"><input type="text" class="d${j}" size="11" placeholder="${j ? 'to' : 'from'}: 2026-08" value="${f.values[j] || ''}"><button class="dcal" title="calendar">📅</button><input type="date" class="dnative" tabindex="-1"></span>`).join(' → ');
+    el.querySelectorAll('.dpick').forEach((span, j) => {
+      const text = span.querySelector('input[type=text]'), native = span.querySelector('.dnative');
+      const set = v => { f.values[j] = v; touch(); };
+      text.oninput = () => { const v = text.value.trim() ? parseDay(text.value, j === 1) : ''; text.classList.toggle('bad', v === null); if (v !== null) set(v); };
+      text.onchange = () => { if (f.values[j]) text.value = f.values[j]; };
+      span.querySelector('.dcal').onclick = () => { native.value = f.values[j] || ''; try { native.showPicker(); } catch (e) { native.focus(); } };
+      native.onchange = () => { if (native.value) { text.value = native.value; text.classList.remove('bad'); set(native.value); } };
+    });
+    setTimeout(() => el.querySelector('.d0').focus(), 0);
   }
 }
 // The values a column takes under every other filter, with their counts; a search box narrows a long list.
@@ -376,7 +420,7 @@ async function init() {
   buildFields();
   filters = filtersFromHash();
   renderFilters();
-  document.getElementById('fadd').onclick = () => { closeEditor(); filters.push({ field: '', op: '', not: false, values: [] }); editing = filters.length - 1; renderFilters(); };
+  renderAdd(false);
   renderStatChoices(); syncViewOpts();
   // Live: any change in any panel re-renders (debounced); a stale response never overwrites a newer one.
   api('api/cards-seen').then(names => { cardNames = new Set(names); document.getElementById('cardnames').innerHTML = names.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
