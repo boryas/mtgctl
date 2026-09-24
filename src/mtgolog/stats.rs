@@ -52,8 +52,11 @@ SELECT
   CASE WHEN mo.match_id IS NULL THEN lo.category         ELSE mo.category         END AS opp_guess_category,
   CASE WHEN mo.match_id IS NULL THEN lo.archetype_marker ELSE mo.archetype_marker END AS opp_guess_marker,
   CASE WHEN mo.match_id IS NULL THEN lo.subtype_marker   ELSE mo.subtype_marker   END AS opp_guess_subtype_marker,
-  cme.colors          AS my_colors,
-  cop.colors          AS opp_colors,
+  md.colors           AS my_colors,
+  od.colors           AS opp_colors,
+  md.reference_id     AS my_reference_id,
+  od.reference_id     AS opp_reference_id,
+  md.seen             AS my_seen,
   COALESCE(m.my_list_id, md.list_id) AS my_list_id,
   CASE WHEN m.my_list_id IS NOT NULL THEN 1 ELSE 0 END AS has_decklist,
   COALESCE(li.name, li.auto_name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_list,
@@ -105,8 +108,6 @@ LEFT JOIN mtgo_match_labels lg ON lg.match_id = m.id AND lg.side = 'me' AND lg.s
 LEFT JOIN mtgo_match_labels lo ON lo.match_id = m.id AND lo.side = 'opp' AND lo.source = 'guess'
 LEFT JOIN mtgo_match_labels mg ON mg.match_id = m.id AND mg.side = 'me' AND mg.source = 'manual'
 LEFT JOIN mtgo_match_labels mo ON mo.match_id = m.id AND mo.side = 'opp' AND mo.source = 'manual'
-LEFT JOIN mtgo_match_colors cme ON cme.match_id = m.id AND cme.side = 'me'
-LEFT JOIN mtgo_match_colors cop ON cop.match_id = m.id AND cop.side = 'opp'
 LEFT JOIN match_decks md ON md.match_id = m.id AND md.side = 'me'
 LEFT JOIN match_decks od ON od.match_id = m.id AND od.side = 'opp'
 LEFT JOIN mtgo_lists li ON li.id = COALESCE(m.my_list_id, md.list_id)

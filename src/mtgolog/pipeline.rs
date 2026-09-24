@@ -28,8 +28,15 @@ impl PlayerDir {
         std::fs::create_dir_all(self.logs())?;
         std::fs::create_dir_all(self.sessions())
     }
+    /// The player's database, with the shared database attached as `shared` when it exists (the
+    /// reference lists live there; a filter can ask whether the assigned reference runs a card).
     pub fn connect(&self) -> Result<SqliteConnection, String> {
-        crate::db::establish_connection_at(&self.db())
+        let mut conn = crate::db::establish_connection_at(&self.db())?;
+        if let Some(shared) = self.root.parent().and_then(|p| p.parent()).map(|d| d.join("shared.db")).filter(|p| p.exists()) {
+            use diesel::prelude::*;
+            diesel::sql_query(format!("ATTACH DATABASE '{}' AS shared", shared.to_string_lossy().replace('\'', "''"))).execute(&mut conn).map_err(|e| e.to_string())?;
+        }
+        Ok(conn)
     }
     /// A config pointing every path at this player, everything else default.
     pub fn config(&self, username: &str, reference: &Reference) -> MtgoConfig {

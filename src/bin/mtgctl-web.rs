@@ -519,6 +519,27 @@ struct ValueRow {
 }
 
 /// Distinct values of one view column under an optional WHERE, most matches first.
+/// Every card either side has revealed, for the card filters' suggestions.
+async fn cards_seen(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<String>>, ApiError> {
+    let name = auth(&st, &headers, &q)?;
+    let dir = player_dir(&st, &name);
+    let rows = tokio::task::spawn_blocking(move || {
+        use diesel::prelude::*;
+        let conn = &mut dir.connect()?;
+        #[derive(diesel::QueryableByName)]
+        struct R {
+            #[diesel(sql_type = diesel::sql_types::Text)]
+            name: String,
+        }
+        let rows: Vec<R> = diesel::sql_query("SELECT DISTINCT name FROM mtgo_game_cards WHERE played = 1 ORDER BY name").load(conn).map_err(|e| e.to_string())?;
+        Ok::<_, String>(rows.into_iter().map(|r| r.name).collect::<Vec<_>>())
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(internal)?;
+    Ok(Json(rows))
+}
+
 async fn values(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
     let name = auth(&st, &headers, &q)?;
     let col = q.get("col").cloned().ok_or_else(|| bad("col required"))?;
@@ -745,6 +766,8 @@ struct MatchRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_seen: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_colors: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_concept: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     event_name: Option<String>,
@@ -789,7 +812,7 @@ async fn matches_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Que
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
+            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
                      FROM (SELECT * FROM mtgo_games WHERE match_id = v.match_id ORDER BY game_number) g) AS games
              FROM mtgo_game_view v
@@ -927,6 +950,8 @@ struct GameRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_seen: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    opp_colors: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_list: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_deck: Option<String>,
@@ -966,7 +991,7 @@ async fn games_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT game_id, match_id, date, opponent, opp_cards, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_archetype_surprise, opp_misfit, opp_seen, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
+            "SELECT game_id, match_id, date, opponent, opp_cards, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_archetype_surprise, opp_misfit, opp_seen, opp_colors, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
              FROM mtgo_game_view {wher} ORDER BY date DESC, match_id DESC, game_number LIMIT {limit}"
         ))
         .load(conn)
@@ -1132,6 +1157,7 @@ async fn main() {
                 .route("/api/game", get(game_detail))
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))
+                .route("/api/cards-seen", get(cards_seen))
                 .route("/api/lists", get(lists))
                 .route("/api/list", get(list_detail))
                 .fallback_service(ServeDir::new(&web))

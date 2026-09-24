@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=42"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=43"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists &amp; concepts</a><a href="reference.html">reference decklists</a></nav>
@@ -25,12 +25,20 @@
     <h3 class="toggle"><span class="caret">▾</span> Filters <span class="psum muted"></span></h3>
     <div class="pbody">
     <div>player <select id="playerSel"></select></div>
-    <div>column <select id="fcol"></select> <span class="muted">(match or per game)</span></div>
+    <div>column <select id="fcol"></select> <select id="fmode"><option value="is">is</option><option value="not">is not</option></select> <span class="muted">(match or per game)</span></div>
     <div>my deck known from: <select id="scope"><option value="hard">registered list (hard)</option><option value="inferred">list or my cards (adds inferred)</option><option value="all">anything (all matches)</option></select></div>
     <div>from <input type="date" id="dfrom"> to <input type="date" id="dto"></div>
     <div class="vals" id="fvals"></div>
     <div class="chips" id="fchips"></div>
     <div class="muted">click a chip to remove it</div>
+    <div class="sec"><div class="sechead">cards <span class="muted">(what a side showed, or what its assigned list runs)</span></div>
+      <div><select id="cfside"><option value="opp">opponent</option><option value="me">me</option></select> <select id="cfmode"><option value="showed">showed</option><option value="notshowed">did not show</option><option value="runs">list runs</option><option value="lacks">list lacks</option></select> <input id="cfname" list="cardnames" size="22" placeholder="card name"> <button id="cfadd">add</button><datalist id="cardnames"></datalist></div>
+      <div class="chips" id="cfchips"></div>
+    </div>
+    <div class="sec"><div class="sechead">colours <span class="muted">(what the lands shown can make)</span></div>
+      <div><select id="clside"><option value="opp">opponent</option><option value="me">me</option></select> <select id="clmode"><option value="all">has all of</option><option value="exact">exactly</option><option value="none">has none of</option></select> <span id="clbox"><label><input type="checkbox" value="W">W</label> <label><input type="checkbox" value="U">U</label> <label><input type="checkbox" value="B">B</label> <label><input type="checkbox" value="R">R</label> <label><input type="checkbox" value="G">G</label></span> <button id="cladd">add</button></div>
+      <div class="chips" id="clchips"></div>
+    </div>
     <div class="sec"><div class="sechead">on output statistics <span class="muted">(applied to groups)</span></div>
       <div><select id="ofstat"></select> <select id="ofop"><option>≥</option><option>≤</option><option>&gt;</option><option>&lt;</option></select> <input id="ofval" type="text" size="5" placeholder="5 or 60%"> <button id="ofadd">add</button></div>
       <div class="chips" id="ofchips"></div>
@@ -59,15 +67,15 @@
 </main>
 </div>
 <aside id="preview" hidden></aside>
-<script src="common.js?v=42"></script>
+<script src="common.js?v=43"></script>
 <script>
 // The columns a person can filter or group on, by level. Anything not listed (ids, empty
 // legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
-const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck known from', my_concept: 'my concept', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_cards: 'opponent cluster', opp_cards_variant: 'opponent cluster (fine)', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era', my_cards: 'my cluster' };
+const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck known from', my_concept: 'my concept', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', my_seen: 'my cards seen', opp_seen: 'opponent cards seen', opp_cards: 'opponent cluster', opp_cards_variant: 'opponent cluster (fine)', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era', my_cards: 'my cluster' };
 const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast' };
 const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
-const CURATED_G = ['opp_deck','opp_archetype','opp_cards','my_deck','my_archetype','my_concept','my_list','event_type','opponent','month','game_number','on_play','my_mulligans','win_by'];
-const CURATED_F = ['my_deck','my_archetype','my_deck_grade','my_concept','my_list','my_experimental','opp_deck','opp_archetype','opp_cards','event_type','event_name','opponent','month','game_number','on_play','my_mulligans'];
+const CURATED_G = ['opp_archetype','opp_deck','opp_colors','opp_cards','my_deck','my_archetype','my_concept','my_list','event_type','opponent','month','game_number','on_play','my_mulligans','win_by'];
+const CURATED_F = ['opp_archetype','opp_deck','opp_colors','my_deck','my_archetype','my_deck_grade','my_concept','my_list','my_experimental','opp_cards','event_type','event_name','opponent','month','game_number','on_play','my_mulligans'];
 const GAME_COLS = Object.keys(GAME_COLS_L);
 // Output statistics. `level` says which view mode a statistic belongs to: match statistics are
 // meaningless once a per-game column is in the query, and vice versa for game statistics.
@@ -89,8 +97,8 @@ const STATS = {
 const statValue = (s, a) => a[1] ? a[0] / a[1] : null;
 const DEFAULT_STATS = ['matches', 'share', 'mwl', 'mwr'];
 // Columns of the rows view (match rows, and game rows under a per-game filter); the choice is remembered.
-const ROW_COLS = { date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_seen: 'opponent cards seen', opp_cards: 'opponent cluster', my_deck: 'my deck', my_list: 'my list', event: 'event', result: 'result', games: 'games' };
-const GAME_ROW_COLS = { date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_seen: 'opponent cards seen', opp_cards: 'opponent cluster', my_deck: 'my deck', my_list: 'my list', event: 'event', game: 'game', pd: 'play/draw', mulls: 'mulligans', turns: 'turns', min: 'minutes', result: 'result', how: 'how it ended' };
+const ROW_COLS = { date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_col: 'opponent colours', opp_seen: 'opponent cards seen', opp_cards: 'opponent cluster', my_deck: 'my deck', my_list: 'my list', event: 'event', result: 'result', games: 'games' };
+const GAME_ROW_COLS = { date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_col: 'opponent colours', opp_seen: 'opponent cards seen', opp_cards: 'opponent cluster', my_deck: 'my deck', my_list: 'my list', event: 'event', game: 'game', pd: 'play/draw', mulls: 'mulligans', turns: 'turns', min: 'minutes', result: 'result', how: 'how it ended' };
 const ROW_DEFAULT_OFF = new Set(['opp_cards', 'opp_seen']);
 const TEXT_COLS = new Set(['opponent', 'opp_deck', 'opp_cands', 'opp_arch', 'opp_seen', 'opp_cards', 'my_deck', 'my_list', 'event']);
 const seenCell = r => r.opp_seen ? r.opp_seen.split('|').join(', ') : NONE;
@@ -118,6 +126,33 @@ function rowCols(game) {
   return { defs, key, set };
 }
 let columns = [], filters = {}; // col → Set(values or null)
+const notCols = new Set(); // columns whose value filter is "is not"
+let cardFilters = []; // [{side, mode, name}]
+let colorFilters = []; // [{side, mode, colors}]
+const SIDE = { opp: 'opponent', me: 'me' };
+const sq = v => `'${String(v).replace(/'/g, "''")}'`;
+// a side's revealed cards are '|'-joined, "name" or "name ×n"
+const showedSql = (side, name) => `(instr('|' || ${side}_seen || '|', ${sq('|' + name + '|')}) > 0 OR instr('|' || ${side}_seen || '|', ${sq('|' + name + ' ×')}) > 0)`;
+const runsSql = (side, name) => `EXISTS (SELECT 1 FROM shared.reference_cards rc WHERE rc.reference_id = ${side}_reference_id AND rc.name = ${sq(name)})`;
+function cardSql(f) {
+  const s = f.side === 'opp' ? 'opp' : 'my';
+  if (f.mode === 'showed') return showedSql(s, f.name);
+  if (f.mode === 'notshowed') return `NOT ${showedSql(s, f.name)}`;
+  if (f.mode === 'runs') return runsSql(s, f.name);
+  return `${s}_reference_id IS NOT NULL AND NOT ${runsSql(s, f.name)}`;
+}
+function colorSql(f) {
+  const c = `${f.side === 'opp' ? 'opp' : 'my'}_colors`;
+  if (f.mode === 'exact') return `${c} = ${sq(f.colors)}`;
+  const terms = [...f.colors].map(x => `${c} LIKE '%${x}%'`);
+  return f.mode === 'all' ? `(${terms.join(' AND ')})` : `(${terms.map(t => 'NOT ' + t).join(' AND ')})`;
+}
+const cardLabel = f => `${SIDE[f.side]} ${{ showed: 'showed', notshowed: 'did not show', runs: 'list runs', lacks: 'list lacks' }[f.mode]} ${f.name}`;
+const colorLabel = f => `${SIDE[f.side]} colours ${{ all: 'have', exact: 'exactly', none: 'lack' }[f.mode]} ${f.colors}`;
+function renderExtraChips() {
+  const mk = (id, arr, label) => { const el = document.getElementById(id); el.innerHTML = ''; arr.forEach((f, i) => { const s = document.createElement('span'); s.textContent = label(f); s.onclick = () => { arr.splice(i, 1); renderExtraChips(); loadValues(); schedule(); }; el.appendChild(s); }); };
+  mk('cfchips', cardFilters, cardLabel); mk('clchips', colorFilters, colorLabel);
+}
 let outFilters = []; // [{stat, op, value}] applied to aggregated groups, after the query
 const OPS = { '≥': (a, b) => a >= b, '≤': (a, b) => a <= b, '>': (a, b) => a > b, '<': (a, b) => a < b };
 function parseOutVal(stat, text) { const t = text.trim(); const pct = t.endsWith('%'); const n = parseFloat(t); if (isNaN(n)) return null; return STATS[stat].rate || STATS[stat].bar ? (pct || n > 1 ? n / 100 : n) : n; }
@@ -162,8 +197,8 @@ async function init() {
   const order = (cs, cur) => [...cur.filter(c => cs.includes(c)), ...cs.filter(c => !cur.includes(c))];
   const fcol = document.getElementById('fcol');
   fcol.innerHTML = `<optgroup label="match">${order(mcols, CURATED_F).map(c => `<option value="${c}">${LABEL[c]}</option>`).join('')}</optgroup><optgroup label="per game">${order(gcolsAll, CURATED_F).map(c => `<option value="${c}">${LABEL[c]}</option>`).join('')}</optgroup>`;
-  fcol.onchange = loadValues;
-  const gl = c => `<label><input type="checkbox" name="g" value="${c}" ${c === 'opp_deck' ? 'checked' : ''}> ${LABEL[c]}</label><br>`;
+  fcol.onchange = () => { document.getElementById('fmode').value = notCols.has(fcol.value) ? 'not' : 'is'; loadValues(); };
+  const gl = c => `<label><input type="checkbox" name="g" value="${c}" ${c === 'opp_archetype' ? 'checked' : ''}> ${LABEL[c]}</label><br>`;
   document.getElementById('gMatch').innerHTML = CURATED_G.filter(c => mcols.includes(c)).map(gl).join('');
   document.getElementById('gGame').innerHTML = CURATED_G.filter(c => gcolsAll.includes(c)).map(gl).join('');
   for (const [id, cs] of [['gmoreM', mcols], ['gmoreG', gcolsAll]]) {
@@ -184,11 +219,17 @@ async function init() {
   document.querySelectorAll('input[name=view]').forEach(r => r.onchange = syncViewOpts);
   const pre = /^#([a-z_]+)=(.*)$/.exec(decodeURIComponent(location.hash || ''));
   if (pre && columns.includes(pre[1])) { filters[pre[1]] = new Set([pre[2]]); fcol.value = pre[1]; renderChips(); }
+  else if (columns.includes('opp_archetype')) { filters.opp_archetype = new Set([null]); notCols.add('opp_archetype'); renderChips(); }  // opponents nothing explains are out by default
   const _pre = pre;
   await loadValues();
   renderStatChoices(); syncViewOpts();
   // Live: any change in any panel re-renders (debounced); a stale response never overwrites a newer one.
   document.getElementById('scope').onchange = () => { loadValues(); schedule(); };
+  document.getElementById('fmode').onchange = () => { const col = document.getElementById('fcol').value; document.getElementById('fmode').value === 'not' ? notCols.add(col) : notCols.delete(col); renderChips(); loadValues(); schedule(); };
+  document.getElementById('cfadd').onclick = () => { const name = document.getElementById('cfname').value.trim(); if (!name) return; cardFilters.push({ side: document.getElementById('cfside').value, mode: document.getElementById('cfmode').value, name }); document.getElementById('cfname').value = ''; renderExtraChips(); loadValues(); schedule(); };
+  document.getElementById('cfname').onkeydown = e => { if (e.key === 'Enter') document.getElementById('cfadd').click(); };
+  document.getElementById('cladd').onclick = () => { const colors = [...document.querySelectorAll('#clbox input:checked')].map(i => i.value).join(''); if (!colors) return; colorFilters.push({ side: document.getElementById('clside').value, mode: document.getElementById('clmode').value, colors }); document.querySelectorAll('#clbox input').forEach(i => i.checked = false); renderExtraChips(); loadValues(); schedule(); };
+  api('api/cards-seen').then(names => { document.getElementById('cardnames').innerHTML = names.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
   document.getElementById('scope').value = 'hard';
   document.getElementById('dfrom').onchange = () => { loadValues(); schedule(); }; document.getElementById('dto').onchange = () => { loadValues(); schedule(); };
   for (const id of ['pGroup', 'pStats']) document.getElementById(id).addEventListener('change', () => { tableSort = null; schedule(); });
@@ -215,7 +256,7 @@ function applyPanels() {
 }
 function summarizePanels() {
   const sum = (id, text) => { const el = document.querySelector(`#${id} .psum`); if (el) el.textContent = text; };
-  const chips = Object.entries(filters).flatMap(([c, vs]) => [...vs].map(v => `${LABEL[c] || c} = ${v === null ? '∅' : v}`));
+  const chips = [...Object.entries(filters).flatMap(([c, vs]) => [...vs].map(v => `${LABEL[c] || c} ${notCols.has(c) ? '≠' : '='} ${v === null ? '∅' : v}`)), ...cardFilters.map(cardLabel), ...colorFilters.map(colorLabel)];
   const range = [document.getElementById('dfrom').value, document.getElementById('dto').value].filter(Boolean).join(' → ');
   const ochips = outFilters.map(f => `${STATS[f.stat].label} ${f.op} ${STATS[f.stat].rate || STATS[f.stat].bar ? (100 * f.value).toFixed(0) + '%' : f.value}`);
   sum('pFilters', [getPlayer(), { hard: 'hard data', inferred: 'hard + inferred', all: 'all matches' }[document.getElementById('scope').value], range, ...chips, ...ochips].filter(Boolean).join(' · '));
@@ -280,12 +321,22 @@ function whereSql(exceptCol) {
   if (to) terms.push(`date <= '${to}'`);
   for (const [col, vals] of Object.entries(filters)) {
     if (col === exceptCol || !vals.size) continue;
-    const vs = [...vals].filter(v => v !== null).map(v => `'${String(v).replace(/'/g, "''")}'`);
+    const vs = [...vals].filter(v => v !== null).map(sq);
+    if (notCols.has(col)) {
+      // "is not": rows with none of the values; ∅ excluded only when chosen, since NOT IN alone drops NULLs
+      const parts = [];
+      if (vs.length) parts.push(`${col} NOT IN (${vs.join(', ')})`);
+      if (vals.has(null)) parts.push(`${col} IS NOT NULL`);
+      terms.push(vs.length && !vals.has(null) ? `(${parts[0]} OR ${col} IS NULL)` : parts.join(' AND '));
+      continue;
+    }
     const parts = [];
     if (vs.length) parts.push(vs.length === 1 ? `${col} = ${vs[0]}` : `${col} IN (${vs.join(', ')})`);
     if (vals.has(null)) parts.push(`${col} IS NULL`);
     terms.push(parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`);
   }
+  for (const f of cardFilters) terms.push(cardSql(f));
+  for (const f of colorFilters) terms.push(colorSql(f));
   return terms.join(' AND ');
 }
 const PEEKABLE = { my_list: 'my_list', my_concept: 'my_concept', my_deck: 'my_deck', opp_deck: 'my_deck' };
@@ -321,7 +372,7 @@ function renderChips() {
   el.innerHTML = '';
   for (const [col, vals] of Object.entries(filters)) for (const v of vals) {
     const s = document.createElement('span');
-    s.textContent = `${LABEL[col] || col} = ${v === null ? '∅' : v}`;
+    s.textContent = `${LABEL[col] || col} ${notCols.has(col) ? '≠' : '='} ${v === null ? '∅' : v}`;
     s.onclick = () => { vals.delete(v); renderChips(); renderStatChoices(); loadValues(); schedule(); };
     el.appendChild(s);
   }
@@ -536,7 +587,7 @@ async function showMatches(seq) {
       if (stale(seq)) return;
       const { defs, set } = rowCols(true);
       const cell = {
-        date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || NONE, opp_cands: cands, opp_arch: g => g.opp_archetype || NONE, opp_seen: seenCell, opp_cards: g => g.opp_cards || '<span class="muted">unknown</span>', my_deck: g => g.my_deck || '<span class="muted">—</span>',
+        date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || NONE, opp_cands: cands, opp_arch: g => g.opp_archetype || NONE, opp_col: g => g.opp_colors || NONE, opp_seen: seenCell, opp_cards: g => g.opp_cards || '<span class="muted">unknown</span>', my_deck: g => g.my_deck || '<span class="muted">—</span>',
         my_list: g => g.my_list ? `<a class="key" data-col="my_list" data-val="${g.my_list.replace(/"/g, '&quot;')}" href="lists.html">${g.my_list}</a>` : '<span class="muted">no list</span>', event: g => g.event_name || '',
         game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
         turns: g => g.turns, min: g => g.minutes ?? '', result: g => `<b>${g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?'}</b>`, how: g => g.win_by || '' };
@@ -553,7 +604,7 @@ async function showMatches(seq) {
     const { defs, set } = rowCols(false);
     const cell = {
       date: r => r.date, opponent: r => r.opponent || '',
-      opp_deck: r => r.opp_deck || NONE, opp_cands: cands, opp_arch: r => r.opp_archetype || NONE, opp_seen: seenCell,
+      opp_deck: r => r.opp_deck || NONE, opp_cands: cands, opp_arch: r => r.opp_archetype || NONE, opp_col: r => r.opp_colors || NONE, opp_seen: seenCell,
       opp_cards: r => r.opp_cards || '<span class="muted">unknown</span>',
       my_deck: r => r.my_deck ? `${r.my_deck}${r.my_deck_source === 'cards' ? ' <span class="muted">(inferred)</span>' : ''}` : (r.my_archetype ? `<span class="muted">${r.my_archetype} (deck ambiguous)</span>` : '<span class="muted">—</span>'),
       my_list: r => r.my_list ? `<a class="key" data-col="my_list" data-val="${r.my_list.replace(/"/g, '&quot;')}" href="lists.html">${r.my_list}</a>` : `<span class="muted">${r.my_concept || 'no list'}</span>`,
