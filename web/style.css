@@ -84,3 +84,8 @@ th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { backgrou
 /* long text cells (deck names, cards seen, list versions) wrap within a bounded width; numbers stay on one line */
 .results td:first-child, .results td.l, .results td.text { white-space: normal; max-width: 300px; overflow-wrap: anywhere; }
 .results .tabwrap { overflow-x: auto; max-width: 100%; }
+
+/* code to copy: a block with a copy button in its corner */
+.copywrap { position: relative; }
+.copywrap pre.copy { margin: 6px 0; padding-right: 64px; white-space: pre-wrap; word-break: break-all; }
+.copywrap button { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 8px; cursor: pointer; }

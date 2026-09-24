@@ -76,3 +76,12 @@ function listText(cards) {
 }
 function diffText(diff) { return diff.map(([n, sb, a, b]) => `${sb ? 'SB ' : ''}${b > a ? '+' : '−'}${Math.abs(b - a)} ${n}`).join(', '); }
 function statsLink(col, val) { return `index.html#${encodeURIComponent(col)}=${encodeURIComponent(val)}`; }
+
+// Every <pre class="copy"> gets a copy button; the block's text goes to the clipboard as is.
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('pre.copy').forEach(pre => {
+    const wrap = document.createElement('div'); wrap.className = 'copywrap'; pre.parentNode.insertBefore(wrap, pre); wrap.appendChild(pre);
+    const b = document.createElement('button'); b.type = 'button'; b.textContent = 'copy'; wrap.appendChild(b);
+    b.onclick = async () => { try { await navigator.clipboard.writeText(pre.textContent.trim() + '\n'); b.textContent = 'copied'; } catch (e) { b.textContent = 'select it'; } setTimeout(() => b.textContent = 'copy', 1500); };
+  });
+});
