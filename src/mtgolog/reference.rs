@@ -357,6 +357,10 @@ impl References {
     }
     /// Copies of a card a list can hold: four, or the most any reference runs (basics). A revealed
     /// count above that is the same object recast or reshuffled (Throes of Chaos, Emrakul), not evidence.
+    /// Below it an extra copy stays evidence: on my registered-list games only 1.4% of card-in-game
+    /// pairs show more instances than the list holds (Consider flashback, replayed lands), so an
+    /// excess copy is worth about the deviation it is charged; capping at the reference's own count
+    /// cost 11 of 79 correct list placements.
     pub fn cap(&self, name: &str, k: i32) -> i32 {
         k.min(self.max_copies.get(name).copied().unwrap_or(4))
     }
