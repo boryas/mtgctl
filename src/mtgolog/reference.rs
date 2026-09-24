@@ -209,6 +209,23 @@ pub fn cards(conn: &mut SqliteConnection, id: i32) -> QueryResult<Vec<ReferenceC
 }
 
 /// Move a deck under another archetype (created if new); an archetype left with no decks is dropped.
+/// Fold one deck into another: its references become the other deck's versions; the emptied deck
+/// and an archetype left without decks go.
+pub fn merge_deck(conn: &mut SqliteConnection, deck: &str, into: &str) -> Result<usize, String> {
+    ensure_schema(conn).map_err(|e| e.to_string())?;
+    let id = |conn: &mut SqliteConnection, name: &str| -> Result<i32, String> {
+        diesel::sql_query(format!("SELECT id FROM decks WHERE name = {}", q(name))).get_result::<IdRow>(conn).map(|r| r.id).map_err(|_| format!("no deck named {name:?}"))
+    };
+    let (from, to) = (id(conn, deck)?, id(conn, into)?);
+    if from == to {
+        return Err("same deck".into());
+    }
+    let n = diesel::sql_query(format!("UPDATE reference_decklists SET deck_id = {to} WHERE deck_id = {from}")).execute(conn).map_err(|e| e.to_string())?;
+    diesel::sql_query(format!("DELETE FROM decks WHERE id = {from}")).execute(conn).map_err(|e| e.to_string())?;
+    diesel::sql_query("DELETE FROM archetypes WHERE id NOT IN (SELECT archetype_id FROM decks)").execute(conn).map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
 pub fn move_deck(conn: &mut SqliteConnection, deck: &str, archetype: &str) -> Result<(), String> {
     ensure_schema(conn).map_err(|e| e.to_string())?;
     let a = archetype_id(conn, archetype).map_err(|e| e.to_string())?;

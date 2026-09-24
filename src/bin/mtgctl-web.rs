@@ -65,6 +65,8 @@ enum Cmd {
     RefReera,
     /// Move a deck under another archetype, e.g. `ref-move Elves "GSZ/Cradle"`.
     RefMove { deck: String, archetype: String },
+    /// Fold a deck into another, e.g. `ref-merge "Jeskai Tempo" "Azorius Tempo"`: its references become versions of the other.
+    RefMerge { deck: String, into: String },
     /// Assign a player's registered lists to decks via the nearest reference decklist and print the decisions.
     Assign { player: String },
     /// Load card facts (card_colors.json from fetch_scryfall.py: colours, colours lands produce) into the shared database.
@@ -988,6 +990,10 @@ async fn main() {
                 Ok(id) => { let era = mtgctl::mtgolog::eras::era_for(&eras, &date).map(|(_, n)| n.as_str()).unwrap_or("?"); println!("reference decklist #{id}: {archetype} / {deck} — {name} (era: {era})") }
                 Err(e) => { eprintln!("{e}"); std::process::exit(1) }
             }
+        }
+        Cmd::RefMerge { deck, into } => {
+            let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            match mtgctl::mtgolog::reference::merge_deck(conn, &deck, &into) { Ok(n) => println!("{deck} → {into}: {n} references moved"), Err(e) => { eprintln!("{e}"); std::process::exit(1) } }
         }
         Cmd::RefMove { deck, archetype } => {
             let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
