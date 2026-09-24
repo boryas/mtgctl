@@ -132,7 +132,7 @@ pub fn ensure_view(conn: &mut SqliteConnection) -> QueryResult<()> {
     Ok(())
 }
 
-#[derive(QueryableByName, Debug, serde::Serialize)]
+#[derive(QueryableByName, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     #[diesel(sql_type = Nullable<Text>)]
     pub key: Option<String>,
@@ -268,44 +268,103 @@ pub fn wilson(wins: i64, n: i64) -> (f64, f64) {
     ((centre - half) / denom, (centre + half) / denom)
 }
 
-pub fn run_stats(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()> {
-    if let Some(per) = &q.per {
-        return run_per(conn, q, per);
+/// Where `mtgo stats` reads from: a database, or the stats site, whose API runs this same `compute`.
+pub enum Source {
+    Db(SqliteConnection),
+    /// the site's base URL, e.g. https://bur.io/doomsday/stats
+    Site(String),
+}
+
+impl Source {
+    /// `data`: a directory holding the pooled database `mtgctl-web --data <dir> rebuild` made; None: the site.
+    pub fn open(data: Option<&std::path::Path>, site: String) -> Result<Source, String> {
+        Ok(match data {
+            Some(d) => Source::Db(super::pipeline::connect(d)?),
+            None => Source::Site(site),
+        })
     }
-    run_one(conn, q)
+    pub fn stats(&mut self, q: &StatsQuery) -> Result<StatsResult, String> {
+        match self {
+            Source::Db(conn) => compute(conn, q),
+            Source::Site(base) => site_get(
+                base,
+                "api/stats",
+                &[("by", q.by.join(",")), ("where", q.where_sql.clone().unwrap_or_default()), ("min", q.min_games.to_string()), ("limit", q.limit.to_string()), ("sort", q.sort.clone()), ("full", q.full.to_string()), ("hist", q.hist.join(","))],
+            ),
+        }
+    }
+    pub fn columns(&mut self) -> Result<Vec<String>, String> {
+        match self {
+            Source::Db(conn) => super::picker::view_columns(conn).map_err(|e| e.to_string()),
+            Source::Site(base) => site_get(base, "api/columns", &[]),
+        }
+    }
+    /// Distinct values of `col` under the ANDed `terms`: (value, matches, games), most matches first.
+    pub fn values(&mut self, col: &str, terms: &[String]) -> Result<Vec<(Option<String>, i64, i64)>, String> {
+        match self {
+            Source::Db(conn) => super::picker::column_values(conn, col, terms).map_err(|e| e.to_string()),
+            Source::Site(base) => {
+                #[derive(serde::Deserialize)]
+                struct V {
+                    value: Option<String>,
+                    matches: i64,
+                    games: i64,
+                }
+                let vs: Vec<V> = site_get(base, "api/values", &[("col", col.to_string()), ("where", terms.join(" AND "))])?;
+                Ok(vs.into_iter().map(|v| (v.value, v.matches, v.games)).collect())
+            }
+        }
+    }
+}
+
+/// GET `<base>/<path>?params` with curl (as the Scryfall fetch does); a non-200 reply's `error` is the Err.
+fn site_get<T: serde::de::DeserializeOwned>(base: &str, path: &str, params: &[(&str, String)]) -> Result<T, String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-sS", "-G", "--max-time", "60", "-w", "\n%{http_code}"]).arg(format!("{}/{path}", base.trim_end_matches('/')));
+    for (k, v) in params {
+        cmd.arg("--data-urlencode").arg(format!("{k}={v}"));
+    }
+    let out = cmd.output().map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("{path}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (body, code) = text.rsplit_once('\n').unwrap_or((&text, ""));
+    if code != "200" {
+        let msg = serde_json::from_str::<serde_json::Value>(body).ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| body.to_string());
+        return Err(format!("{path}: {code} {msg}"));
+    }
+    serde_json::from_str(body).map_err(|e| format!("{path}: {e}"))
+}
+
+pub fn run_stats(src: &mut Source, q: &StatsQuery) -> Result<(), String> {
+    if let Some(per) = &q.per {
+        return run_per(src, q, per);
+    }
+    print_result(q, src.stats(q)?);
+    Ok(())
 }
 
 /// `--per col`: the same table once per value of `col`, values in the order they first occurred.
-fn run_per(conn: &mut SqliteConnection, q: &StatsQuery, per: &str) -> QueryResult<()> {
+fn run_per(src: &mut Source, q: &StatsQuery, per: &str) -> Result<(), String> {
     if !ident_ok(per) {
-        eprintln!("bad column name: {per}");
-        return Ok(());
+        return Err(format!("bad column name: {per}"));
     }
-    #[derive(QueryableByName)]
-    struct V {
-        #[diesel(sql_type = Nullable<Text>)]
-        v: Option<String>,
-        #[diesel(sql_type = BigInt)]
-        n: i64,
-    }
-    ensure_view(conn)?;
-    let wher = q.where_sql.as_deref().map(|w| format!("WHERE {w}")).unwrap_or_default();
-    let vals: Vec<V> = diesel::sql_query(format!("SELECT CAST({per} AS TEXT) AS v, COUNT(DISTINCT match_id) AS n FROM mtgo_game_view {wher} GROUP BY v ORDER BY MIN(date), v")).load(conn)?;
-    for val in vals {
-        let cond = match &val.v {
-            Some(v) => format!("{per} = '{}'", v.replace('\'', "''")),
-            None => format!("{per} IS NULL"),
-        };
+    // the facet values are the groups of `--by per`, keyed as compute keys them (NULL → ∅)
+    let facets = src.stats(&StatsQuery { by: vec![per.to_string()], per: None, where_sql: q.where_sql.clone(), min_games: 1, sort: "time".into(), limit: usize::MAX, full: false, hist: vec![] })?;
+    for f in facets.rows {
+        let v = f.key.unwrap_or_default();
+        let cond = if v == "∅" { format!("{per} IS NULL") } else { format!("CAST({per} AS TEXT) = '{}'", v.replace('\'', "''")) };
         let sub = StatsQuery { per: None, where_sql: Some(match &q.where_sql { Some(w) => format!("({w}) AND {cond}"), None => cond }), ..q.clone() };
-        println!("\n══ {per} = {} ({} matches) ══", val.v.as_deref().unwrap_or("∅"), val.n);
-        run_one(conn, &sub)?;
+        println!("\n══ {per} = {v} ({} matches) ══", f.matches);
+        print_result(&sub, src.stats(&sub)?);
     }
     Ok(())
 }
 
 /// The computed table behind `mtgo stats` (and the web API): groups after --min/--limit,
 /// the rolled-up remainder, the grand total, and per-group histograms keyed by group key.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StatsResult {
     pub by: Vec<String>,
     pub rows: Vec<Row>,
@@ -408,14 +467,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
     Ok(StatsResult { by: by.clone(), rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups: hidden.len(), game_mode: is_game_mode(q) })
 }
 
-fn run_one(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()> {
-    let r = match compute(conn, q) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("{e}");
-            return Ok(());
-        }
-    };
+fn print_result(q: &StatsQuery, r: StatsResult) {
     let StatsResult { by, rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups, .. } = r;
     let (min_games, limit, where_sql) = (q.min_games, q.limit, q.where_sql.as_deref());
     let total_games = all_games;
@@ -511,7 +563,6 @@ fn run_one(conn: &mut SqliteConnection, q: &StatsQuery) -> QueryResult<()> {
     if uses_signature {
         println!("{SIGNATURE_NOTE}");
     }
-    Ok(())
 }
 
 /// Sum hidden groups into one "(other)" row; averages are game-weighted.
@@ -582,17 +633,10 @@ pub fn is_game_mode(q: &StatsQuery) -> bool {
 pub const SIGNATURE_COLS: &[&str] = &["my_cards", "opp_cards", "my_cards_variant", "opp_cards_variant", "my_cards_id", "opp_cards_id", "my_cards_variant_id", "opp_cards_variant_id"];
 pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_colors/opp_colors = minimal colours proven by the cards shown (WUBRG letters; fetches prove nothing); my_guess_*/opp_guess_* = nearest-anchor labels (`mtgo label`: the whole card signature votes against LDC/hand/list-labelled matches), overridden per match by `mtgo label-match`. my_list/my_list_* = exact registered list (has_decklist=1); my_deck/my_archetype = the deck named by the nearest reference decklist (my_deck_known=1), from the client's 'Deck Used' session logs — available from 2026-08-18 on. my_experimental = 1 when the list is a throwaway brew (`mtgo experimental`), exclude with --where 'my_experimental = 0' or in default_scope.";
 
-pub fn print_columns(conn: &mut SqliteConnection) -> QueryResult<()> {
-    super::db::ensure_schema(conn)?;
-    ensure_view(conn)?;
-    #[derive(QueryableByName)]
-    struct Col {
-        #[diesel(sql_type = Text)]
-        name: String,
-    }
-    let cols: Vec<Col> = diesel::sql_query("SELECT name FROM pragma_table_info('mtgo_game_view')").load(conn)?;
+pub fn print_columns(src: &mut Source) -> Result<(), String> {
+    let cols = src.columns()?;
     println!("mtgo_game_view columns (use with --by / --where):");
-    println!("  {}", cols.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", "));
+    println!("  {}", cols.join(", "));
     println!("{SIGNATURE_NOTE}");
     println!("Tables: mtgo_matches, mtgo_games, mtgo_game_cards (game_id, side, name, instances, plays, first_turn, played), mtgo_events (game_id, seq, ts, turn, side, kind, card, target, text), mtgo_clusters, mtgo_eras");
     Ok(())

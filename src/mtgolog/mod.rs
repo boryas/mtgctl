@@ -59,6 +59,8 @@ pub struct MtgoConfig {
     /// Default scope (SQL over mtgo_game_view) applied to stats/cards/pivot/picker unless --all.
     /// Default: "has_decklist = 1" — only matches with an exact registered list.
     pub default_scope: Option<String>,
+    /// The stats site `mtgo stats` reads from without --data; default https://bur.io/doomsday/stats.
+    pub site: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -99,6 +101,9 @@ impl MtgoConfig {
             Some(w) if !w.trim().is_empty() => (Some(format!("({scope}) AND ({w})")), desc),
             _ => (Some(scope), desc),
         }
+    }
+    pub fn site(&self) -> String {
+        self.site.clone().unwrap_or_else(|| "https://bur.io/doomsday/stats".to_string())
     }
     pub fn markers_path(&self) -> PathBuf {
         PathBuf::from(self.markers.clone().unwrap_or_else(|| "definitions/mtgo/markers.toml".to_string()))
@@ -193,6 +198,12 @@ enum MtgoCommand {
         /// Include every match (default scope is list-backed matches only: has_decklist = 1).
         #[arg(long)]
         all: bool,
+        /// Whose matches (default: [mtgo] username); '*' for every player.
+        #[arg(long)]
+        player: Option<String>,
+        /// Read the pooled database that `mtgctl-web --data <DIR> rebuild` made instead of the stats site.
+        #[arg(long, value_name = "DIR")]
+        data: Option<PathBuf>,
     },
     /// Per-card win-rate lift: games where a card was played vs not (first-order, no confounder control).
     Cards {
@@ -333,7 +344,11 @@ enum MtgoCommand {
         file: PathBuf,
     },
     /// List the columns available to `mtgo stats`.
-    Columns,
+    Columns {
+        /// As for `mtgo stats --data`.
+        #[arg(long, value_name = "DIR")]
+        data: Option<PathBuf>,
+    },
     /// Load the Legacy timeline (bans, set releases) into mtgo_eras and stamp matches with era_id.
     Eras {
         /// Timeline TOML (default: definitions/mtgo/legacy_timeline.toml).
@@ -374,13 +389,25 @@ pub fn run(args: MtgoArgs) {
                 eprintln!("cluster failed: {e}");
             }
         }
-        MtgoCommand::Stats { by, per, where_sql, min, sort, limit, full, hist, interactive, all } => {
-            let conn = &mut crate::db::establish_connection();
+        MtgoCommand::Stats { by, per, where_sql, min, sort, limit, full, hist, interactive, all, player, data } => {
+            let mut src = match stats::Source::open(data.as_deref(), cfg.site()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return;
+                }
+            };
+            let player = player.or_else(|| cfg.username.clone()).filter(|p| p != "*");
             let (where_sql, scope_desc) = cfg.scope(where_sql, all);
+            let where_sql = match (&player, where_sql) {
+                (Some(p), Some(w)) => Some(format!("player = '{}' AND ({w})", p.replace('\'', "''"))),
+                (Some(p), None) => Some(format!("player = '{}'", p.replace('\'', "''"))),
+                (None, w) => w,
+            };
             let mut q = stats::StatsQuery { by, per, where_sql, min_games: min, sort, limit, full, hist };
-            println!("{scope_desc}");
+            println!("{} · {scope_desc} · {}", player.as_deref().unwrap_or("every player"), data.as_ref().map_or_else(|| cfg.site(), |d| d.display().to_string()));
             if interactive {
-                match picker::pick(conn, &cfg, q) {
+                match picker::pick(&mut src, &cfg, q, player.as_deref()) {
                     Ok(Some(picked)) => q = picked,
                     Ok(None) => return,
                     Err(e) => {
@@ -390,7 +417,7 @@ pub fn run(args: MtgoArgs) {
                 }
                 println!("\n$ {}\n", q.command_line());
             }
-            if let Err(e) = stats::run_stats(conn, &q) {
+            if let Err(e) = stats::run_stats(&mut src, &q) {
                 eprintln!("stats failed: {e}");
             }
         }
@@ -513,9 +540,15 @@ pub fn run(args: MtgoArgs) {
                 Err(e) => eprintln!("{e}"),
             }
         }
-        MtgoCommand::Columns => {
-            let conn = &mut crate::db::establish_connection();
-            if let Err(e) = stats::print_columns(conn) {
+        MtgoCommand::Columns { data } => {
+            let mut src = match stats::Source::open(data.as_deref(), cfg.site()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return;
+                }
+            };
+            if let Err(e) = stats::print_columns(&mut src) {
                 eprintln!("{e}");
             }
         }

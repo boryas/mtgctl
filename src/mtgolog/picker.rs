@@ -2,7 +2,7 @@
 //! what actually exists in `mtgo_game_view`, then hand a `StatsQuery` to the same SQL engine
 //! the flag-driven path uses. Prints the equivalent command line so the flags are learnable.
 
-use super::stats::{ensure_view, StatsQuery};
+use super::stats::{ensure_view, Source, StatsQuery};
 use super::MtgoConfig;
 use crate::game::fuzzy_multi_select;
 use dialoguer::{Input, MultiSelect, Select};
@@ -127,8 +127,9 @@ fn label_value(label: &str) -> Option<String> {
     }
 }
 
-pub fn pick(conn: &mut SqliteConnection, cfg: &MtgoConfig, base: StatsQuery) -> Result<Option<StatsQuery>, String> {
-    let cols = view_columns(conn).map_err(|e| e.to_string())?;
+/// `player` narrows the "last N matches" pseudo-filter to that player's matches.
+pub fn pick(src: &mut Source, cfg: &MtgoConfig, base: StatsQuery, player: Option<&str>) -> Result<Option<StatsQuery>, String> {
+    let cols = src.columns()?;
 
     // Step 1: which columns to filter on (curated first screen + "more columns…").
     let primary_f: Vec<String> = if cfg.picker_filter_columns.is_empty() { DEFAULT_FILTER_COLS.iter().map(|s| s.to_string()).collect() } else { cfg.picker_filter_columns.clone() };
@@ -140,10 +141,11 @@ pub fn pick(conn: &mut SqliteConnection, cfg: &MtgoConfig, base: StatsQuery) -> 
     for col in &chosen {
         if col == LAST_N {
             let n: usize = Input::new().with_prompt("Last N matches").default(50).interact_text().map_err(|e| e.to_string())?;
-            terms.push(format!("match_id IN (SELECT id FROM mtgo_matches WHERE replay = 0 ORDER BY start_ts DESC LIMIT {n})"));
+            let mine = player.map(|p| format!(" AND me = {}", sql_quote(p))).unwrap_or_default();
+            terms.push(format!("match_id IN (SELECT id FROM mtgo_matches WHERE replay = 0{mine} ORDER BY start_ts DESC LIMIT {n})"));
             continue;
         }
-        let values = column_values(conn, col, &terms).map_err(|e| e.to_string())?;
+        let values = src.values(col, &terms)?;
         let game_col = super::stats::GAME_COLS.contains(&col.as_str());
         let labels: Vec<String> = values
             .iter()
