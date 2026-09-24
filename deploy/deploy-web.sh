@@ -8,6 +8,7 @@ H=bur.io
 ssh "$H" 'mkdir -p ~/mtgctl-web/{bin,web,definitions/mtgo,deploy,data} ~/.config/systemd/user'
 rsync -az target-bullseye/release/mtgctl-web "$H":mtgctl-web/bin/mtgctl-web.new
 rsync -az --delete web/ "$H":mtgctl-web/web/
+rsync -az deploy/windows/ "$H":mtgctl-web/web/windows/
 rsync -az definitions/mtgo/*.toml "$H":mtgctl-web/definitions/mtgo/
 rsync -az deploy/mtgo_cards_seed.sql "$H":mtgctl-web/deploy/
 rsync -az deploy/mtgctl-web.service "$H":.config/systemd/user/mtgctl-web.service
