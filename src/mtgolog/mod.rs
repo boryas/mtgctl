@@ -295,21 +295,7 @@ enum MtgoCommand {
     },
     /// Name a list (shows up as my_deck).
     NameList { id: i32, name: String },
-    /// Declare a concept starting at a list (`mtgo fork 4 "Bilbo DD" --experimental`); later versions chained to it inherit the name and tag.
-    Fork {
-        id: i32,
-        /// Concept name (my_concept); omit with --clear.
-        name: Option<String>,
-        /// The concept is a throwaway brew (my_experimental = 1).
-        #[arg(long)]
-        experimental: bool,
-        /// Remove the declaration; the list rejoins its parent's concept.
-        #[arg(long)]
-        clear: bool,
-    },
-    /// Override a list's parent in the concept chain: a list id, `root` (starts a chain) or `auto` (nearest earlier list again).
-    Reparent { id: i32, parent: String },
-    /// Tag the concept each list belongs to as an experimental brew (my_experimental = 1 in mtgo_game_view) so stats can drop them: --where 'my_experimental = 0'.
+    /// Tag lists as experimental brews (my_experimental = 1 in mtgo_game_view; the hard scope drops them).
     Experimental {
         ids: Vec<i32>,
         /// Clear the tag instead.
@@ -492,38 +478,6 @@ pub fn run(args: MtgoArgs) {
                 Err(e) => eprintln!("{e}"),
             }
         }
-        MtgoCommand::Fork { id, name, experimental, clear } => {
-            let conn = &mut crate::db::establish_connection();
-            if let Err(e) = db::ensure_schema(conn) {
-                eprintln!("{e}");
-                return;
-            }
-            let r = match (clear, name) {
-                (true, _) => decklist::fork_list(conn, id, None, false),
-                (false, Some(n)) => decklist::fork_list(conn, id, Some(&n), experimental),
-                (false, None) => Err("a concept name is required (or --clear)".to_string()),
-            };
-            match r {
-                Ok(()) => println!("{}", decklist::describe(conn, id)),
-                Err(e) => eprintln!("{e}"),
-            }
-        }
-        MtgoCommand::Reparent { id, parent } => {
-            let conn = &mut crate::db::establish_connection();
-            if let Err(e) = db::ensure_schema(conn) {
-                eprintln!("{e}");
-                return;
-            }
-            let p = match parent.as_str() {
-                "auto" => Ok(None),
-                "root" => Ok(Some(0)),
-                s => s.parse::<i32>().map(Some).map_err(|_| format!("parent must be a list id, root or auto (got '{s}')")),
-            };
-            match p.and_then(|p| decklist::reparent(conn, id, p)) {
-                Ok(()) => println!("{}", decklist::describe(conn, id)),
-                Err(e) => eprintln!("{e}"),
-            }
-        }
         MtgoCommand::Experimental { ids, off } => {
             let conn = &mut crate::db::establish_connection();
             if let Err(e) = db::ensure_schema(conn) {
@@ -532,7 +486,7 @@ pub fn run(args: MtgoArgs) {
             }
             for id in ids {
                 match decklist::set_experimental(conn, id, !off) {
-                    Ok(root) => println!("{}", decklist::describe(conn, root)),
+                    Ok(()) => println!("list {id}: experimental = {}", !off),
                     Err(e) => eprintln!("{e}"),
                 }
             }

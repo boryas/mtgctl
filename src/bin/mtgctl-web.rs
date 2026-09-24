@@ -519,6 +519,26 @@ struct ValueRow {
 }
 
 /// Distinct values of one view column under an optional WHERE, most matches first.
+#[derive(Deserialize)]
+struct ExperimentalReq {
+    id: i32,
+    on: bool,
+}
+
+/// Tag one of the player's registered lists as an experimental brew, or clear the tag.
+async fn list_experimental(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(req): Json<ExperimentalReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    let name = auth(&st, &headers, &q)?;
+    let dir = player_dir(&st, &name);
+    tokio::task::spawn_blocking(move || {
+        let conn = &mut dir.connect()?;
+        mtgctl::mtgolog::decklist::set_experimental(conn, req.id, req.on)
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(bad)?;
+    Ok(Json(serde_json::json!({ "id": req.id, "experimental": req.on })))
+}
+
 /// Every card either side has revealed, for the card filters' suggestions.
 async fn cards_seen(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<String>>, ApiError> {
     let name = auth(&st, &headers, &q)?;
@@ -566,10 +586,6 @@ struct ListRow {
     id: i32,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     name: Option<String>,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
-    concept: Option<String>,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
-    parent_id: Option<i32>,
     #[diesel(sql_type = diesel::sql_types::Bool)]
     experimental: bool,
     #[diesel(sql_type = diesel::sql_types::Text)]
@@ -590,6 +606,10 @@ struct ListRow {
     runner_up_dist: Option<i32>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     colors: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Integer>)]
+    reference_id: Option<i32>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    reference_name: Option<String>,
 }
 
 async fn lists(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ListRow>>, ApiError> {
@@ -600,9 +620,10 @@ async fn lists(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Has
         let conn = &mut dir.connect()?;
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(
-            "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.concept, l.parent_id, l.experimental, l.first_seen, l.last_seen,
+            "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.experimental, l.first_seen, l.last_seen,
                     (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
-                    a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors
+                    a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors,
+                    a.reference_id, (SELECT r.name FROM shared.reference_decklists r WHERE r.id = a.reference_id) AS reference_name
              FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id ORDER BY l.first_seen, l.id",
         )
         .load::<ListRow>(conn)
@@ -628,8 +649,6 @@ struct ListCard {
 struct ListDetail {
     id: i32,
     name: Option<String>,
-    concept: Option<String>,
-    parent_id: Option<i32>,
     experimental: bool,
     first_seen: String,
     last_seen: String,
@@ -640,12 +659,14 @@ struct ListDetail {
     runner_up_deck: Option<String>,
     runner_up_dist: Option<i32>,
     colors: Option<String>,
+    reference_id: Option<i32>,
+    reference_name: Option<String>,
     cards: Vec<ListCard>,
-    /// vs the parent: (name, sideboard, qty in parent, qty here), only where they differ
+    /// vs the assigned reference: (name, sideboard, qty in the reference, qty here), only where they differ
     diff: Vec<(String, bool, i32, i32)>,
 }
 
-/// One registered list with its cards and the card-level delta against its parent.
+/// One registered list with its cards and the card-level delta against its assigned reference.
 async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<ListDetail>, ApiError> {
     let name = auth(&st, &headers, &q)?;
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
@@ -655,9 +676,10 @@ async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Que
         let conn = &mut dir.connect()?;
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         let rows: Vec<ListRow> = diesel::sql_query(format!(
-            "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.concept, l.parent_id, l.experimental, l.first_seen, l.last_seen,
+            "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.experimental, l.first_seen, l.last_seen,
                     (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
-                    a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors
+                    a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors,
+                    a.reference_id, (SELECT r.name FROM shared.reference_decklists r WHERE r.id = a.reference_id) AS reference_name
              FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id WHERE l.id = {id}"
         ))
         .load(conn)
@@ -668,8 +690,8 @@ async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Que
         };
         let cards = load(conn, id)?;
         let mut diff = Vec::new();
-        if let Some(p) = l.parent_id {
-            let parent = load(conn, p)?;
+        if let Some(rid) = l.reference_id {
+            let parent: Vec<ListCard> = diesel::sql_query(format!("SELECT name, qty, sideboard FROM shared.reference_cards WHERE reference_id = {rid} ORDER BY sideboard, name")).load(conn).map_err(|e| e.to_string())?;
             let mut keys: std::collections::BTreeSet<(bool, String)> = cards.iter().map(|c| (c.sideboard, c.name.clone())).collect();
             keys.extend(parent.iter().map(|c| (c.sideboard, c.name.clone())));
             for (sb, n) in keys {
@@ -680,7 +702,7 @@ async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Que
                 }
             }
         }
-        Ok(ListDetail { id: l.id, name: l.name, concept: l.concept, parent_id: l.parent_id, experimental: l.experimental, first_seen: l.first_seen, last_seen: l.last_seen, matches: l.matches, deck: l.deck, archetype: l.archetype, deck_score: l.deck_score, runner_up_deck: l.runner_up_deck, runner_up_dist: l.runner_up_dist, colors: l.colors, cards, diff })
+        Ok(ListDetail { id: l.id, name: l.name, experimental: l.experimental, first_seen: l.first_seen, last_seen: l.last_seen, matches: l.matches, deck: l.deck, archetype: l.archetype, deck_score: l.deck_score, runner_up_deck: l.runner_up_deck, runner_up_dist: l.runner_up_dist, colors: l.colors, reference_id: l.reference_id, reference_name: l.reference_name, cards, diff })
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -768,8 +790,6 @@ struct MatchRow {
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_colors: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
-    my_concept: Option<String>,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     event_name: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Text)]
     match_result: String,
@@ -812,7 +832,7 @@ async fn matches_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Que
         mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
         stats::ensure_view(conn).map_err(|e| e.to_string())?;
         diesel::sql_query(format!(
-            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.my_concept, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
+            "SELECT v.match_id, v.date, v.opponent, v.opp_cards, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
                      FROM (SELECT * FROM mtgo_games WHERE match_id = v.match_id ORDER BY game_number) g) AS games
              FROM mtgo_game_view v
@@ -1158,6 +1178,7 @@ async fn main() {
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))
                 .route("/api/cards-seen", get(cards_seen))
+                .route("/api/list/experimental", post(list_experimental))
                 .route("/api/lists", get(lists))
                 .route("/api/list", get(list_detail))
                 .fallback_service(ServeDir::new(&web))

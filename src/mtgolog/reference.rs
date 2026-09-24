@@ -435,7 +435,37 @@ pub fn assign_player(conn: &mut SqliteConnection, refs: &References) -> QueryRes
         .execute(conn)?;
         out.push(a);
     }
+    name_lists(conn)?;
     Ok(out)
+}
+
+/// Auto-names from the assignment: "<deck> v<n> (<MM-DD>)", n counting the player's lists of that
+/// deck in the order first seen; "unassigned #<id> (<MM-DD>)" otherwise. A user-given name wins in the view.
+fn name_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
+    #[derive(QueryableByName)]
+    struct L {
+        #[diesel(sql_type = Integer)]
+        id: i32,
+        #[diesel(sql_type = Text)]
+        first_seen: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        deck: Option<String>,
+    }
+    let lists: Vec<L> = diesel::sql_query("SELECT l.id, l.first_seen, a.deck FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id ORDER BY l.first_seen, l.id").load(conn)?;
+    let mut n: std::collections::HashMap<String, i32> = Default::default();
+    for l in lists {
+        let day = l.first_seen.get(5..10).unwrap_or("");
+        let name = match l.deck {
+            Some(d) => {
+                let c = n.entry(d.clone()).or_insert(0);
+                *c += 1;
+                format!("{d} v{c} ({day})")
+            }
+            None => format!("unassigned #{} ({day})", l.id),
+        };
+        diesel::sql_query(format!("UPDATE mtgo_lists SET auto_name = {} WHERE id = {}", q(&name), l.id)).execute(conn)?;
+    }
+    Ok(())
 }
 
 // ---- card facts (from Scryfall): colours of spells, colours produced by lands ----
