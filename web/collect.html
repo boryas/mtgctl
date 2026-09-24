@@ -4,7 +4,9 @@
 <h1>mtgctl · add my logs</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a></nav>
 <div class="box">
-  <p class="muted">On Windows you can skip this page: <a href="windows/README.md">install the uploader</a> and it sends new logs every 30 minutes and when you close the client.</p>
+  <div class="box"><b>On Windows, skip this page.</b> Open PowerShell (Start menu, type <i>PowerShell</i>) and paste this line:
+<pre style="user-select:all;margin:6px 0">irm https://bur.io/doomsday/stats/windows/install.ps1 | iex</pre>
+<span class="muted">It installs an uploader that sends new logs every 30 minutes, at logon, and when you close the client from a <i>Play MTGO</i> desktop shortcut. Nothing else to install. <a href="windows/README.md">Details and how to remove it.</a></span></div>
 <div id="known" class="muted">…</div>
   <p style="margin:12px 0"><button id="pick" style="font-size:16px;padding:8px 16px">Add my logs</button>
      <input type="file" id="dirinput" webkitdirectory multiple hidden>

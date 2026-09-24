@@ -1,16 +1,15 @@
 # mtgctl uploader for Windows
 
-Sends your MTGO match and session logs to the stats site automatically, the same way the
-"add my logs" page does. Nothing to install: Windows PowerShell does the work.
+Open PowerShell (Start menu, type "PowerShell") and paste:
 
-1. Download the three `.ps1` files into one folder.
-2. Right-click `install.ps1` → *Run with PowerShell* (or from a PowerShell window:
-   `powershell -ExecutionPolicy Bypass -File install.ps1`).
-3. That registers an upload every 30 minutes and at logon, puts a **Play MTGO** shortcut on
-   your desktop that uploads when you close the client, and runs the first upload right away.
+    irm https://bur.io/doomsday/stats/windows/install.ps1 | iex
 
-The first upload works out who you are from your match logs and remembers it in
-`%LOCALAPPDATA%\mtgctl\state.json`. Progress goes to `%LOCALAPPDATA%\mtgctl\upload.log`.
+That downloads the uploader, registers it to run every 30 minutes and at logon, puts a
+**Play MTGO** shortcut on your desktop that uploads when you close the client, and runs the
+first upload. The first run reads every match log you have and can take a few minutes; after
+that it is seconds. It works out who you are from your match logs; nothing else is needed.
 
-To remove: `schtasks /Delete /TN "mtgctl upload" /F` and `schtasks /Delete /TN "mtgctl upload at logon" /F`,
+Files live in `%LOCALAPPDATA%\mtgctl`; progress is in `upload.log` there.
+
+To remove: `schtasks /Delete /TN "mtgctl upload" /F`, `schtasks /Delete /TN "mtgctl upload at logon" /F`,
 then delete `%LOCALAPPDATA%\mtgctl` and the desktop shortcut.
