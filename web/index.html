@@ -55,7 +55,7 @@
 <script>
 // The columns a person can filter or group on, by level. Anything not listed (ids, empty
 // legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
-const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck known from', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', my_seen: 'my cards seen', opp_seen: 'opponent cards seen', player: 'player', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
+const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', my_seen: 'my cards seen', opp_seen: 'opponent cards seen', player: 'player', opponent: 'opponent', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
 const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast' };
 const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
 const CURATED_G = ['opp_archetype','opp_deck','opp_colors','my_deck','my_archetype','my_list','event_type','player','opponent','month','game_number','on_play','my_mulligans','win_by'];
@@ -117,7 +117,7 @@ const like = v => `${sq('%' + v.replace(/[\\%_]/g, m => '\\' + m) + '%')} ESCAPE
 // Compared with unquoted literals: my_experimental is an expression without type affinity, which a quoted '0' never equals.
 const NUMERIC = new Set(['my_experimental', 'game_number', 'my_mulligans', 'opp_mulligans', 'my_hand', 'opp_hand', 'turns', 'minutes', 'my_lands', 'opp_lands', 'my_spells', 'opp_spells']);
 const lit = (col, v) => NUMERIC.has(col) && /^-?\d+(\.\d+)?$/.test(v) ? v : sq(v);
-const VALUE_LABEL = { my_experimental: { 0: 'no', 1: 'yes' }, on_play: { 0: 'on the draw', 1: 'on the play' } };
+const VALUE_LABEL = { my_deck_grade: { hard: 'exact from logs', inferred: 'inferred from game', none: 'unknown' }, my_experimental: { 0: 'no', 1: 'yes' }, on_play: { 0: 'on the draw', 1: 'on the play' } };
 const valText = (col, v) => v === null ? '∅' : (VALUE_LABEL[col] || {})[v] || v;
 // a side's revealed cards are '|'-joined, "name" or "name ×n"
 const showedSql = (s, name) => `(instr('|' || ${s}_seen || '|', ${sq('|' + name + '|')}) > 0 OR instr('|' || ${s}_seen || '|', ${sq('|' + name + ' ×')}) > 0)`;
@@ -510,7 +510,7 @@ async function showGame(id) {
 }
 // ---- views ----
 function keyCell(col, k, key) {
-  return `<td>${PEEKABLE[col] && !key.startsWith('(') ? `<a class="key" href="lists.html" data-col="${col}" data-val="${k.replace(/"/g, '&quot;')}">${k}</a>` : k}</td>`;
+  return `<td>${PEEKABLE[col] && !key.startsWith('(') ? `<a class="key" href="lists.html" data-col="${col}" data-val="${k.replace(/"/g, '&quot;')}">${k}</a>` : valText(col, k)}</td>`;
 }
 function wireKeys(out) {
   out.querySelectorAll('a.key').forEach(a => hoverable(a, () => preview(a.dataset.col, a.dataset.val)));
