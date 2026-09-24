@@ -77,8 +77,11 @@ foreach ($root in $roots) {
 }
 if (-not $games -and -not $sessions) { Log "no MTGO logs under $($roots -join ', ')"; exit 1 }
 # nothing on disk changed since the last run: no network at all (the timed task runs overnight too)
-$latest = (($games + $sessions) | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum.ToString('o')
-if ($state.player -and $state.last_change -and $latest -le $state.last_change) { if (-not $Quiet) { Log 'no log changed since the last run' }; exit 0 }
+# (ConvertFrom-Json turns ISO dates into DateTime, so compare as DateTime, both in UTC)
+$latestDt = (($games + $sessions) | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum.ToUniversalTime()
+$lastDt = if ($state.last_change) { ([datetime]$state.last_change).ToUniversalTime() } else { $null }
+if ($state.player -and $lastDt -and $latestDt -le $lastDt) { if (-not $Quiet) { Log 'no log changed since the last run' }; exit 0 }
+$latest = $latestDt.ToString('o')
 
 # ---- who: the newest match logs name the player
 if (-not $state.player) {
