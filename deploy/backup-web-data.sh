@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Pull the droplet's raw uploads and player registry to a local mirror. The per-player SQLite
-# files are derived (rebuildable with one sync) and are excluded; what cannot be rebuilt is
-# logs/, sessions/ and players.toml, plus each player's marks once the export exists.
+# Pull the droplet's raw uploads to a local mirror. The databases are derived (`mtgctl-web --data
+# <dir> rebuild` recreates them) and are excluded; what cannot be rebuilt is players/*/{logs,sessions},
+# shared.db, plus each player's marks once the export exists.
 set -euo pipefail
 DEST=${1:-$HOME/backups/mtgctl-web}
 mkdir -p "$DEST"
