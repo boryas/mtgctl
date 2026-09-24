@@ -868,6 +868,8 @@ struct MatchRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     date: String,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    start: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opponent: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     my_list: Option<String>,
@@ -930,13 +932,13 @@ async fn matches_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -
         use diesel::prelude::*;
         let conn = &mut pool(&st)?;
         diesel::sql_query(format!(
-            "SELECT v.match_id, v.date, v.opponent, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
+            "SELECT v.match_id, v.date, v.match_start AS start, v.opponent, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
                      FROM (SELECT * FROM mtgo_games WHERE match_id = v.match_id ORDER BY game_number) g) AS games
              FROM mtgo_game_view v
              {wher}
              GROUP BY v.match_id
-             ORDER BY v.date DESC, v.match_id DESC
+             ORDER BY v.match_start DESC, v.match_id DESC
              LIMIT {limit}"
         ))
         .load(conn)
@@ -1044,6 +1046,8 @@ struct GameRow {
     #[diesel(sql_type = diesel::sql_types::Text)]
     date: String,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    start: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opponent: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
     opp_deck: Option<String>,
@@ -1097,8 +1101,8 @@ async fn games_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> 
         use diesel::prelude::*;
         let conn = &mut pool(&st)?;
         diesel::sql_query(format!(
-            "SELECT game_id, match_id, date, opponent, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_archetype_surprise, opp_misfit, opp_seen, opp_colors, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
-             FROM mtgo_game_view {wher} ORDER BY date DESC, match_id DESC, game_number LIMIT {limit}"
+            "SELECT game_id, match_id, date, game_start AS start, opponent, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_archetype_surprise, opp_misfit, opp_seen, opp_colors, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
+             FROM mtgo_game_view {wher} ORDER BY game_start DESC, game_id DESC LIMIT {limit}"
         ))
         .load(conn)
         .map_err(|e| format!("query failed: {e}"))
