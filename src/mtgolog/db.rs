@@ -149,7 +149,7 @@ diesel::allow_tables_to_appear_in_same_query!(mtgo_matches, mtgo_games, mtgo_gam
 const DDL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS mtgo_matches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        guid TEXT NOT NULL UNIQUE,
+        guid TEXT NOT NULL,              -- unique per me: both players of a match may upload it
         path TEXT NOT NULL,
         start_ts TEXT,
         end_ts TEXT,
@@ -256,6 +256,7 @@ const DDL: &[&str] = &[
         key TEXT PRIMARY KEY,            -- e.g. explain_reviewed_through
         value TEXT NOT NULL
     )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mtgo_matches_me_guid ON mtgo_matches(me, guid)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_games_match ON mtgo_games(match_id)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_game_cards_game ON mtgo_game_cards(game_id)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_game_cards_name ON mtgo_game_cards(name)",
@@ -275,10 +276,17 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> QueryResult<()> {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     // Columns added after the first release (ALTER if missing).
-    for (table, col, ty) in [("mtgo_matches", "my_variant", "INTEGER"), ("mtgo_matches", "opp_variant", "INTEGER"), ("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT")] {
+    for (table, col, ty) in [("mtgo_matches", "my_variant", "INTEGER"), ("mtgo_matches", "opp_variant", "INTEGER"), ("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT"), ("mtgo_lists", "me", "TEXT"), ("mtgo_decklists", "me", "TEXT")] {
         if diesel::sql_query(format!("SELECT {col} FROM {table} LIMIT 0")).execute(conn).is_err() {
             diesel::sql_query(format!("ALTER TABLE {table} ADD COLUMN {col} {ty}")).execute(conn)?;
+            if col == "me" {
+                // a database from before the column held one player's rows
+                diesel::sql_query(format!("UPDATE {table} SET me = (SELECT me FROM mtgo_matches GROUP BY me ORDER BY COUNT(*) DESC LIMIT 1)")).execute(conn)?;
+            }
         }
+    }
+    for stmt in super::decklist::INDEXES {
+        diesel::sql_query(*stmt).execute(conn)?;
     }
     Ok(())
 }
@@ -463,17 +471,41 @@ pub struct ImportStats {
     pub refreshed: usize,
 }
 
+/// The player a one-player database belongs to: the configured username, else whoever most of its matches name as me.
+pub fn player(conn: &mut SqliteConnection, cfg: &MtgoConfig) -> QueryResult<String> {
+    if let Some(u) = &cfg.username {
+        return Ok(u.clone());
+    }
+    let me: Option<String> = mtgo_matches::table.group_by(mtgo_matches::me).select(mtgo_matches::me).order(diesel::dsl::count_star().desc()).first(conn).optional()?;
+    Ok(me.unwrap_or_default())
+}
+
+/// Delete every row of one player: their matches with everything hanging off them, and their lists.
+pub fn remove_player(conn: &mut SqliteConnection, me: &str) -> QueryResult<usize> {
+    let ids: Vec<i32> = mtgo_matches::table.filter(mtgo_matches::me.eq(me)).select(mtgo_matches::id).load(conn)?;
+    conn.transaction::<_, diesel::result::Error, _>(|conn| {
+        for id in &ids {
+            delete_match(conn, *id)?;
+        }
+        super::decklist::delete_lists(conn, me)?;
+        Ok(ids.len())
+    })
+}
+
+/// Imports the logs under `root` as `cfg.username`'s (else the name most logs share); only that player's matches are compared or replaced.
 pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force: bool, with_events: bool) -> QueryResult<ImportStats> {
     ensure_schema(conn)?;
     let (loaded, bad) = load_all(root);
     let me = cfg.username.clone().or_else(|| guess_me(&loaded)).unwrap_or_default();
     if force {
-        for t in ["mtgo_events", "mtgo_game_cards", "mtgo_games", "mtgo_matches"] {
-            diesel::sql_query(format!("DELETE FROM {t}")).execute(conn)?;
+        let ids: Vec<i32> = mtgo_matches::table.filter(mtgo_matches::me.eq(&me)).select(mtgo_matches::id).load(conn)?;
+        for id in ids {
+            delete_match(conn, id)?;
         }
     }
     // guid → (id, imported_at) of what is already in the DB
     let existing: HashMap<String, (i32, String)> = mtgo_matches::table
+        .filter(mtgo_matches::me.eq(&me))
         .select((mtgo_matches::guid, mtgo_matches::id, mtgo_matches::imported_at))
         .load::<(String, i32, String)>(conn)?
         .into_iter()
@@ -521,10 +553,9 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
 
 /// Remove one match and everything hanging off it (foreign keys are not enforced by default in SQLite).
 fn delete_match(conn: &mut SqliteConnection, id: i32) -> QueryResult<()> {
-    for t in ["mtgo_events", "mtgo_game_cards", "mtgo_games"] {
+    for t in ["mtgo_events", "mtgo_game_cards", "mtgo_games", "mtgo_match_labels", "mtgo_match_colors", "match_decks"] {
         diesel::sql_query(format!("DELETE FROM {t} WHERE match_id = {id}")).execute(conn)?;
     }
-    diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE match_id = {id}")).execute(conn)?;
     diesel::sql_query(format!("DELETE FROM mtgo_matches WHERE id = {id}")).execute(conn)?;
     Ok(())
 }
@@ -556,7 +587,7 @@ fn insert_match(conn: &mut SqliteConnection, l: &Loaded, me: &str, now: &str, wi
             imported_at: now,
         })
         .execute(conn)?;
-    let match_id: i32 = mtgo_matches::table.filter(mtgo_matches::guid.eq(&m.guid)).select(mtgo_matches::id).first(conn)?;
+    let match_id: i32 = mtgo_matches::table.filter(mtgo_matches::me.eq(me)).filter(mtgo_matches::guid.eq(&m.guid)).select(mtgo_matches::id).first(conn)?;
     st.matches += 1;
 
     for g in &m.games {

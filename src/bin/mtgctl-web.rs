@@ -1,9 +1,10 @@
 //! HTTP front-end over the mtgolog pipeline: players upload their MTGO log files, the server
-//! keeps one database per player and answers the same stats queries as `mtgctl mtgo stats`.
+//! pools every player's matches in one database and answers the same stats queries as `mtgctl mtgo stats`.
 //! Identity (v0): the MTGO username the game logs themselves name as "me" — detected by
 //! `/api/detect`, sent as the `X-Player` header, and re-checked against the stored logs on every
 //! sync. No secrets; a real login (Discord) is the planned replacement.
-//! Layout: `<data>/players/<name>/{logs,sessions,mtgctl.db}`.
+//! Layout: `<data>/players/<name>/{logs,sessions}` (the uploads), `<data>/mtgctl.db` (derived from
+//! them, see pipeline::connect), `<data>/shared.db` (reference decklists).
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Multipart, Query, State};
@@ -12,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
-use mtgctl::mtgolog::pipeline::{PlayerDir, Reference};
+use mtgctl::mtgolog::pipeline::{self, PlayerDir, Reference};
 use mtgctl::mtgolog::{picker, stats};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -69,6 +70,15 @@ enum Cmd {
     RefMerge { deck: String, into: String },
     /// Delete one stored session extract of a player (by file name); the next upload of that log stores it again.
     SessionRemove { player: String, name: String },
+    /// Rebuild the pooled database from every player's uploads, carrying list names and experimental
+    /// tags (by list hash) and manual labels (by match guid) over from the per-player databases of older builds.
+    Rebuild {
+        /// Repo root holding definitions/mtgo/markers.toml.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+    /// Delete a player: their rows of the pooled database and their uploads.
+    PlayerRemove { player: String },
     /// Assign a player's registered lists to decks via the nearest reference decklist and print the decisions.
     Assign { player: String },
     /// Load card facts (card_colors.json from fetch_scryfall.py: colours, colours lands produce) into the shared database.
@@ -102,8 +112,8 @@ enum Cmd {
 struct AppState {
     data: PathBuf,
     reference: Reference,
-    /// one pipeline run per player at a time
-    sync_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// one pipeline run at a time: SQLite has one writer
+    sync_lock: Mutex<()>,
 }
 
 /// Uploads per player are capped so a stray or hostile client cannot fill the volume.
@@ -141,6 +151,10 @@ fn auth(_state: &AppState, headers: &HeaderMap, q: &HashMap<String, String>) -> 
 }
 
 /// MTGO usernames: letters, digits, `_ . -`; also keeps the name safe as a directory component.
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
 fn valid_player(n: &str) -> bool {
     !n.is_empty() && n.len() <= 32 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-') && !n.starts_with('.')
 }
@@ -186,8 +200,16 @@ fn shared_db(data: &Path) -> Result<diesel::SqliteConnection, String> {
     Ok(conn)
 }
 
+fn pool(state: &AppState) -> Result<diesel::SqliteConnection, String> {
+    pipeline::connect(&state.data)
+}
+
 fn player_dir(state: &AppState, name: &str) -> PlayerDir {
-    PlayerDir::new(state.data.join("players").join(name))
+    player_dir_at(&state.data, name)
+}
+
+fn player_dir_at(data: &Path, name: &str) -> PlayerDir {
+    PlayerDir::new(data.join("players").join(name))
 }
 
 #[derive(Serialize)]
@@ -239,7 +261,7 @@ fn hex(b: &[u8]) -> String {
 
 async fn me(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<serde_json::Value>, ApiError> {
     let name = auth(&st, &headers, &q)?;
-    let known = player_dir(&st, &name).db().exists();
+    let known = player_dir(&st, &name).logs().exists();
     Ok(Json(serde_json::json!({ "name": name, "known": known })))
 }
 
@@ -459,9 +481,82 @@ fn compact_sessions(data: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Sync every player into the pooled database. Marks made in an older build's per-player database
+/// (list name, fork and experimental tag by list hash; manual labels by match guid) are carried onto
+/// lists that have none and matches without a manual label.
+fn rebuild(data: &Path, reference: &Reference) -> Result<(), String> {
+    use diesel::prelude::*;
+    use diesel::sql_types::{Bool, Nullable, Text};
+    #[derive(diesel::QueryableByName)]
+    struct ListMark {
+        #[diesel(sql_type = Text)]
+        hash: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        name: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        fork: Option<String>,
+        #[diesel(sql_type = Bool)]
+        experimental: bool,
+    }
+    #[derive(diesel::QueryableByName)]
+    struct Label {
+        #[diesel(sql_type = Text)]
+        guid: String,
+        #[diesel(sql_type = Text)]
+        side: String,
+        #[diesel(sql_type = Nullable<Text>)]
+        archetype: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        subtype: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        category: Option<String>,
+    }
+    let o = |v: &Option<String>| v.as_deref().map(sq).unwrap_or("NULL".into());
+    let conn = &mut pipeline::connect(data)?;
+    mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
+    stats::ensure_view(conn).map_err(|e| e.to_string())?;
+    let mut names: Vec<String> = std::fs::read_dir(data.join("players")).map_err(|e| e.to_string())?.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    names.sort();
+    for name in names {
+        let dir = player_dir_at(data, &name);
+        let (marks, labels): (Vec<ListMark>, Vec<Label>) = if dir.old_db().exists() {
+            let old = &mut mtgctl::db::establish_connection_at(&dir.old_db())?;
+            let marks = diesel::sql_query("SELECT hash, name, fork, experimental FROM mtgo_lists WHERE name IS NOT NULL OR fork IS NOT NULL OR experimental = 1").load(old).map_err(|e| e.to_string())?;
+            let labels = diesel::sql_query("SELECT m.guid, l.side, l.archetype, l.subtype, l.category FROM mtgo_match_labels l JOIN mtgo_matches m ON m.id = l.match_id WHERE l.source = 'manual'").load(old).map_err(|e| e.to_string())?;
+            (marks, labels)
+        } else {
+            (vec![], vec![])
+        };
+        let report = pipeline::sync(conn, &dir, &name, reference)?;
+        let me = sq(&name);
+        let mut carried = 0;
+        for m in &marks {
+            carried += diesel::sql_query(format!(
+                "UPDATE mtgo_lists SET name = {}, fork = {}, experimental = {} WHERE me = {me} AND hash = {} AND name IS NULL AND fork IS NULL AND experimental = 0",
+                o(&m.name), o(&m.fork), m.experimental as i32, sq(&m.hash)
+            ))
+            .execute(conn)
+            .map_err(|e| e.to_string())?;
+        }
+        let mut labelled = 0;
+        for l in &labels {
+            labelled += diesel::sql_query(format!(
+                "INSERT OR IGNORE INTO mtgo_match_labels(match_id, side, source, archetype, subtype, category) SELECT id, {}, 'manual', {}, {}, {} FROM mtgo_matches WHERE me = {me} AND guid = {}",
+                sq(&l.side), o(&l.archetype), o(&l.subtype), o(&l.category), sq(&l.guid)
+            ))
+            .execute(conn)
+            .map_err(|e| e.to_string())?;
+        }
+        println!("{name}: {} matches imported, {} lists; {carried} of {} list marks and {labelled} of {} manual labels carried over", report.imported, report.lists, marks.len(), labels.len());
+        for step in &report.steps {
+            println!("  {step}");
+        }
+    }
+    Ok(())
+}
+
 async fn run_sync(st: Shared, name: String) -> Result<mtgctl::mtgolog::pipeline::SyncReport, ApiError> {
-    let lock = st.sync_locks.lock().await.entry(name.clone()).or_insert_with(|| Arc::new(Mutex::new(()))).clone();
-    let _g = lock.lock().await;
+    let _g = st.sync_lock.lock().await;
     let st2 = st.clone();
     let report = tokio::task::spawn_blocking(move || {
         let dir = player_dir(&st2, &name);
@@ -472,7 +567,7 @@ async fn run_sync(st: Shared, name: String) -> Result<mtgctl::mtgolog::pipeline:
                 return Err(format!("these logs belong to {me}, not {name}"));
             }
         }
-        mtgctl::mtgolog::pipeline::sync(&dir, &name, &st2.reference)
+        pipeline::sync(&mut pool(&st2)?, &dir, &name, &st2.reference)
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -501,8 +596,6 @@ struct StatsParams {
     full: bool,
     #[serde(default)]
     hist: String,
-    #[serde(default)]
-    player: Option<String>,
 }
 fn one() -> i64 {
     1
@@ -518,16 +611,10 @@ fn split_cols(s: &str) -> Vec<String> {
     s.split(',').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect()
 }
 
-async fn stats_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<StatsParams>) -> Result<Json<stats::StatsResult>, ApiError> {
-    let mut q = HashMap::new();
-    if let Some(t) = &p.player {
-        q.insert("player".to_string(), t.clone());
-    }
-    let name = auth(&st, &headers, &q)?;
+async fn stats_api(State(st): State<Shared>, Query(p): Query<StatsParams>) -> Result<Json<stats::StatsResult>, ApiError> {
     let query = stats::StatsQuery { by: split_cols(&p.by), per: None, where_sql: p.where_sql.filter(|w| !w.trim().is_empty()), min_games: p.min, sort: p.sort, limit: p.limit, full: p.full, hist: split_cols(&p.hist) };
-    let dir = player_dir(&st, &name);
     let r = tokio::task::spawn_blocking(move || {
-        let conn = &mut dir.connect()?;
+        let conn = &mut pool(&st)?;
         stats::compute(conn, &query)
     })
     .await
@@ -536,12 +623,9 @@ async fn stats_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query
     Ok(Json(r))
 }
 
-async fn columns(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<String>>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
-    let dir = player_dir(&st, &name);
+async fn columns(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiError> {
     let cols = tokio::task::spawn_blocking(move || {
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
+        let conn = &mut pool(&st)?;
         picker::view_columns(conn).map_err(|e| e.to_string())
     })
     .await
@@ -567,10 +651,9 @@ struct ExperimentalReq {
 /// Tag one of the player's registered lists as an experimental brew, or clear the tag.
 async fn list_experimental(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(req): Json<ExperimentalReq>) -> Result<Json<serde_json::Value>, ApiError> {
     let name = auth(&st, &headers, &q)?;
-    let dir = player_dir(&st, &name);
     tokio::task::spawn_blocking(move || {
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::decklist::set_experimental(conn, req.id, req.on)
+        let conn = &mut pool(&st)?;
+        mtgctl::mtgolog::decklist::set_experimental(conn, &name, req.id, req.on)
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -579,12 +662,10 @@ async fn list_experimental(State(st): State<Shared>, headers: HeaderMap, Query(q
 }
 
 /// Every card either side has revealed, for the card filters' suggestions.
-async fn cards_seen(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<String>>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
-    let dir = player_dir(&st, &name);
+async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiError> {
     let rows = tokio::task::spawn_blocking(move || {
         use diesel::prelude::*;
-        let conn = &mut dir.connect()?;
+        let conn = &mut pool(&st)?;
         #[derive(diesel::QueryableByName)]
         struct R {
             #[diesel(sql_type = diesel::sql_types::Text)]
@@ -599,18 +680,14 @@ async fn cards_seen(State(st): State<Shared>, headers: HeaderMap, Query(q): Quer
     Ok(Json(rows))
 }
 
-async fn values(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
     let col = q.get("col").cloned().ok_or_else(|| bad("col required"))?;
     if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(bad("bad column"));
     }
     let wher: Vec<String> = q.get("where").filter(|w| !w.trim().is_empty()).cloned().into_iter().collect();
-    let dir = player_dir(&st, &name);
     let rows = tokio::task::spawn_blocking(move || {
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
-        stats::ensure_view(conn).map_err(|e| e.to_string())?;
+        let conn = &mut pool(&st)?;
         picker::column_values(conn, &col, &wher).map_err(|e| e.to_string())
     })
     .await
@@ -653,18 +730,17 @@ struct ListRow {
 
 async fn lists(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ListRow>>, ApiError> {
     let name = auth(&st, &headers, &q)?;
-    let dir = player_dir(&st, &name);
     let rows = tokio::task::spawn_blocking(move || {
         use diesel::prelude::*;
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
-        diesel::sql_query(
+        let conn = &mut pool(&st)?;
+        diesel::sql_query(format!(
             "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.experimental, l.first_seen, l.last_seen,
                     (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
                     a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors,
                     a.reference_id, (SELECT r.name FROM shared.reference_decklists r WHERE r.id = a.reference_id) AS reference_name
-             FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id ORDER BY l.first_seen, l.id",
-        )
+             FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id WHERE l.me = {} ORDER BY l.first_seen, l.id",
+            sq(&name)
+        ))
         .load::<ListRow>(conn)
         .map_err(|e| e.to_string())
     })
@@ -709,17 +785,16 @@ struct ListDetail {
 async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<ListDetail>, ApiError> {
     let name = auth(&st, &headers, &q)?;
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
-    let dir = player_dir(&st, &name);
     let r = tokio::task::spawn_blocking(move || -> Result<ListDetail, String> {
         use diesel::prelude::*;
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
+        let conn = &mut pool(&st)?;
         let rows: Vec<ListRow> = diesel::sql_query(format!(
             "SELECT l.id, COALESCE(l.name, l.auto_name) AS name, l.experimental, l.first_seen, l.last_seen,
                     (SELECT COUNT(*) FROM mtgo_matches m WHERE m.my_list_id = l.id) AS matches,
                     a.deck, a.archetype, a.dist_main AS deck_score, a.runner_up_deck, a.runner_up_dist, a.colors,
                     a.reference_id, (SELECT r.name FROM shared.reference_decklists r WHERE r.id = a.reference_id) AS reference_name
-             FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id WHERE l.id = {id}"
+             FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id WHERE l.id = {id} AND l.me = {}",
+            sq(&name)
         ))
         .load(conn)
         .map_err(|e| e.to_string())?;
@@ -766,21 +841,17 @@ struct Summary {
 /// What the server already knows for a player, in the terms the upload page speaks.
 async fn summary(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Summary>, ApiError> {
     let name = auth(&st, &headers, &q)?;
-    let dir = player_dir(&st, &name);
-    if !dir.db().exists() {
-        return Ok(Json(Summary { matches: 0, latest_match: None, lists: 0, latest_list: None, matches_with_list: 0 }));
-    }
     let r = tokio::task::spawn_blocking(move || -> Result<Summary, String> {
         use diesel::prelude::*;
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
-        diesel::sql_query(
-            "SELECT (SELECT COUNT(*) FROM mtgo_matches WHERE replay = 0) AS matches,
-                    (SELECT MAX(start_ts) FROM mtgo_matches WHERE replay = 0) AS latest_match,
-                    (SELECT COUNT(*) FROM mtgo_lists) AS lists,
-                    (SELECT COALESCE(name, auto_name) FROM mtgo_lists ORDER BY last_seen DESC LIMIT 1) AS latest_list,
-                    (SELECT COUNT(*) FROM mtgo_matches WHERE replay = 0 AND my_list_id IS NOT NULL) AS matches_with_list",
-        )
+        let conn = &mut pool(&st)?;
+        let me = sq(&name);
+        diesel::sql_query(format!(
+            "SELECT (SELECT COUNT(*) FROM mtgo_matches WHERE replay = 0 AND me = {me}) AS matches,
+                    (SELECT MAX(start_ts) FROM mtgo_matches WHERE replay = 0 AND me = {me}) AS latest_match,
+                    (SELECT COUNT(*) FROM mtgo_lists WHERE me = {me}) AS lists,
+                    (SELECT COALESCE(name, auto_name) FROM mtgo_lists WHERE me = {me} ORDER BY last_seen DESC LIMIT 1) AS latest_list,
+                    (SELECT COUNT(*) FROM mtgo_matches WHERE replay = 0 AND my_list_id IS NOT NULL AND me = {me}) AS matches_with_list"
+        ))
         .get_result(conn)
         .map_err(|e| e.to_string())
     })
@@ -845,8 +916,6 @@ struct MatchesParams {
     where_sql: Option<String>,
     #[serde(default = "two_hundred")]
     limit: usize,
-    #[serde(default)]
-    player: Option<String>,
 }
 fn two_hundred() -> usize {
     200
@@ -854,20 +923,12 @@ fn two_hundred() -> usize {
 
 /// The matches a WHERE over mtgo_game_view selects (a match is included if any of its games
 /// passes), newest first, with a compact per-game summary.
-async fn matches_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<MatchesParams>) -> Result<Json<Vec<MatchRow>>, ApiError> {
-    let mut q = HashMap::new();
-    if let Some(t) = &p.player {
-        q.insert("player".to_string(), t.clone());
-    }
-    let name = auth(&st, &headers, &q)?;
-    let dir = player_dir(&st, &name);
+async fn matches_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> Result<Json<Vec<MatchRow>>, ApiError> {
     let wher = p.where_sql.filter(|w| !w.trim().is_empty()).map(|w| format!("WHERE {w}")).unwrap_or_default();
     let limit = p.limit.min(2000);
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<MatchRow>, String> {
         use diesel::prelude::*;
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
-        stats::ensure_view(conn).map_err(|e| e.to_string())?;
+        let conn = &mut pool(&st)?;
         diesel::sql_query(format!(
             "SELECT v.match_id, v.date, v.opponent, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
@@ -955,13 +1016,11 @@ fn plain_text(s: &str) -> String {
 }
 
 /// One game: its facts, the cards each side played (with first turn), and the event log.
-async fn game_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<GameDetail>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+async fn game_detail(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<GameDetail>, ApiError> {
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
-    let dir = player_dir(&st, &name);
     let r = tokio::task::spawn_blocking(move || -> Result<GameDetail, String> {
         use diesel::prelude::*;
-        let conn = &mut dir.connect()?;
+        let conn = &mut pool(&st)?;
         let game: GameMeta = diesel::sql_query(format!("SELECT g.id, g.match_id, g.game_number, g.on_play, g.turns, g.winner, g.win_by, g.my_mulligans, g.opp_mulligans, m.opponent, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| format!("no game {id}: {e}"))?;
         let cards: Vec<PlayedCard> = diesel::sql_query(format!("SELECT side, name, plays, first_turn FROM mtgo_game_cards WHERE game_id = {id} AND played = 1 ORDER BY side, first_turn, name")).load(conn).map_err(|e| e.to_string())?;
         let mut events: Vec<EventRow> = diesel::sql_query(format!("SELECT seq, turn, side, kind, card, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
@@ -1031,20 +1090,12 @@ struct GameRow {
 }
 
 /// One row per game the WHERE selects, newest first.
-async fn games_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<MatchesParams>) -> Result<Json<Vec<GameRow>>, ApiError> {
-    let mut q = HashMap::new();
-    if let Some(t) = &p.player {
-        q.insert("player".to_string(), t.clone());
-    }
-    let name = auth(&st, &headers, &q)?;
-    let dir = player_dir(&st, &name);
+async fn games_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> Result<Json<Vec<GameRow>>, ApiError> {
     let wher = p.where_sql.filter(|w| !w.trim().is_empty()).map(|w| format!("WHERE {w}")).unwrap_or_default();
     let limit = p.limit.min(5000);
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<GameRow>, String> {
         use diesel::prelude::*;
-        let conn = &mut dir.connect()?;
-        mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
-        stats::ensure_view(conn).map_err(|e| e.to_string())?;
+        let conn = &mut pool(&st)?;
         diesel::sql_query(format!(
             "SELECT game_id, match_id, date, opponent, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_archetype_surprise, opp_misfit, opp_seen, opp_colors, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
              FROM mtgo_game_view {wher} ORDER BY date DESC, match_id DESC, game_number LIMIT {limit}"
@@ -1107,12 +1158,11 @@ async fn main() {
             use mtgctl::mtgolog::reference as r;
             let shared = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             let refs = r::load_references(shared, &timeline_eras()).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
-            let dir = PlayerDir::new(cli.data.join("players").join(&player));
-            let conn = &mut dir.connect().unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let conn = &mut pipeline::connect(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             #[derive(diesel::QueryableByName)]
             struct Truth { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)] deck: Option<String>, #[diesel(sql_type = diesel::sql_types::Text)] date: String }
-            let truth: Vec<Truth> = diesel::sql_query("SELECT m.id AS match_id, a.deck, COALESCE(substr(m.start_ts,1,10), '') AS date FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 ORDER BY m.start_ts").load(conn).unwrap();
-            let mut games = r::games_by_match(conn, &side, &refs.fetches).unwrap();
+            let truth: Vec<Truth> = diesel::sql_query(format!("SELECT m.id AS match_id, a.deck, COALESCE(substr(m.start_ts,1,10), '') AS date FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 AND m.me = {} ORDER BY m.start_ts", sq(&player))).load(conn).unwrap();
+            let mut games = r::games_by_match(conn, &side, &refs.fetches, &player).unwrap();
             for gs in games.values_mut() {
                 r::cap_revealed(gs, &refs);
             }
@@ -1121,7 +1171,7 @@ async fn main() {
             }
             if side == "me" {
                 // list-level check: with the player's lists as hypotheses, does a match linked by the session log land on its own list?
-                let lists = r::player_lists(conn, &refs.fetches).unwrap();
+                let lists = r::player_lists(conn, &refs.fetches, &player).unwrap();
                 let with_lists = refs.with_lists(&lists);
                 #[derive(diesel::QueryableByName)]
                 struct Linked { #[diesel(sql_type = diesel::sql_types::Integer)] match_id: i32, #[diesel(sql_type = diesel::sql_types::Integer)] list_id: i32, #[diesel(sql_type = diesel::sql_types::Text)] date: String }
@@ -1176,15 +1226,14 @@ async fn main() {
             use mtgctl::mtgolog::reference as r;
             let shared = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             let refs = r::load_references(shared, &timeline_eras()).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
-            let dir = PlayerDir::new(cli.data.join("players").join(&player));
-            let conn = &mut dir.connect().unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            let conn = &mut pipeline::connect(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             let names: HashMap<i32, String> = {
                 use diesel::prelude::*;
                 #[derive(diesel::QueryableByName)]
                 struct N { #[diesel(sql_type = diesel::sql_types::Integer)] id: i32, #[diesel(sql_type = diesel::sql_types::Text)] name: String }
-                diesel::sql_query("SELECT id, COALESCE(name, auto_name, 'list#' || id) AS name FROM mtgo_lists").load::<N>(conn).unwrap_or_default().into_iter().map(|n| (n.id, n.name)).collect()
+                diesel::sql_query(format!("SELECT id, COALESCE(name, auto_name, 'list#' || id) AS name FROM mtgo_lists WHERE me = {}", sq(&player))).load::<N>(conn).unwrap_or_default().into_iter().map(|n| (n.id, n.name)).collect()
             };
-            match r::assign_player(conn, &refs) {
+            match r::assign_player(conn, &refs, &player) {
                 Ok(asg) => {
                     for r in &refs.refs { println!("reference #{} {:<12} colours {}", r.id, r.deck, r.colors); }
                     println!("{:<4} {:<58} {:<6} {:<12} {:>5} {:>4}  runner-up", "list", "name", "mana", "deck", "score", "side");
@@ -1195,6 +1244,24 @@ async fn main() {
                 Err(e) => eprintln!("{e}"),
             }
         }
+        Cmd::Rebuild { repo } => {
+            if let Err(e) = rebuild(&cli.data, &Reference::locate(&repo, &cli.data)) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        Cmd::PlayerRemove { player } => {
+            let conn = &mut pipeline::connect(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
+            match mtgctl::mtgolog::db::ensure_schema(conn).and_then(|_| mtgctl::mtgolog::db::remove_player(conn, &player)) {
+                Ok(n) => println!("{player}: {n} matches deleted"),
+                Err(e) => { eprintln!("{e}"); std::process::exit(1) }
+            }
+            let dir = cli.data.join("players").join(&player);
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).unwrap_or_else(|e| { eprintln!("{}: {e}", dir.display()); std::process::exit(1) });
+                println!("removed {}", dir.display());
+            }
+        }
         Cmd::CompactSessions => {
             if let Err(e) = compact_sessions(&cli.data) {
                 eprintln!("{e}");
@@ -1203,7 +1270,11 @@ async fn main() {
         }
         Cmd::Serve { listen, web, repo } => {
             std::fs::create_dir_all(cli.data.join("players")).expect("data dir");
-            let state = Arc::new(AppState { data: cli.data.clone(), reference: Reference::locate(&repo, &cli.data), sync_locks: Mutex::new(HashMap::new()) });
+            // once here, so that requests only read
+            let conn = &mut pipeline::connect(&cli.data).expect("database");
+            mtgctl::mtgolog::db::ensure_schema(conn).expect("schema");
+            stats::ensure_view(conn).expect("view");
+            let state = Arc::new(AppState { data: cli.data.clone(), reference: Reference::locate(&repo, &cli.data), sync_lock: Mutex::new(()) });
             let app = Router::new()
                 .route("/api/me", get(me))
                 .route("/api/players", get(players))

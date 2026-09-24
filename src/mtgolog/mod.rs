@@ -449,7 +449,14 @@ pub fn run(args: MtgoArgs) {
         }
         MtgoCommand::Decklists { fetch, verbose } => {
             let conn = &mut crate::db::establish_connection();
-            match decklist::run_decklists(conn, &cfg, fetch, verbose) {
+            let me = match db::ensure_schema(conn).and_then(|_| db::player(conn, &cfg)) {
+                Ok(me) => me,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return;
+                }
+            };
+            match decklist::run_decklists(conn, &cfg, &me, fetch, verbose) {
                 Ok(st) => println!(
                     "decklists: {} 'Deck Used' games, {} new distinct lists, {} linked to imported games, {} unlinked (game not imported yet), {} mismatched, {} unresolved card ids",
                     st.lines, st.lists, st.linked, st.unlinked, st.mismatched, st.unknown_names
@@ -484,8 +491,15 @@ pub fn run(args: MtgoArgs) {
                 eprintln!("{e}");
                 return;
             }
+            let me = match db::player(conn, &cfg) {
+                Ok(me) => me,
+                Err(e) => {
+                    eprintln!("{e}");
+                    return;
+                }
+            };
             for id in ids {
-                match decklist::set_experimental(conn, id, !off) {
+                match decklist::set_experimental(conn, &me, id, !off) {
                     Ok(()) => println!("list {id}: experimental = {}", !off),
                     Err(e) => eprintln!("{e}"),
                 }

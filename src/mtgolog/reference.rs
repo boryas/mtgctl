@@ -477,13 +477,13 @@ struct LC {
     sideboard: bool,
 }
 
-/// Assign every registered list in a player's database against `refs`; rewrites list_assignments.
-pub fn assign_player(conn: &mut SqliteConnection, refs: &References) -> QueryResult<Vec<Assignment>> {
-    // fully derived: rebuilt from scratch every run (also picks up column changes)
-    diesel::sql_query("DROP TABLE IF EXISTS list_assignments").execute(conn)?;
+/// Assign every registered list of `me` against `refs`; rewrites their list_assignments rows.
+pub fn assign_player(conn: &mut SqliteConnection, refs: &References, me: &str) -> QueryResult<Vec<Assignment>> {
     diesel::sql_query(ASSIGN_DDL).execute(conn)?;
-    let lists: Vec<ListMeta> = diesel::sql_query("SELECT id, first_seen FROM mtgo_lists ORDER BY id").load(conn)?;
-    let cards: Vec<LC> = diesel::sql_query("SELECT list_id, name, qty, sideboard FROM mtgo_list_cards").load(conn)?;
+    let mine = format!("SELECT id FROM mtgo_lists WHERE me = {}", q(me));
+    diesel::sql_query(format!("DELETE FROM list_assignments WHERE list_id IN ({mine})")).execute(conn)?;
+    let lists: Vec<ListMeta> = diesel::sql_query(format!("SELECT id, first_seen FROM mtgo_lists WHERE me = {} ORDER BY id", q(me))).load(conn)?;
+    let cards: Vec<LC> = diesel::sql_query(format!("SELECT list_id, name, qty, sideboard FROM mtgo_list_cards WHERE list_id IN ({mine})")).load(conn)?;
     let mut by_list: std::collections::HashMap<i32, (BTreeMap<String, i32>, BTreeMap<String, i32>)> = std::collections::HashMap::new();
     for c in cards {
         let e = by_list.entry(c.list_id).or_default();
@@ -504,13 +504,13 @@ pub fn assign_player(conn: &mut SqliteConnection, refs: &References) -> QueryRes
         .execute(conn)?;
         out.push(a);
     }
-    name_lists(conn)?;
+    name_lists(conn, me)?;
     Ok(out)
 }
 
 /// Auto-names from the assignment: "<deck> v<n> (<MM-DD>)", n counting the player's lists of that
 /// deck in the order first seen; "unassigned #<id> (<MM-DD>)" otherwise. A user-given name wins in the view.
-fn name_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
+fn name_lists(conn: &mut SqliteConnection, me: &str) -> QueryResult<()> {
     #[derive(QueryableByName)]
     struct L {
         #[diesel(sql_type = Integer)]
@@ -520,7 +520,7 @@ fn name_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
         #[diesel(sql_type = Nullable<Text>)]
         deck: Option<String>,
     }
-    let lists: Vec<L> = diesel::sql_query("SELECT l.id, l.first_seen, a.deck FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id ORDER BY l.first_seen, l.id").load(conn)?;
+    let lists: Vec<L> = diesel::sql_query(format!("SELECT l.id, l.first_seen, a.deck FROM mtgo_lists l LEFT JOIN list_assignments a ON a.list_id = l.id WHERE l.me = {} ORDER BY l.first_seen, l.id", q(me))).load(conn)?;
     let mut n: std::collections::HashMap<String, i32> = Default::default();
     for l in lists {
         let day = l.first_seen.get(5..10).unwrap_or("");
@@ -947,12 +947,13 @@ struct MatchRow {
     list_archetype: Option<String>,
 }
 
-/// Every game of every match for one side, with what that side revealed; games with nothing
-/// revealed still count (their draws are evidence of absence).
-pub fn games_by_match(conn: &mut SqliteConnection, side: &str, fetches: &Fetches) -> QueryResult<std::collections::HashMap<i32, Vec<GameSeen>>> {
+/// Every game of every match of `me` for one side, with what that side revealed; games with
+/// nothing revealed still count (their draws are evidence of absence).
+pub fn games_by_match(conn: &mut SqliteConnection, side: &str, fetches: &Fetches, me: &str) -> QueryResult<std::collections::HashMap<i32, Vec<GameSeen>>> {
     let mull = if side == "me" { "my_mulligans" } else { "opp_mulligans" };
-    let games: Vec<GameRow> = diesel::sql_query(format!("SELECT id, match_id, game_number, on_play, COALESCE(turns, 0) AS turns, COALESCE({mull}, 0) AS mulligans FROM mtgo_games ORDER BY match_id, game_number")).load(conn)?;
-    let revealed: Vec<RevealedRow> = diesel::sql_query(format!("SELECT game_id, name, COALESCE(MAX(instances), 1) AS qty FROM mtgo_game_cards WHERE side = '{side}' AND played = 1 GROUP BY game_id, name")).load(conn)?;
+    let mine = format!("SELECT id FROM mtgo_matches WHERE me = {}", q(me));
+    let games: Vec<GameRow> = diesel::sql_query(format!("SELECT id, match_id, game_number, on_play, COALESCE(turns, 0) AS turns, COALESCE({mull}, 0) AS mulligans FROM mtgo_games WHERE match_id IN ({mine}) ORDER BY match_id, game_number")).load(conn)?;
+    let revealed: Vec<RevealedRow> = diesel::sql_query(format!("SELECT game_id, name, COALESCE(MAX(instances), 1) AS qty FROM mtgo_game_cards WHERE side = '{side}' AND played = 1 AND match_id IN ({mine}) GROUP BY game_id, name")).load(conn)?;
     let mut by_game: std::collections::HashMap<i32, BTreeMap<String, i32>> = Default::default();
     for r in revealed {
         *by_game.entry(r.game_id).or_default().entry(if fetches.contains(&r.name) { FETCH.to_string() } else { r.name }).or_default() += r.qty;
@@ -1059,9 +1060,10 @@ pub struct PlayerList {
 
 /// The player's registered lists as hypotheses next to the references, so an unlinked match can be
 /// placed on the exact list it was played with.
-pub fn player_lists(conn: &mut SqliteConnection, fetches: &Fetches) -> QueryResult<Vec<PlayerList>> {
-    let cards: Vec<ListCardRow> = diesel::sql_query("SELECT list_id, name, qty, sideboard FROM mtgo_list_cards").load(conn)?;
-    let seen: Vec<ListSeenRow> = diesel::sql_query("SELECT id, COALESCE(substr(first_seen, 1, 10), '') AS first_seen FROM mtgo_lists").load(conn)?;
+pub fn player_lists(conn: &mut SqliteConnection, fetches: &Fetches, me: &str) -> QueryResult<Vec<PlayerList>> {
+    let mine = format!("SELECT id FROM mtgo_lists WHERE me = {}", q(me));
+    let cards: Vec<ListCardRow> = diesel::sql_query(format!("SELECT list_id, name, qty, sideboard FROM mtgo_list_cards WHERE list_id IN ({mine})")).load(conn)?;
+    let seen: Vec<ListSeenRow> = diesel::sql_query(format!("SELECT id, COALESCE(substr(first_seen, 1, 10), '') AS first_seen FROM mtgo_lists WHERE me = {}", q(me))).load(conn)?;
     let first_seen: std::collections::HashMap<i32, String> = seen.into_iter().map(|r| (r.id, r.first_seen)).collect();
     let decks: Vec<ListDeckRow> = diesel::sql_query("SELECT list_id, deck, archetype, reference_id, colors FROM list_assignments").load(conn)?;
     let assigned: std::collections::HashMap<i32, (Option<String>, Option<String>)> = decks.into_iter().map(|d| (d.list_id, (d.deck, d.archetype))).collect();
@@ -1108,30 +1110,31 @@ pub struct MatchDeckCounts {
     pub opp_archetype_only: usize,
 }
 
-/// Rewrite match_decks for a player: my side from the registered list when it is named, else from
-/// the pooled games; the opponent from their games per match.
-pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryResult<MatchDeckCounts> {
-    diesel::sql_query("DROP TABLE IF EXISTS match_decks").execute(conn)?;
+/// Rewrite match_decks for `me`'s matches: my side from the registered list when it is named, else
+/// from the pooled games; the opponent from their games per match.
+pub fn label_matches(conn: &mut SqliteConnection, refs: &References, me: &str) -> QueryResult<MatchDeckCounts> {
     diesel::sql_query(MATCH_DECKS_DDL).execute(conn)?;
-    let matches: Vec<MatchRow> = diesel::sql_query(
+    diesel::sql_query(format!("DELETE FROM match_decks WHERE match_id IN (SELECT id FROM mtgo_matches WHERE me = {})", q(me))).execute(conn)?;
+    let matches: Vec<MatchRow> = diesel::sql_query(format!(
         "SELECT m.id, COALESCE(substr(m.start_ts,1,10), '') AS date, a.deck AS list_deck, a.archetype AS list_archetype
-         FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 ORDER BY m.start_ts",
-    )
+         FROM mtgo_matches m LEFT JOIN list_assignments a ON a.list_id = m.my_list_id WHERE m.replay = 0 AND m.me = {} ORDER BY m.start_ts",
+        q(me)
+    ))
     .load(conn)?;
     let timing = std::env::var_os("MTGCTL_TIMING").is_some();
     let t = std::time::Instant::now();
-    let mut me = games_by_match(conn, "me", &refs.fetches)?;
-    let mut opp = games_by_match(conn, "opp", &refs.fetches)?;
-    for gs in me.values_mut().chain(opp.values_mut()) {
+    let mut mine = games_by_match(conn, "me", &refs.fetches, me)?;
+    let mut opp = games_by_match(conn, "opp", &refs.fetches, me)?;
+    for gs in mine.values_mut().chain(opp.values_mut()) {
         cap_revealed(gs, refs);
     }
     if timing { eprintln!("label: load games {:.1}s", t.elapsed().as_secs_f64()); }
     let t = std::time::Instant::now();
-    let pooled = pool_runs(&matches.iter().map(|m| (m.id, m.date.clone())).collect::<Vec<_>>(), &me, refs);
+    let pooled = pool_runs(&matches.iter().map(|m| (m.id, m.date.clone())).collect::<Vec<_>>(), &mine, refs);
     if timing { eprintln!("label: pool runs {:.1}s", t.elapsed().as_secs_f64()); }
     let t = std::time::Instant::now();
     let mut counts = MatchDeckCounts { me_list: 0, me_cards: 0, me_list_inferred: 0, opp_named: 0, opp_archetype_only: 0 };
-    let lists = player_lists(conn, &refs.fetches)?;
+    let lists = player_lists(conn, &refs.fetches, me)?;
     let with_lists = refs.with_lists(&lists);
     let list_deck: std::collections::HashMap<i32, ListDeckRow> = {
         let rows: Vec<ListDeckRow> = diesel::sql_query("SELECT list_id, deck, archetype, reference_id, colors FROM list_assignments").load(conn)?;
@@ -1145,7 +1148,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
             #[diesel(sql_type = Integer)]
             list_id: i32,
         }
-        let rows: Vec<R> = diesel::sql_query("SELECT id, my_list_id AS list_id FROM mtgo_matches WHERE my_list_id IS NOT NULL").load(conn)?;
+        let rows: Vec<R> = diesel::sql_query(format!("SELECT id, my_list_id AS list_id FROM mtgo_matches WHERE my_list_id IS NOT NULL AND me = {}", q(me))).load(conn)?;
         rows.into_iter().map(|r| (r.id, r.list_id)).collect()
     };
     let ins = |conn: &mut SqliteConnection, id: i32, side: &str, source: &str, i: &Inference, list_id: Option<i32>| -> QueryResult<usize> {
@@ -1169,7 +1172,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References) -> QueryRes
                 counts.me_list += 1;
             } else if let Some((gs, gsc)) = pooled.get(&m.id) {
                 // the list from this match alone: a run pools across version switches a card apart, which the fit test cannot see
-                if let Some((lid, p)) = infer_list(&me[&m.id], &m.date, &with_lists) {
+                if let Some((lid, p)) = infer_list(&mine[&m.id], &m.date, &with_lists) {
                     // the games were played with a registered list: its assigned deck, if it has one
                     let la = list_deck.get(&lid);
                     let deck = la.and_then(|a| a.deck.clone());

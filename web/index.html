@@ -177,7 +177,7 @@ const chosenStats = () => [...document.querySelectorAll('input[name=stat]:checke
 const gameQuery = () => [...groupBy(), ...Object.keys(filters).filter(c => filters[c].size)].some(c => GAME_COLS.includes(c));
 const groupBy = () => [...document.querySelectorAll('input[name=g]:checked')].map(i => i.value);
 
-// Player is a filter like any other (one database per player for now, so single-choice).
+// The player choice becomes a `player =` term of whereSql.
 async function initPlayer() {
   let known = []; try { known = await api('api/players'); } catch (e) {}
   let cur = getPlayer(); if (cur && !known.includes(cur)) known.push(cur);
@@ -314,6 +314,7 @@ function renderStatChoices() {
 }
 function whereSql(exceptCol) {
   const terms = [];
+  if (getPlayer()) terms.push(`player = ${sq(getPlayer())}`);
   const scope = document.getElementById('scope').value;
   if (scope === 'hard') terms.push("my_deck_grade = 'hard' AND my_experimental = 0"); else if (scope === 'inferred') terms.push("my_deck_grade IN ('hard', 'inferred')");
   const from = document.getElementById('dfrom').value, to = document.getElementById('dto').value;

@@ -1,11 +1,12 @@
-//! One player's upload directory → their database: parse the game logs, link the registered
-//! lists, and name both sides' decks against the reference decklists.
+//! One player's upload directory → their rows of the pooled database: parse the game logs, link
+//! the registered lists, and name both sides' decks against the reference decklists.
 use super::MtgoConfig;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use std::path::{Path, PathBuf};
 
-/// Layout under `<data>/players/<name>/`.
+/// Layout under `<data>/players/<name>/`: the raw uploads, from which the player's rows of the
+/// pooled database are rebuilt.
 pub struct PlayerDir {
     pub root: PathBuf,
 }
@@ -20,22 +21,13 @@ impl PlayerDir {
     pub fn sessions(&self) -> PathBuf {
         self.root.join("sessions")
     }
-    pub fn db(&self) -> PathBuf {
+    /// The per-player database of builds before the pooled one; only `mtgctl-web rebuild` reads it.
+    pub fn old_db(&self) -> PathBuf {
         self.root.join("mtgctl.db")
     }
     pub fn ensure(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(self.logs())?;
         std::fs::create_dir_all(self.sessions())
-    }
-    /// The player's database, with the shared database attached as `shared` when it exists (the
-    /// reference lists live there; a filter can ask whether the assigned reference runs a card).
-    pub fn connect(&self) -> Result<SqliteConnection, String> {
-        let mut conn = crate::db::establish_connection_at(&self.db())?;
-        if let Some(shared) = self.root.parent().and_then(|p| p.parent()).map(|d| d.join("shared.db")).filter(|p| p.exists()) {
-            use diesel::prelude::*;
-            diesel::sql_query(format!("ATTACH DATABASE '{}' AS shared", shared.to_string_lossy().replace('\'', "''"))).execute(&mut conn).map_err(|e| e.to_string())?;
-        }
-        Ok(conn)
     }
     /// A config pointing every path at this player, everything else default.
     pub fn config(&self, username: &str, reference: &Reference) -> MtgoConfig {
@@ -47,6 +39,20 @@ impl PlayerDir {
             ..MtgoConfig::default()
         }
     }
+}
+
+/// `<data>/mtgctl.db`, every player's rows (see `mtgo_matches.me`), in WAL mode so pages read
+/// while a sync writes; `<data>/shared.db` is attached as `shared` when it exists (the reference
+/// lists live there; a filter can ask whether the assigned reference runs a card).
+pub fn connect(data: &Path) -> Result<SqliteConnection, String> {
+    std::fs::create_dir_all(data).map_err(|e| e.to_string())?;
+    let mut conn = crate::db::establish_connection_at(&data.join("mtgctl.db"))?;
+    diesel::sql_query("PRAGMA journal_mode = WAL").execute(&mut conn).map_err(|e| e.to_string())?;
+    let shared = data.join("shared.db");
+    if shared.exists() {
+        diesel::sql_query(format!("ATTACH DATABASE '{}' AS shared", shared.to_string_lossy().replace('\'', "''"))).execute(&mut conn).map_err(|e| e.to_string())?;
+    }
+    Ok(conn)
 }
 
 /// Player-independent inputs: the marker rules (only to give my own lists a readable lineage
@@ -82,12 +88,11 @@ pub struct SyncReport {
     pub steps: Vec<String>,
 }
 
-/// Run the pipeline for one player: import → decklists → reference decks. Each step's own console
-/// output goes to the server log.
-pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<SyncReport, String> {
+/// Run the pipeline for one player: import → decklists → reference decks; only rows whose `me` is
+/// `username` are rewritten. Each step's own console output goes to the server log.
+pub fn sync(conn: &mut SqliteConnection, dir: &PlayerDir, username: &str, reference: &Reference) -> Result<SyncReport, String> {
     dir.ensure().map_err(|e| e.to_string())?;
     let cfg = dir.config(username, reference);
-    let conn = &mut dir.connect()?;
     super::db::ensure_schema(conn).map_err(|e| e.to_string())?;
     let mut steps = Vec::new();
     let t0 = std::time::Instant::now();
@@ -107,20 +112,20 @@ pub fn sync(dir: &PlayerDir, username: &str, reference: &Reference) -> Result<Sy
     timed(&mut steps, format!("import: {} new, {} refreshed, {} skipped, {} in progress, {} failed", st.matches, st.refreshed, st.skipped, st.in_progress, st.failed));
 
     // fetch = true: list catalog ids are printings the game logs never name; Scryfall fills them once per player DB.
-    let dl = super::decklist::run_decklists(conn, &cfg, true, false).map_err(|e| format!("decklists: {e}"))?;
+    let dl = super::decklist::run_decklists(conn, &cfg, username, true, false).map_err(|e| format!("decklists: {e}"))?;
     timed(&mut steps, format!("decklists: {} lists, {} games linked, {} unlinked", dl.lists, dl.linked, dl.unlinked));
 
     let shared = &mut crate::db::establish_connection_at(&reference.shared_db)?;
     let eras = super::eras::eras_from_file(&reference.timeline)?;
     let refs = super::reference::load_references(shared, &eras).map_err(|e| format!("references: {e}"))?;
-    let assigned = super::reference::assign_player(conn, &refs).map_err(|e| format!("assign: {e}"))?;
+    let assigned = super::reference::assign_player(conn, &refs, username).map_err(|e| format!("assign: {e}"))?;
     let lists_assigned = assigned.iter().filter(|a| a.deck.is_some()).count();
     timed(&mut steps, format!("decks: {lists_assigned} of {} lists named by {} reference decklists", assigned.len(), refs.refs.len()));
-    let md = super::reference::label_matches(conn, &refs).map_err(|e| format!("match decks: {e}"))?;
+    let md = super::reference::label_matches(conn, &refs, username).map_err(|e| format!("match decks: {e}"))?;
     timed(&mut steps, format!("match decks: mine from list {}, from cards {} ({} placed on a registered list); opponents named {}, archetype only {}", md.me_list, md.me_cards, md.me_list_inferred, md.opp_named, md.opp_archetype_only));
 
     // Guessed opponent labels are not part of this pipeline; clear any left by an older build.
-    diesel::sql_query("DELETE FROM mtgo_match_labels WHERE source = 'guess'").execute(conn).map_err(|e| e.to_string())?;
+    diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE source = 'guess' AND match_id IN (SELECT id FROM mtgo_matches WHERE me = '{}')", username.replace('\'', "''"))).execute(conn).map_err(|e| e.to_string())?;
 
     Ok(SyncReport { imported: st.matches, refreshed: st.refreshed, skipped: st.skipped, in_progress: st.in_progress, failed: st.failed, lists: dl.lists, linked_games: dl.linked, lists_assigned, steps })
 }

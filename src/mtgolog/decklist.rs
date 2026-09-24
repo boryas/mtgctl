@@ -67,7 +67,8 @@ diesel::table! {
 pub const DDL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS mtgo_lists (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        hash TEXT NOT NULL UNIQUE,          -- canonical (name, qty, sideboard) multiset
+        me TEXT,                            -- the player whose list it is; lineage and marks are theirs
+        hash TEXT NOT NULL,                 -- canonical (name, qty, sideboard) multiset, unique per me
         name TEXT,                          -- user-given name (mtgctl mtgo name-list)
         auto_name TEXT,                     -- Archetype/Subtype v2 (08-21): lineage + version + first-seen
         fork TEXT,                          -- concept declared at this list (mtgo fork); NULL = inherit from parent
@@ -91,7 +92,8 @@ pub const DDL: &[&str] = &[
     )",
     "CREATE TABLE IF NOT EXISTS mtgo_decklists (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        mtgo_game_id INTEGER NOT NULL UNIQUE, -- MTGO's numeric game id from the log line
+        me TEXT,                            -- whose session log the line is from
+        mtgo_game_id INTEGER NOT NULL,      -- MTGO's numeric game id from the log line, unique per me
         mtgo_match_id INTEGER,              -- MTGO's numeric match id (== mtgo_game_history Id)
         seen_at TEXT NOT NULL,              -- timestamp of the Deck Used line
         source_file TEXT NOT NULL,
@@ -108,6 +110,26 @@ pub const DDL: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_list_cards_list ON mtgo_list_cards(list_id)",
 ];
+
+/// Created after `db::ensure_schema` has added `me` to databases from before it.
+pub const INDEXES: &[&str] = &[
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mtgo_lists_me_hash ON mtgo_lists(me, hash)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mtgo_decklists_me_game ON mtgo_decklists(me, mtgo_game_id)",
+];
+
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Delete one player's lists and the Deck Used lines naming them.
+pub fn delete_lists(conn: &mut SqliteConnection, me: &str) -> QueryResult<()> {
+    let me = sq(me);
+    diesel::sql_query(format!("DELETE FROM mtgo_list_cards WHERE list_id IN (SELECT id FROM mtgo_lists WHERE me = {me})")).execute(conn)?;
+    diesel::sql_query(format!("DELETE FROM list_assignments WHERE list_id IN (SELECT id FROM mtgo_lists WHERE me = {me})")).execute(conn)?;
+    diesel::sql_query(format!("DELETE FROM mtgo_decklists WHERE me = {me}")).execute(conn)?;
+    diesel::sql_query(format!("DELETE FROM mtgo_lists WHERE me = {me}")).execute(conn)?;
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct DeckEntry {
@@ -466,7 +488,8 @@ pub struct DecklistStats {
     pub unknown_names: usize,
 }
 
-pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool, verbose: bool) -> QueryResult<DecklistStats> {
+/// Rebuild `me`'s lists from the session logs `cfg` names and link them to `me`'s games.
+pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fetch: bool, verbose: bool) -> QueryResult<DecklistStats> {
     super::db::ensure_schema(conn)?;
     for stmt in DDL {
         diesel::sql_query(*stmt).execute(conn)?;
@@ -491,38 +514,19 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
     let names = resolve_names(conn, cfg, &ids, fetch)?;
     if timing { eprintln!("decklists: resolve names {:.1}s", t1.elapsed().as_secs_f64()); }
     let t2 = std::time::Instant::now();
-    // Rebuild list tables from scratch (cheap; keeps everything consistent with resolver/linking fixes).
-    // User marks (name, fork, parent override) are keyed by hash so they survive.
-    #[derive(QueryableByName)]
-    struct HN {
-        #[diesel(sql_type = Text)]
-        hash: String,
-        #[diesel(sql_type = Nullable<Text>)]
-        name: Option<String>,
-        #[diesel(sql_type = Nullable<Text>)]
-        fork: Option<String>,
-        #[diesel(sql_type = Bool)]
-        fork_experimental: bool,
-        #[diesel(sql_type = Nullable<Text>)]
-        parent_hash: Option<String>,
-    }
-    let kept: Vec<HN> = diesel::sql_query(
-        "SELECT l.hash, l.name, l.fork, l.experimental AS fork_experimental, NULL AS parent_hash
-         FROM mtgo_lists l WHERE l.name IS NOT NULL OR l.experimental = 1",
-    )
-    .load(conn)?;
-    let kept_marks: HashMap<String, HN> = kept.into_iter().map(|r| (r.hash.clone(), r)).collect();
+    // Lists are kept by (me, hash), so their ids and the marks on them (name, fork, experimental)
+    // survive; the Deck Used lines and links are rebuilt, and lists no line names any more dropped.
     // one transaction: hundreds of inserts and lookups, each its own fsync otherwise
     let st = conn.transaction::<_, diesel::result::Error, _>(|conn| {
-        for t in ["mtgo_decklists", "mtgo_list_cards", "mtgo_lists"] {
-            super::db::truncate(conn, t)?;
-        }
-        diesel::sql_query("UPDATE mtgo_games SET list_id = NULL").execute(conn)?;
-        diesel::sql_query("UPDATE mtgo_matches SET my_list_id = NULL").execute(conn)?;
-        diesel::sql_query("DELETE FROM mtgo_match_labels WHERE side = 'me' AND source = 'list'").execute(conn)?;
+        let mine = format!("SELECT id FROM mtgo_matches WHERE me = {}", sq(me));
+        diesel::sql_query(format!("DELETE FROM mtgo_decklists WHERE me = {}", sq(me))).execute(conn)?;
+        let mut seen_lists: HashSet<i32> = HashSet::new();
+        diesel::sql_query(format!("UPDATE mtgo_games SET list_id = NULL WHERE match_id IN ({mine})")).execute(conn)?;
+        diesel::sql_query(format!("UPDATE mtgo_matches SET my_list_id = NULL WHERE id IN ({mine})")).execute(conn)?;
+        diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE side = 'me' AND source = 'list' AND match_id IN ({mine})")).execute(conn)?;
         let unknown_names = ids.iter().filter(|id| !names.contains_key(id)).count();
 
-        let games: Vec<GameStart> = diesel::sql_query("SELECT g.id, g.match_id, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE m.replay = 0").load(conn)?;
+        let games: Vec<GameStart> = diesel::sql_query(format!("SELECT g.id, g.match_id, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE m.replay = 0 AND m.me = {}", sq(me))).load(conn)?;
         let mut game_times: Vec<(NaiveDateTime, GameStart)> = games.into_iter().filter_map(|g| NaiveDateTime::parse_from_str(&g.start_ts, "%Y-%m-%d %H:%M:%S").ok().map(|t| (t, g))).collect();
         game_times.sort_by_key(|(t, _)| *t);
 
@@ -544,24 +548,21 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
             let n_main: i64 = cards.iter().filter(|c| !c.2).map(|c| c.1).sum();
             let n_side: i64 = cards.iter().filter(|c| c.2).map(|c| c.1).sum();
             let seen_at = d.at.format("%Y-%m-%d %H:%M:%S").to_string();
-            let existing: Option<IdRow> = diesel::sql_query(format!("SELECT id FROM mtgo_lists WHERE hash = '{hash}'")).get_result(conn).optional()?;
+            let existing: Option<IdRow> = diesel::sql_query(format!("SELECT id FROM mtgo_lists WHERE hash = '{hash}' AND me = {}", sq(me))).get_result(conn).optional()?;
             let list_id = match existing {
                 Some(r) => {
-                    diesel::sql_query(format!("UPDATE mtgo_lists SET first_seen = MIN(first_seen, '{seen_at}'), last_seen = MAX(last_seen, '{seen_at}') WHERE id = {}", r.id)).execute(conn)?;
+                    // the first line naming a kept list this run resets its dates
+                    let (first, last) = if seen_lists.insert(r.id) { (format!("'{seen_at}'"), format!("'{seen_at}'")) } else { (format!("MIN(first_seen, '{seen_at}')"), format!("MAX(last_seen, '{seen_at}')")) };
+                    diesel::sql_query(format!("UPDATE mtgo_lists SET first_seen = {first}, last_seen = {last} WHERE id = {}", r.id)).execute(conn)?;
                     r.id
                 }
                 None => {
-                    let q = |v: &Option<String>| v.as_ref().map(|n| format!("'{}'", n.replace('\'', "''"))).unwrap_or("NULL".into());
-                    let (nm, fk, fx) = match kept_marks.get(&hash) {
-                        Some(m) => (q(&m.name), q(&m.fork), m.fork_experimental as i32),
-                        None => ("NULL".to_string(), "NULL".to_string(), 0),
-                    };
-                    diesel::sql_query(format!("INSERT INTO mtgo_lists(hash, name, fork, experimental, n_main, n_side, first_seen, last_seen) VALUES ('{hash}', {nm}, {fk}, {fx}, {n_main}, {n_side}, '{seen_at}', '{seen_at}')")).execute(conn)?;
+                    diesel::sql_query(format!("INSERT INTO mtgo_lists(me, hash, n_main, n_side, first_seen, last_seen) VALUES ({}, '{hash}', {n_main}, {n_side}, '{seen_at}', '{seen_at}')", sq(me))).execute(conn)?;
                     let r: IdRow = diesel::sql_query("SELECT last_insert_rowid() AS id").get_result(conn)?;
                     for (name, qty, sb, cid) in &cards {
                         diesel::sql_query(format!("INSERT INTO mtgo_list_cards(list_id, catalog_id, name, qty, sideboard) VALUES ({}, {cid}, '{}', {qty}, {})", r.id, name.replace('\'', "''"), *sb as i32)).execute(conn)?;
                     }
-                    st.lists += 1;
+                    seen_lists.insert(r.id);
                     r.id
                 }
             };
@@ -598,10 +599,10 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
             let en = d.event_name.as_deref().map(|e| format!("'{}'", e.replace('\'', "''"))).unwrap_or("NULL".into());
             let mid = d.match_id.map(|m| m.to_string()).unwrap_or("NULL".into());
             diesel::sql_query(format!(
-                "INSERT INTO mtgo_decklists(mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind, event_name)
-                 VALUES ({}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek}, {en})
-                 ON CONFLICT(mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), event_name = COALESCE(excluded.event_name, mtgo_decklists.event_name), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
-                d.game_id, d.source.replace('\'', "''"),
+                "INSERT INTO mtgo_decklists(me, mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind, event_name)
+                 VALUES ({}, {}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek}, {en})
+                 ON CONFLICT(me, mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), event_name = COALESCE(excluded.event_name, mtgo_decklists.event_name), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
+                sq(me), d.game_id, d.source.replace('\'', "''"),
                 game_db_id.map(|x| x.to_string()).unwrap_or("NULL".into()), match_db_id.map(|x| x.to_string()).unwrap_or("NULL".into())
             ))
             .execute(conn)?;
@@ -630,6 +631,12 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
                 .execute(conn)?;
             }
         }
+        let gone = format!("SELECT id FROM mtgo_lists WHERE me = {} AND id NOT IN ({})", sq(me), seen_lists.iter().map(|i| i.to_string()).chain(["0".to_string()]).collect::<Vec<_>>().join(", "));
+        for t in ["mtgo_list_cards", "list_assignments"] {
+            diesel::sql_query(format!("DELETE FROM {t} WHERE list_id IN ({gone})")).execute(conn)?;
+        }
+        diesel::sql_query(format!("DELETE FROM mtgo_lists WHERE id IN ({gone})")).execute(conn)?;
+        st.lists = seen_lists.len();
         let _ = (mtgo_games::table, mtgo_matches::table, mtgo_match_labels::table);
         Ok(st)
     })?;
@@ -638,8 +645,8 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, fetch: bool,
 }
 
 /// Tag a registered list as an experimental brew (my_experimental = 1) or not.
-pub fn set_experimental(conn: &mut SqliteConnection, id: i32, on: bool) -> Result<(), String> {
-    match diesel::sql_query(format!("UPDATE mtgo_lists SET experimental = {} WHERE id = {id}", on as i32)).execute(conn) {
+pub fn set_experimental(conn: &mut SqliteConnection, me: &str, id: i32, on: bool) -> Result<(), String> {
+    match diesel::sql_query(format!("UPDATE mtgo_lists SET experimental = {} WHERE id = {id} AND me = {}", on as i32, sq(me))).execute(conn) {
         Ok(1) => Ok(()),
         Ok(_) => Err(format!("no list {id}")),
         Err(e) => Err(e.to_string()),

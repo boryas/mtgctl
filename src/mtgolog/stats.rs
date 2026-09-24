@@ -17,6 +17,7 @@ SELECT
   strftime('%Y-W%W', substr(m.start_ts,1,10)) AS week,
   m.era_id            AS era_id,
   e.name              AS era,
+  m.me                AS player,
   m.opponent          AS opponent,
   m.result            AS match_result,
   m.my_game_wins      AS my_game_wins,
@@ -115,7 +116,17 @@ LEFT JOIN mtgo_match_labels ll ON ll.match_id = m.id AND ll.side = 'me' AND ll.s
 LEFT JOIN mtgo_decklists dl ON dl.game_db_id = g.id
 WHERE m.replay = 0";
 
+/// Recreates the view only when its stored SQL differs from VIEW_SQL, so a reader takes no write lock.
 pub fn ensure_view(conn: &mut SqliteConnection) -> QueryResult<()> {
+    #[derive(QueryableByName)]
+    struct S {
+        #[diesel(sql_type = Text)]
+        sql: String,
+    }
+    let cur: Option<S> = diesel::sql_query("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'mtgo_game_view'").get_result(conn).optional()?;
+    if cur.is_some_and(|c| c.sql == VIEW_SQL) {
+        return Ok(());
+    }
     diesel::sql_query("DROP VIEW IF EXISTS mtgo_game_view").execute(conn)?;
     diesel::sql_query(VIEW_SQL).execute(conn)?;
     Ok(())
