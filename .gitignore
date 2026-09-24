@@ -7,3 +7,4 @@ pkg/
 web-data/
 target-bullseye/
 !web/*.html
+!deploy/linux/*.py
