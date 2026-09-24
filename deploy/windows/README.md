@@ -4,7 +4,10 @@ Open PowerShell (Start menu, type "PowerShell") and paste:
 
     irm https://bur.io/doomsday/stats/windows/install.ps1 | iex
 
-That downloads the uploader, registers it to run every 30 minutes and at logon, puts a
+Or download [install-mtgctl.cmd](install-mtgctl.cmd), double-click it and click *Run* when
+Windows asks; it runs the same line.
+
+Either way it downloads the uploader, registers it to run every 30 minutes and at logon, puts a
 **Play MTGO** shortcut on your desktop that uploads when you close the client, and runs the
 first upload. The first run reads every match log you have and can take a few minutes; after
 that it is seconds. It works out who you are from your match logs; nothing else is needed.
