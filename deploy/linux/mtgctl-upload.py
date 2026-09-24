@@ -102,7 +102,7 @@ def main():
         while j < len(todo):
             kind, name, mt, sha, data = todo[j]; b = data()
             if j > i and size + len(b) > MAX_BATCH: break
-            parts += [{'name': 'kind', 'value': kind}, {'name': 'name', 'value': name}, {'name': 'mtime', 'value': str(mt)}]
+            parts += [{'name': 'kind', 'value': kind}, {'name': 'name', 'value': name}, {'name': 'mtime', 'value': str(mt)}, {'name': 'tz', 'value': str(-time.localtime(mt / 1000).tm_gmtoff // 60)}]
             if sha: parts.append({'name': 'sha256', 'value': sha})
             parts.append({'name': 'file', 'filename': name, 'bytes': b}); size += len(b); j += 1
         body, ct = multipart(parts)

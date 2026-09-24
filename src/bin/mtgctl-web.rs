@@ -67,6 +67,8 @@ enum Cmd {
     RefMove { deck: String, archetype: String },
     /// Fold a deck into another, e.g. `ref-merge "Jeskai Tempo" "Azorius Tempo"`: its references become versions of the other.
     RefMerge { deck: String, into: String },
+    /// Delete one stored session extract of a player (by file name); the next upload of that log stores it again.
+    SessionRemove { player: String, name: String },
     /// Assign a player's registered lists to decks via the nearest reference decklist and print the decisions.
     Assign { player: String },
     /// Load card facts (card_colors.json from fetch_scryfall.py: colours, colours lands produce) into the shared database.
@@ -313,6 +315,8 @@ async fn upload(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Ha
     let mut used: u64 = stored_files(&dir).iter().map(|f| f.size).sum();
     let mut res = UploadResult { stored: vec![], skipped: vec![] };
     let (mut kind, mut fname, mut mtime, mut sha): (Option<String>, Option<String>, Option<u64>, Option<String>) = (None, None, None, None);
+    // the client's UTC offset in minutes, JavaScript's getTimezoneOffset sign (UTC minus local; 420 for UTC-7)
+    let mut tz: Option<i64> = None;
     let existing_session_hashes: std::collections::HashSet<String> = stored_files(&dir).into_iter().filter(|f| f.kind == "session").map(|f| f.sha256).collect();
     let mut session_hashes = existing_session_hashes;
     while let Some(field) = mp.next_field().await.map_err(|e| bad(e.to_string()))? {
@@ -321,6 +325,7 @@ async fn upload(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Ha
             "name" => fname = Some(field.text().await.map_err(|e| bad(e.to_string()))?),
             "mtime" => mtime = field.text().await.map_err(|e| bad(e.to_string()))?.trim().parse().ok(),
             "sha256" => sha = Some(field.text().await.map_err(|e| bad(e.to_string()))?.trim().to_lowercase()),
+            "tz" => tz = field.text().await.map_err(|e| bad(e.to_string()))?.trim().parse().ok(),
             "file" => {
                 let bytes: Bytes = field.bytes().await.map_err(|e| bad(e.to_string()))?;
                 let k = kind.take().ok_or_else(|| bad("kind before file"))?;
@@ -330,7 +335,7 @@ async fn upload(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Ha
                 if used + bytes.len() as u64 > MAX_PLAYER_BYTES {
                     return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, format!("{name} is over the {} MB storage cap", MAX_PLAYER_BYTES >> 20)));
                 }
-                match store_file(&dir, &k, &n, mt, s.as_deref(), &bytes, &mut session_hashes) {
+                match store_file(&dir, &k, &n, mt, tz, s.as_deref(), &bytes, &mut session_hashes) {
                     Ok(Some(stored)) => {
                         used += bytes.len() as u64;
                         res.stored.push(stored)
@@ -345,7 +350,7 @@ async fn upload(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Ha
     Ok(Json(res))
 }
 
-fn store_file(dir: &PlayerDir, kind: &str, name: &str, mtime_ms: u64, raw_sha: Option<&str>, bytes: &[u8], session_hashes: &mut std::collections::HashSet<String>) -> Result<Option<String>, String> {
+fn store_file(dir: &PlayerDir, kind: &str, name: &str, mtime_ms: u64, tz_min: Option<i64>, raw_sha: Option<&str>, bytes: &[u8], session_hashes: &mut std::collections::HashSet<String>) -> Result<Option<String>, String> {
     let base = Path::new(name).file_name().and_then(|n| n.to_str()).ok_or("bad name")?;
     let target = match kind {
         "game" => {
@@ -356,7 +361,7 @@ fn store_file(dir: &PlayerDir, kind: &str, name: &str, mtime_ms: u64, raw_sha: O
             // never store chat: refuse chat files whatever their name, drop chat records from a game log
             match mtgctl::mtgolog::format::strip_chat(bytes) {
                 Ok(None) => {}
-                Ok(Some(clean)) => return store_file(dir, kind, name, mtime_ms, raw_sha, &clean, session_hashes),
+                Ok(Some(clean)) => return store_file(dir, kind, name, mtime_ms, tz_min, raw_sha, &clean, session_hashes),
                 Err(e) => return Err(format!("not a game log ({e})")),
             }
             let p = dir.logs().join(base);
@@ -382,19 +387,32 @@ fn store_file(dir: &PlayerDir, kind: &str, name: &str, mtime_ms: u64, raw_sha: O
                 }
                 _ => hex(&Sha256::digest(bytes)),
             };
+            // The file name carries the session's end in the player's local time: the log has no dates of
+            // its own, the parser works back from this day. An archive name (mtgo-YYYYMMDD-HHMMSS.log) is
+            // already local; otherwise the modification time shifted by the client's offset, and only
+            // without one the server's clock.
+            let named = base.strip_prefix("mtgo-").and_then(|s| s.get(..15)).and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d-%H%M%S").ok());
+            let local: chrono::NaiveDateTime = named.unwrap_or_else(|| {
+                let utc = chrono::DateTime::<chrono::Utc>::from(UNIX_EPOCH + Duration::from_millis(mtime_ms));
+                match tz_min {
+                    Some(off) => (utc - chrono::Duration::minutes(off)).naive_utc(),
+                    None => utc.with_timezone(&chrono::Local).naive_local(),
+                }
+            });
+            let stamp = local.format("%Y%m%d-%H%M%S").to_string();
+            let target = dir.sessions().join(format!("mtgo-{stamp}-{h}.log.gz"));
             if !session_hashes.insert(h.clone()) {
+                // already stored: a client that now knows the local time corrects an earlier name
+                if let Some(old) = std::fs::read_dir(dir.sessions()).ok().and_then(|rd| rd.flatten().map(|e| e.path()).find(|p| p.to_string_lossy().ends_with(&format!("-{h}.log.gz")) && *p != target)) {
+                    std::fs::rename(&old, &target).map_err(|e| e.to_string())?;
+                    set_mtime(&target, local.and_utc().timestamp_millis().max(0) as u64)?;
+                    return Ok(Some(target.file_name().unwrap().to_string_lossy().to_string()));
+                }
                 return Ok(None);
             }
-            let named = base
-                .strip_prefix("mtgo-")
-                .and_then(|s| s.get(..15))
-                .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y%m%d-%H%M%S").ok())
-                .and_then(|t| t.and_local_timezone(chrono::Local).single());
-            let t = named.unwrap_or_else(|| chrono::DateTime::<chrono::Local>::from(UNIX_EPOCH + Duration::from_millis(mtime_ms)));
             let gz = if kind == "session-extract" { bytes.to_vec() } else { session_extract_gz(&String::from_utf8_lossy(bytes))? };
-            let target = dir.sessions().join(format!("mtgo-{}-{}.log.gz", t.format("%Y%m%d-%H%M%S"), h));
             std::fs::write(&target, gz).map_err(|e| e.to_string())?;
-            set_mtime(&target, t.timestamp_millis().max(0) as u64)?;
+            set_mtime(&target, local.and_utc().timestamp_millis().max(0) as u64)?;
             return Ok(Some(target.file_name().unwrap().to_string_lossy().to_string()));
         }
         _ => return Err("kind must be game or session".into()),
@@ -1056,6 +1074,10 @@ async fn main() {
                 Ok(id) => { let era = mtgctl::mtgolog::eras::era_for(&eras, &date).map(|(_, n)| n.as_str()).unwrap_or("?"); println!("reference decklist #{id}: {archetype} / {deck} — {name} (era: {era})") }
                 Err(e) => { eprintln!("{e}"); std::process::exit(1) }
             }
+        }
+        Cmd::SessionRemove { player, name } => {
+            let p = cli.data.join("players").join(&player).join("sessions").join(Path::new(&name).file_name().unwrap_or_default());
+            match std::fs::remove_file(&p) { Ok(()) => println!("removed {}", p.display()), Err(e) => { eprintln!("{}: {e}", p.display()); std::process::exit(1) } }
         }
         Cmd::RefMerge { deck, into } => {
             let conn = &mut shared_db(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });

@@ -115,7 +115,7 @@ async function addLogs(files) {
     const fd = new FormData(); let bytes = 0, j = i;
     for (; j < todo.length && (j === i || bytes + todo[j][1].size <= MAX_BATCH); j++) {
       const [kind, f] = todo[j];
-      fd.append('kind', kind); fd.append('name', f.name); fd.append('mtime', String(f.lastModified));
+      fd.append('kind', kind); fd.append('name', f.name); fd.append('mtime', String(f.lastModified)); fd.append('tz', String(new Date().getTimezoneOffset()));
       if (f.sha256) fd.append('sha256', f.sha256);
       fd.append('file', f.blob || f, f.name); bytes += f.size;
     }

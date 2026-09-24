@@ -126,6 +126,7 @@ while ($i -lt $todo.Count) {
         $parts += @{ name = 'kind'; value = $t.kind }
         $parts += @{ name = 'name'; value = $t.file.Name }
         $parts += @{ name = 'mtime'; value = (MtimeMs $t.file) }
+        $parts += @{ name = 'tz'; value = [int](-[TimeZoneInfo]::Local.GetUtcOffset($t.file.LastWriteTime).TotalMinutes) }
         if ($t.ContainsKey('sha256')) { $parts += @{ name = 'sha256'; value = $t.sha256 } }
         $parts += @{ name = 'file'; filename = $t.file.Name; bytes = $data }
         $bytes += $data.Length; $j++
