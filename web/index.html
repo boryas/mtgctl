@@ -58,7 +58,7 @@
 const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', my_seen: 'my cards seen', opp_seen: 'opponent cards seen', player: 'player', opponent: 'opponent', match_result: 'match result', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
 const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast' };
 const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
-const CURATED_G = ['opp_archetype','opp_deck','opp_colors','my_deck','my_archetype','my_list','event_type','player','opponent','month','game_number','on_play','my_mulligans','win_by'];
+const CURATED_G = ['opp_archetype','opp_deck','opp_colors','my_deck','my_archetype','my_list','event_type','player','opponent','era','month','game_number','on_play','my_mulligans','win_by'];
 const GAME_COLS = Object.keys(GAME_COLS_L);
 // Output statistics. `level` says which view mode a statistic belongs to: match statistics are
 // meaningless once a per-game column is in the query, and vice versa for game statistics.

@@ -77,6 +77,13 @@ enum Cmd {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Eras from the timeline with their match counts, and a check that no banned card was played after its ban took effect. --all re-places every match.
+    Eras {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        all: bool,
+    },
     /// Delete a player: their rows of the pooled database and their uploads.
     PlayerRemove { player: String },
     /// Assign a player's registered lists to decks via the nearest reference decklist and print the decisions.
@@ -526,6 +533,49 @@ fn rebuild(data: &Path, reference: &Reference) -> Result<(), String> {
         for step in &report.steps {
             println!("  {step}");
         }
+    }
+    let s = mtgctl::mtgolog::eras::stamp(conn, &reference.timeline, true)?;
+    println!("eras: {} matches re-placed in {} eras", s.placed, s.eras);
+    Ok(())
+}
+
+fn eras_report(data: &Path, timeline: &Path, all: bool) -> Result<(), String> {
+    use diesel::prelude::*;
+    use diesel::sql_types::{BigInt, Text};
+    use mtgctl::mtgolog::eras;
+    let conn = &mut pipeline::connect(data)?;
+    mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
+    let s = eras::stamp(conn, timeline, all)?;
+    println!("{} matches placed{}", s.placed, s.from.map(|d| format!(" (re-placed from {} on)", if d.is_empty() { "the start" } else { &d })).unwrap_or_default());
+    #[derive(diesel::QueryableByName)]
+    struct R {
+        #[diesel(sql_type = Text)]
+        start_date: String,
+        #[diesel(sql_type = Text)]
+        name: String,
+        #[diesel(sql_type = Text)]
+        banned: String,
+        #[diesel(sql_type = BigInt)]
+        matches: i64,
+    }
+    let rows: Vec<R> = diesel::sql_query("SELECT e.start_date, e.name, e.banned || CASE WHEN e.unbanned <> '' THEN ' / unbanned ' || e.unbanned ELSE '' END AS banned, (SELECT COUNT(*) FROM mtgo_matches m WHERE m.era_id = e.id AND m.replay = 0) AS matches FROM mtgo_eras e ORDER BY e.start_date").load(conn).map_err(|e| e.to_string())?;
+    let before: i64 = diesel::sql_query("SELECT COUNT(*) AS n FROM mtgo_matches WHERE era_id IS NULL AND replay = 0").get_result::<mtgctl::mtgolog::db::CountRow>(conn).map_err(|e| e.to_string())?.n;
+    println!("{:<11} {:>7}  {:<42} banned", "from", "matches", "era");
+    for r in &rows {
+        println!("{:<11} {:>7}  {:<42} {}", r.start_date, r.matches, r.name, r.banned);
+    }
+    if before > 0 {
+        println!("{before} matches predate the first era");
+    }
+    let players: Vec<String> = mtgctl::mtgolog::db::mtgo_matches::table.select(mtgctl::mtgolog::db::mtgo_matches::me).distinct().load(conn).map_err(|e| e.to_string())?;
+    for p in players {
+        if let Some((days, last)) = eras::staleness(conn, timeline, &p)? {
+            println!("{p}: newest match is {days} days past the timeline's last event ({last}); the timeline is probably missing a set release or B&R change");
+        }
+    }
+    println!("\nbanned cards, games played before / on or after the ban took effect:");
+    for (date, card, before, after) in eras::ban_check(conn, timeline)? {
+        println!("  {date} {card:<32} {before:>5} / {after:<5}{}", if after > 0 { "  <-- after the ban: check the effective date" } else { "" });
     }
     Ok(())
 }
@@ -1229,6 +1279,12 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Cmd::Eras { repo, all } => {
+            if let Err(e) = eras_report(&cli.data, &Reference::locate(&repo, &cli.data).timeline, all) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         Cmd::PlayerRemove { player } => {
             let conn = &mut pipeline::connect(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             match mtgctl::mtgolog::db::ensure_schema(conn).and_then(|_| mtgctl::mtgolog::db::remove_player(conn, &player)) {
@@ -1253,7 +1309,13 @@ async fn main() {
             let conn = &mut pipeline::connect(&cli.data).expect("database");
             mtgctl::mtgolog::db::ensure_schema(conn).expect("schema");
             stats::ensure_view(conn).expect("view");
-            let state = Arc::new(AppState { data: cli.data.clone(), reference: Reference::locate(&repo, &cli.data), sync_lock: Mutex::new(()) });
+            let reference = Reference::locate(&repo, &cli.data);
+            // a deploy that changed the timeline re-places the matches from the first changed era on
+            match mtgctl::mtgolog::eras::stamp(conn, &reference.timeline, false) {
+                Ok(s) => eprintln!("eras: {} matches placed in {} eras{}", s.placed, s.eras, s.from.map(|d| format!(", the timeline changed from {d} on")).unwrap_or_default()),
+                Err(e) => eprintln!("eras: {e}"),
+            }
+            let state = Arc::new(AppState { data: cli.data.clone(), reference, sync_lock: Mutex::new(()) });
             let app = Router::new()
                 .route("/api/me", get(me))
                 .route("/api/players", get(players))

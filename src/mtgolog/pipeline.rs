@@ -108,6 +108,9 @@ pub fn sync(conn: &mut SqliteConnection, dir: &PlayerDir, username: &str, refere
     }
     let st = super::db::import(conn, &cfg, &dir.logs(), false, true).map_err(|e| format!("import: {e}"))?;
     timed(&mut steps, format!("import: {} new, {} refreshed, {} skipped, {} in progress, {} failed", st.matches, st.refreshed, st.skipped, st.in_progress, st.failed));
+    let es = super::eras::stamp(conn, &reference.timeline, false).map_err(|e| format!("eras: {e}"))?;
+    let stale = super::eras::staleness(conn, &reference.timeline, username)?.map(|(days, last)| format!("; the newest match is {days} days past the timeline's last event ({last}): definitions/mtgo/legacy_timeline.toml is probably missing a set release or B&R change")).unwrap_or_default();
+    timed(&mut steps, format!("eras: {} matches placed in {} eras{}{stale}", es.placed, es.eras, es.from.map(|d| format!(", the timeline changed from {d} on")).unwrap_or_default()));
 
     // fetch = true: list catalog ids are printings the game logs never name; Scryfall fills them once per player DB.
     let dl = super::decklist::run_decklists(conn, &cfg, username, true, false).map_err(|e| format!("decklists: {e}"))?;
