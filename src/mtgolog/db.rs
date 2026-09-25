@@ -29,24 +29,9 @@ diesel::table! {
         record_count -> Integer,
         event_name -> Nullable<Text>,
         format -> Nullable<Text>,
-        my_cluster -> Nullable<Integer>,
-        opp_cluster -> Nullable<Integer>,
         era_id -> Nullable<Integer>,
         imported_at -> Text,
-        my_variant -> Nullable<Integer>,
-        opp_variant -> Nullable<Integer>,
         my_list_id -> Nullable<Integer>,
-    }
-}
-
-diesel::table! {
-    mtgo_variants (id) {
-        id -> Integer,
-        cluster_id -> Integer,
-        size -> Integer,
-        name -> Text,
-        top_cards -> Text,
-        threshold -> Double,
     }
 }
 
@@ -108,17 +93,6 @@ diesel::table! {
 }
 
 diesel::table! {
-    mtgo_clusters (id) {
-        id -> Integer,
-        size -> Integer,
-        name -> Nullable<Text>,
-        top_cards -> Text,
-        threshold -> Double,
-        created_at -> Text,
-    }
-}
-
-diesel::table! {
     mtgo_eras (id) {
         id -> Integer,
         start_date -> Text,
@@ -131,20 +105,7 @@ diesel::table! {
     }
 }
 
-diesel::table! {
-    mtgo_match_labels (match_id, side, source) {
-        match_id -> Integer,
-        side -> Text,
-        source -> Text,
-        archetype -> Nullable<Text>,
-        subtype -> Nullable<Text>,
-        category -> Nullable<Text>,
-        archetype_marker -> Nullable<Text>,
-        subtype_marker -> Nullable<Text>,
-    }
-}
-
-diesel::allow_tables_to_appear_in_same_query!(mtgo_matches, mtgo_games, mtgo_game_cards, mtgo_events, mtgo_clusters, mtgo_eras, mtgo_variants, mtgo_match_labels);
+diesel::allow_tables_to_appear_in_same_query!(mtgo_matches, mtgo_games, mtgo_game_cards, mtgo_events, mtgo_eras);
 
 const DDL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS mtgo_matches (
@@ -163,8 +124,6 @@ const DDL: &[&str] = &[
         record_count INTEGER NOT NULL,
         event_name TEXT,                 -- from mtgo_game_history (later)
         format TEXT,
-        my_cluster INTEGER,              -- mtgo_clusters.id (deck signature cluster)
-        opp_cluster INTEGER,
         era_id INTEGER,
         imported_at TEXT NOT NULL
     )",
@@ -215,14 +174,6 @@ const DDL: &[&str] = &[
         target TEXT,                     -- first target (card name or player side)
         text TEXT NOT NULL               -- raw line without the @P prefix
     )",
-    "CREATE TABLE IF NOT EXISTS mtgo_clusters (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        size INTEGER NOT NULL,
-        name TEXT,
-        top_cards TEXT NOT NULL,
-        threshold DOUBLE NOT NULL,
-        created_at TEXT NOT NULL
-    )",
     "CREATE TABLE IF NOT EXISTS mtgo_eras (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         start_date TEXT NOT NULL,        -- effective date (MTGO) of the change that opens the era
@@ -232,25 +183,6 @@ const DDL: &[&str] = &[
         unbanned TEXT NOT NULL DEFAULT '',
         notes TEXT NOT NULL DEFAULT '',
         source TEXT NOT NULL DEFAULT ''
-    )",
-    "CREATE TABLE IF NOT EXISTS mtgo_variants (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        cluster_id INTEGER NOT NULL,     -- parent mtgo_clusters.id
-        size INTEGER NOT NULL,
-        name TEXT NOT NULL,              -- cards distinguishing this variant from its siblings
-        top_cards TEXT NOT NULL,
-        threshold DOUBLE NOT NULL
-    )",
-    "CREATE TABLE IF NOT EXISTS mtgo_match_labels (
-        match_id INTEGER NOT NULL,
-        side TEXT NOT NULL,              -- me | opp
-        source TEXT NOT NULL,            -- guess (marker rules) | list (Deck Used logs) | manual
-        archetype TEXT,
-        subtype TEXT,
-        category TEXT,
-        archetype_marker TEXT,           -- the card that triggered the archetype guess
-        subtype_marker TEXT,
-        PRIMARY KEY (match_id, side, source)
     )",
     "CREATE TABLE IF NOT EXISTS mtgo_state (
         key TEXT PRIMARY KEY,            -- e.g. explain_reviewed_through
@@ -272,11 +204,11 @@ pub struct CountRow {
 }
 
 pub fn ensure_schema(conn: &mut SqliteConnection) -> QueryResult<()> {
-    for stmt in DDL.iter().chain(super::decklist::DDL.iter()).chain(super::ldc::DDL.iter()).chain(super::skeleton::DDL.iter()).chain(super::colors::DDL.iter()).chain([super::reference::ASSIGN_DDL, super::reference::MATCH_DECKS_DDL].iter()) {
+    for stmt in DDL.iter().chain(super::decklist::DDL.iter()).chain([super::reference::ASSIGN_DDL, super::reference::MATCH_DECKS_DDL].iter()) {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     // Columns added after the first release (ALTER if missing).
-    for (table, col, ty) in [("mtgo_matches", "my_variant", "INTEGER"), ("mtgo_matches", "opp_variant", "INTEGER"), ("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT"), ("mtgo_lists", "me", "TEXT"), ("mtgo_decklists", "me", "TEXT")] {
+    for (table, col, ty) in [("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT"), ("mtgo_lists", "me", "TEXT"), ("mtgo_decklists", "me", "TEXT")] {
         if diesel::sql_query(format!("SELECT {col} FROM {table} LIMIT 0")).execute(conn).is_err() {
             diesel::sql_query(format!("ALTER TABLE {table} ADD COLUMN {col} {ty}")).execute(conn)?;
             if col == "me" {
@@ -553,7 +485,7 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
 
 /// Remove one match and everything hanging off it (foreign keys are not enforced by default in SQLite).
 fn delete_match(conn: &mut SqliteConnection, id: i32) -> QueryResult<()> {
-    for t in ["mtgo_events", "mtgo_game_cards", "mtgo_games", "mtgo_match_labels", "mtgo_match_colors", "match_decks"] {
+    for t in ["mtgo_events", "mtgo_game_cards", "mtgo_games", "match_decks"] {
         diesel::sql_query(format!("DELETE FROM {t} WHERE match_id = {id}")).execute(conn)?;
     }
     diesel::sql_query(format!("DELETE FROM mtgo_matches WHERE id = {id}")).execute(conn)?;

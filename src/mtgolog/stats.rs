@@ -7,7 +7,7 @@ use diesel::sql_types::{BigInt, Double, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
 use std::collections::HashMap;
 
-/// One row per game, joined with its match and cluster names. Rebuilt on every run (cheap).
+/// One row per game, joined with its match and both sides' deck labels.
 pub const VIEW_SQL: &str = "CREATE VIEW mtgo_game_view AS
 SELECT
   g.id                AS game_id,
@@ -36,24 +36,6 @@ SELECT
     ELSE 'Other'
   END                 AS event_type,
   m.format            AS format,
-  m.my_cluster        AS my_cards_id,
-  cm.name             AS my_cards,
-  m.opp_cluster       AS opp_cards_id,
-  co.name             AS opp_cards,
-  m.my_variant        AS my_cards_variant_id,
-  vm.name             AS my_cards_variant,
-  m.opp_variant       AS opp_cards_variant_id,
-  vo.name             AS opp_cards_variant,
-  CASE WHEN mg.match_id IS NULL THEN lg.archetype        ELSE mg.archetype        END AS my_guess_archetype,
-  CASE WHEN mg.match_id IS NULL THEN lg.subtype          ELSE mg.subtype          END AS my_guess_subtype,
-  CASE WHEN mg.match_id IS NULL THEN lg.category         ELSE mg.category         END AS my_guess_category,
-  CASE WHEN mg.match_id IS NULL THEN lg.archetype_marker ELSE mg.archetype_marker END AS my_guess_marker,
-  CASE WHEN mg.match_id IS NULL THEN lg.subtype_marker   ELSE mg.subtype_marker   END AS my_guess_subtype_marker,
-  CASE WHEN mo.match_id IS NULL THEN lo.archetype        ELSE mo.archetype        END AS opp_guess_archetype,
-  CASE WHEN mo.match_id IS NULL THEN lo.subtype          ELSE mo.subtype          END AS opp_guess_subtype,
-  CASE WHEN mo.match_id IS NULL THEN lo.category         ELSE mo.category         END AS opp_guess_category,
-  CASE WHEN mo.match_id IS NULL THEN lo.archetype_marker ELSE mo.archetype_marker END AS opp_guess_marker,
-  CASE WHEN mo.match_id IS NULL THEN lo.subtype_marker   ELSE mo.subtype_marker   END AS opp_guess_subtype_marker,
   md.colors           AS my_colors,
   od.colors           AS opp_colors,
   md.reference_id     AS my_reference_id,
@@ -77,9 +59,6 @@ SELECT
   od.misfit           AS opp_misfit,
   od.seen             AS opp_seen,
   COALESCE(li.experimental, 0) AS my_experimental,
-  ll.archetype        AS my_list_archetype,
-  ll.subtype          AS my_list_subtype,
-  ll.category         AS my_list_category,
   g.list_id           AS game_list_id,
   dl.event_kind       AS event_kind,
   g.game_number       AS game_number,
@@ -101,20 +80,11 @@ SELECT
   g.opp_spells        AS opp_spells
 FROM mtgo_games g
 JOIN mtgo_matches m ON m.id = g.match_id
-LEFT JOIN mtgo_clusters cm ON cm.id = m.my_cluster
-LEFT JOIN mtgo_clusters co ON co.id = m.opp_cluster
-LEFT JOIN mtgo_variants vm ON vm.id = m.my_variant
-LEFT JOIN mtgo_variants vo ON vo.id = m.opp_variant
 LEFT JOIN mtgo_eras e ON e.id = m.era_id
-LEFT JOIN mtgo_match_labels lg ON lg.match_id = m.id AND lg.side = 'me' AND lg.source = 'guess'
-LEFT JOIN mtgo_match_labels lo ON lo.match_id = m.id AND lo.side = 'opp' AND lo.source = 'guess'
-LEFT JOIN mtgo_match_labels mg ON mg.match_id = m.id AND mg.side = 'me' AND mg.source = 'manual'
-LEFT JOIN mtgo_match_labels mo ON mo.match_id = m.id AND mo.side = 'opp' AND mo.source = 'manual'
 LEFT JOIN match_decks md ON md.match_id = m.id AND md.side = 'me'
 LEFT JOIN match_decks od ON od.match_id = m.id AND od.side = 'opp'
 LEFT JOIN mtgo_lists li ON li.id = COALESCE(m.my_list_id, md.list_id)
 LEFT JOIN list_assignments la ON la.list_id = COALESCE(m.my_list_id, md.list_id)
-LEFT JOIN mtgo_match_labels ll ON ll.match_id = m.id AND ll.side = 'me' AND ll.source = 'list'
 LEFT JOIN mtgo_decklists dl ON dl.game_db_id = g.id
 WHERE m.replay = 0";
 
@@ -443,7 +413,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
         hists.push(m);
     }
     // Decks, versions, eras and dates read best in the order they happened; sizes are for the rest.
-    const CHRONOLOGICAL: &[&str] = &["my_list", "my_list_id", "game_list_id", "my_cards_variant", "my_cards_variant_id", "era", "era_id", "month", "date"];
+    const CHRONOLOGICAL: &[&str] = &["my_list", "my_list_id", "game_list_id", "era", "era_id", "month", "date"];
     let sort = if sort == "games" && by.first().map(|c| CHRONOLOGICAL.contains(&c.as_str())).unwrap_or(false) { "time" } else { sort };
     match sort {
         "time" => rows.sort_by(|a, b| a.first_date.cmp(&b.first_date).then_with(|| natural_cmp(a.key.as_deref().unwrap_or(""), b.key.as_deref().unwrap_or("")))),
@@ -471,7 +441,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
 
 fn print_result(q: &StatsQuery, r: StatsResult) {
     let StatsResult { by, rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups, .. } = r;
-    let (min_games, limit, where_sql) = (q.min_games, q.limit, q.where_sql.as_deref());
+    let (min_games, limit) = (q.min_games, q.limit);
     let total_games = all_games;
 
     let mut t = Table::new();
@@ -560,11 +530,6 @@ fn print_result(q: &StatsQuery, r: StatsResult) {
         rows.len(),
         if hidden_groups == 0 { String::new() } else { format!("; {hidden_groups} groups rolled up into the last row (--min {min_games}, --limit {limit})") }
     );
-    let uses_signature = by.iter().chain(q.hist.iter()).any(|c| SIGNATURE_COLS.contains(&c.as_str()))
-        || where_sql.is_some_and(|w| SIGNATURE_COLS.iter().any(|c| w.contains(c)));
-    if uses_signature {
-        println!("{SIGNATURE_NOTE}");
-    }
 }
 
 /// Sum hidden groups into one "(other)" row; averages are game-weighted.
@@ -631,15 +596,14 @@ pub fn is_game_mode(q: &StatsQuery) -> bool {
         || q.where_sql.as_deref().is_some_and(|w| GAME_COLS.iter().any(|c| mentions_col(w, c)))
 }
 
-/// Columns derived from clustering observed cards (not registered decklists).
-pub const SIGNATURE_COLS: &[&str] = &["my_cards", "opp_cards", "my_cards_variant", "opp_cards_variant", "my_cards_id", "opp_cards_id", "my_cards_variant_id", "opp_cards_variant_id"];
-pub const SIGNATURE_NOTE: &str = "note: opp_cards = cluster of the cards the opponent actually showed me (what I faced). my_cards = cluster of the cards I drew/played — NOT my decklist (my_cards_variant merges my matches per day+cluster); my_colors/opp_colors = minimal colours proven by the cards shown (WUBRG letters; fetches prove nothing); my_guess_*/opp_guess_* = nearest-anchor labels (`mtgo label`: the whole card signature votes against LDC/hand/list-labelled matches), overridden per match by `mtgo label-match`. my_list/my_list_* = exact registered list (has_decklist=1); my_deck/my_archetype = the deck named by the nearest reference decklist (my_deck_known=1), from the client's 'Deck Used' session logs — available from 2026-08-18 on. my_experimental = 1 when the list is a throwaway brew (`mtgo experimental`), exclude with --where 'my_experimental = 0' or in default_scope.";
+/// Printed with `mtgo columns`.
+pub const COLUMNS_NOTE: &str = "note: my_deck/my_archetype and opp_deck/opp_archetype = the reference deck a registered list is nearest to, or the side's revealed cards fit; my_deck_grade = hard (a registered list, from the client's 'Deck Used' session logs, 2026-08-18 on, named by a reference) | inferred (from the cards played) | none; opp_deck_candidates = the decks not ruled out; my_colors/opp_colors = WUBRG letters the revealed lands (or the list's lands) can make; my_list = the exact registered list; my_experimental = 1 for a throwaway brew.";
 
 pub fn print_columns(src: &mut Source) -> Result<(), String> {
     let cols = src.columns()?;
     println!("mtgo_game_view columns (use with --by / --where):");
     println!("  {}", cols.join(", "));
-    println!("{SIGNATURE_NOTE}");
-    println!("Tables: mtgo_matches, mtgo_games, mtgo_game_cards (game_id, side, name, instances, plays, first_turn, played), mtgo_events (game_id, seq, ts, turn, side, kind, card, target, text), mtgo_clusters, mtgo_eras");
+    println!("{COLUMNS_NOTE}");
+    println!("Tables: mtgo_matches, mtgo_games, mtgo_game_cards (game_id, side, name, instances, plays, first_turn, played), mtgo_events (game_id, seq, ts, turn, side, kind, card, target, text), mtgo_lists, match_decks");
     Ok(())
 }

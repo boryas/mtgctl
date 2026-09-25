@@ -30,12 +30,11 @@ impl PlayerDir {
         std::fs::create_dir_all(self.sessions())
     }
     /// A config pointing every path at this player, everything else default.
-    pub fn config(&self, username: &str, reference: &Reference) -> MtgoConfig {
+    pub fn config(&self, username: &str) -> MtgoConfig {
         MtgoConfig {
             log_dir: Some(self.logs().to_string_lossy().to_string()),
             username: Some(username.to_string()),
             session_logs_dir: Some(self.sessions().to_string_lossy().to_string()),
-            markers: Some(reference.markers.to_string_lossy().to_string()),
             ..MtgoConfig::default()
         }
     }
@@ -55,11 +54,10 @@ pub fn connect(data: &Path) -> Result<SqliteConnection, String> {
     Ok(conn)
 }
 
-/// Player-independent inputs: the marker rules (only to give my own lists a readable lineage
-/// name, see decklist::auto_name_lists) and catalog-id → card-name rows that Scryfall cannot
-/// answer (DFC printings; only the MTGO client's own card database knows them).
+/// Player-independent inputs: catalog-id → card-name rows that Scryfall cannot answer (DFC
+/// printings; only the MTGO client's own card database knows them), the reference decklists and
+/// the Legacy timeline.
 pub struct Reference {
-    pub markers: PathBuf,
     pub card_names: Option<PathBuf>,
     /// the shared database (reference decklists, card facts)
     pub shared_db: PathBuf,
@@ -68,10 +66,10 @@ pub struct Reference {
 }
 
 impl Reference {
-    /// `repo` holds `definitions/mtgo/markers.toml` and `deploy/mtgo_cards_seed.sql`; `data` holds `shared.db`.
+    /// `repo` holds `definitions/mtgo/legacy_timeline.toml` and `deploy/mtgo_cards_seed.sql`; `data` holds `shared.db`.
     pub fn locate(repo: &Path, data: &Path) -> Self {
         let seed = repo.join("deploy/mtgo_cards_seed.sql");
-        Reference { markers: repo.join("definitions/mtgo/markers.toml"), card_names: seed.exists().then_some(seed), shared_db: data.join("shared.db"), timeline: repo.join("definitions/mtgo/legacy_timeline.toml") }
+        Reference { card_names: seed.exists().then_some(seed), shared_db: data.join("shared.db"), timeline: repo.join("definitions/mtgo/legacy_timeline.toml") }
     }
 }
 
@@ -92,7 +90,7 @@ pub struct SyncReport {
 /// `username` are rewritten. Each step's own console output goes to the server log.
 pub fn sync(conn: &mut SqliteConnection, dir: &PlayerDir, username: &str, reference: &Reference) -> Result<SyncReport, String> {
     dir.ensure().map_err(|e| e.to_string())?;
-    let cfg = dir.config(username, reference);
+    let cfg = dir.config(username);
     super::db::ensure_schema(conn).map_err(|e| e.to_string())?;
     let mut steps = Vec::new();
     let t0 = std::time::Instant::now();
@@ -124,8 +122,6 @@ pub fn sync(conn: &mut SqliteConnection, dir: &PlayerDir, username: &str, refere
     let md = super::reference::label_matches(conn, &refs, username).map_err(|e| format!("match decks: {e}"))?;
     timed(&mut steps, format!("match decks: mine from list {}, from cards {} ({} placed on a registered list); opponents named {}, archetype only {}", md.me_list, md.me_cards, md.me_list_inferred, md.opp_named, md.opp_archetype_only));
 
-    // Guessed opponent labels are not part of this pipeline; clear any left by an older build.
-    diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE source = 'guess' AND match_id IN (SELECT id FROM mtgo_matches WHERE me = '{}')", username.replace('\'', "''"))).execute(conn).map_err(|e| e.to_string())?;
 
     Ok(SyncReport { imported: st.matches, refreshed: st.refreshed, skipped: st.skipped, in_progress: st.in_progress, failed: st.failed, lists: dl.lists, linked_games: dl.linked, lists_assigned, steps })
 }

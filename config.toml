@@ -65,7 +65,7 @@ username = "boryas"
 # `mtgctl mtgo stats -i` defaults: columns pre-selected as filters / group-bys / histograms
 # (any column of mtgo_game_view — see `mtgctl mtgo columns` — plus "last N matches").
 stats_filters = ["my_deck"]
-stats_groupbys = ["opp_guess_archetype"]
+stats_groupbys = ["opp_archetype"]
 stats_hist = []
 stats_min_games = 1
 # Row order pre-selected in `mtgo stats -i`: games (size), wr, key, time.
@@ -75,5 +75,5 @@ picker_filter_columns = []
 picker_groupby_columns = []
 # Default scope for stats/cards/pivot/-i: only matches with an exact registered list (from the
 # client's session logs, 2026-08-18 on). Pass --all to include the historical, observation-only matches.
-# Add "AND my_experimental = 0" to drop lists tagged with `mtgctl mtgo experimental <id>…`.
+# Add "AND my_experimental = 0" to drop lists tagged experimental on the site's lists page.
 default_scope = "has_decklist = 1"

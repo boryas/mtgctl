@@ -71,9 +71,9 @@ enum Cmd {
     /// Delete one stored session extract of a player (by file name); the next upload of that log stores it again.
     SessionRemove { player: String, name: String },
     /// Rebuild the pooled database from every player's uploads, carrying list names and experimental
-    /// tags (by list hash) and manual labels (by match guid) over from the per-player databases of older builds.
+    /// tags (by list hash) over from the per-player databases of older builds.
     Rebuild {
-        /// Repo root holding definitions/mtgo/markers.toml.
+        /// Repo root holding definitions/mtgo/legacy_timeline.toml.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
@@ -102,7 +102,7 @@ enum Cmd {
         /// Static files (the stats and collector pages).
         #[arg(long, default_value = "web")]
         web: PathBuf,
-        /// Repo root holding definitions/mtgo/markers.toml.
+        /// Repo root holding definitions/mtgo/legacy_timeline.toml.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
@@ -482,8 +482,7 @@ fn compact_sessions(data: &Path) -> Result<(), String> {
 }
 
 /// Sync every player into the pooled database. Marks made in an older build's per-player database
-/// (list name, fork and experimental tag by list hash; manual labels by match guid) are carried onto
-/// lists that have none and matches without a manual label.
+/// (list name, fork and experimental tag by list hash) are carried onto lists that have none.
 fn rebuild(data: &Path, reference: &Reference) -> Result<(), String> {
     use diesel::prelude::*;
     use diesel::sql_types::{Bool, Nullable, Text};
@@ -498,19 +497,6 @@ fn rebuild(data: &Path, reference: &Reference) -> Result<(), String> {
         #[diesel(sql_type = Bool)]
         experimental: bool,
     }
-    #[derive(diesel::QueryableByName)]
-    struct Label {
-        #[diesel(sql_type = Text)]
-        guid: String,
-        #[diesel(sql_type = Text)]
-        side: String,
-        #[diesel(sql_type = Nullable<Text>)]
-        archetype: Option<String>,
-        #[diesel(sql_type = Nullable<Text>)]
-        subtype: Option<String>,
-        #[diesel(sql_type = Nullable<Text>)]
-        category: Option<String>,
-    }
     let o = |v: &Option<String>| v.as_deref().map(sq).unwrap_or("NULL".into());
     let conn = &mut pipeline::connect(data)?;
     mtgctl::mtgolog::db::ensure_schema(conn).map_err(|e| e.to_string())?;
@@ -519,13 +505,11 @@ fn rebuild(data: &Path, reference: &Reference) -> Result<(), String> {
     names.sort();
     for name in names {
         let dir = player_dir_at(data, &name);
-        let (marks, labels): (Vec<ListMark>, Vec<Label>) = if dir.old_db().exists() {
+        let marks: Vec<ListMark> = if dir.old_db().exists() {
             let old = &mut mtgctl::db::establish_connection_at(&dir.old_db())?;
-            let marks = diesel::sql_query("SELECT hash, name, fork, experimental FROM mtgo_lists WHERE name IS NOT NULL OR fork IS NOT NULL OR experimental = 1").load(old).map_err(|e| e.to_string())?;
-            let labels = diesel::sql_query("SELECT m.guid, l.side, l.archetype, l.subtype, l.category FROM mtgo_match_labels l JOIN mtgo_matches m ON m.id = l.match_id WHERE l.source = 'manual'").load(old).map_err(|e| e.to_string())?;
-            (marks, labels)
+            diesel::sql_query("SELECT hash, name, fork, experimental FROM mtgo_lists WHERE name IS NOT NULL OR fork IS NOT NULL OR experimental = 1").load(old).map_err(|e| e.to_string())?
         } else {
-            (vec![], vec![])
+            vec![]
         };
         let report = pipeline::sync(conn, &dir, &name, reference)?;
         let me = sq(&name);
@@ -538,16 +522,7 @@ fn rebuild(data: &Path, reference: &Reference) -> Result<(), String> {
             .execute(conn)
             .map_err(|e| e.to_string())?;
         }
-        let mut labelled = 0;
-        for l in &labels {
-            labelled += diesel::sql_query(format!(
-                "INSERT OR IGNORE INTO mtgo_match_labels(match_id, side, source, archetype, subtype, category) SELECT id, {}, 'manual', {}, {}, {} FROM mtgo_matches WHERE me = {me} AND guid = {}",
-                sq(&l.side), o(&l.archetype), o(&l.subtype), o(&l.category), sq(&l.guid)
-            ))
-            .execute(conn)
-            .map_err(|e| e.to_string())?;
-        }
-        println!("{name}: {} matches imported, {} lists; {carried} of {} list marks and {labelled} of {} manual labels carried over", report.imported, report.lists, marks.len(), labels.len());
+        println!("{name}: {} matches imported, {} lists; {carried} of {} list marks carried over", report.imported, report.lists, marks.len());
         for step in &report.steps {
             println!("  {step}");
         }

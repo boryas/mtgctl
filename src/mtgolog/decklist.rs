@@ -5,7 +5,6 @@
 //! else Scryfall's /cards/mtgo/<id>, cached), dedupes identical lists, and links each to the imported
 //! game whose start time matches (validated by containment of the cards actually played).
 
-use super::db::{mtgo_games, mtgo_matches, mtgo_match_labels};
 use super::MtgoConfig;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, CellAlignment, Table};
@@ -69,7 +68,7 @@ pub const DDL: &[&str] = &[
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         me TEXT,                            -- the player whose list it is; lineage and marks are theirs
         hash TEXT NOT NULL,                 -- canonical (name, qty, sideboard) multiset, unique per me
-        name TEXT,                          -- user-given name (mtgctl mtgo name-list)
+        name TEXT,                          -- user-given name
         auto_name TEXT,                     -- Archetype/Subtype v2 (08-21): lineage + version + first-seen
         fork TEXT,                          -- concept declared at this list (mtgo fork); NULL = inherit from parent
         fork_experimental BOOLEAN NOT NULL DEFAULT 0, -- the declared concept is a throwaway brew
@@ -523,7 +522,6 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fe
         let mut seen_lists: HashSet<i32> = HashSet::new();
         diesel::sql_query(format!("UPDATE mtgo_games SET list_id = NULL WHERE match_id IN ({mine})")).execute(conn)?;
         diesel::sql_query(format!("UPDATE mtgo_matches SET my_list_id = NULL WHERE id IN ({mine})")).execute(conn)?;
-        diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE side = 'me' AND source = 'list' AND match_id IN ({mine})")).execute(conn)?;
         let unknown_names = ids.iter().filter(|id| !names.contains_key(id)).count();
 
         let games: Vec<GameStart> = diesel::sql_query(format!("SELECT g.id, g.match_id, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE m.replay = 0 AND m.me = {}", sq(me))).load(conn)?;
@@ -613,22 +611,11 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fe
                 diesel::sql_query(format!("UPDATE mtgo_matches SET event_name = {en} WHERE id = {mid}")).execute(conn)?;
             }
         }
-        // match-level list = the list of its earliest linked game (the registered list); label source='list'
-        let rules = super::label::load_markers(&cfg.markers_path()).unwrap_or_default();
+        // match-level list = the list of its earliest linked game (the registered list)
         for mid in touched_matches {
             let first: Option<IdRow> = diesel::sql_query(format!("SELECT g.list_id AS id FROM mtgo_games g WHERE g.match_id = {mid} AND g.list_id IS NOT NULL ORDER BY g.game_number LIMIT 1")).get_result(conn).optional()?;
             if let Some(r) = first {
                 diesel::sql_query(format!("UPDATE mtgo_matches SET my_list_id = {} WHERE id = {mid}", r.id)).execute(conn)?;
-                let names: Vec<PlayedRow> = diesel::sql_query(format!("SELECT name FROM mtgo_list_cards WHERE list_id = {}", r.id)).load(conn)?;
-                let set: BTreeSet<String> = names.into_iter().map(|n| n.name).collect();
-                let g = super::label::guess(&rules, &set);
-                diesel::sql_query(format!("DELETE FROM mtgo_match_labels WHERE match_id = {mid} AND side = 'me' AND source = 'list'")).execute(conn)?;
-                let q = |v: &Option<String>| v.as_ref().map(|x| format!("'{}'", x.replace('\'', "''"))).unwrap_or("NULL".into());
-                diesel::sql_query(format!(
-                    "INSERT INTO mtgo_match_labels(match_id, side, source, archetype, subtype, category, archetype_marker, subtype_marker) VALUES ({mid}, 'me', 'list', {}, {}, {}, {}, {})",
-                    q(&g.archetype), q(&g.subtype), q(&g.category), q(&g.archetype_marker), q(&g.subtype_marker)
-                ))
-                .execute(conn)?;
             }
         }
         let gone = format!("SELECT id FROM mtgo_lists WHERE me = {} AND id NOT IN ({})", sq(me), seen_lists.iter().map(|i| i.to_string()).chain(["0".to_string()]).collect::<Vec<_>>().join(", "));
@@ -637,7 +624,6 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fe
         }
         diesel::sql_query(format!("DELETE FROM mtgo_lists WHERE id IN ({gone})")).execute(conn)?;
         st.lists = seen_lists.len();
-        let _ = (mtgo_games::table, mtgo_matches::table, mtgo_match_labels::table);
         Ok(st)
     })?;
     if timing { eprintln!("decklists: rebuild + link {:.1}s", t2.elapsed().as_secs_f64()); }
@@ -742,7 +728,7 @@ pub fn print_lists(conn: &mut SqliteConnection) -> QueryResult<()> {
         ]);
     }
     println!("{t}");
-    println!("{} distinct lists (a list = exact main+side multiset; post-board configurations are separate lists). `mtgctl mtgo list <id>` prints one; `mtgo name-list <id> <name>` names it; `mtgo experimental <id>…` tags throwaway brews (exp ✓, my_experimental = 1).", rows.len());
+    println!("{} distinct lists (a list = exact main+side multiset; post-board configurations are separate lists). `mtgctl mtgo list <id>` prints one.", rows.len());
     Ok(())
 }
 
