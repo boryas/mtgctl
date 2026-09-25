@@ -128,6 +128,9 @@ const CARD_FIELDS = {
   opp_runs: { label: "opponent's list runs", neg: "opponent's list lacks", side: 'opp', runs: true },
   my_runs: { label: 'my list runs', neg: 'my list lacks', side: 'my', runs: true },
 };
+// A "showed" filter holds for the whole match when the card was revealed in any of its games
+// (scope 'match', the default), or only for the games it was revealed in (scope 'game').
+const inGame = f => f.scope === 'game' && CARD_FIELDS[f.field] && !CARD_FIELDS[f.field].runs;
 const COLOR_OPS = { all: 'has all of', exact: 'is exactly', none: 'has none of' };
 // Per kind: its ops (the first is the default) and whether a filter of it can be negated.
 const KINDS = {
@@ -166,6 +169,11 @@ function filterSql(f) {
     }
     case 'card': {
       const d = CARD_FIELDS[c], s = d.side;
+      if (inGame(f)) {
+        // this game's own revealed cards; game_id outside the subquery is the view row's
+        const cond = vs.map(v => f.op === 'contains' ? `gc.name LIKE ${like(v)}` : `gc.name = ${sq(v)}`).join(' OR ');
+        return `game_id ${f.not ? 'NOT IN' : 'IN'} (SELECT gc.game_id FROM mtgo_game_cards gc WHERE gc.side = '${s === 'opp' ? 'opp' : 'me'}' AND gc.played = 1 AND (${cond}))`;
+      }
       const one = v => f.op === 'contains' ? (d.runs ? runsSql(s, `rc.name LIKE ${like(v)}`) : `${s}_seen LIKE ${like(v)}`) : (d.runs ? runsSql(s, `rc.name = ${sq(v)}`) : showedSql(s, v));
       const t = `(${vs.map(one).join(' OR ')})`;
       // a list lacks a card only where a list is known
@@ -192,7 +200,7 @@ function filterText(f) {
       if (f.op === 'contains') return `${F.label} ${f.not ? "doesn't contain" : 'contains'} ${or(vs.map(v => `“${v}”`))}`;
       if (f.op !== 'is') return `${f.not ? 'not ' : ''}${F.label} ${f.op} ${vs[0]}`;
       return `${F.label} ${f.not ? 'is not' : 'is'} ${or(vs.map(v => valText(f.field, v)))}`;
-    case 'card': { const d = CARD_FIELDS[f.field]; return `${f.not ? d.neg : d.label} ${f.op === 'contains' ? `a card containing ${or(vs.map(v => `“${v}”`))}` : or(vs)}`; }
+    case 'card': { const d = CARD_FIELDS[f.field]; return `${f.not ? d.neg : d.label} ${f.op === 'contains' ? `a card containing ${or(vs.map(v => `“${v}”`))}` : or(vs)}${d.runs ? '' : inGame(f) ? ' in that game' : ' in the match'}`; }
     case 'colors': return `${f.not ? 'not: ' : ''}${F.label} ${COLOR_OPS[f.op]} ${vs[0]}`;
     case 'date': return `date ${f.values[0] || '…'} → ${f.values[1] || '…'}`;
     case 'stat': { const s = STATS[f.field.slice(5)]; return `${s.label} ${f.op} ${s.rate || s.bar ? (100 * vs[0]).toFixed(0) + '%' : vs[0]}`; }
@@ -287,9 +295,10 @@ function editor(f, i, textEl) {
   const touch = () => { textEl.textContent = filterText(f); textEl.parentElement.classList.toggle('idle', !active(f)); filtersChanged(); };
   const fieldSel = fieldSelect(f.field);
   const k = kindOf(f), K = k && KINDS[k];
-  box.innerHTML = `<div>${fieldSel}${K ? ` ${Object.keys(K.ops).length > 1 ? `<select class="fop">${Object.entries(K.ops).map(([o, l]) => `<option value="${o}" ${o === f.op ? 'selected' : ''}>${l}</option>`).join('')}</select> ` : ''}${K.negatable ? `<label><input type="checkbox" class="fnot" ${f.not ? 'checked' : ''}> not</label>` : ''}` : ''}</div><div class="fval"></div><div class="fbtns"><button class="fdone">done</button></div>`;
+  box.innerHTML = `<div>${fieldSel}${K ? ` ${Object.keys(K.ops).length > 1 ? `<select class="fop">${Object.entries(K.ops).map(([o, l]) => `<option value="${o}" ${o === f.op ? 'selected' : ''}>${l}</option>`).join('')}</select> ` : ''}${K.negatable ? `<label><input type="checkbox" class="fnot" ${f.not ? 'checked' : ''}> not</label>` : ''}${CARD_FIELDS[f.field] && !CARD_FIELDS[f.field].runs ? ` <select class="fscope"><option value="match">in the match (all its games)</option><option value="game" ${inGame(f) ? 'selected' : ''}>in that game (per game)</option></select>` : ''}` : ''}</div><div class="fval"></div><div class="fbtns"><button class="fdone">done</button></div>`;
   box.querySelector('.ffield').onchange = e => { Object.assign(f, newFilter(e.target.value)); renderFilters(); filtersChanged(); };
   const not = box.querySelector('.fnot'); if (not) not.onchange = () => { f.not = not.checked; touch(); };
+  const scope = box.querySelector('.fscope'); if (scope) scope.onchange = () => { f.scope = scope.value; touch(); };
   const op = box.querySelector('.fop'); if (op) op.onchange = () => { const was = f.op; f.op = op.value; if ((was === 'is') !== (f.op === 'is') || k === 'num') f.values = []; renderFilters(); filtersChanged(); };
   box.querySelector('.fdone').onclick = () => { closeEditor(); editing = null; renderFilters(); };
   if (k) valueEditor(f, i, box.querySelector('.fval'), touch);
@@ -395,7 +404,7 @@ async function lists() {
 }
 const view = () => document.querySelector('input[name=view]:checked').value;
 const chosenStats = () => [...document.querySelectorAll('input[name=stat]:checked')].map(i => i.value);
-const gameQuery = () => [...groupBy(), ...filters.filter(active).map(f => f.field)].some(c => GAME_COLS.includes(c));
+const gameQuery = () => [...groupBy(), ...filters.filter(active).map(f => f.field)].some(c => GAME_COLS.includes(c)) || filters.some(f => active(f) && inGame(f));
 const groupBy = () => [...document.querySelectorAll('input[name=g]:checked')].map(i => i.value);
 
 async function init() {
@@ -498,7 +507,9 @@ function renderStatChoices() {
   const game = gameQuery();
   const sec = document.getElementById('sMatchSec'); sec.classList.toggle('off', game);
   document.getElementById('sMatchWhy').textContent = game ? 'not meaningful with a per-game filter or grouping' : '';
-  document.querySelectorAll('#sMatch input[name=stat]').forEach(i => { i.disabled = game; if (game) i.checked = false; });
+  // a match statistic switched off by per-game mode is replaced by its per-game counterpart
+  const twin = { matches: 'games', mwl: 'gwl', mwr: 'gwr' };
+  document.querySelectorAll('#sMatch input[name=stat]').forEach(i => { if (game && i.checked && twin[i.value]) document.querySelector(`input[name=stat][value=${twin[i.value]}]`).checked = true; i.disabled = game; if (game) i.checked = false; });
   if (game && ![...document.querySelectorAll('input[name=stat]:checked')].length) ['games', 'share', 'gwl', 'gwr'].forEach(k => document.querySelector(`input[name=stat][value=${k}]`).checked = true);
 }
 const PEEKABLE = { my_list: 'my_list', my_deck: 'my_deck', opp_deck: 'my_deck' };
