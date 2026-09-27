@@ -1036,10 +1036,12 @@ struct GameDetail {
     events: Vec<EventRow>,
 }
 
-/// Strip MTGO's `@[Name@:catalog,instance:@]` card markup down to the name.
+/// MTGO's card markup `@[Name@:catalog,instance:@]`.
+static CARD_REF: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"@\[([^@]*)@:([0-9]*),?([0-9]*):@\]").unwrap());
+
+/// Strip MTGO's card markup down to the name.
 fn plain_text(s: &str) -> String {
-    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"@\[([^@]*)@:[0-9,]*:@\]").unwrap());
-    RE.replace_all(s, "$1").into_owned()
+    CARD_REF.replace_all(s, "$1").into_owned()
 }
 
 /// One game: its facts, the cards each side played (with first turn), and the event log.
@@ -1055,6 +1057,153 @@ async fn game_detail(State(st): State<Shared>, Query(q): Query<HashMap<String, S
             e.text = plain_text(&e.text);
         }
         Ok(GameDetail { game, cards, events })
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(bad)?;
+    Ok(Json(r))
+}
+
+#[derive(diesel::QueryableByName)]
+struct ReplayEventRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    seq: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    ts: String,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    turn: i32,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    side: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    kind: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    text: String,
+}
+
+#[derive(Serialize)]
+struct ReplayEvent {
+    seq: i32,
+    ts: String,
+    turn: i32,
+    side: Option<String>,
+    kind: String,
+    text: String,
+    /// the cards the line names, in order
+    cards: Vec<String>,
+}
+
+#[derive(diesel::QueryableByName)]
+struct ReplayKey {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    me: String,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::BigInt>)]
+    mtgo_game_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ReplayPlayer {
+    side: &'static str,
+    name: String,
+    life: i32,
+    hand: i32,
+    library: i32,
+}
+
+#[derive(Serialize)]
+struct ReplayCard {
+    id: i64,
+    name: String,
+    zone: String,
+    /// owner's side
+    side: &'static str,
+    controller: &'static str,
+    land: bool,
+}
+
+#[derive(Serialize)]
+struct ReplayState {
+    at: String,
+    players: Vec<ReplayPlayer>,
+    cards: Vec<ReplayCard>,
+}
+
+#[derive(Serialize)]
+struct Replay {
+    game: GameMeta,
+    events: Vec<ReplayEvent>,
+    states: Vec<ReplayState>,
+    /// why `states` is empty
+    note: Option<String>,
+}
+
+/// One game's event log plus its state snapshots from the player's stored session logs (see
+/// `mtgolog::snapshot`), card names resolved; sideboards are left out.
+async fn replay_api(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Replay>, ApiError> {
+    let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
+    let r = tokio::task::spawn_blocking(move || -> Result<Replay, String> {
+        use diesel::prelude::*;
+        use mtgctl::mtgolog::{decklist, snapshot};
+        let conn = &mut pool(&st)?;
+        let game: GameMeta = diesel::sql_query(format!("SELECT g.id, g.match_id, g.game_number, g.on_play, g.turns, g.winner, g.win_by, g.my_mulligans, g.opp_mulligans, m.opponent, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| format!("no game {id}: {e}"))?;
+        let rows: Vec<ReplayEventRow> = diesel::sql_query(format!("SELECT seq, ts, turn, side, kind, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
+        // (time, object id, name) for every card the log mentions: snapshots share the log's object
+        // ids but may use another printing's catalog id, which Scryfall need not know (back faces)
+        let mut logged: Vec<(String, i64, String)> = Vec::new();
+        let mut events: Vec<ReplayEvent> = Vec::with_capacity(rows.len());
+        for e in rows {
+            let mut cards = Vec::new();
+            for c in CARD_REF.captures_iter(&e.text) {
+                if let Ok(obj) = c[3].parse() {
+                    logged.push((e.ts.clone(), obj, c[1].to_string()));
+                }
+                cards.push(c[1].to_string());
+            }
+            events.push(ReplayEvent { seq: e.seq, ts: e.ts, turn: e.turn, side: e.side, kind: e.kind, text: plain_text(&e.text), cards });
+        }
+        let key: ReplayKey = diesel::sql_query(format!("SELECT m.me, (SELECT d.mtgo_game_id FROM mtgo_decklists d WHERE d.game_db_id = g.id) AS mtgo_game_id FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| e.to_string())?;
+        let Some(mtgo_id) = key.mtgo_game_id else {
+            return Ok(Replay { game, events, states: Vec::new(), note: Some("no session log names this game (the client log of that session was not uploaded)".into()) });
+        };
+        let day = chrono::NaiveDate::parse_from_str(&game.start_ts[..10], "%Y-%m-%d").map_err(|e| e.to_string())?;
+        let cfg = player_dir(&st, &key.me).config(&key.me);
+        let snaps = snapshot::game_snapshots(&cfg, mtgo_id, day);
+        let ids: std::collections::BTreeSet<i64> = snaps.iter().flat_map(|s| s.cards.iter().map(|c| c.catalog_id)).collect();
+        // resolving unknown ids writes the name cache: only while no sync is writing
+        let lands = shared_db(&st.data).and_then(|mut sh| mtgctl::mtgolog::reference::load_lands(&mut sh).map_err(|e| e.to_string()))?;
+        let names = match st.sync_lock.try_lock() {
+            Ok(_g) => decklist::resolve_names(conn, &cfg, &ids, true),
+            Err(_) => decklist::known_names(conn),
+        }
+        .map_err(|e| e.to_string())?;
+        let states = snaps
+            .into_iter()
+            .map(|s| {
+                let side = |pid: i64| if s.players.iter().any(|p| p.id == pid && p.name == key.me) { "me" } else { "opp" };
+                let at = s.at.format("%Y-%m-%d %H:%M:%S").to_string();
+                // the object's name as of this state (a transform keeps the id), else its first
+                let by_object = |obj: i64| {
+                    let named = logged.iter().filter(|l| l.1 == obj);
+                    let first = named.clone().next();
+                    named.filter(|l| l.0 <= at).last().or(first).map(|l| l.2.clone())
+                };
+                let name = |c: &snapshot::SnapCard| names.get(&c.catalog_id).cloned().or_else(|| by_object(c.id)).unwrap_or_else(|| format!("#{}", c.catalog_id));
+                ReplayState {
+                    at: at.clone(),
+                    players: s.players.iter().map(|p| ReplayPlayer { side: side(p.id), name: p.name.clone(), life: p.life, hand: p.hand, library: p.library }).collect(),
+                    cards: s
+                        .cards
+                        .iter()
+                        .filter(|c| !matches!(c.zone.as_str(), "Sideboard" | "Nowhere" | "Effects"))
+                        .map(|c| {
+                            let name = name(c);
+                            ReplayCard { id: c.id, land: lands.contains(&name), name, zone: c.zone.clone(), side: side(c.owner), controller: side(c.controller) }
+                        })
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let note = states.is_empty().then(|| format!("no snapshots of MTGO game {mtgo_id} in the stored session logs"));
+        Ok(Replay { game, events, states, note })
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -1330,6 +1479,7 @@ async fn main() {
                 .route("/api/matches", get(matches_api))
                 .route("/api/games", get(games_api))
                 .route("/api/game", get(game_detail))
+                .route("/api/replay", get(replay_api))
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))
                 .route("/api/cards-seen", get(cards_seen))

@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=48"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=55"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="windows/">windows uploader</a></nav>
@@ -557,12 +557,13 @@ async function preview(col, val) {
     renderGrid(p, r.cards);
   } catch (e) { p.innerHTML = `<span class="err">${e.message}</span>`; }
 }
+const replayLink = id => `<a class="rpl" href="replay.html#game=${id}" target="_blank" title="replay this game">▶</a>`;
 const QUIET = new Set(['Draws', 'Turn', 'Joined', 'SkipsDraw', 'Other', 'Triggers']);
 async function showGame(id) {
   pinned = true; const p = panel(); p.hidden = false; p.innerHTML = '…';
   try {
     const d = await api(`api/game?id=${id}`); const g = d.game;
-    p.innerHTML = `${closeBtn()}<h4>Game ${g.game_number} vs ${g.opponent || '?'} · ${g.start_ts.slice(0, 16)}</h4><div class="muted">${g.on_play ? 'on the play' : 'on the draw'} · mulligans ${g.my_mulligans}/${g.opp_mulligans} · ${g.turns} turns · ${g.winner === 'me' ? 'won' : 'lost'}${g.win_by ? ' by ' + g.win_by : ''}</div>`;
+    p.innerHTML = `${closeBtn()}<h4>Game ${g.game_number} vs ${g.opponent || '?'} · ${g.start_ts.slice(0, 16)}</h4><div class="muted">${g.on_play ? 'on the play' : 'on the draw'} · mulligans ${g.my_mulligans}/${g.opp_mulligans} · ${g.turns} turns · ${g.winner === 'me' ? 'won' : 'lost'}${g.win_by ? ' by ' + g.win_by : ''} · <a href="replay.html#game=${g.id}" target="_blank">replay ↗</a></div>`;
     for (const side of ['me', 'opp']) {
       const cs = d.cards.filter(c => c.side === side); if (!cs.length) continue;
       const h = document.createElement('div'); h.className = 'muted'; h.style.marginTop = '6px'; h.textContent = side === 'me' ? 'I played' : 'they played'; p.appendChild(h);
@@ -759,7 +760,7 @@ async function showMatches(seq) {
       const cell = {
         id: g => g.game_id, date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || NONE, opp_cands: cands, opp_arch: g => g.opp_archetype || NONE, opp_col: g => g.opp_colors || NONE, opp_seen: seenCell, my_deck: g => g.my_deck || '<span class="muted">—</span>',
         my_list: g => g.my_list ? `<a class="key" data-col="my_list" data-val="${g.my_list.replace(/"/g, '&quot;')}" href="lists.html">${g.my_list}</a>` : '<span class="muted">no list</span>', event: g => g.event_name || '',
-        game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
+        game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>${replayLink(g.game_id)}`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
         turns: g => g.turns, min: g => g.minutes ?? '', result: g => `<b>${g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?'}</b>`, how: g => g.win_by || '' };
       const cols = Object.keys(defs).filter(c => set.has(c));
       rowTable(out, rows, cols, Object.assign({}, defs, { mulls: 'mulls (me/opp)' }), cell, GAME_ROW_FIELD);
@@ -768,7 +769,7 @@ async function showMatches(seq) {
     }
     const rows = await cachedRows('api/matches?' + new URLSearchParams({ where: whereSql(), limit: String(limit) }));
     if (stale(seq)) return;
-    const game = g => { const [id, n, pd, m, t, w, by] = g.split(':'); return `<span class="g ${w === 'me' ? 'gw' : 'gl'}" data-game="${id}" title="game ${n}: ${pd}, ${m} mulligan${m === '1' ? '' : 's'}, ${t} turns, ${w === 'me' ? 'won' : 'lost'}${by ? ' by ' + by : ''} — click for the log">${w === 'me' ? 'W' : 'L'}<small>${pd === 'play' ? 'p' : 'd'}${m !== '0' ? 'm' + m : ''}·${t}</small></span>`; };
+    const game = g => { const [id, n, pd, m, t, w, by] = g.split(':'); return `<span class="g ${w === 'me' ? 'gw' : 'gl'}" data-game="${id}" title="game ${n}: ${pd}, ${m} mulligan${m === '1' ? '' : 's'}, ${t} turns, ${w === 'me' ? 'won' : 'lost'}${by ? ' by ' + by : ''} — click for the log">${w === 'me' ? 'W' : 'L'}<small>${pd === 'play' ? 'p' : 'd'}${m !== '0' ? 'm' + m : ''}·${t}</small></span>${replayLink(id)}`; };
     const { defs, set } = rowCols(false);
     const cell = {
       id: r => r.match_id, date: r => r.date, opponent: r => r.opponent || '',

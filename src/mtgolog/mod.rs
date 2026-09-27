@@ -16,6 +16,7 @@ pub mod pipeline;
 pub mod reference;
 pub mod pivot;
 pub mod scan;
+pub mod snapshot;
 pub mod stats;
 
 use clap::{Args, Subcommand};

@@ -218,7 +218,7 @@ pub fn session_extract(text: &str) -> String {
 }
 
 /// Read a session log, gunzipping `.gz` extracts.
-fn read_session_log(path: &Path) -> Option<String> {
+pub(crate) fn read_session_log(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     if path.extension().and_then(|x| x.to_str()) == Some("gz") {
         use std::io::Read;
@@ -230,30 +230,60 @@ fn read_session_log(path: &Path) -> Option<String> {
     }
 }
 
-fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
-    let Some(text) = read_session_log(path) else { return Vec::new() };
+/// Dates a session log's `HH:MM:SS` lines: the file name (archived copies are named after the
+/// session's end) or else its mtime gives the last day, and each midnight rollover observed in the
+/// file moves the first day back by one. Feed it every line in order.
+pub(crate) struct SessionClock {
+    date: NaiveDate,
+    last: Option<NaiveTime>,
+}
+
+impl SessionClock {
+    pub(crate) fn new(path: &Path, text: &str) -> Self {
+        let end_date = session_end_date(path);
+        let mut last: Option<NaiveTime> = None;
+        let mut rollovers = 0;
+        for line in text.lines() {
+            if let Some(t) = line_time(line) {
+                if last.is_some_and(|l| t < l && (l - t).num_hours() > 12) {
+                    rollovers += 1;
+                }
+                last = Some(t);
+            }
+        }
+        Self { date: end_date - chrono::Days::new(rollovers), last: None }
+    }
+
+    /// The line's timestamp, None for an untimed line.
+    pub(crate) fn stamp(&mut self, line: &str) -> Option<NaiveDateTime> {
+        let t = line_time(line)?;
+        if self.last.is_some_and(|l| t < l && (l - t).num_hours() > 12) {
+            self.date = self.date + chrono::Days::new(1);
+        }
+        self.last = Some(t);
+        Some(NaiveDateTime::new(self.date, t))
+    }
+}
+
+fn line_time(line: &str) -> Option<NaiveTime> {
+    let c = TS.captures(line)?;
+    NaiveTime::from_hms_opt(c[1].parse().ok()?, c[2].parse().ok()?, c[3].parse().ok()?)
+}
+
+/// The day a session log ended: from an archived name, else the file's mtime.
+pub(crate) fn session_end_date(path: &Path) -> NaiveDate {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let end_date: NaiveDate = FNAME
+    FNAME
         .captures(name)
         .and_then(|c| NaiveDate::from_ymd_opt(c[1].parse().ok()?, c[2].parse().ok()?, c[3].parse().ok()?))
         .or_else(|| std::fs::metadata(path).and_then(|m| m.modified()).ok().map(|t| chrono::DateTime::<chrono::Local>::from(t).date_naive()))
-        .unwrap_or_else(|| chrono::Local::now().date_naive());
-    // count rollovers
-    let mut last: Option<NaiveTime> = None;
-    let mut rollovers = 0;
-    for line in text.lines() {
-        if let Some(c) = TS.captures(line) {
-            let t = NaiveTime::from_hms_opt(c[1].parse().unwrap(), c[2].parse().unwrap(), c[3].parse().unwrap()).unwrap();
-            if let Some(l) = last {
-                if t < l && (l - t).num_hours() > 12 {
-                    rollovers += 1;
-                }
-            }
-            last = Some(t);
-        }
-    }
-    let mut date = end_date - chrono::Days::new(rollovers as u64);
-    last = None;
+        .unwrap_or_else(|| chrono::Local::now().date_naive())
+}
+
+fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
+    let Some(text) = read_session_log(path) else { return Vec::new() };
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let mut clock = SessionClock::new(path, &text);
     let mut out: Vec<DeckUsed> = Vec::new();
     let mut game_match: HashMap<i64, i64> = HashMap::new();
     let mut pending_scene: Option<usize> = None; // index in out awaiting its "Details:" line
@@ -286,16 +316,9 @@ fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
             };
             continue;
         }
-        let Some(c) = TS.captures(line) else {
+        let Some(at) = clock.stamp(line) else {
             continue;
         };
-        let t = NaiveTime::from_hms_opt(c[1].parse().unwrap(), c[2].parse().unwrap(), c[3].parse().unwrap()).unwrap();
-        if let Some(l) = last {
-            if t < l && (l - t).num_hours() > 12 {
-                date = date + chrono::Days::new(1);
-            }
-        }
-        last = Some(t);
         if let Some(m) = STATUS.captures(line) {
             game_match.insert(m[1].parse().unwrap(), m[2].parse().unwrap());
             continue;
@@ -314,7 +337,7 @@ fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
             if let Some(prev) = out.iter().position(|d| d.game_id == game_id) {
                 out.remove(prev);
             }
-            out.push(DeckUsed { at: NaiveDateTime::new(date, t), game_id, entries, source: name.to_string(), match_id: None, event_kind: None, event_name: current_event.clone() });
+            out.push(DeckUsed { at, game_id, entries, source: name.to_string(), match_id: None, event_kind: None, event_name: current_event.clone() });
             pending_scene = Some(out.len() - 1);
         }
     }
@@ -412,9 +435,22 @@ fn html_unescape(s: &str) -> String {
     s.replace("&amp;", "&").replace("&quot;", "\"").replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">")
 }
 
+/// catalog id → name from the cache table and the names seen in imported games, writing nothing
+/// (safe while a sync holds the database).
+pub fn known_names(conn: &mut SqliteConnection) -> QueryResult<HashMap<i64, String>> {
+    let mut map: HashMap<i64, String> = HashMap::new();
+    for r in diesel::sql_query("SELECT DISTINCT catalog_id, name FROM mtgo_game_cards").load::<NameRow>(conn)? {
+        map.insert(r.catalog_id as i64, r.name);
+    }
+    for r in diesel::sql_query("SELECT catalog_id, name FROM mtgo_cards WHERE source <> 'unknown'").load::<NameRow>(conn)? {
+        map.insert(r.catalog_id as i64, front_face(&r.name));
+    }
+    Ok(map)
+}
+
 /// catalog id → name: cache table, then names seen in imported games, then MTGO's CardDataSource,
 /// then Scryfall (curl). DFC names are normalised to the front face.
-fn resolve_names(conn: &mut SqliteConnection, cfg: &MtgoConfig, ids: &BTreeSet<i64>, fetch: bool) -> QueryResult<HashMap<i64, String>> {
+pub fn resolve_names(conn: &mut SqliteConnection, cfg: &MtgoConfig, ids: &BTreeSet<i64>, fetch: bool) -> QueryResult<HashMap<i64, String>> {
     let mut map: HashMap<i64, String> = HashMap::new();
     let cached: Vec<NameRow> = diesel::sql_query("SELECT catalog_id, name FROM mtgo_cards WHERE source <> 'unknown'").load(conn)?;
     for r in cached {

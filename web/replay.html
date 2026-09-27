@@ -1,0 +1,180 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl replay</title><link rel="stylesheet" href="style.css?v=55"></head>
+<body>
+<h1 class="rp-title">mtgctl · replay</h1>
+<nav class="rp-nav"><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a></nav>
+<div id="head" class="muted">…</div>
+<div class="rp-controls">
+  <button id="first" title="start (Home)">⏮</button><button id="prevTurn" title="previous turn (Shift+←)">«</button><button id="prev" title="back (←)">‹</button>
+  <input type="range" id="slider" min="0" value="0">
+  <button id="next" title="forward (→)">›</button><button id="nextTurn" title="next turn (Shift+→)">»</button><button id="last" title="end (End)">⏭</button>
+  <span id="pos" class="muted"></span>
+</div>
+<div class="rp">
+  <div class="rp-board" id="board"></div>
+  <div class="rp-log log" id="log"></div>
+</div>
+<img id="zoom" class="rp-zoom" hidden alt="">
+<script src="common.js?v=45"></script>
+<script>
+// A step is one snapshot (the state after the events since the previous one); a game without
+// snapshots steps through its events instead, with no board.
+// Every zone has a fixed place, shown even when empty: hands at the outer edges, battlefields
+// facing each other across the stack (lands on the outside, other permanents toward it), graveyard
+// and exile in a column on the right.
+const GROUPED = new Set(['Graveyard', 'Exile']);
+let R, steps, cur = 0;
+
+function buildSteps(r) {
+  if (!r.states.length) return r.events.map((e, i) => ({ state: null, events: [i], turn: e.turn }));
+  const out = []; let ei = 0;
+  for (const s of r.states) {
+    const evs = [];
+    while (ei < r.events.length && r.events[ei].ts <= s.at) evs.push(ei++);
+    out.push({ state: s, events: evs, turn: null });
+  }
+  if (ei < r.events.length) out[out.length - 1].events.push(...r.events.slice(ei).map((_, k) => ei + k));
+  let turn = 0;
+  for (const st of out) { for (const i of st.events) turn = r.events[i].turn; st.turn = turn; }
+  trackKnown(r, out);
+  return out;
+}
+
+// The opponent's known hand after each step, as [{name, maybe}]. A snapshot listing their hand (a
+// reveal resolving) sets it; the log removes a known card when they cast, play, cycle, discard or
+// pitch it, and adds one returned to their hand from a public zone. Cards they may have put back on
+// the library (Brainstorm: the log never says which) and any excess over their hand count become maybe.
+const LEAVES = new Set(['Casts', 'PlaysLand', 'Cycles']);
+const PUTS_BACK = new Set(['Brainstorm']);
+function trackKnown(r, steps) {
+  let known = [];
+  const drop = name => { const i = known.findIndex(k => k.name === name && !k.maybe); const j = i >= 0 ? i : known.findIndex(k => k.name === name); if (j >= 0) known.splice(j, 1); };
+  let prevState = null;
+  for (const st of steps) {
+    for (const i of st.events) {
+      const e = r.events[i], first = e.cards[0];
+      if (LEAVES.has(e.kind) && e.side === 'opp' && first) drop(first);
+      else if (e.kind === 'Discards' && e.side === 'opp') e.cards.forEach(drop);
+      else if (e.kind === 'Exiles' && / with (with )?Force of (Will|Negation)/.test(e.text)) {
+        // the pitch line may name the wrong player; the pitcher casts the Force in the same second
+        const cast = r.events.find(x => x.kind === 'Casts' && x.ts === e.ts && /^Force of (Will|Negation)$/.test(x.cards[0] || ''));
+        if (cast && cast.side === 'opp' && first) drop(first);
+      } else if (e.kind === 'Returns' && /to its owner's hand/.test(e.text) && first && prevState
+        && prevState.cards.some(c => c.side === 'opp' && c.name === first && c.zone !== 'Hand')) known.push({ name: first, maybe: false });
+      else if (e.kind === 'Draws' && e.side === 'opp' && PUTS_BACK.has(e.cards[0])) known.forEach(k => k.maybe = true);
+    }
+    const s = st.state;
+    if (s) {
+      const shown = s.cards.filter(c => c.zone === 'Hand' && c.side === 'opp');
+      if (shown.length) known = shown.map(c => ({ name: c.name, maybe: false }));
+      const opp = s.players.find(p => p.side === 'opp');
+      if (opp && known.length > opp.hand) known.forEach(k => k.maybe = true);
+      prevState = s;
+    }
+    st.known = known.map(k => Object.assign({}, k));
+  }
+}
+
+function zoneEl(label, cards, cls, grouped, area) {
+  const z = document.createElement('div'); z.className = 'rp-zone' + (area ? ' rp-' + area : ''); if (area) z.style.gridArea = area;
+  const h = document.createElement('div'); h.className = 'muted'; h.textContent = `${label} (${cards.length})`; z.appendChild(h);
+  const grid = document.createElement('div'); grid.className = 'cards mini';
+  if (grouped) {
+    const n = new Map(); for (const c of cards) n.set(c.name, (n.get(c.name) || 0) + 1);
+    for (const [name, q] of n) grid.appendChild(cardEl(name, q));
+  } else for (const c of cards) grid.appendChild(cardEl(c.name, 1, cls(c)));
+  z.appendChild(grid); return z;
+}
+
+function sideEl(state, prev, side) {
+  const p = state.players.find(x => x.side === side) || {};
+  const box = document.createElement('div'); box.className = 'rp-side ' + side;
+  box.innerHTML = `<div class="rp-who" style="grid-area: who"><b>${p.name || side}</b> · life <b>${p.life}</b> · hand ${p.hand} · library ${p.library}</div>`;
+  const mine = z => state.cards.filter(c => c.zone === z && (z === 'Battlefield' ? c.controller === side : c.side === side));
+  const before = new Set(prev ? prev.cards.filter(c => c.zone === 'Hand' && c.side === side).map(c => c.id) : []);
+  const hand = mine('Hand');
+  if (side === 'opp' && !hand.length) {
+    const zz = document.createElement('div'); zz.className = 'rp-zone rp-hand'; zz.style.gridArea = 'hand';
+    const known = steps[cur].known || [], sure = known.filter(k => !k.maybe).length;
+    zz.innerHTML = `<div class="muted">Hand (${p.hand}${known.length ? `, ${sure} known${known.length > sure ? `, ${known.length - sure} maybe` : ''}` : ', hidden'})</div>`;
+    const grid = document.createElement('div'); grid.className = 'cards mini';
+    for (const k of known) { const el = cardEl(k.name, 1, k.maybe ? 'maybe' : 'known'); el.title = k.name + (k.maybe ? ' — may have been put back' : ' — known from a reveal'); grid.appendChild(el); }
+    grid.insertAdjacentHTML('beforeend', '<div class="card back"></div>'.repeat(Math.max(0, Math.min(p.hand, 12) - known.length)));
+    zz.appendChild(grid); box.appendChild(zz);
+  } else box.appendChild(zoneEl(side === 'opp' ? 'Hand (revealed)' : 'Hand', hand, c => (side === 'me' && prev && !before.has(c.id) ? 'in' : ''), false, 'hand'));
+  const bf = mine('Battlefield');
+  box.appendChild(zoneEl('Lands', bf.filter(c => c.land), () => '', false, 'lands'));
+  box.appendChild(zoneEl('Permanents', bf.filter(c => !c.land), () => '', false, 'perms'));
+  box.appendChild(zoneEl('Graveyard', mine('Graveyard'), () => '', true, 'gy'));
+  box.appendChild(zoneEl('Exile', mine('Exile'), () => '', true, 'ex'));
+  return box;
+}
+
+function render() {
+  const st = steps[cur], board = document.getElementById('board');
+  board.innerHTML = ''; document.getElementById('zoom').hidden = true;
+  if (st.state) {
+    const prev = cur > 0 ? steps[cur - 1].state : null;
+    board.appendChild(sideEl(st.state, prev, 'opp'));
+    const s = zoneEl('Stack', st.state.cards.filter(c => c.zone === 'Stack'), c => c.side, false); s.classList.add('rp-stack'); board.appendChild(s);
+    board.appendChild(sideEl(st.state, prev, 'me'));
+    loadImages(board);
+  } else board.innerHTML = `<div class="muted">${R.note || 'no snapshots for this game'}: the log alone.</div>`;
+  const now = new Set(st.events);
+  document.querySelectorAll('#log .ev').forEach(el => {
+    const i = +el.dataset.i; el.classList.toggle('now', now.has(i));
+    el.classList.toggle('future', steps.findIndex(s => s.events.includes(i)) > cur);
+  });
+  const first = document.querySelector('#log .ev.now'); if (first) first.scrollIntoView({ block: 'center' });
+  document.getElementById('slider').value = cur;
+  document.getElementById('pos').textContent = `turn ${st.turn} · step ${cur + 1}/${steps.length}${st.state ? ' · ' + st.state.at.slice(11) : ''}`;
+  history.replaceState(null, '', `#game=${R.game.id}&step=${cur}`);
+}
+
+function go(i) { cur = Math.max(0, Math.min(steps.length - 1, i)); render(); }
+function goTurn(d) {
+  const t = steps[cur].turn;
+  if (d > 0) { const i = steps.findIndex((s, k) => k > cur && s.turn > t); go(i < 0 ? steps.length - 1 : i); }
+  else {
+    const start = steps.findIndex(s => s.turn === t);
+    if (start < cur) return go(start);
+    const pt = cur > 0 ? steps[cur - 1].turn : t;
+    go(steps.findIndex(s => s.turn === pt));
+  }
+}
+
+// scrolling zones would clip the in-place zoom, so the board zooms into one floating image
+function wireZoom() {
+  const zoom = document.getElementById('zoom'), board = document.getElementById('board');
+  board.addEventListener('mouseover', e => { const img = e.target.closest('.card') && e.target.closest('.card').querySelector('img'); if (img && img.src) { zoom.src = img.src.replace('/small/', '/normal/'); zoom.hidden = false; } });
+  board.addEventListener('mouseout', e => { if (e.target.closest('.card')) zoom.hidden = true; });
+  board.addEventListener('mousemove', e => { const w = 250, h = 350; zoom.style.left = Math.min(e.clientX + 16, innerWidth - w - 8) + 'px'; zoom.style.top = Math.max(8, Math.min(e.clientY - h / 2, innerHeight - h - 8)) + 'px'; });
+}
+
+(async () => {
+  wireZoom();
+  const m = /game=(\d+)/.exec(location.hash), sm = /step=(\d+)/.exec(location.hash);
+  if (!m) { document.getElementById('head').textContent = 'open a game from the results page'; return; }
+  try {
+    R = await api(`api/replay?id=${m[1]}`); const g = R.game;
+    document.getElementById('head').innerHTML = `<b>Game ${g.game_number} vs ${g.opponent || '?'}</b> · ${g.start_ts.slice(0, 16)} · ${g.on_play ? 'on the play' : 'on the draw'} · mulligans ${g.my_mulligans}/${g.opp_mulligans} · ${g.turns} turns · ${g.winner === 'me' ? 'won' : 'lost'}${g.win_by ? ' by ' + g.win_by : ''}${R.note ? ` · <span class="err">${R.note}</span>` : ''}`;
+    steps = buildSteps(R);
+    let turn = -1, html = '';
+    R.events.forEach((e, i) => { if (e.turn !== turn) { turn = e.turn; html += `<div class="turn">turn ${turn}</div>`; } html += `<div class="ev ${e.side || ''}" data-i="${i}">${e.text}</div>`; });
+    const log = document.getElementById('log'); log.innerHTML = html;
+    log.onclick = e => { const el = e.target.closest('.ev'); if (!el) return; const i = steps.findIndex(s => s.events.includes(+el.dataset.i)); if (i >= 0) go(i); };
+    const sl = document.getElementById('slider'); sl.max = steps.length - 1; sl.oninput = () => go(+sl.value);
+    document.getElementById('first').onclick = () => go(0); document.getElementById('last').onclick = () => go(steps.length - 1);
+    document.getElementById('prev').onclick = () => go(cur - 1); document.getElementById('next').onclick = () => go(cur + 1);
+    document.getElementById('prevTurn').onclick = () => goTurn(-1); document.getElementById('nextTurn').onclick = () => goTurn(1);
+    document.addEventListener('keydown', e => {
+      if (e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); e.shiftKey ? goTurn(1) : go(cur + 1); }
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); e.shiftKey ? goTurn(-1) : go(cur - 1); }
+      else if (e.key === 'Home') go(0); else if (e.key === 'End') go(steps.length - 1);
+    });
+    go(sm ? +sm[1] : 0);
+  } catch (e) { document.getElementById('head').innerHTML = `<span class="err">${e.message}</span>`; }
+})();
+</script>
+</body></html>
