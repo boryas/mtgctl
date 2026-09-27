@@ -83,41 +83,41 @@ macro_rules! re {
 // A single card ref as a sub-pattern (non-capturing wrapper; we re-parse with CARD_RE).
 const C: &str = r"@\[.+?@:\d+,\d+:@\]";
 
-re!(TURN, r"^Turn (\d+): (\S+)$");
-re!(ROLLED, r"^(\S+) rolled a (\d+)\.$");
-re!(JOINED, r"^(\S+) joined the game\.$");
-re!(PLAYFIRST, r"^(\S+) chooses to (play|draw) first\.$");
-re!(MULLIGAN, r"^(\S+) mulligans to (\w+) cards?\.$");
-re!(BEGINS, r"^(\S+) (?:puts .*? on the bottom of their library and )?begins the game with (\w+) cards? in hand\.$");
-re!(SKIPDRAW, r"^(\S+) skips their draw step\.$");
-re!(DRAWS, r"^(\S+) draws (a|\w+) cards?(?: with (.+?)(?:'s ability)?)?\.$");
-re!(DRAWS_NEXT, r"^(\S+) draws their next card\.$");
-static CASTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^(\S+) casts ({C})(.*)$")).unwrap());
-static PLAYS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^(\S+) plays ({C})\.$")).unwrap());
-static ACTIVATES: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^(\S+) activates an ability of ({C})(.*)$")).unwrap());
-re!(TRIGGERS, r"^(\S+) puts (?:a )?triggered ability from (.+?) onto the stack(.*)$");
-static ATTACKED_PW: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^(\S+)'s ({C}) is being attacked by (.*)$")).unwrap());
-re!(ATTACKED, r"^(\S+) is being attacked by (.*)$");
+re!(TURN, r"^Turn (\d+): ([^@:]+?)(?: - Extra Turn)?$");
+re!(ROLLED, r"^([^@:]+?) rolled a (\d+)\.$");
+re!(JOINED, r"^([^@:]+?) joined the game\.$");
+re!(PLAYFIRST, r"^([^@:]+?) chooses to (play|draw) first\.$");
+re!(MULLIGAN, r"^([^@:]+?) mulligans to (\w+) cards?\.$");
+re!(BEGINS, r"^([^@:]+?) (?:puts .*? on the bottom of their library and )?begins the game with (\w+) cards? in hand\.$");
+re!(SKIPDRAW, r"^([^@:]+?) skips their draw step\.$");
+re!(DRAWS, r"^([^@:]+?) draws (a|\w+) cards?(?: with (.+?)(?:'s ability)?)?\.$");
+re!(DRAWS_NEXT, r"^([^@:]+?) draws their next card\.$");
+static CASTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^([^@:]+?) casts ({C})(.*)$")).unwrap());
+static PLAYS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^([^@:]+?) plays ({C})\.$")).unwrap());
+static ACTIVATES: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^([^@:]+?) activates an ability of ({C})(.*)$")).unwrap());
+re!(TRIGGERS, r"^([^@:]+?) puts (?:a )?triggered ability from (.+?) onto the stack(.*)$");
+static ATTACKED_PW: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^([^@:]+?)'s ({C}) is being attacked by (.*)$")).unwrap());
+re!(ATTACKED, r"^([^@:]+?) is being attacked by (.*)$");
 static BLOCKS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^({C}) blocks ({C})\.$")).unwrap());
-re!(DISCARDS, r"^(\S+) discards (.+)\.$");
-re!(MILLS, r"^(\S+) mills (.+)\.$");
-re!(EXILES, r"^(\S+) exiles (.+?)( with .*| from .*)?\.$");
-re!(SACRIFICES, r"^(\S+) sacrifices (.+)\.$");
-re!(TOGY, r"^(\S+) puts (.+) into their graveyard\.$");
-re!(REVEALS, r"^(\S+) reveals (.+?)( with .*)?\.$");
-re!(RETURNS, r"^(\S+) returns (.+?) to (?:their|its owner's) hand( with .*)?\.$");
-re!(CYCLES, r"^(\S+) cycles (.+)\.$");
-static COUNTERS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^(\S+) counters ({C}) with (.+)\.$")).unwrap());
-re!(SHUFFLES, r"^(\S+) shuffles their library\.$");
-re!(GAINS, r"^(\S+) gains (\d+) life\.$");
-re!(PREVENTED, r"^(\d+) damage caused by (.+?) to (\S+) is prevented\.$");
-re!(CONCEDES, r"^(\S+) has conceded from the game\.$");
-re!(LEFT, r"^(\S+) has left the game\.$");
-re!(LOSTCONN, r"^(\S+) has lost connection to the game\.$");
-re!(WINSGAME, r"^(\S+) wins the game\.$");
-re!(LOSESGAME, r"^(\S+) loses the game\.$");
-re!(LEADS, r"^(\S+) leads the match (\d+)-(\d+)$");
-re!(WINSMATCH, r"^(\S+) wins the match (\d+)-(\d+)$");
+re!(DISCARDS, r"^([^@:]+?) discards (.+)\.$");
+re!(MILLS, r"^([^@:]+?) mills (.+)\.$");
+re!(EXILES, r"^([^@:]+?) exiles (.+?)( with .*| from .*)?\.$");
+re!(SACRIFICES, r"^([^@:]+?) sacrifices (.+)\.$");
+re!(TOGY, r"^([^@:]+?) puts (.+) into their graveyard\.$");
+re!(REVEALS, r"^([^@:]+?) reveals (.+?)( with .*)?\.$");
+re!(RETURNS, r"^([^@:]+?) returns (.+?) to (?:their|its owner's) hand( with .*)?\.$");
+re!(CYCLES, r"^([^@:]+?) cycles (.+)\.$");
+static COUNTERS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^([^@:]+?) counters ({C}) with (.+)\.$")).unwrap());
+re!(SHUFFLES, r"^([^@:]+?) shuffles their library\.$");
+re!(GAINS, r"^([^@:]+?) gains (\d+) life\.$");
+re!(PREVENTED, r"^(\d+) damage caused by (.+?) to ([^@:]+?) is prevented\.$");
+re!(CONCEDES, r"^([^@:]+?) has conceded from the game\.$");
+re!(LEFT, r"^([^@:]+?) has left the game\.$");
+re!(LOSTCONN, r"^([^@:]+?) has lost connection to the game\.$");
+re!(WINSGAME, r"^([^@:]+?) wins the game\.$");
+re!(LOSESGAME, r"^([^@:]+?) loses the game\.$");
+re!(LEADS, r"^([^@:]+?) leads the match (\d+)-(\d+)$");
+re!(WINSMATCH, r"^([^@:]+?) wins the match (\d+)-(\d+)$");
 re!(TIED, r"^Match Tied (\d+)-(\d+)$");
 re!(TARGETING, r" targeting (.+?)(?: \(|\.?$)");
 
@@ -159,9 +159,11 @@ fn targets_in(rest: &str) -> Vec<Target> {
     };
     let clause = &m[1];
     let mut out: Vec<Target> = card_refs(clause).into_iter().map(Target::Card).collect();
-    // Player targets: strip card refs, then any remaining bare tokens.
+    // Player targets: what remains between separators once card refs are stripped; a name may
+    // contain spaces, so only "," and " and " separate.
     let stripped = CARD_RE.replace_all(clause, "");
-    for tok in stripped.split(|c: char| c == ',' || c.is_whitespace()) {
+    for tok in stripped.split(',').flat_map(|s| s.split(" and ")) {
+        let tok = tok.trim().trim_start_matches("and ").trim();
         let tok = tok.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.');
         if tok.is_empty() || tok == "and" {
             continue;
@@ -399,5 +401,31 @@ mod tests {
             e => panic!("{e:?}"),
         }
         assert!(matches!(parse_event("@Pboryas draws three cards with @[Brainstorm@:1,2:@]."), Event::Draws { count: 3, via: Some(_), .. }));
+    }
+
+    #[test]
+    fn parses_names_with_spaces() {
+        assert_eq!(parse_event("@P@Pwhiffy penguin joined the game."), Event::Joined { player: "whiffy penguin".into() });
+        assert_eq!(parse_event("@PTurn 2: whiffy penguin"), Event::Turn { number: 2, player: "whiffy penguin".into() });
+        assert_eq!(parse_event("@PTurn 5: whiffy penguin - Extra Turn"), Event::Turn { number: 5, player: "whiffy penguin".into() });
+        assert!(matches!(parse_event("@PChosen mode: Target player draws a card."), Event::Other(_)));
+        match parse_event("@Pwhiffy penguin casts @[Goblin Welder@:25122,429:@].") {
+            Event::Casts { player, card, .. } => {
+                assert_eq!(player, "whiffy penguin");
+                assert_eq!(card.name, "Goblin Welder");
+            }
+            e => panic!("{e:?}"),
+        }
+        match parse_event("@Pboryas casts @[Thoughtseize@:100512,467:@] targeting whiffy penguin.") {
+            Event::Casts { targets, .. } => assert_eq!(targets, vec![Target::Player("whiffy penguin".into())]),
+            e => panic!("{e:?}"),
+        }
+        match parse_event("@Pa b casts @[Fireblast@:1,2:@] targeting @[Goblin Welder@:3,4:@] and whiffy penguin.") {
+            Event::Casts { targets, .. } => {
+                assert!(matches!(&targets[0], Target::Card(c) if c.name == "Goblin Welder"));
+                assert_eq!(targets[1], Target::Player("whiffy penguin".into()));
+            }
+            e => panic!("{e:?}"),
+        }
     }
 }
