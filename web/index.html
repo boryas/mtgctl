@@ -57,7 +57,7 @@
 // The columns a person can filter or group on, by level. Anything not listed (ids, empty
 // legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
 const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', player: 'player', opponent: 'opponent', match_result: 'match result', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
-const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast', my_dd_resolved: 'my Doomsday resolved', my_dd_turn: 'turn my Doomsday resolved' };
+const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast', my_dd_resolved: 'my Doomsday resolved', my_dd_turn: 'turn my Doomsday resolved', my_hand_known: 'my hands known (session log)', my_pile_known: 'my Doomsday pile known' };
 const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
 const GAME_COLS = Object.keys(GAME_COLS_L);
 // Output statistics. `level` says which view mode a statistic belongs to: match statistics are
@@ -115,12 +115,14 @@ let filters = [];
 const sq = v => `'${String(v).replace(/'/g, "''")}'`;
 const like = v => `${sq('%' + v.replace(/[\\%_]/g, m => '\\' + m) + '%')} ESCAPE '\\'`;
 // Compared with unquoted literals: my_experimental is an expression without type affinity, which a quoted '0' never equals.
-const NUMERIC = new Set(['my_experimental', 'game_number', 'my_mulligans', 'opp_mulligans', 'my_hand', 'opp_hand', 'turns', 'minutes', 'my_lands', 'opp_lands', 'my_spells', 'opp_spells', 'my_dd_resolved', 'my_dd_turn']);
+const NUMERIC = new Set(['my_experimental', 'game_number', 'my_mulligans', 'opp_mulligans', 'my_hand', 'opp_hand', 'turns', 'minutes', 'my_lands', 'opp_lands', 'my_spells', 'opp_spells', 'my_dd_resolved', 'my_dd_turn', 'my_hand_known', 'my_pile_known']);
 const lit = (col, v) => NUMERIC.has(col) && /^-?\d+(\.\d+)?$/.test(v) ? v : sq(v);
-const VALUE_LABEL = { my_deck_grade: { hard: 'exact from logs', inferred: 'inferred from game', none: 'unknown' }, my_experimental: { 0: 'no', 1: 'yes' }, my_dd_resolved: { 0: 'no', 1: 'yes' }, on_play: { 0: 'on the draw', 1: 'on the play' } };
+const VALUE_LABEL = { my_deck_grade: { hard: 'exact from logs', inferred: 'inferred from game', none: 'unknown' }, my_experimental: { 0: 'no', 1: 'yes' }, my_dd_resolved: { 0: 'no', 1: 'yes' }, my_hand_known: { 0: 'no', 1: 'yes' }, my_pile_known: { 0: 'no', 1: 'yes' }, on_play: { 0: 'on the draw', 1: 'on the play' } };
 const valText = (col, v) => v === null ? '∅' : (VALUE_LABEL[col] || {})[v] || v;
 // What a card sentence can say happened, by mtgo_card_events.verb (see model::Verb): `active`
 // verbs read "I cast X", `passive` ones "my X was milled"; `other` names what `other` holds.
+// `needs` verbs are mine only, from the session log's snapshots (see hands), and hold only where
+// the game's REQUIRE entry of that name does.
 const VERBS = {
   cast: { active: 'cast', other: 'targeting' },
   land: { active: 'played the land' },
@@ -135,6 +137,14 @@ const VERBS = {
   returned: { passive: 'was returned to hand', other: 'with' },
   sacrificed: { passive: 'was sacrificed' },
   to_graveyard: { passive: 'was put into the graveyard' },
+  opening_hand: { passive: 'was in my kept opening hand', needs: 'hand' },
+  mulliganed: { passive: 'was in a hand I mulliganed', needs: 'hand' },
+  bottomed: { passive: 'went to the bottom in my mulligan', needs: 'hand' },
+  drawn: { active: 'drew', needs: 'hand' },
+  in_hand: { passive: 'was in my hand', needs: 'hand' },
+  boarded_in: { active: 'boarded in', needs: 'hand' },
+  boarded_out: { active: 'boarded out', needs: 'hand' },
+  pile: { passive: 'was in my Doomsday pile', needs: 'pile' },
 };
 const WHEN = { any: 'any time', before: 'before my Doomsday resolved', after: 'after my Doomsday resolved' };
 const BOARD = { any: 'decklist', main: 'main deck', side: 'sideboard' };
@@ -186,12 +196,16 @@ const REQUIRE = {
   my_list: { sql: 'my_list_id IS NOT NULL', text: 'my list is known' },
   opp_list: { sql: 'opp_reference_id IS NOT NULL', text: "the opponent's deck is inferred" },
   dd_deck: { sql: "my_archetype = 'Doomsday'", text: 'my archetype is Doomsday' },
+  hand: { sql: 'my_hand_known = 1', text: 'my hands, draws and sideboarding are known (a session log)' },
+  pile: { sql: 'my_pile_known = 1', text: 'my Doomsday pile is known' },
 };
 function needs(f) {
   const d = CARD_FIELDS[f.field];
   if (d && d.kind === 'deck') return [d.side === 'me' ? 'my_list' : 'opp_list'];
-  if ((d && d.kind === 'play' && f.when !== 'any') || f.field === 'my_dd_resolved' || f.field === 'my_dd_turn') return ['dd_deck'];
-  return [];
+  const out = [];
+  if (d && d.kind === 'play' && VERBS[f.verb].needs) out.push(VERBS[f.verb].needs);
+  if ((d && d.kind === 'play' && f.when !== 'any') || ['my_dd_resolved', 'my_dd_turn', 'my_pile_known'].includes(f.field)) out.push('dd_deck');
+  return out;
 }
 function requirements() {
   const m = new Map();
@@ -479,7 +493,7 @@ function cardEditor(f, el, touch) {
     return;
   }
   const me = CARD_FIELDS[f.field].side === 'me';
-  const verbs = Object.fromEntries(Object.entries(VERBS).map(([k, v]) => [k, v.active || `… ${v.passive}`]));
+  const verbs = Object.fromEntries(Object.entries(VERBS).filter(([, v]) => me || !v.needs).map(([k, v]) => [k, v.active || `… ${v.passive}`]));
   let otherRow = null, cardsRow = null;
   const drawOther = () => { if (otherRow) otherRow.remove(); otherRow = null; const o = VERBS[f.verb].other; if (!o) { f.other = []; return; } otherRow = row(o, cardChips(f.other, touch, 'any card (optional)')); cardsRow.after(otherRow); };
   row(me ? 'I / my card:' : 'opponent / their card:', sel(verbs, 'verb', drawOther));

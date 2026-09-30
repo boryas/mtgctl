@@ -79,7 +79,9 @@ SELECT
   (SELECT COUNT(*) FROM mtgo_card_events c WHERE c.game_id = g.id AND c.side = 'me' AND c.verb = 'cast') AS my_spells,
   (SELECT COUNT(*) FROM mtgo_card_events c WHERE c.game_id = g.id AND c.side = 'opp' AND c.verb = 'cast') AS opp_spells,
   CASE WHEN g.my_dd_seq IS NOT NULL THEN 1 ELSE 0 END AS my_dd_resolved,
-  (SELECT ev.turn FROM mtgo_events ev WHERE ev.game_id = g.id AND ev.seq = g.my_dd_seq) AS my_dd_turn
+  (SELECT ev.turn FROM mtgo_events ev WHERE ev.game_id = g.id AND ev.seq = g.my_dd_seq) AS my_dd_turn,
+  CASE WHEN g.hand_known THEN 1 ELSE 0 END AS my_hand_known,
+  CASE WHEN g.pile_known THEN 1 ELSE 0 END AS my_pile_known
 FROM mtgo_games g
 JOIN mtgo_matches m ON m.id = g.match_id
 LEFT JOIN mtgo_eras e ON e.id = m.era_id
@@ -579,7 +581,7 @@ fn rollup_rows(hidden: &[Row]) -> Row {
 pub const GAME_COLS: &[&str] = &[
     "game_id", "game_number", "on_play", "turns", "duration_secs", "minutes", "winner", "won", "win_by",
     "my_mulligans", "opp_mulligans", "my_hand", "opp_hand", "my_lands", "opp_lands", "my_spells", "opp_spells",
-    "my_dd_resolved", "my_dd_turn",
+    "my_dd_resolved", "my_dd_turn", "my_hand_known", "my_pile_known",
 ];
 
 fn mentions_col(sql: &str, col: &str) -> bool {

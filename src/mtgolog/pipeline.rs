@@ -115,6 +115,8 @@ pub fn sync(conn: &mut SqliteConnection, dir: &PlayerDir, username: &str, refere
     // fetch = true: list catalog ids are printings the game logs never name; Scryfall fills them once per player DB.
     let dl = super::decklist::run_decklists(conn, &cfg, username, true, false).map_err(|e| format!("decklists: {e}"))?;
     timed(&mut steps, format!("decklists: {} lists, {} games linked, {} unlinked", dl.lists, dl.linked, dl.unlinked));
+    let hs = super::hands::derive_all(conn, &cfg, &dir.logs(), username).map_err(|e| format!("hands: {e}"))?;
+    timed(&mut steps, format!("hands: {} games read from session logs, {} with every hand fact known, {} Doomsday piles, {} without snapshots", hs.games, hs.hand_known, hs.pile_known, hs.no_snapshots));
 
     let shared = &mut crate::db::establish_connection_at(&reference.shared_db)?;
     let eras = super::eras::eras_from_file(&reference.timeline)?;

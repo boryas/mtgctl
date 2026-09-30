@@ -49,6 +49,15 @@ pub enum Verb {
     ToGraveyard,
     Exiled,
     Returned,
+    // My side only, from the client's snapshots; see hands.
+    OpeningHand,
+    Mulliganed,
+    Bottomed,
+    Drawn,
+    InHand,
+    Pile,
+    BoardedIn,
+    BoardedOut,
 }
 
 impl Verb {
@@ -67,6 +76,14 @@ impl Verb {
             Verb::ToGraveyard => "to_graveyard",
             Verb::Exiled => "exiled",
             Verb::Returned => "returned",
+            Verb::OpeningHand => "opening_hand",
+            Verb::Mulliganed => "mulliganed",
+            Verb::Bottomed => "bottomed",
+            Verb::Drawn => "drawn",
+            Verb::InHand => "in_hand",
+            Verb::Pile => "pile",
+            Verb::BoardedIn => "boarded_in",
+            Verb::BoardedOut => "boarded_out",
         }
     }
 }

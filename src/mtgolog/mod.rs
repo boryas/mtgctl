@@ -9,6 +9,7 @@ pub mod decklist;
 pub mod eras;
 pub mod event;
 pub mod format;
+pub mod hands;
 pub mod model;
 pub mod picker;
 pub mod pipeline;
