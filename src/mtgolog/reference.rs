@@ -953,7 +953,12 @@ pub fn games_by_match(conn: &mut SqliteConnection, side: &str, fetches: &Fetches
     let mull = if side == "me" { "my_mulligans" } else { "opp_mulligans" };
     let mine = format!("SELECT id FROM mtgo_matches WHERE me = {}", q(me));
     let games: Vec<GameRow> = diesel::sql_query(format!("SELECT id, match_id, game_number, on_play, COALESCE(turns, 0) AS turns, COALESCE({mull}, 0) AS mulligans FROM mtgo_games WHERE match_id IN ({mine}) ORDER BY match_id, game_number")).load(conn)?;
-    let revealed: Vec<RevealedRow> = diesel::sql_query(format!("SELECT game_id, name, COALESCE(MAX(instances), 1) AS qty FROM mtgo_game_cards WHERE side = '{side}' AND played = 1 AND match_id IN ({mine}) GROUP BY game_id, name")).load(conn)?;
+    // copies = the objects the side itself did something with; a zone change renumbers an object, so this overcounts
+    let revealed: Vec<RevealedRow> = diesel::sql_query(format!(
+        "SELECT game_id, card AS name, COUNT(DISTINCT CASE WHEN actor = side AND verb <> 'attacked' THEN object_id END) AS qty
+         FROM mtgo_card_events WHERE side = '{side}' AND match_id IN ({mine}) GROUP BY game_id, card HAVING MAX(verb IN ('cast', 'land')) = 1"
+    ))
+    .load(conn)?;
     let mut by_game: std::collections::HashMap<i32, BTreeMap<String, i32>> = Default::default();
     for r in revealed {
         *by_game.entry(r.game_id).or_default().entry(if fetches.contains(&r.name) { FETCH.to_string() } else { r.name }).or_default() += r.qty;

@@ -25,6 +25,7 @@
     <h3 class="toggle"><span class="caret">▾</span> Filters <span class="psum muted"></span></h3>
     <div class="pbody">
     <div id="flist"></div>
+    <div id="freq"></div>
     <div id="faddrow"></div>
     <datalist id="cardnames"></datalist>
     </div>
@@ -32,8 +33,8 @@
   <fieldset class="box" id="pGroup">
     <h3 class="toggle"><span class="caret">▾</span> Group by <span class="psum muted"></span></h3>
     <div class="pbody">
-    <div class="sec"><div class="sechead">match</div><div id="gMatch"></div><div>more: <select id="gmoreM"><option value="">…</option></select></div></div>
-    <div class="sec"><div class="sechead">per game</div><div id="gGame"></div><div>more: <select id="gmoreG"><option value="">…</option></select></div></div>
+    <div id="glist"></div>
+    <div id="gaddrow"></div>
     </div>
   </fieldset>
   <fieldset class="box" id="pStats">
@@ -55,10 +56,9 @@
 <script>
 // The columns a person can filter or group on, by level. Anything not listed (ids, empty
 // legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
-const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', my_seen: 'my cards seen', opp_seen: 'opponent cards seen', player: 'player', opponent: 'opponent', match_result: 'match result', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
-const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast' };
+const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', player: 'player', opponent: 'opponent', match_result: 'match result', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
+const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast', my_dd_resolved: 'my Doomsday resolved', my_dd_turn: 'turn my Doomsday resolved' };
 const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
-const CURATED_G = ['opp_archetype','opp_deck','opp_colors','my_deck','my_archetype','my_list','event_type','player','opponent','era','month','game_number','on_play','my_mulligans','win_by'];
 const GAME_COLS = Object.keys(GAME_COLS_L);
 // Output statistics. `level` says which view mode a statistic belongs to: match statistics are
 // meaningless once a per-game column is in the query, and vice versa for game statistics.
@@ -115,28 +115,97 @@ let filters = [];
 const sq = v => `'${String(v).replace(/'/g, "''")}'`;
 const like = v => `${sq('%' + v.replace(/[\\%_]/g, m => '\\' + m) + '%')} ESCAPE '\\'`;
 // Compared with unquoted literals: my_experimental is an expression without type affinity, which a quoted '0' never equals.
-const NUMERIC = new Set(['my_experimental', 'game_number', 'my_mulligans', 'opp_mulligans', 'my_hand', 'opp_hand', 'turns', 'minutes', 'my_lands', 'opp_lands', 'my_spells', 'opp_spells']);
+const NUMERIC = new Set(['my_experimental', 'game_number', 'my_mulligans', 'opp_mulligans', 'my_hand', 'opp_hand', 'turns', 'minutes', 'my_lands', 'opp_lands', 'my_spells', 'opp_spells', 'my_dd_resolved', 'my_dd_turn']);
 const lit = (col, v) => NUMERIC.has(col) && /^-?\d+(\.\d+)?$/.test(v) ? v : sq(v);
-const VALUE_LABEL = { my_deck_grade: { hard: 'exact from logs', inferred: 'inferred from game', none: 'unknown' }, my_experimental: { 0: 'no', 1: 'yes' }, on_play: { 0: 'on the draw', 1: 'on the play' } };
+const VALUE_LABEL = { my_deck_grade: { hard: 'exact from logs', inferred: 'inferred from game', none: 'unknown' }, my_experimental: { 0: 'no', 1: 'yes' }, my_dd_resolved: { 0: 'no', 1: 'yes' }, on_play: { 0: 'on the draw', 1: 'on the play' } };
 const valText = (col, v) => v === null ? '∅' : (VALUE_LABEL[col] || {})[v] || v;
-// a side's revealed cards are '|'-joined, "name" or "name ×n"
-const showedSql = (s, name) => `(instr('|' || ${s}_seen || '|', ${sq('|' + name + '|')}) > 0 OR instr('|' || ${s}_seen || '|', ${sq('|' + name + ' ×')}) > 0)`;
-const runsSql = (s, cond) => `EXISTS (SELECT 1 FROM shared.reference_cards rc WHERE rc.reference_id = ${s}_reference_id AND ${cond})`;
-const CARD_FIELDS = {
-  opp_showed: { label: 'opponent showed', neg: 'opponent did not show', side: 'opp', runs: false },
-  my_showed: { label: 'I showed', neg: 'I did not show', side: 'my', runs: false },
-  opp_runs: { label: "opponent's list runs", neg: "opponent's list lacks", side: 'opp', runs: true },
-  my_runs: { label: 'my list runs', neg: 'my list lacks', side: 'my', runs: true },
+// What a card sentence can say happened, by mtgo_card_events.verb (see model::Verb): `active`
+// verbs read "I cast X", `passive` ones "my X was milled"; `other` names what `other` holds.
+const VERBS = {
+  cast: { active: 'cast', other: 'targeting' },
+  land: { active: 'played the land' },
+  cycled: { active: 'cycled' },
+  activated: { active: 'activated', other: 'targeting' },
+  triggered: { passive: 'triggered', other: 'targeting' },
+  attacked: { passive: 'attacked' },
+  discarded: { passive: 'was discarded' },
+  milled: { passive: 'was milled' },
+  revealed: { passive: 'was revealed' },
+  exiled: { passive: 'was exiled', other: 'with' },
+  returned: { passive: 'was returned to hand', other: 'with' },
+  sacrificed: { passive: 'was sacrificed' },
+  to_graveyard: { passive: 'was put into the graveyard' },
 };
-// A "showed" filter holds for the whole match when the card was revealed in any of its games
-// (scope 'match', the default), or only for the games it was revealed in (scope 'game').
-const inGame = f => f.scope === 'game' && CARD_FIELDS[f.field] && !CARD_FIELDS[f.field].runs;
+const WHEN = { any: 'any time', before: 'before my Doomsday resolved', after: 'after my Doomsday resolved' };
+const BOARD = { any: 'decklist', main: 'main deck', side: 'sideboard' };
+// `side` is whose cards: the game's card events, or a decklist (mine: my list; the opponent's:
+// the reference their revealed cards were matched to).
+const CARD_FIELDS = {
+  my_play: { label: 'my cards in the game', kind: 'play', side: 'me' },
+  opp_play: { label: "opponent's cards in the game", kind: 'play', side: 'opp' },
+  my_list_has: { label: 'my decklist', kind: 'deck', side: 'me' },
+  opp_list_has: { label: "opponent's inferred decklist", kind: 'deck', side: 'opp' },
+};
+const newCardEntry = (field, kind) => kind === 'play' ? { field, verb: 'cast', values: [], other: [], when: 'any', scope: 'game', n: 1, not: false } : { field, values: [], board: 'any', n: 1, not: false };
+// The games (scope 'game') or matches (scope 'match') in which the sentence happened at least n times.
+function playSql(f, not) {
+  const d = CARD_FIELDS[f.field], unit = f.scope === 'match' ? 'match_id' : 'game_id';
+  const conds = [`c.side = '${d.side}'`, `c.verb = ${sq(f.verb)}`, `c.card IN (${f.values.map(sq).join(', ')})`];
+  if (VERBS[f.verb].other && f.other && f.other.length) conds.push(`c.other IN (${f.other.map(sq).join(', ')})`);
+  if (f.when === 'before') conds.push('(g.my_dd_seq IS NULL OR c.seq < g.my_dd_seq)');
+  if (f.when === 'after') conds.push('c.seq > g.my_dd_seq');
+  const n = +f.n > 1 ? ` GROUP BY c.${unit} HAVING COUNT(*) >= ${+f.n}` : '';
+  return `${unit} ${not ? 'NOT IN' : 'IN'} (SELECT c.${unit} FROM mtgo_card_events c JOIN mtgo_games g ON g.id = c.game_id WHERE ${conds.join(' AND ')}${n})`;
+}
+// The list holds at least n copies of any of the cards (main and side summed for 'any').
+function deckSql(f, not) {
+  const d = CARD_FIELDS[f.field];
+  const [table, key] = d.side === 'me' ? ['mtgo_list_cards', 'list_id = my_list_id'] : ['shared.reference_cards', 'reference_id = opp_reference_id'];
+  const board = f.board === 'main' ? ' AND lc.sideboard = 0' : f.board === 'side' ? ' AND lc.sideboard = 1' : '';
+  const one = v => `(SELECT COALESCE(SUM(lc.qty), 0) FROM ${table} lc WHERE lc.${key} AND lc.name = ${sq(v)}${board}) >= ${Math.max(1, +f.n || 1)}`;
+  const t = `(${f.values.map(one).join(' OR ')})`;
+  return not ? `NOT ${t}` : t;
+}
+function cardText(f) {
+  const d = CARD_FIELDS[f.field], me = d.side === 'me', cards = f.values.join(' or ') || '…';
+  if (d.kind === 'deck') {
+    const n = +f.n > 1 ? +f.n : 0;
+    return `${me ? 'my' : "opponent's inferred"} ${BOARD[f.board]} ${f.not ? (n ? `has fewer than ${n}×` : 'lacks') : (n ? `has ≥ ${n}×` : 'has')} ${cards}`;
+  }
+  const v = VERBS[f.verb];
+  let t = v.active ? `${me ? 'I' : 'opponent'} ${v.active} ${cards}` : `${me ? 'my' : "opponent's"} ${cards} ${v.passive}`;
+  if (v.other && f.other && f.other.length) t += ` ${v.other} ${f.other.join(' or ')}`;
+  if (+f.n > 1) t += ` ≥ ${f.n} times`;
+  if (f.when !== 'any') t += `, ${WHEN[f.when]}`;
+  t += f.scope === 'match' ? ', in any game of the match' : ', in that game';
+  return f.not ? `not: ${t}` : t;
+}
+// A filter or group entry in use applies what it needs to mean what it says, and nothing is left
+// behind when it goes: these are recomputed on every query, never added to the filter list.
+const REQUIRE = {
+  my_list: { sql: 'my_list_id IS NOT NULL', text: 'my list is known' },
+  opp_list: { sql: 'opp_reference_id IS NOT NULL', text: "the opponent's deck is inferred" },
+  dd_deck: { sql: "my_archetype = 'Doomsday'", text: 'my archetype is Doomsday' },
+};
+function needs(f) {
+  const d = CARD_FIELDS[f.field];
+  if (d && d.kind === 'deck') return [d.side === 'me' ? 'my_list' : 'opp_list'];
+  if ((d && d.kind === 'play' && f.when !== 'any') || f.field === 'my_dd_resolved' || f.field === 'my_dd_turn') return ['dd_deck'];
+  return [];
+}
+function requirements() {
+  const m = new Map();
+  for (const [f, text] of [...filters.filter(active).map(f => [f, filterText(f)]), ...groups.filter(groupActive).map(g => [g, groupText(g)])])
+    for (const k of needs(f)) { if (!m.has(k)) m.set(k, []); m.get(k).push(text); }
+  return [...m].map(([k, by]) => ({ k, by }));
+}
 const COLOR_OPS = { all: 'has all of', exact: 'is exactly', none: 'has none of' };
 // Per kind: its ops (the first is the default) and whether a filter of it can be negated.
 const KINDS = {
   col: { ops: { is: 'is', contains: 'contains' }, negatable: true },
   num: { ops: { is: 'is', '≥': '≥', '≤': '≤' }, negatable: true },
-  card: { ops: { is: 'the card', contains: 'a card whose name contains' }, negatable: true },
+  play: { ops: { is: '' }, negatable: true },
+  deck: { ops: { is: '' }, negatable: true },
   colors: { ops: COLOR_OPS, negatable: true },
   date: { ops: { between: 'between' }, negatable: false },
   stat: { ops: { '≥': '≥', '≤': '≤', '>': '>', '<': '<' }, negatable: false },
@@ -145,11 +214,10 @@ let FIELDS = {}; // key → {label, group, kind}
 function buildFields() {
   FIELDS = {};
   for (const c of columns) {
-    if (c === 'my_seen' || c === 'opp_seen') continue; // the card fields ask about these
     const kind = c === 'date' ? 'date' : c.endsWith('_colors') ? 'colors' : NUMERIC.has(c) ? 'num' : 'col';
     FIELDS[c] = { label: LABEL[c], group: GAME_COLS_L[c] ? 'per game' : 'match', kind };
   }
-  for (const [k, d] of Object.entries(CARD_FIELDS)) FIELDS[k] = { label: d.label, group: 'cards', kind: 'card' };
+  for (const [k, d] of Object.entries(CARD_FIELDS)) FIELDS[k] = { label: d.label, group: 'cards', kind: d.kind };
   for (const [k, s] of Object.entries(STATS)) if (!s.pair) FIELDS['stat:' + k] = { label: s.label, group: 'on groups (after grouping)', kind: 'stat' };
 }
 const kindOf = f => f.field && FIELDS[f.field] ? FIELDS[f.field].kind : null;
@@ -167,18 +235,8 @@ function filterSql(f) {
       if (f.not) return [nn.length ? `(${c} NOT IN (${nn.join(', ')})${hasNull ? '' : ` OR ${c} IS NULL`})` : null, hasNull ? `${c} IS NOT NULL` : null].filter(Boolean).join(' AND ');
       return nn.length && hasNull ? `(${inList} OR ${c} IS NULL)` : nn.length ? inList : `${c} IS NULL`;
     }
-    case 'card': {
-      const d = CARD_FIELDS[c], s = d.side;
-      if (inGame(f)) {
-        // this game's own revealed cards; game_id outside the subquery is the view row's
-        const cond = vs.map(v => f.op === 'contains' ? `gc.name LIKE ${like(v)}` : `gc.name = ${sq(v)}`).join(' OR ');
-        return `game_id ${f.not ? 'NOT IN' : 'IN'} (SELECT gc.game_id FROM mtgo_game_cards gc WHERE gc.side = '${s === 'opp' ? 'opp' : 'me'}' AND gc.played = 1 AND (${cond}))`;
-      }
-      const one = v => f.op === 'contains' ? (d.runs ? runsSql(s, `rc.name LIKE ${like(v)}`) : `${s}_seen LIKE ${like(v)}`) : (d.runs ? runsSql(s, `rc.name = ${sq(v)}`) : showedSql(s, v));
-      const t = `(${vs.map(one).join(' OR ')})`;
-      // a list lacks a card only where a list is known
-      return f.not ? (d.runs ? `${s}_reference_id IS NOT NULL AND NOT ${t}` : `NOT ${t}`) : t;
-    }
+    case 'play': return playSql(f, f.not);
+    case 'deck': return deckSql(f, f.not);
     case 'colors': {
       const cs = vs[0];
       if (f.op === 'exact') return neg(`(${c} = ${sq(cs)})`);
@@ -200,14 +258,14 @@ function filterText(f) {
       if (f.op === 'contains') return `${F.label} ${f.not ? "doesn't contain" : 'contains'} ${or(vs.map(v => `“${v}”`))}`;
       if (f.op !== 'is') return `${f.not ? 'not ' : ''}${F.label} ${f.op} ${vs[0]}`;
       return `${F.label} ${f.not ? 'is not' : 'is'} ${or(vs.map(v => valText(f.field, v)))}`;
-    case 'card': { const d = CARD_FIELDS[f.field]; return `${f.not ? d.neg : d.label} ${f.op === 'contains' ? `a card containing ${or(vs.map(v => `“${v}”`))}` : or(vs)}${d.runs ? '' : inGame(f) ? ' in that game' : ' in the match'}`; }
+    case 'play': case 'deck': return cardText(f);
     case 'colors': return `${f.not ? 'not: ' : ''}${F.label} ${COLOR_OPS[f.op]} ${vs[0]}`;
     case 'date': return `date ${f.values[0] || '…'} → ${f.values[1] || '…'}`;
     case 'stat': { const s = STATS[f.field.slice(5)]; return `${s.label} ${f.op} ${s.rate || s.bar ? (100 * vs[0]).toFixed(0) + '%' : vs[0]}`; }
   }
 }
 function whereSql(except) {
-  return filters.filter((f, i) => i !== except && active(f) && kindOf(f) !== 'stat').map(filterSql).filter(Boolean).join(' AND ');
+  return [...filters.filter((f, i) => i !== except && active(f) && kindOf(f) !== 'stat').map(filterSql), ...requirements().map(r => REQUIRE[r.k].sql)].filter(Boolean).join(' AND ');
 }
 const OPS = { '≥': (a, b) => a >= b, '≤': (a, b) => a <= b, '>': (a, b) => a > b, '<': (a, b) => a < b };
 function parseOutVal(stat, text) { const t = String(text).trim(); const pct = t.endsWith('%'); const n = parseFloat(t); if (isNaN(n)) return null; return STATS[stat].rate || STATS[stat].bar ? (pct || n > 1 ? n / 100 : n) : n; }
@@ -221,60 +279,95 @@ function defaultFilters() {
   fs.push({ field: 'my_deck_grade', op: 'is', not: false, values: ['hard'] }, { field: 'my_experimental', op: 'is', not: false, values: ['0'] });
   return fs;
 }
-// The query lives in the URL: `#q=<json>`; a `#col=value` link (statsLink) starts from the defaults plus that value.
-function filtersFromHash() {
+// The query lives in the URL: `#q={"f": filters, "g": group entries}`; a `#col=value` link (statsLink) starts from the defaults plus that value.
+function queryFromHash() {
   const h = decodeURIComponent(location.hash || '');
-  if (h.startsWith('#q=')) { try { const fs = JSON.parse(h.slice(3)); if (Array.isArray(fs)) return fs.filter(f => f && typeof f.field === 'string' && Array.isArray(f.values)); } catch (e) {} }
+  const g0 = [{ field: 'opp_archetype' }];
+  if (h.startsWith('#q=')) {
+    try {
+      // a bare array is a link from before group entries were kept
+      const q = JSON.parse(h.slice(3)), fs = Array.isArray(q) ? q : q.f || [];
+      return { f: fs.filter(f => f && FIELDS[f.field] && Array.isArray(f.values)), g: Array.isArray(q) ? g0 : (q.g || []).filter(g => g && FIELDS[g.field]) };
+    } catch (e) {}
+  }
+  return { f: linkFilters(h), g: g0 };
+}
+function linkFilters(h) {
   const pre = /^#([a-z_]+)=(.*)$/.exec(h);
   if (pre && FIELDS[pre[1]]) return [...defaultFilters(), { field: pre[1], op: 'is', not: false, values: [pre[2]] }];
   // opponents nothing explains are out by default
   return [...defaultFilters(), ...(FIELDS.opp_archetype ? [{ field: 'opp_archetype', op: 'is', not: true, values: [null] }] : [])];
 }
-function saveHash() { try { history.replaceState(null, '', '#q=' + encodeURIComponent(JSON.stringify(filters.filter(active)))); } catch (e) {} }
-let editing = null; // index of the filter whose editor is open
-function filtersChanged() { renderStatChoices(); if (view() === 'rows') renderRowCols(); saveHash(); schedule(); }
-function renderFilters() {
-  const el = document.getElementById('flist'); el.innerHTML = '';
-  const order = [...filters.keys()].sort((a, b) => (kindOf(filters[a]) === 'stat') - (kindOf(filters[b]) === 'stat'));
+function saveHash() { try { history.replaceState(null, '', '#q=' + encodeURIComponent(JSON.stringify({ f: filters.filter(active), g: groups.filter(groupActive) }))); } catch (e) {} }
+// The Filters and Group by panels are two lists of entries over the same FIELDS, built with the
+// same picker and editor: a filter restricts the rows; a group entry splits them, a column by its
+// values and a card sentence into yes/no. At most one editor is open: {mode, i}.
+let editing = null;
+const LISTS = {
+  filter: { el: 'flist', add: 'faddrow', addText: '+ filter', hint: 'every filter must hold; click one to change it', items: () => filters, changed: () => filtersChanged() },
+  group: { el: 'glist', add: 'gaddrow', addText: '+ group by', hint: 'a card entry splits into yes / no', items: () => groups, changed: () => groupsChanged() },
+};
+let groups = [];
+const isColumn = f => FIELDS[f.field] && !CARD_FIELDS[f.field] && kindOf(f) !== 'stat';
+const groupActive = g => isColumn(g) || (!!CARD_FIELDS[g.field] && g.values.length > 0);
+const groupText = g => isColumn(g) ? LABEL[g.field] : CARD_FIELDS[g.field] ? cardText(Object.assign({}, g, { not: false })) : 'choose a field…';
+const entryActive = (mode, f) => mode === 'filter' ? active(f) : groupActive(f);
+const entryText = (mode, f) => mode === 'filter' ? filterText(f) : groupText(f);
+function groupsChanged() { renderStatChoices(); renderRequired(); saveHash(); tableSort = null; schedule(); }
+function filtersChanged() { renderStatChoices(); renderRequired(); if (view() === 'rows') renderRowCols(); saveHash(); schedule(); }
+function renderEntries(mode) {
+  const L = LISTS[mode], items = L.items(), el = document.getElementById(L.el); el.innerHTML = '';
+  const order = [...items.keys()].sort((a, b) => (kindOf(items[a]) === 'stat') - (kindOf(items[b]) === 'stat'));
   let divided = false;
   for (const i of order) {
-    const f = filters[i];
+    const f = items[i], open = editing && editing.mode === mode && editing.i === i;
     if (kindOf(f) === 'stat' && !divided) { divided = true; el.insertAdjacentHTML('beforeend', '<div class="sechead fdiv">on groups <span class="muted">(after grouping)</span></div>'); }
-    const row = document.createElement('div'); row.className = 'frow' + (editing === i ? ' open' : '') + (active(f) ? '' : ' idle');
+    const row = document.createElement('div'); row.className = 'frow' + (open ? ' open' : '') + (entryActive(mode, f) ? '' : ' idle');
     row.innerHTML = `<span class="ftext"></span><button class="fx" title="remove">×</button>`;
-    row.querySelector('.ftext').textContent = filterText(f);
-    row.querySelector('.ftext').onclick = () => { closeEditor(); editing = editing === i ? null : i; renderFilters(); };
-    row.querySelector('.fx').onclick = () => { filters.splice(i, 1); editing = null; renderFilters(); filtersChanged(); };
+    row.querySelector('.ftext').textContent = entryText(mode, f);
+    // a column group entry has nothing to edit
+    if (!(mode === 'group' && isColumn(f))) row.querySelector('.ftext').onclick = () => { closeEditor(); editing = open ? null : { mode, i }; renderEntries(mode); };
+    row.querySelector('.fx').onclick = () => { items.splice(i, 1); editing = null; renderEntries(mode); L.changed(); };
     el.appendChild(row);
-    if (editing === i) el.appendChild(editor(f, i, row.querySelector('.ftext')));
+    if (open) el.appendChild(editor(f, mode, row.querySelector('.ftext')));
   }
 }
-// Closing an editor drops a filter left without values.
+const renderFilters = () => renderEntries('filter');
+// Closing an editor drops an entry left without values.
 function closeEditor() {
-  if (editing !== null && filters[editing] && !active(filters[editing])) { filters.splice(editing, 1); editing = null; filtersChanged(); }
+  if (!editing) return;
+  const { mode, i } = editing, items = LISTS[mode].items();
+  if (items[i] && !entryActive(mode, items[i])) { items.splice(i, 1); editing = null; renderEntries(mode); LISTS[mode].changed(); }
 }
-function fieldSelect(cur) {
+function fieldSelect(cur, mode) {
   const groups = {};
-  for (const [k, d] of Object.entries(FIELDS)) (groups[d.group] = groups[d.group] || []).push([k, d]);
+  for (const [k, d] of Object.entries(FIELDS)) if (mode === 'filter' || d.kind !== 'stat') (groups[d.group] = groups[d.group] || []).push([k, d]);
   return `<select class="ffield"><option value="">choose a field…</option>${Object.entries(groups).map(([g, fs]) => `<optgroup label="${g}">${fs.map(([k, d]) => `<option value="${k}" ${k === cur ? 'selected' : ''}>${d.label}</option>`).join('')}</optgroup>`).join('')}</select>`;
 }
 function newFilter(field) {
   const k = FIELDS[field] && FIELDS[field].kind;
+  if (CARD_FIELDS[field]) return newCardEntry(field, k);
   return { field, op: k ? Object.keys(KINDS[k].ops)[0] : '', not: false, values: k === 'date' ? ['', ''] : [] };
 }
-// "+ filter" turns into the field picker in place; picking a field adds the filter with its editor open.
-function renderAdd(picking) {
-  const el = document.getElementById('faddrow');
+const newEntry = (mode, field) => mode === 'group' && !CARD_FIELDS[field] ? { field } : newFilter(field);
+// The add button turns into the field picker in place; picking a field adds the entry with its editor open (a column group entry needs none).
+function renderAdd(mode, picking) {
+  const L = LISTS[mode], el = document.getElementById(L.add);
   if (!picking) {
-    el.innerHTML = '<button id="fadd">+ filter</button> <span class="muted">every filter must hold; click one to change it</span>';
-    el.querySelector('#fadd').onclick = () => { closeEditor(); editing = null; renderFilters(); renderAdd(true); };
+    el.innerHTML = `<button class="fadd">${L.addText}</button> <span class="muted">${L.hint}</span>`;
+    el.querySelector('.fadd').onclick = () => { closeEditor(); editing = null; renderEntries(mode); renderAdd(mode, true); };
     return;
   }
-  el.innerHTML = `${fieldSelect('')} <button class="fcancel">cancel</button>`;
+  el.innerHTML = `${fieldSelect('', mode)} <button class="fcancel">cancel</button>`;
   const sel = el.querySelector('.ffield');
-  sel.onchange = () => { if (!sel.value) return; filters.push(newFilter(sel.value)); editing = filters.length - 1; renderAdd(false); renderFilters(); };
-  sel.onkeydown = e => { if (e.key === 'Escape') renderAdd(false); };
-  el.querySelector('.fcancel').onclick = () => renderAdd(false);
+  sel.onchange = () => {
+    if (!sel.value) return;
+    const items = L.items(); items.push(newEntry(mode, sel.value));
+    editing = mode === 'group' && !CARD_FIELDS[sel.value] ? null : { mode, i: items.length - 1 };
+    renderAdd(mode, false); renderEntries(mode); if (!editing) L.changed();
+  };
+  sel.onkeydown = e => { if (e.key === 'Escape') renderAdd(mode, false); };
+  el.querySelector('.fcancel').onclick = () => renderAdd(mode, false);
   sel.focus(); try { sel.showPicker(); } catch (e) {}
 }
 // '2026', '2026-08', '8/2026', '2026-08-15', '8/15/2026' → the first day of that period, or with `end` the last; null if not a date.
@@ -290,18 +383,23 @@ function parseDay(t, end) {
   if (d < 1 || d > last) return null;
   return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
-function editor(f, i, textEl) {
+function renderRequired() {
+  const el = document.getElementById('freq'); if (!el) return;
+  el.innerHTML = requirements().map(r => `<div class="muted">also: only where ${REQUIRE[r.k].text} <span title="${r.by.join('\n').replace(/"/g, '&quot;')}">(needed by ${r.by.length === 1 ? r.by[0] : r.by.length + ' entries'})</span></div>`).join('');
+}
+function editor(f, mode, textEl) {
   const box = document.createElement('div'); box.className = 'fedit';
-  const touch = () => { textEl.textContent = filterText(f); textEl.parentElement.classList.toggle('idle', !active(f)); filtersChanged(); };
-  const fieldSel = fieldSelect(f.field);
+  const L = LISTS[mode];
+  const touch = () => { textEl.textContent = entryText(mode, f); textEl.parentElement.classList.toggle('idle', !entryActive(mode, f)); L.changed(); };
   const k = kindOf(f), K = k && KINDS[k];
-  box.innerHTML = `<div>${fieldSel}${K ? ` ${Object.keys(K.ops).length > 1 ? `<select class="fop">${Object.entries(K.ops).map(([o, l]) => `<option value="${o}" ${o === f.op ? 'selected' : ''}>${l}</option>`).join('')}</select> ` : ''}${K.negatable ? `<label><input type="checkbox" class="fnot" ${f.not ? 'checked' : ''}> not</label>` : ''}${CARD_FIELDS[f.field] && !CARD_FIELDS[f.field].runs ? ` <select class="fscope"><option value="match">in the match (all its games)</option><option value="game" ${inGame(f) ? 'selected' : ''}>in that game (per game)</option></select>` : ''}` : ''}</div><div class="fval"></div><div class="fbtns"><button class="fdone">done</button></div>`;
-  box.querySelector('.ffield').onchange = e => { Object.assign(f, newFilter(e.target.value)); renderFilters(); filtersChanged(); };
+  // negation means nothing for a yes/no split
+  const negatable = K && K.negatable && mode === 'filter';
+  box.innerHTML = `<div>${fieldSelect(f.field, mode)}${K ? ` ${Object.keys(K.ops).length > 1 ? `<select class="fop">${Object.entries(K.ops).map(([o, l]) => `<option value="${o}" ${o === f.op ? 'selected' : ''}>${l}</option>`).join('')}</select> ` : ''}${negatable ? `<label><input type="checkbox" class="fnot" ${f.not ? 'checked' : ''}> not</label>` : ''}` : ''}</div><div class="fval"></div><div class="fbtns"><button class="fdone">done</button></div>`;
+  box.querySelector('.ffield').onchange = e => { const items = L.items(); items[editing.i] = newEntry(mode, e.target.value); if (mode === 'group' && !CARD_FIELDS[e.target.value]) editing = null; renderEntries(mode); L.changed(); };
   const not = box.querySelector('.fnot'); if (not) not.onchange = () => { f.not = not.checked; touch(); };
-  const scope = box.querySelector('.fscope'); if (scope) scope.onchange = () => { f.scope = scope.value; touch(); };
-  const op = box.querySelector('.fop'); if (op) op.onchange = () => { const was = f.op; f.op = op.value; if ((was === 'is') !== (f.op === 'is') || k === 'num') f.values = []; renderFilters(); filtersChanged(); };
-  box.querySelector('.fdone').onclick = () => { closeEditor(); editing = null; renderFilters(); };
-  if (k) valueEditor(f, i, box.querySelector('.fval'), touch);
+  const op = box.querySelector('.fop'); if (op) op.onchange = () => { const was = f.op; f.op = op.value; if ((was === 'is') !== (f.op === 'is') || k === 'num') f.values = []; renderEntries(mode); L.changed(); };
+  box.querySelector('.fdone').onclick = () => { closeEditor(); editing = null; renderEntries(mode); };
+  if (k) valueEditor(f, editing.i, box.querySelector('.fval'), touch);
   return box;
 }
 // A comparison typed as text: a leading <, <=, ≤, >, >=, ≥ sets the op (when the kind has it); a value
@@ -330,23 +428,13 @@ function textInput(f, touch, placeholder, list) {
 function valueEditor(f, i, el, touch) {
   const k = kindOf(f);
   if ((k === 'col' || k === 'num') && f.op === 'is') return pickValues(f, i, el, touch);
-  if (k === 'col' || (k === 'card' && f.op === 'contains')) return el.appendChild(textInput(f, touch, 'part of a name'));
+  if (k === 'col') return el.appendChild(textInput(f, touch, 'part of a name'));
   if (k === 'num') return comparisonInput(f, el, touch, 'a number', f.values[0] ?? '', t => /^-?\d+(\.\d+)?$/.test(t) ? t : null);
   if (k === 'stat') {
     const stat = f.field.slice(5), pct = STATS[stat].rate || STATS[stat].bar;
     return comparisonInput(f, el, touch, pct ? '60%' : '5', f.values.length ? (pct ? `${Math.round(100 * f.values[0])}%` : f.values[0]) : '', t => parseOutVal(stat, t));
   }
-  if (k === 'card') {
-    // several names: any of them (OR); suggestions are every card either side has revealed
-    const chips = document.createElement('div'); chips.className = 'chips';
-    const draw = () => { chips.innerHTML = ''; f.values.forEach((v, j) => { const s = document.createElement('span'); s.textContent = v; s.title = 'remove'; s.onclick = () => { f.values.splice(j, 1); draw(); touch(); }; chips.appendChild(s); }); };
-    const inp = document.createElement('input'); inp.size = 24; inp.placeholder = 'card name, Enter to add'; inp.setAttribute('list', 'cardnames');
-    const add = () => { const n = inp.value.trim(); if (n && !f.values.includes(n)) { f.values.push(n); draw(); touch(); } inp.value = ''; };
-    inp.onkeydown = e => { if (e.key === 'Enter') add(); };
-    inp.onchange = () => { if (cardNames.has(inp.value.trim())) add(); };
-    el.append(inp, chips); draw(); setTimeout(() => inp.focus(), 0);
-    return;
-  }
+  if (k === 'play' || k === 'deck') return cardEditor(f, el, touch);
   if (k === 'colors') {
     const cur = f.values[0] || '';
     el.innerHTML = [...'WUBRG'].map(x => `<label><input type="checkbox" value="${x}" ${cur.includes(x) ? 'checked' : ''}> ${x}</label>`).join(' ');
@@ -366,6 +454,40 @@ function valueEditor(f, i, el, touch) {
     });
     setTimeout(() => el.querySelector('.d0').focus(), 0);
   }
+}
+// Card names as removable chips, any of them (OR); suggestions are every card a game log or a list names.
+function cardChips(arr, touch, placeholder, focus) {
+  const wrap = document.createElement('span');
+  const chips = document.createElement('div'); chips.className = 'chips';
+  const draw = () => { chips.innerHTML = ''; arr.forEach((v, j) => { const c = document.createElement('span'); c.textContent = v; c.title = 'remove'; c.onclick = () => { arr.splice(j, 1); draw(); touch(); }; chips.appendChild(c); }); };
+  const inp = document.createElement('input'); inp.size = 24; inp.placeholder = placeholder; inp.setAttribute('list', 'cardnames');
+  const add = () => { const n = inp.value.trim(); if (n && !arr.includes(n)) { arr.push(n); draw(); touch(); } inp.value = ''; };
+  inp.onkeydown = e => { if (e.key === 'Enter') add(); };
+  inp.onchange = () => { if (cardNames.has(inp.value.trim())) add(); };
+  wrap.append(inp, chips); draw(); if (focus) setTimeout(() => inp.focus(), 0);
+  return wrap;
+}
+const selectOf = (opts, cur) => `<select>${Object.entries(opts).map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+function cardEditor(f, el, touch) {
+  const row = (label, node) => { const d = document.createElement('div'); if (label) d.append(label + ' '); d.append(node); el.appendChild(d); return d; };
+  const sel = (opts, key, then) => { const t = document.createElement('template'); t.innerHTML = selectOf(opts, f[key]); const x = t.content.firstChild; x.onchange = () => { f[key] = x.value; if (then) then(); touch(); }; return x; };
+  const num = (key, label) => { const x = document.createElement('input'); x.type = 'number'; x.min = '1'; x.value = f[key] || 1; x.style.width = '4em'; x.oninput = () => { f[key] = Math.max(1, +x.value || 1); touch(); }; return row(label, x); };
+  if (kindOf(f) === 'deck') {
+    row('in the', sel(BOARD, 'board'));
+    num('n', 'at least this many copies:');
+    row('', cardChips(f.values, touch, 'card name, Enter to add', true));
+    return;
+  }
+  const me = CARD_FIELDS[f.field].side === 'me';
+  const verbs = Object.fromEntries(Object.entries(VERBS).map(([k, v]) => [k, v.active || `… ${v.passive}`]));
+  let otherRow = null, cardsRow = null;
+  const drawOther = () => { if (otherRow) otherRow.remove(); otherRow = null; const o = VERBS[f.verb].other; if (!o) { f.other = []; return; } otherRow = row(o, cardChips(f.other, touch, 'any card (optional)')); cardsRow.after(otherRow); };
+  row(me ? 'I / my card:' : 'opponent / their card:', sel(verbs, 'verb', drawOther));
+  cardsRow = row('', cardChips(f.values, touch, 'card name, Enter to add', true));
+  drawOther();
+  row('when', sel(WHEN, 'when'));
+  num('n', 'at least this many times:');
+  row('', sel({ game: 'in that game (per game)', match: 'in any game of the match' }, 'scope'));
 }
 // The values a column takes under every other filter, with their counts; a search box narrows a long list.
 async function pickValues(f, i, el, touch) {
@@ -404,36 +526,31 @@ async function lists() {
 }
 const view = () => document.querySelector('input[name=view]:checked').value;
 const chosenStats = () => [...document.querySelectorAll('input[name=stat]:checked')].map(i => i.value);
-const gameQuery = () => [...groupBy(), ...filters.filter(active).map(f => f.field)].some(c => GAME_COLS.includes(c)) || filters.some(f => active(f) && inGame(f));
-const groupBy = () => [...document.querySelectorAll('input[name=g]:checked')].map(i => i.value);
+// The rows are games when a per-game column or a per-game card sentence is in use; the server is told so.
+const gameQuery = () => [...groupBy(), ...filters.filter(active).map(f => f.field)].some(c => GAME_COLS.includes(c))
+  || [...filters.filter(active), ...groups.filter(groupActive)].some(f => kindOf(f) === 'play' && f.scope === 'game');
+const groupBy = () => groups.filter(g => groupActive(g) && isColumn(g)).map(g => g.field);
+const groupSplits = () => groups.filter(g => groupActive(g) && CARD_FIELDS[g.field]).map(g => ({ label: groupText(g), sql: kindOf(g) === 'play' ? playSql(g, false) : deckSql(g, false) }));
+// the server's key order: the columns, then the splits
+const groupLabels = () => [...groupBy().map(c => LABEL[c] || c), ...groupSplits().map(x => x.label)];
+const statsParams = extra => new URLSearchParams(Object.assign({ where: whereSql(), split: JSON.stringify(groupSplits().map(x => x.sql)), game: String(gameQuery()) }, extra));
 
 async function init() {
   // the player is the one this browser uploaded as (a default filter), else the first with data
   if (!getPlayer()) { try { const ps = await api('api/players'); if (ps.length) setPlayer(ps[0]); } catch (e) {} }
   columns = (await api('api/columns')).filter(c => LABEL[c]);
-  // Every panel is split the same way: match-level things, then per-game things.
-  const mcols = columns.filter(c => MATCH_COLS[c]), gcolsAll = columns.filter(c => GAME_COLS_L[c]);
-  const gl = c => `<label><input type="checkbox" name="g" value="${c}" ${c === 'opp_archetype' ? 'checked' : ''}> ${LABEL[c]}</label><br>`;
-  document.getElementById('gMatch').innerHTML = CURATED_G.filter(c => mcols.includes(c)).map(gl).join('');
-  document.getElementById('gGame').innerHTML = CURATED_G.filter(c => gcolsAll.includes(c)).map(gl).join('');
-  for (const [id, cs] of [['gmoreM', mcols], ['gmoreG', gcolsAll]]) {
-    const more = document.getElementById(id);
-    more.innerHTML += cs.filter(c => !CURATED_G.includes(c)).map(c => `<option value="${c}">${LABEL[c]}</option>`).join('');
-    more.onchange = () => { if (more.value) { document.getElementById(id === 'gmoreM' ? 'gMatch' : 'gGame').innerHTML += gl(more.value).replace('checked', '').replace('<input', '<input checked'); more.value = ''; renderStatChoices(); tableSort = null; schedule(); } };
-  }
-  document.getElementById('pGroup').addEventListener('change', renderStatChoices);
   const sl = ([k, s]) => `<label><input type="checkbox" name="stat" value="${k}" ${DEFAULT_STATS.includes(k) ? 'checked' : ''}> ${s.label}</label><br>`;
   document.getElementById('sMatch').innerHTML = Object.entries(STATS).filter(([, s]) => s.level === 'match').map(sl).join('');
   document.getElementById('sGame').innerHTML = Object.entries(STATS).filter(([, s]) => s.level !== 'match').map(sl).join('');
   document.querySelectorAll('input[name=view]').forEach(r => r.onchange = syncViewOpts);
   buildFields();
-  filters = filtersFromHash();
-  renderFilters();
-  renderAdd(false);
+  ({ f: filters, g: groups } = queryFromHash());
+  renderEntries('filter'); renderEntries('group'); renderRequired();
+  renderAdd('filter', false); renderAdd('group', false);
   renderStatChoices(); syncViewOpts();
   // Live: any change in any panel re-renders (debounced); a stale response never overwrites a newer one.
   api('api/cards-seen').then(names => { cardNames = new Set(names); document.getElementById('cardnames').innerHTML = names.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
-  for (const id of ['pGroup', 'pStats']) document.getElementById(id).addEventListener('change', () => { tableSort = null; schedule(); });
+  document.getElementById('pStats').addEventListener('change', () => { tableSort = null; schedule(); });
   document.getElementById('pView').addEventListener('change', schedule);
   document.getElementById('sort').addEventListener('change', () => { tableSort = null; });
   for (const id of ['topn', 'rowlimit']) document.getElementById(id).addEventListener('input', schedule);
@@ -458,7 +575,7 @@ function applyPanels() {
 function summarizePanels() {
   const sum = (id, text) => { const el = document.querySelector(`#${id} .psum`); if (el) el.textContent = text; };
   sum('pFilters', filters.filter(active).map(filterText).join(' · ') || 'none');
-  sum('pGroup', groupBy().map(c => LABEL[c]).join(', ') || 'none');
+  sum('pGroup', groupLabels().join(', ') || 'none');
   sum('pStats', view() === 'rows' ? `${rowCols(gameQuery()).set.size} columns` : (chosenStats().map(k => STATS[k].label).join(', ') || 'none'));
   const v = view();
   const vname = { table: "table", series: "time series", rows: "rows" }[v];
@@ -600,19 +717,18 @@ async function showTable(seq) {
   const chosen = chosenStats();
   if (!chosen.length) { out.innerHTML = '<span class="err">pick at least one output statistic</span>'; return; }
   try {
-    const params = new URLSearchParams({ by: by.join(','), where: whereSql(), sort: document.getElementById('sort').value, min: '1', limit: '5000', full: 'true' });
-    const r = await api('api/stats?' + params);
+    const r = await api('api/stats?' + statsParams({ by: by.join(','), sort: document.getElementById('sort').value, min: '1', limit: '5000', full: 'true' }));
     if (stale(seq)) return;
     const total = r.game_mode ? r.all_games : r.all_matches;
     const asRow = x => Object.assign({ n: r.game_mode ? x.games : x.matches }, x);
     const kept = r.rows.filter(x => passesOut(asRow(x), total)); const hiddenN = r.rows.length - kept.length;
     r.rows = kept; r.rollup = null;
-    const head = [...(by.length ? by.map(c => LABEL[c] || c) : ['all'])];
+    const labels = groupLabels(), head = [...(labels.length ? labels : ['all'])];
     for (const k of chosen) { head.push(STATS[k].label); if (STATS[k].ci) head.push('95% CI'); }
     // one record per row: cells (html) and sort keys (per header column)
     const mk = x => {
-      const key = x.key || ''; const keys = by.length > 1 && !key.startsWith('(') ? key.split(' │ ') : [key];
-      while (keys.length < Math.max(by.length, 1)) keys.push('');
+      const key = x.key || ''; const keys = labels.length > 1 && !key.startsWith('(') ? key.split(' │ ') : [key];
+      while (keys.length < Math.max(labels.length, 1)) keys.push('');
       const cells = keys.map((k, i) => keyCell(by[i], k, key)); const sortv = keys.map(k => k.toLowerCase());
       const rr = Object.assign({ n: r.game_mode ? x.games : x.matches }, x);
       for (const k of chosen) {
@@ -651,12 +767,12 @@ async function showSeries(seq) {
   const groups = groupBy(), stats = chosenStats().filter(k => STATS[k].plot);
   if (!stats.length) { out.innerHTML = '<span class="err">pick at least one plottable output (counts, rates, averages)</span>'; return; }
   try {
-    const r = await api('api/stats?' + new URLSearchParams({ by: [bucket, ...groups].join(','), where: whereSql(), sort: 'key', min: '1', limit: '20000', full: 'true' }));
+    const r = await api('api/stats?' + statsParams({ by: [bucket, ...groups].join(','), sort: 'key', min: '1', limit: '20000', full: 'true' }));
     if (stale(seq)) return;
     const rows = new Map(); const size = new Map(); const buckets = new Set();
     for (const x of r.rows) {
       if (!x.key || x.key.startsWith('(')) continue;
-      const parts = x.key.split(' │ '); const b = parts[0]; const g = groups.length ? parts.slice(1).join(' │ ') : 'all';
+      const parts = x.key.split(' │ '); const b = parts[0]; const g = parts.length > 1 ? parts.slice(1).join(' │ ') : 'all';
       const rr = Object.assign({ n: r.game_mode ? x.games : x.matches }, x);
       if (!rows.has(g)) rows.set(g, new Map()); rows.get(g).set(b, rr); size.set(g, (size.get(g) || 0) + rr.n); buckets.add(b);
     }
@@ -686,7 +802,7 @@ async function showSeries(seq) {
       html += `<h3 class="charttitle">${st.label}${win > 1 ? ` <span class="muted">(smoothed over ${win} ${bucket === 'date' ? 'days' : bucket + 's'})</span>` : ''}</h3>` + chart(xs, series, st);
     }
     out.innerHTML = html + `<div class="muted">${names.length} of ${size.size} groups shown (largest by ${r.game_mode ? 'games' : 'matches'}${qualified.length < size.size ? `, ${size.size - qualified.length} hidden by the filters on groups` : ''}); hover a point for the value and sample size</div>`;
-    setSummary(`per ${bucket}${groups.length ? ' by ' + groups.map(c => LABEL[c]).join(', ') : ''}; ${r.all_matches} matches / ${r.all_games} games; where: ${whereSql() || '(none)'}`);
+    setSummary(`per ${bucket}${groupLabels().length ? ' by ' + groupLabels().join(', ') : ''}; ${r.all_matches} matches / ${r.all_games} games; where: ${whereSql() || '(none)'}`);
   } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
 }
 const PALETTE = ['#2a6fdb', '#d9534f', '#3a9d5d', '#e8a33d', '#8e5ec9', '#1fa2b3', '#b5651d', '#777'];

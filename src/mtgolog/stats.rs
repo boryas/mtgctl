@@ -74,10 +74,12 @@ SELECT
   g.opp_mulligans     AS opp_mulligans,
   g.my_hand           AS my_hand,
   g.opp_hand          AS opp_hand,
-  g.my_lands          AS my_lands,
-  g.opp_lands         AS opp_lands,
-  g.my_spells         AS my_spells,
-  g.opp_spells        AS opp_spells
+  (SELECT COUNT(*) FROM mtgo_card_events c WHERE c.game_id = g.id AND c.side = 'me' AND c.verb = 'land') AS my_lands,
+  (SELECT COUNT(*) FROM mtgo_card_events c WHERE c.game_id = g.id AND c.side = 'opp' AND c.verb = 'land') AS opp_lands,
+  (SELECT COUNT(*) FROM mtgo_card_events c WHERE c.game_id = g.id AND c.side = 'me' AND c.verb = 'cast') AS my_spells,
+  (SELECT COUNT(*) FROM mtgo_card_events c WHERE c.game_id = g.id AND c.side = 'opp' AND c.verb = 'cast') AS opp_spells,
+  CASE WHEN g.my_dd_seq IS NOT NULL THEN 1 ELSE 0 END AS my_dd_resolved,
+  (SELECT ev.turn FROM mtgo_events ev WHERE ev.game_id = g.id AND ev.seq = g.my_dd_seq) AS my_dd_turn
 FROM mtgo_games g
 JOIN mtgo_matches m ON m.id = g.match_id
 LEFT JOIN mtgo_eras e ON e.id = m.era_id
@@ -155,6 +157,10 @@ struct HistRow {
 #[derive(Debug, Clone, Default)]
 pub struct StatsQuery {
     pub by: Vec<String>,
+    /// SQL conditions over mtgo_game_view grouped on as yes/no after the `by` columns
+    pub split: Vec<String>,
+    /// whether the rows are games rather than matches, when the caller knows; else see is_game_mode
+    pub game: Option<bool>,
     /// one table per value of this column (a facet), each grouped by `by`
     pub per: Option<String>,
     pub where_sql: Option<String>,
@@ -323,7 +329,7 @@ fn run_per(src: &mut Source, q: &StatsQuery, per: &str) -> Result<(), String> {
         return Err(format!("bad column name: {per}"));
     }
     // the facet values are the groups of `--by per`, keyed as compute keys them (NULL → ∅)
-    let facets = src.stats(&StatsQuery { by: vec![per.to_string()], per: None, where_sql: q.where_sql.clone(), min_games: 1, sort: "time".into(), limit: usize::MAX, full: false, hist: vec![] })?;
+    let facets = src.stats(&StatsQuery { by: vec![per.to_string()], split: vec![], game: q.game, per: None, where_sql: q.where_sql.clone(), min_games: 1, sort: "time".into(), limit: usize::MAX, full: false, hist: vec![] })?;
     for f in facets.rows {
         let v = f.key.unwrap_or_default();
         let cond = if v == "∅" { format!("{per} IS NULL") } else { format!("CAST({per} AS TEXT) = '{}'", v.replace('\'', "''")) };
@@ -361,13 +367,14 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
             return Err(format!("bad column name: {c}"));
         }
     }
+    let groups: Vec<String> = by.iter().cloned().chain(q.split.iter().map(|c| format!("(CASE WHEN {c} THEN 'yes' ELSE 'no' END)"))).collect();
     // Group key as one text column so the result shape is static.
-    let key_expr = if by.is_empty() {
+    let key_expr = if groups.is_empty() {
         "'all'".to_string()
     } else {
-        by.iter().map(|c| format!("COALESCE(CAST({c} AS TEXT),'∅')")).collect::<Vec<_>>().join(" || ' │ ' || ")
+        groups.iter().map(|c| format!("COALESCE(CAST({c} AS TEXT),'∅')")).collect::<Vec<_>>().join(" || ' │ ' || ")
     };
-    let group = if by.is_empty() { String::new() } else { format!("GROUP BY {}", by.join(", ")) };
+    let group = if groups.is_empty() { String::new() } else { format!("GROUP BY {}", groups.join(", ")) };
     let wher = where_sql.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let select_body = format!(
         "COUNT(*) AS games,
@@ -572,6 +579,7 @@ fn rollup_rows(hidden: &[Row]) -> Row {
 pub const GAME_COLS: &[&str] = &[
     "game_id", "game_number", "on_play", "turns", "duration_secs", "minutes", "winner", "won", "win_by",
     "my_mulligans", "opp_mulligans", "my_hand", "opp_hand", "my_lands", "opp_lands", "my_spells", "opp_spells",
+    "my_dd_resolved", "my_dd_turn",
 ];
 
 fn mentions_col(sql: &str, col: &str) -> bool {
@@ -592,8 +600,11 @@ fn mentions_col(sql: &str, col: &str) -> bool {
 }
 
 pub fn is_game_mode(q: &StatsQuery) -> bool {
+    if let Some(g) = q.game {
+        return g;
+    }
     q.by.iter().chain(q.hist.iter()).any(|c| GAME_COLS.contains(&c.as_str()))
-        || q.where_sql.as_deref().is_some_and(|w| GAME_COLS.iter().any(|c| mentions_col(w, c)))
+        || q.where_sql.iter().chain(q.split.iter()).any(|w| GAME_COLS.iter().any(|c| mentions_col(w, c)))
 }
 
 /// Printed with `mtgo columns`.
@@ -604,6 +615,6 @@ pub fn print_columns(src: &mut Source) -> Result<(), String> {
     println!("mtgo_game_view columns (use with --by / --where):");
     println!("  {}", cols.join(", "));
     println!("{COLUMNS_NOTE}");
-    println!("Tables: mtgo_matches, mtgo_games, mtgo_game_cards (game_id, side, name, instances, plays, first_turn, played), mtgo_events (game_id, seq, ts, turn, side, kind, card, target, text), mtgo_lists, match_decks");
+    println!("Tables: mtgo_matches, mtgo_games, mtgo_card_events (game_id, seq, turn, side, actor, card, object_id, verb, other), mtgo_events (game_id, seq, ts, turn, side, kind, text), mtgo_lists, match_decks");
     Ok(())
 }

@@ -196,7 +196,7 @@ pub fn ban_check(conn: &mut SqliteConnection, path: &Path) -> Result<Vec<(String
         for card in &e.banned {
             let n: N = diesel::sql_query(format!(
                 "SELECT COUNT(DISTINCT CASE WHEN m.start_ts < '{d}' THEN c.game_id END) AS before, COUNT(DISTINCT CASE WHEN m.start_ts >= '{d}' THEN c.game_id END) AS after
-                 FROM mtgo_game_cards c JOIN mtgo_matches m ON m.id = c.match_id WHERE c.played = 1 AND c.name = '{}'",
+                 FROM mtgo_card_events c JOIN mtgo_matches m ON m.id = c.match_id WHERE c.verb IN ('cast', 'land') AND c.card = '{}'",
                 card.replace('\'', "''"),
                 d = e.effective
             ))

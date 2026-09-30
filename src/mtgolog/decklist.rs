@@ -439,7 +439,7 @@ fn html_unescape(s: &str) -> String {
 /// (safe while a sync holds the database).
 pub fn known_names(conn: &mut SqliteConnection) -> QueryResult<HashMap<i64, String>> {
     let mut map: HashMap<i64, String> = HashMap::new();
-    for r in diesel::sql_query("SELECT DISTINCT catalog_id, name FROM mtgo_game_cards").load::<NameRow>(conn)? {
+    for r in diesel::sql_query("SELECT DISTINCT catalog_id, card AS name FROM mtgo_card_events").load::<NameRow>(conn)? {
         map.insert(r.catalog_id as i64, r.name);
     }
     for r in diesel::sql_query("SELECT catalog_id, name FROM mtgo_cards WHERE source <> 'unknown'").load::<NameRow>(conn)? {
@@ -456,7 +456,7 @@ pub fn resolve_names(conn: &mut SqliteConnection, cfg: &MtgoConfig, ids: &BTreeS
     for r in cached {
         map.insert(r.catalog_id as i64, front_face(&r.name));
     }
-    let seen: Vec<NameRow> = diesel::sql_query("SELECT DISTINCT catalog_id, name FROM mtgo_game_cards").load(conn)?;
+    let seen: Vec<NameRow> = diesel::sql_query("SELECT DISTINCT catalog_id, card AS name FROM mtgo_card_events").load(conn)?;
     for r in seen {
         if !map.contains_key(&(r.catalog_id as i64)) {
             diesel::sql_query(format!("INSERT OR IGNORE INTO mtgo_cards(catalog_id, name, source) VALUES ({}, '{}', 'seen')", r.catalog_id, r.name.replace('\'', "''"))).execute(conn)?;
@@ -611,7 +611,7 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fe
             let (mut game_db_id, mut match_db_id) = (None, None);
             if let Some((_, g)) = best {
                 // validate: cards I played in that game must (mostly) be in the list
-                let played: Vec<PlayedRow> = diesel::sql_query(format!("SELECT DISTINCT name FROM mtgo_game_cards WHERE game_id = {} AND side = 'me' AND played = 1", g.id)).load(conn)?;
+                let played: Vec<PlayedRow> = diesel::sql_query(format!("SELECT DISTINCT card AS name FROM mtgo_card_events WHERE game_id = {} AND side = 'me' AND verb IN ('cast', 'land')", g.id)).load(conn)?;
                 let list_names: HashSet<&str> = cards.iter().map(|c| c.0.as_str()).collect();
                 let hits = played.iter().filter(|p| list_names.contains(p.name.as_str())).count();
                 let ok = played.is_empty() || hits as f64 / played.len() as f64 >= 0.8;

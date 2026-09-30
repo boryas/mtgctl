@@ -621,6 +621,11 @@ struct StatsParams {
     full: bool,
     #[serde(default)]
     hist: String,
+    /// a JSON array of SQL conditions, see StatsQuery::split
+    #[serde(default)]
+    split: String,
+    #[serde(default)]
+    game: Option<bool>,
 }
 fn one() -> i64 {
     1
@@ -637,7 +642,8 @@ fn split_cols(s: &str) -> Vec<String> {
 }
 
 async fn stats_api(State(st): State<Shared>, Query(p): Query<StatsParams>) -> Result<Json<stats::StatsResult>, ApiError> {
-    let query = stats::StatsQuery { by: split_cols(&p.by), per: None, where_sql: p.where_sql.filter(|w| !w.trim().is_empty()), min_games: p.min, sort: p.sort, limit: p.limit, full: p.full, hist: split_cols(&p.hist) };
+    let split: Vec<String> = if p.split.is_empty() { vec![] } else { serde_json::from_str(&p.split).map_err(|e| bad(format!("split: {e}")))? };
+    let query = stats::StatsQuery { by: split_cols(&p.by), split, game: p.game, per: None, where_sql: p.where_sql.filter(|w| !w.trim().is_empty()), min_games: p.min, sort: p.sort, limit: p.limit, full: p.full, hist: split_cols(&p.hist) };
     let r = tokio::task::spawn_blocking(move || {
         let conn = &mut pool(&st)?;
         stats::compute(conn, &query)
@@ -686,7 +692,7 @@ async fn list_experimental(State(st): State<Shared>, headers: HeaderMap, Query(q
     Ok(Json(serde_json::json!({ "id": req.id, "experimental": req.on })))
 }
 
-/// Every card either side has revealed, for the card filters' suggestions.
+/// Every card the game logs name or a registered list holds, for the card filters' suggestions.
 async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiError> {
     let rows = tokio::task::spawn_blocking(move || {
         use diesel::prelude::*;
@@ -696,7 +702,7 @@ async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiEr
             #[diesel(sql_type = diesel::sql_types::Text)]
             name: String,
         }
-        let rows: Vec<R> = diesel::sql_query("SELECT DISTINCT name FROM mtgo_game_cards WHERE played = 1 ORDER BY name").load(conn).map_err(|e| e.to_string())?;
+        let rows: Vec<R> = diesel::sql_query("SELECT card AS name FROM mtgo_card_events UNION SELECT name FROM mtgo_list_cards ORDER BY name").load(conn).map_err(|e| e.to_string())?;
         Ok::<_, String>(rows.into_iter().map(|r| r.name).collect::<Vec<_>>())
     })
     .await
@@ -985,8 +991,6 @@ struct EventRow {
     side: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Text)]
     kind: String,
-    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
-    card: Option<String>,
     #[diesel(sql_type = diesel::sql_types::Text)]
     text: String,
 }
@@ -1051,8 +1055,8 @@ async fn game_detail(State(st): State<Shared>, Query(q): Query<HashMap<String, S
         use diesel::prelude::*;
         let conn = &mut pool(&st)?;
         let game: GameMeta = diesel::sql_query(format!("SELECT g.id, g.match_id, g.game_number, g.on_play, g.turns, g.winner, g.win_by, g.my_mulligans, g.opp_mulligans, m.opponent, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| format!("no game {id}: {e}"))?;
-        let cards: Vec<PlayedCard> = diesel::sql_query(format!("SELECT side, name, plays, first_turn FROM mtgo_game_cards WHERE game_id = {id} AND played = 1 ORDER BY side, first_turn, name")).load(conn).map_err(|e| e.to_string())?;
-        let mut events: Vec<EventRow> = diesel::sql_query(format!("SELECT seq, turn, side, kind, card, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
+        let cards: Vec<PlayedCard> = diesel::sql_query(format!("SELECT side, card AS name, COUNT(*) AS plays, MIN(turn) AS first_turn FROM mtgo_card_events WHERE game_id = {id} AND verb IN ('cast', 'land') GROUP BY side, card ORDER BY side, first_turn, name")).load(conn).map_err(|e| e.to_string())?;
+        let mut events: Vec<EventRow> = diesel::sql_query(format!("SELECT seq, turn, side, kind, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
         for e in &mut events {
             e.text = plain_text(&e.text);
         }

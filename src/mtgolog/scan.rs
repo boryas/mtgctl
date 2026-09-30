@@ -2,7 +2,7 @@
 
 use super::event::{template, Event};
 use super::format::{read_log, LogKind};
-use super::model::{build_match, GameOutcome, MatchLog, MatchResult, WinBy};
+use super::model::{build_match, GameOutcome, MatchLog, MatchResult, Verb, WinBy};
 use super::MtgoConfig;
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, Table};
 use std::collections::{BTreeMap, HashMap};
@@ -226,8 +226,8 @@ fn dump_match(l: &Loaded, me: &str) {
         );
         for (p, pg) in &g.per_player {
             let tag = if p == me { "me " } else { "opp" };
-            let played: Vec<String> = pg.played.values().map(|c| format!("{}x{}", c.name, c.instances.len())).collect();
-            println!("   {tag} {p}: mull={} hand={:?} lands={} spells={} played=[{}]", pg.mulligans, pg.hand_size, pg.lands_played, pg.spells_cast, played.join(", "));
+            let played: Vec<&str> = g.card_events.iter().filter(|e| e.owner == *p && matches!(e.verb, Verb::Cast | Verb::Land)).map(|e| e.card.name.as_str()).collect();
+            println!("   {tag} {p}: mull={} hand={:?} played=[{}]", pg.mulligans, pg.hand_size, played.join(", "));
         }
         for ev in &g.events {
             println!("   {} {:?}", ev.ts.format("%H:%M:%S"), ev.event);

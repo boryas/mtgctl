@@ -3,7 +3,7 @@
 //! Sides are normalised to "me"/"opp" at import so every analysis can slice on the same
 //! columns without re-deriving who I was. The raw player names are kept on the match.
 
-use super::event::{Event, Target};
+use super::event::Event;
 use super::model::{GameOutcome, MatchLog, MatchResult, WinBy};
 use super::scan::{guess_me, load_all, Loaded};
 use super::MtgoConfig;
@@ -32,6 +32,7 @@ diesel::table! {
         era_id -> Nullable<Integer>,
         imported_at -> Text,
         my_list_id -> Nullable<Integer>,
+        derived -> Integer,
     }
 }
 
@@ -51,26 +52,25 @@ diesel::table! {
         opp_mulligans -> Integer,
         my_hand -> Nullable<Integer>,
         opp_hand -> Nullable<Integer>,
-        my_lands -> Integer,
-        opp_lands -> Integer,
-        my_spells -> Integer,
-        opp_spells -> Integer,
         list_id -> Nullable<Integer>,
+        my_dd_seq -> Nullable<Integer>,
     }
 }
 
 diesel::table! {
-    mtgo_game_cards (id) {
+    mtgo_card_events (id) {
         id -> Integer,
         game_id -> Integer,
         match_id -> Integer,
+        seq -> Integer,
+        turn -> Integer,
         side -> Text,
-        name -> Text,
+        actor -> Text,
+        card -> Text,
         catalog_id -> Integer,
-        instances -> Integer,
-        plays -> Integer,
-        first_turn -> Nullable<Integer>,
-        played -> Bool,
+        object_id -> Integer,
+        verb -> Text,
+        other -> Nullable<Text>,
     }
 }
 
@@ -85,9 +85,6 @@ diesel::table! {
         actor -> Nullable<Text>,
         side -> Nullable<Text>,
         kind -> Text,
-        card -> Nullable<Text>,
-        catalog_id -> Nullable<Integer>,
-        target -> Nullable<Text>,
         text -> Text,
     }
 }
@@ -105,7 +102,7 @@ diesel::table! {
     }
 }
 
-diesel::allow_tables_to_appear_in_same_query!(mtgo_matches, mtgo_games, mtgo_game_cards, mtgo_events, mtgo_eras);
+diesel::allow_tables_to_appear_in_same_query!(mtgo_matches, mtgo_games, mtgo_card_events, mtgo_events, mtgo_eras);
 
 const DDL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS mtgo_matches (
@@ -141,23 +138,21 @@ const DDL: &[&str] = &[
         my_mulligans INTEGER NOT NULL,
         opp_mulligans INTEGER NOT NULL,
         my_hand INTEGER,
-        opp_hand INTEGER,
-        my_lands INTEGER NOT NULL,
-        opp_lands INTEGER NOT NULL,
-        my_spells INTEGER NOT NULL,
-        opp_spells INTEGER NOT NULL
+        opp_hand INTEGER
     )",
-    "CREATE TABLE IF NOT EXISTS mtgo_game_cards (
+    "CREATE TABLE IF NOT EXISTS mtgo_card_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         game_id INTEGER NOT NULL REFERENCES mtgo_games(id) ON DELETE CASCADE,
         match_id INTEGER NOT NULL,
-        side TEXT NOT NULL,              -- me | opp
-        name TEXT NOT NULL,
+        seq INTEGER NOT NULL,            -- mtgo_events.seq of the line
+        turn INTEGER NOT NULL,
+        side TEXT NOT NULL,              -- me | opp: whose card
+        actor TEXT NOT NULL,             -- me | opp: whom the line is about
+        card TEXT NOT NULL,
         catalog_id INTEGER NOT NULL,
-        instances INTEGER NOT NULL,      -- distinct object ids seen (~copies)
-        plays INTEGER NOT NULL,          -- casts + land drops
-        first_turn INTEGER,              -- first turn cast/played
-        played BOOLEAN NOT NULL          -- 1 = cast/played; 0 = only seen (revealed/discarded/milled/...)
+        object_id INTEGER NOT NULL,      -- renumbered by MTGO on every zone change
+        verb TEXT NOT NULL,              -- model::Verb::name
+        other TEXT                       -- model::CardEvent::other
     )",
     "CREATE TABLE IF NOT EXISTS mtgo_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,9 +164,6 @@ const DDL: &[&str] = &[
         actor TEXT,
         side TEXT,                       -- me | opp | NULL
         kind TEXT NOT NULL,              -- Event variant name
-        card TEXT,                       -- primary card name (cast/played/source)
-        catalog_id INTEGER,
-        target TEXT,                     -- first target (card name or player side)
         text TEXT NOT NULL               -- raw line without the @P prefix
     )",
     "CREATE TABLE IF NOT EXISTS mtgo_eras (
@@ -190,11 +182,12 @@ const DDL: &[&str] = &[
     )",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_mtgo_matches_me_guid ON mtgo_matches(me, guid)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_games_match ON mtgo_games(match_id)",
-    "CREATE INDEX IF NOT EXISTS idx_mtgo_game_cards_game ON mtgo_game_cards(game_id)",
-    "CREATE INDEX IF NOT EXISTS idx_mtgo_game_cards_name ON mtgo_game_cards(name)",
+    "DROP TABLE IF EXISTS mtgo_game_cards",
+    "CREATE INDEX IF NOT EXISTS idx_mtgo_card_events_game ON mtgo_card_events(game_id)",
+    "CREATE INDEX IF NOT EXISTS idx_mtgo_card_events_card ON mtgo_card_events(card, verb)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_events_game ON mtgo_events(game_id)",
     "CREATE INDEX IF NOT EXISTS idx_mtgo_events_kind ON mtgo_events(kind)",
-    "CREATE INDEX IF NOT EXISTS idx_mtgo_events_card ON mtgo_events(card)",
+    "DROP INDEX IF EXISTS idx_mtgo_events_card",
 ];
 
 #[derive(QueryableByName)]
@@ -208,13 +201,21 @@ pub fn ensure_schema(conn: &mut SqliteConnection) -> QueryResult<()> {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     // Columns added after the first release (ALTER if missing).
-    for (table, col, ty) in [("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT"), ("mtgo_lists", "me", "TEXT"), ("mtgo_decklists", "me", "TEXT")] {
+    for (table, col, ty) in [("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_games", "my_dd_seq", "INTEGER"), ("mtgo_matches", "derived", "INTEGER NOT NULL DEFAULT 0"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT"), ("mtgo_lists", "me", "TEXT"), ("mtgo_decklists", "me", "TEXT")] {
         if diesel::sql_query(format!("SELECT {col} FROM {table} LIMIT 0")).execute(conn).is_err() {
             diesel::sql_query(format!("ALTER TABLE {table} ADD COLUMN {col} {ty}")).execute(conn)?;
             if col == "me" {
                 // a database from before the column held one player's rows
                 diesel::sql_query(format!("UPDATE {table} SET me = (SELECT me FROM mtgo_matches GROUP BY me ORDER BY COUNT(*) DESC LIMIT 1)")).execute(conn)?;
             }
+        }
+    }
+    // Columns replaced by mtgo_card_events. SQLite refuses to drop a column a view names, so the
+    // view goes first; stats::ensure_view recreates it.
+    for (table, col) in [("mtgo_events", "card"), ("mtgo_events", "catalog_id"), ("mtgo_events", "target"), ("mtgo_games", "my_lands"), ("mtgo_games", "opp_lands"), ("mtgo_games", "my_spells"), ("mtgo_games", "opp_spells")] {
+        if diesel::sql_query(format!("SELECT {col} FROM {table} LIMIT 0")).execute(conn).is_ok() {
+            diesel::sql_query("DROP VIEW IF EXISTS mtgo_game_view").execute(conn)?;
+            diesel::sql_query(format!("ALTER TABLE {table} DROP COLUMN {col}")).execute(conn)?;
         }
     }
     for stmt in super::decklist::INDEXES {
@@ -264,24 +265,22 @@ struct NewGame {
     opp_mulligans: i32,
     my_hand: Option<i32>,
     opp_hand: Option<i32>,
-    my_lands: i32,
-    opp_lands: i32,
-    my_spells: i32,
-    opp_spells: i32,
 }
 
 #[derive(Insertable)]
-#[diesel(table_name = mtgo_game_cards)]
-struct NewGameCard {
+#[diesel(table_name = mtgo_card_events)]
+struct NewCardEvent<'a> {
     game_id: i32,
     match_id: i32,
+    seq: i32,
+    turn: i32,
     side: &'static str,
-    name: String,
+    actor: &'static str,
+    card: &'a str,
     catalog_id: i32,
-    instances: i32,
-    plays: i32,
-    first_turn: Option<i32>,
-    played: bool,
+    object_id: i32,
+    verb: &'static str,
+    other: Option<&'a str>,
 }
 
 #[derive(Insertable)]
@@ -295,9 +294,6 @@ struct NewEvent {
     actor: Option<String>,
     side: Option<&'static str>,
     kind: &'static str,
-    card: Option<String>,
-    catalog_id: Option<i32>,
-    target: Option<String>,
     text: String,
 }
 
@@ -329,6 +325,7 @@ pub fn kind_name(e: &Event) -> &'static str {
         Cycles { .. } => "Cycles",
         Counters { .. } => "Counters",
         Shuffles { .. } => "Shuffles",
+        PutsOnTop { .. } => "PutsOnTop",
         GainsLife { .. } => "GainsLife",
         DamagePrevented { .. } => "DamagePrevented",
         Concedes { .. } => "Concedes",
@@ -341,38 +338,6 @@ pub fn kind_name(e: &Event) -> &'static str {
         System(_) => "System",
         Other(_) => "Other",
     }
-}
-
-/// Primary card of an event (what was cast/played/activated/etc.).
-fn primary_card(e: &Event) -> Option<(String, u32)> {
-    use Event::*;
-    let c = match e {
-        Casts { card, .. } | PlaysLand { card, .. } | Cycles { card, .. } => card,
-        Activates { source, .. } => source,
-        Triggers { source: Some(source), .. } => source,
-        Counters { spell, .. } => spell,
-        Blocks { blocker, .. } => blocker,
-        Draws { via: Some(c), .. } => c,
-        Attacks { attackers, .. } => attackers.first()?,
-        Discards { cards, .. } | Mills { cards, .. } | Exiles { cards, .. } | Sacrifices { cards, .. } | ToGraveyard { cards, .. } | Reveals { cards, .. } | Returns { cards, .. } => cards.first()?,
-        DamagePrevented { source: Some(c), .. } => c,
-        _ => return None,
-    };
-    Some((c.name.clone(), c.catalog_id))
-}
-
-fn first_target(e: &Event, me: &str) -> Option<String> {
-    use Event::*;
-    let ts = match e {
-        Casts { targets, .. } | Activates { targets, .. } | Triggers { targets, .. } => targets,
-        Blocks { attacker, .. } => return Some(attacker.name.clone()),
-        Counters { with, .. } => return Some(with.clone()),
-        _ => return None,
-    };
-    ts.first().map(|t| match t {
-        Target::Card(c) => c.name.clone(),
-        Target::Player(p) => side_of(p, me).unwrap_or("?").to_string(),
-    })
 }
 
 fn side_of(player: &str, me: &str) -> Option<&'static str> {
@@ -401,7 +366,13 @@ pub struct ImportStats {
     pub in_progress: usize,
     /// existing matches whose file grew after import → deleted and re-imported (counted in `matches` too)
     pub refreshed: usize,
+    /// existing matches whose per-game log facts were rewritten, see DERIVED
+    pub rederived: usize,
 }
+
+/// Version of the per-game facts `derive_games` writes (events, card events, Doomsday resolution);
+/// bump it when they change and every sync rewrites the older matches from their logs.
+const DERIVED: i32 = 1;
 
 /// The player a one-player database belongs to: the configured username, else whoever most of its matches name as me.
 pub fn player(conn: &mut SqliteConnection, cfg: &MtgoConfig) -> QueryResult<String> {
@@ -425,7 +396,7 @@ pub fn remove_player(conn: &mut SqliteConnection, me: &str) -> QueryResult<usize
 }
 
 /// Imports the logs under `root` as `cfg.username`'s (else the name most logs share); only that player's matches are compared or replaced.
-pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force: bool, with_events: bool) -> QueryResult<ImportStats> {
+pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force: bool) -> QueryResult<ImportStats> {
     ensure_schema(conn)?;
     let (loaded, bad) = load_all(root);
     let me = cfg.username.clone().or_else(|| guess_me(&loaded)).unwrap_or_default();
@@ -435,17 +406,17 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
             delete_match(conn, id)?;
         }
     }
-    // guid → (id, imported_at) of what is already in the DB
-    let existing: HashMap<String, (i32, String)> = mtgo_matches::table
+    // guid → (id, imported_at, derived) of what is already in the DB
+    let existing: HashMap<String, (i32, String, i32)> = mtgo_matches::table
         .filter(mtgo_matches::me.eq(&me))
-        .select((mtgo_matches::guid, mtgo_matches::id, mtgo_matches::imported_at))
-        .load::<(String, i32, String)>(conn)?
+        .select((mtgo_matches::guid, mtgo_matches::id, mtgo_matches::imported_at, mtgo_matches::derived))
+        .load::<(String, i32, String, i32)>(conn)?
         .into_iter()
-        .map(|(g, id, at)| (g, (id, at)))
+        .map(|(g, id, at, d)| (g, (id, at, d)))
         .collect();
     let now_dt = chrono::Local::now().naive_local();
     let now = now_dt.format("%Y-%m-%d %H:%M:%S").to_string();
-    let mut st = ImportStats { matches: 0, skipped: 0, games: 0, cards: 0, events: 0, replays_skipped: 0, failed: bad.len(), in_progress: 0, refreshed: 0 };
+    let mut st = ImportStats { matches: 0, skipped: 0, games: 0, cards: 0, events: 0, replays_skipped: 0, failed: bad.len(), in_progress: 0, refreshed: 0, rederived: 0 };
 
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         for l in &loaded {
@@ -463,20 +434,25 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
                 st.in_progress += 1;
                 continue;
             }
-            if let Some((id, imported_at)) = existing.get(&l.m.guid) {
+            if let Some((id, imported_at, derived)) = existing.get(&l.m.guid) {
                 // Re-import if the file grew after we imported it (e.g. imported mid-match before the guard existed).
                 let stale = match (mtime, chrono::NaiveDateTime::parse_from_str(imported_at, "%Y-%m-%d %H:%M:%S")) {
                     (Some(mt), Ok(at)) => mt > at,
                     _ => false,
                 };
                 if !stale {
-                    st.skipped += 1;
+                    if *derived < DERIVED {
+                        derive_games(conn, *id, &l.m, &me, &mut st)?;
+                        st.rederived += 1;
+                    } else {
+                        st.skipped += 1;
+                    }
                     continue;
                 }
                 delete_match(conn, *id)?;
                 st.refreshed += 1;
             }
-            insert_match(conn, l, &me, &now, with_events, &mut st)?;
+            insert_match(conn, l, &me, &now, &mut st)?;
         }
         Ok(())
     })?;
@@ -485,14 +461,14 @@ pub fn import(conn: &mut SqliteConnection, cfg: &MtgoConfig, root: &Path, force:
 
 /// Remove one match and everything hanging off it (foreign keys are not enforced by default in SQLite).
 fn delete_match(conn: &mut SqliteConnection, id: i32) -> QueryResult<()> {
-    for t in ["mtgo_events", "mtgo_game_cards", "mtgo_games", "match_decks"] {
+    for t in ["mtgo_events", "mtgo_card_events", "mtgo_games", "match_decks"] {
         diesel::sql_query(format!("DELETE FROM {t} WHERE match_id = {id}")).execute(conn)?;
     }
     diesel::sql_query(format!("DELETE FROM mtgo_matches WHERE id = {id}")).execute(conn)?;
     Ok(())
 }
 
-fn insert_match(conn: &mut SqliteConnection, l: &Loaded, me: &str, now: &str, with_events: bool, st: &mut ImportStats) -> QueryResult<()> {
+fn insert_match(conn: &mut SqliteConnection, l: &Loaded, me: &str, now: &str, st: &mut ImportStats) -> QueryResult<()> {
     let m: &MatchLog = &l.m;
     let opponent = m.opponent_of(me);
     let (w, lo) = m.game_score(me);
@@ -552,68 +528,72 @@ fn insert_match(conn: &mut SqliteConnection, l: &Loaded, me: &str, now: &str, wi
                 opp_mulligans: theirs.map_or(0, |p| p.mulligans) as i32,
                 my_hand: mine.and_then(|p| p.hand_size).map(|h| h as i32),
                 opp_hand: theirs.and_then(|p| p.hand_size).map(|h| h as i32),
-                my_lands: mine.map_or(0, |p| p.lands_played) as i32,
-                opp_lands: theirs.map_or(0, |p| p.lands_played) as i32,
-                my_spells: mine.map_or(0, |p| p.spells_cast) as i32,
-                opp_spells: theirs.map_or(0, |p| p.spells_cast) as i32,
             })
             .execute(conn)?;
-        let game_id: i32 = mtgo_games::table.order(mtgo_games::id.desc()).select(mtgo_games::id).first(conn)?;
         st.games += 1;
+    }
+    derive_games(conn, match_id, m, me, st)
+}
 
-        let mut cards: Vec<NewGameCard> = Vec::new();
-        for (side, pg) in [("me", mine), ("opp", theirs)] {
-            let Some(pg) = pg else { continue };
-            for (name, use_) in &pg.seen {
-                let played = pg.played.get(name);
-                cards.push(NewGameCard {
-                    game_id,
-                    match_id,
-                    side,
-                    name: name.clone(),
-                    catalog_id: use_.catalog_id as i32,
-                    instances: use_.instances.len() as i32,
-                    plays: played.map_or(0, |p| p.plays) as i32,
-                    first_turn: played.and_then(|p| p.first_turn).map(|t| t as i32),
-                    played: played.is_some(),
-                });
+/// (Re)writes the facts of a stored match's games that come from reading its log line by line:
+/// its events, its card events and my Doomsday resolution; stamps the match with DERIVED.
+fn derive_games(conn: &mut SqliteConnection, match_id: i32, m: &MatchLog, me: &str, st: &mut ImportStats) -> QueryResult<()> {
+    for t in ["mtgo_events", "mtgo_card_events"] {
+        diesel::sql_query(format!("DELETE FROM {t} WHERE game_id IN (SELECT id FROM mtgo_games WHERE match_id = {match_id})")).execute(conn)?;
+    }
+    let ids: HashMap<i32, i32> = mtgo_games::table.filter(mtgo_games::match_id.eq(match_id)).select((mtgo_games::game_number, mtgo_games::id)).load::<(i32, i32)>(conn)?.into_iter().collect();
+    // a log can name players besides me and the match's opponent (spectated games); their cards are left out
+    let opponent = m.opponent_of(me);
+    let side = |p: &str| if p == me { Some("me") } else if Some(p) == opponent { Some("opp") } else { None };
+    for g in &m.games {
+        let Some(&game_id) = ids.get(&(g.number as i32)) else { continue };
+        let mut evs: Vec<NewEvent> = Vec::with_capacity(g.events.len());
+        let mut turn = 0;
+        for (i, le) in g.events.iter().enumerate() {
+            if let Event::Turn { number, .. } = le.event {
+                turn = number;
             }
+            let actor = super::event::actor(&le.event).map(str::to_string);
+            let (text, _) = super::event::strip_prefix(&le.raw);
+            evs.push(NewEvent {
+                game_id,
+                match_id,
+                seq: i as i32,
+                ts: fmt_ts(le.ts),
+                turn: turn as i32,
+                side: actor.as_deref().and_then(|a| side_of(a, me)),
+                actor,
+                kind: kind_name(&le.event),
+                text: text.to_string(),
+            });
         }
+        st.events += evs.len();
+        for chunk in evs.chunks(400) {
+            diesel::insert_into(mtgo_events::table).values(chunk).execute(conn)?;
+        }
+        let cards: Vec<NewCardEvent> = g
+            .card_events
+            .iter()
+            .filter_map(|e| Some(NewCardEvent {
+                game_id,
+                match_id,
+                seq: e.seq as i32,
+                turn: e.turn as i32,
+                side: side(&e.owner)?,
+                actor: side(&e.actor)?,
+                card: &e.card.name,
+                catalog_id: e.card.catalog_id as i32,
+                object_id: e.card.instance_id as i32,
+                verb: e.verb.name(),
+                other: e.other.as_deref(),
+            }))
+            .collect();
         st.cards += cards.len();
         for chunk in cards.chunks(500) {
-            diesel::insert_into(mtgo_game_cards::table).values(chunk).execute(conn)?;
+            diesel::insert_into(mtgo_card_events::table).values(chunk).execute(conn)?;
         }
-
-        if with_events {
-            let mut evs: Vec<NewEvent> = Vec::with_capacity(g.events.len());
-            let mut turn = 0;
-            for (i, le) in g.events.iter().enumerate() {
-                if let Event::Turn { number, .. } = le.event {
-                    turn = number;
-                }
-                let actor = super::event::actor(&le.event).map(str::to_string);
-                let (card, catalog_id) = primary_card(&le.event).map(|(n, c)| (Some(n), Some(c as i32))).unwrap_or((None, None));
-                let (text, _) = super::event::strip_prefix(&le.raw);
-                evs.push(NewEvent {
-                    game_id,
-                    match_id,
-                    seq: i as i32,
-                    ts: fmt_ts(le.ts),
-                    turn: turn as i32,
-                    side: actor.as_deref().and_then(|a| side_of(a, me)),
-                    actor,
-                    kind: kind_name(&le.event),
-                    card,
-                    catalog_id,
-                    target: first_target(&le.event, me),
-                    text: text.to_string(),
-                });
-            }
-            st.events += evs.len();
-            for chunk in evs.chunks(400) {
-                diesel::insert_into(mtgo_events::table).values(chunk).execute(conn)?;
-            }
-        }
+        diesel::update(mtgo_games::table.find(game_id)).set(mtgo_games::my_dd_seq.eq(g.doomsday_resolved.get(me).map(|&s| s as i32))).execute(conn)?;
     }
+    diesel::update(mtgo_matches::table.find(match_id)).set(mtgo_matches::derived.eq(DERIVED)).execute(conn)?;
     Ok(())
 }

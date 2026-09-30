@@ -4,7 +4,6 @@
 //! See ~/org/projects/mtgctl/mtgo-logs.org for the format notes and roadmap.
 #![allow(dead_code)] // parsed fields are consumed by upcoming analyses
 
-pub mod cards;
 pub mod db;
 pub mod decklist;
 pub mod eras;
@@ -14,7 +13,6 @@ pub mod model;
 pub mod picker;
 pub mod pipeline;
 pub mod reference;
-pub mod pivot;
 pub mod scan;
 pub mod snapshot;
 pub mod stats;
@@ -49,7 +47,7 @@ pub struct MtgoConfig {
     /// `mtgo stats -i`: curated first-screen columns for filters / group-bys (rest behind "more columns…").
     pub picker_filter_columns: Vec<String>,
     pub picker_groupby_columns: Vec<String>,
-    /// Default scope (SQL over mtgo_game_view) applied to stats/cards/pivot/picker unless --all.
+    /// Default scope (SQL over mtgo_game_view) applied to stats/picker unless --all.
     /// Default: "has_decklist = 1" — only matches with an exact registered list.
     pub default_scope: Option<String>,
     /// The stats site `mtgo stats` reads from without --data; default https://bur.io/doomsday/stats.
@@ -167,53 +165,6 @@ enum MtgoCommand {
         #[arg(long, value_name = "DIR")]
         data: Option<PathBuf>,
     },
-    /// Per-card win-rate lift: games where a card was played vs not (first-order, no confounder control).
-    Cards {
-        /// Whose cards: me or opp.
-        #[arg(long, default_value = "me")]
-        side: String,
-        /// SQL WHERE over mtgo_game_view, e.g. "my_archetype = 'Doomsday'" or "opp_archetype = 'Eldrazi'"
-        #[arg(long = "where")]
-        where_sql: Option<String>,
-        /// Only count the card if first cast/played on or before this turn (e.g. 1 for "T1 Chalice").
-        #[arg(long)]
-        by_turn: Option<i32>,
-        /// Count cards merely seen (revealed/discarded/milled…) too, not just cast/played.
-        #[arg(long)]
-        seen: bool,
-        /// Minimum games-with to list a card (default: no filtering).
-        #[arg(long, default_value_t = 1)]
-        min: i64,
-        /// Order: lift (default), worst, n, name.
-        #[arg(long, default_value = "lift")]
-        sort: String,
-        #[arg(long, default_value_t = 40)]
-        limit: usize,
-        /// Include every match (default scope is list-backed matches only).
-        #[arg(long)]
-        all: bool,
-    },
-    /// Pivot analysis for a staged plan: what happens before the pivot card resolves, after, and when it's never cast.
-    Pivot {
-        /// The pivot card (e.g. Doomsday, Marit Lage, Thassa's Oracle).
-        #[arg(long, default_value = "Doomsday")]
-        card: String,
-        /// The conversion card cast after resolution (default: Thassa's Oracle when card = Doomsday).
-        #[arg(long)]
-        convert: Option<String>,
-        /// SQL WHERE over mtgo_game_view to pick the population, e.g. "my_deck = 'UB Tempo DD'"
-        #[arg(long = "where")]
-        where_sql: Option<String>,
-        /// Minimum games-with for an event row (default: no filtering).
-        #[arg(long, default_value_t = 1)]
-        min: i64,
-        /// Rows per direction in each table.
-        #[arg(long, default_value_t = 12)]
-        top: usize,
-        /// Include every match (default scope is list-backed matches only).
-        #[arg(long)]
-        all: bool,
-    },
     /// Show the distinct registered lists (id, name, archetype, usage).
     Lists,
     /// Print one list (or the diff between two: `mtgo list 3 --diff 5`).
@@ -252,7 +203,7 @@ pub fn run(args: MtgoArgs) {
                 (Some(p), None) => Some(format!("player = '{}'", p.replace('\'', "''"))),
                 (None, w) => w,
             };
-            let mut q = stats::StatsQuery { by, per, where_sql, min_games: min, sort, limit, full, hist };
+            let mut q = stats::StatsQuery { by, split: vec![], game: None, per, where_sql, min_games: min, sort, limit, full, hist };
             println!("{} · {scope_desc} · {}", player.as_deref().unwrap_or("every player"), data.as_ref().map_or_else(|| cfg.site(), |d| d.display().to_string()));
             if interactive {
                 match picker::pick(&mut src, &cfg, q, player.as_deref()) {
@@ -267,22 +218,6 @@ pub fn run(args: MtgoArgs) {
             }
             if let Err(e) = stats::run_stats(&mut src, &q) {
                 eprintln!("stats failed: {e}");
-            }
-        }
-        MtgoCommand::Cards { side, where_sql, by_turn, seen, min, sort, limit, all } => {
-            let conn = &mut crate::db::establish_connection();
-            let (where_sql, scope_desc) = cfg.scope(where_sql, all);
-            println!("{scope_desc}");
-            if let Err(e) = cards::run_cards(conn, &side, where_sql.as_deref(), by_turn, seen, min, &sort, limit) {
-                eprintln!("cards failed: {e}");
-            }
-        }
-        MtgoCommand::Pivot { card, convert, where_sql, min, top, all } => {
-            let conn = &mut crate::db::establish_connection();
-            let (wher, scope_desc) = cfg.scope(where_sql, all);
-            println!("{scope_desc}");
-            if let Err(e) = pivot::run_pivot(conn, &card, convert.as_deref(), wher.as_deref(), min, top) {
-                eprintln!("pivot failed: {e}");
             }
         }
         MtgoCommand::Lists => {

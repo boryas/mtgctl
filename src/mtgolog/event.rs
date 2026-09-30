@@ -59,6 +59,9 @@ pub enum Event {
     Cycles { player: String, card: CardRef },
     Counters { player: String, spell: CardRef, with: String },
     Shuffles { player: String },
+    /// "put a card on top of X's library" (Doomsday's pile, Brainstorm) or "puts 1 card on top of
+    /// their library" (surveil); the card is hidden.
+    PutsOnTop { player: String, count: u32 },
     GainsLife { player: String, amount: u32 },
     DamagePrevented { amount: u32, source: Option<CardRef>, to: String },
     Concedes { player: String },
@@ -108,6 +111,7 @@ re!(REVEALS, r"^([^@:]+?) reveals (.+?)( with .*)?\.$");
 re!(RETURNS, r"^([^@:]+?) returns (.+?) to (?:their|its owner's) hand( with .*)?\.$");
 re!(CYCLES, r"^([^@:]+?) cycles (.+)\.$");
 static COUNTERS: LazyLock<Regex> = LazyLock::new(|| Regex::new(&format!(r"^([^@:]+?) counters ({C}) with (.+)\.$")).unwrap());
+re!(PUTS_ON_TOP, r"^([^@:]+?) puts? (a|\w+) cards? on top of (?:their|[^@:]+?'s) library\.$");
 re!(SHUFFLES, r"^([^@:]+?) shuffles their library\.$");
 re!(GAINS, r"^([^@:]+?) gains (\d+) life\.$");
 re!(PREVENTED, r"^(\d+) damage caused by (.+?) to ([^@:]+?) is prevented\.$");
@@ -285,6 +289,9 @@ pub fn parse_event(text: &str) -> Event {
     if let Some(c) = cap!(REVEALS) {
         return Event::Reveals { player: c[1].to_string(), cards: card_refs(&c[2]), rest: c.get(3).map(|m| m.as_str().to_string()).unwrap_or_default() };
     }
+    if let Some(c) = cap!(PUTS_ON_TOP) {
+        return Event::PutsOnTop { player: c[1].to_string(), count: word_number(&c[2]).unwrap_or(1) };
+    }
     if let Some(c) = cap!(SHUFFLES) {
         return Event::Shuffles { player: c[1].to_string() };
     }
@@ -346,7 +353,7 @@ pub fn actor(e: &Event) -> Option<&str> {
         | PlaysLand { player, .. } | Activates { player, .. } | Triggers { player, .. } | Discards { player, .. }
         | Mills { player, .. } | Exiles { player, .. } | Sacrifices { player, .. } | ToGraveyard { player, .. }
         | Reveals { player, .. } | Returns { player, .. } | Cycles { player, .. } | Counters { player, .. }
-        | Shuffles { player } | GainsLife { player, .. } | Concedes { player } | LeavesGame { player, .. }
+        | Shuffles { player } | PutsOnTop { player, .. } | GainsLife { player, .. } | Concedes { player } | LeavesGame { player, .. }
         | WinsGame { player } | LosesGame { player } | LeadsMatch { player, .. } | WinsMatch { player, .. } => player,
         Attacks { defender, .. } => defender,
         DamagePrevented { to, .. } => to,
@@ -401,6 +408,9 @@ mod tests {
             e => panic!("{e:?}"),
         }
         assert!(matches!(parse_event("@Pboryas draws three cards with @[Brainstorm@:1,2:@]."), Event::Draws { count: 3, via: Some(_), .. }));
+        assert_eq!(parse_event("@Pboryas put a card on top of boryas's library."), Event::PutsOnTop { player: "boryas".into(), count: 1 });
+        assert_eq!(parse_event("@Pboryas puts 1 card on top of their library."), Event::PutsOnTop { player: "boryas".into(), count: 1 });
+        assert_eq!(parse_event("@Pwhiffy penguin put a card on top of whiffy penguin's library."), Event::PutsOnTop { player: "whiffy penguin".into(), count: 1 });
     }
 
     #[test]

@@ -32,16 +32,60 @@ pub enum WinBy {
     Normal,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct CardUse {
-    pub catalog_id: u32,
-    pub name: String,
-    /// Distinct object instances observed for this card name (approx. copies seen).
-    pub instances: BTreeSet<u32>,
-    /// Number of cast/play events.
-    pub plays: u32,
-    /// Earliest turn (game turn number) the card was cast/played; None if only seen passively.
-    pub first_turn: Option<u32>,
+/// What happened to a card in one log line (`CardEvent::verb`); stored by `Verb::name`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verb {
+    Cast,
+    Land,
+    Cycled,
+    Activated,
+    Triggered,
+    Attacked,
+    /// not the discard that pays for cycling, see `GameBuilder::push`
+    Discarded,
+    Milled,
+    Revealed,
+    Sacrificed,
+    ToGraveyard,
+    Exiled,
+    Returned,
+}
+
+impl Verb {
+    pub fn name(self) -> &'static str {
+        match self {
+            Verb::Cast => "cast",
+            Verb::Land => "land",
+            Verb::Cycled => "cycled",
+            Verb::Activated => "activated",
+            Verb::Triggered => "triggered",
+            Verb::Attacked => "attacked",
+            Verb::Discarded => "discarded",
+            Verb::Milled => "milled",
+            Verb::Revealed => "revealed",
+            Verb::Sacrificed => "sacrificed",
+            Verb::ToGraveyard => "to_graveyard",
+            Verb::Exiled => "exiled",
+            Verb::Returned => "returned",
+        }
+    }
+}
+
+/// One card in one log line. A card whose owner the game gives no evidence of is left out.
+#[derive(Debug, Clone)]
+pub struct CardEvent {
+    /// index into `GameLog::events`
+    pub seq: u32,
+    pub turn: u32,
+    /// the player whose card it is
+    pub owner: String,
+    /// the player the line is about; differs from `owner` for an opponent's exile or edict
+    pub actor: String,
+    pub card: CardRef,
+    pub verb: Verb,
+    /// the other card involved: a cast or ability's first card target, the source an exile or
+    /// return names
+    pub other: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -49,12 +93,6 @@ pub struct PlayerGame {
     pub name: String,
     pub mulligans: u32,
     pub hand_size: Option<u32>,
-    /// Cards this player cast or played (land drops), keyed by name.
-    pub played: BTreeMap<String, CardUse>,
-    /// Any card attributed to this player in any way (played ∪ revealed/discarded/milled/sacrificed/…).
-    pub seen: BTreeMap<String, CardUse>,
-    pub lands_played: u32,
-    pub spells_cast: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +107,10 @@ pub struct GameLog {
     pub outcome: GameOutcome,
     pub per_player: BTreeMap<String, PlayerGame>,
     pub events: Vec<LogEvent>,
+    pub card_events: Vec<CardEvent>,
+    /// player → seq of the fifth consecutive put-on-top line of theirs after they cast Doomsday,
+    /// for the first Doomsday that resolves (Doomsday's pile is the only run of five)
+    pub doomsday_resolved: BTreeMap<String, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,15 +172,13 @@ fn is_game_start(e: &Event) -> bool {
     matches!(e, Event::Joined { .. } | Event::Rolled { .. })
 }
 
-fn note_card(map: &mut BTreeMap<String, CardUse>, c: &CardRef, turn: u32, played: bool) {
-    let u = map.entry(c.name.clone()).or_insert_with(|| CardUse { catalog_id: c.catalog_id, name: c.name.clone(), ..Default::default() });
-    u.instances.insert(c.instance_id);
-    if played {
-        u.plays += 1;
-        if u.first_turn.map_or(true, |t| turn < t) {
-            u.first_turn = Some(turn);
-        }
+/// The card an exile or return line names after "with": a card ref, else "Triggered ability
+/// from X".
+fn other_card(rest: &str) -> Option<String> {
+    if let Some(c) = super::event::card_refs(rest).into_iter().next() {
+        return Some(c.name);
     }
+    rest.split_once("ability from ").map(|(_, x)| x.trim_end_matches('.').to_string())
 }
 
 struct GameBuilder {
@@ -156,6 +196,12 @@ struct GameBuilder {
     loss_line: Option<String>,
     per_player: BTreeMap<String, PlayerGame>,
     events: Vec<LogEvent>,
+    card_events: Vec<CardEvent>,
+    /// players with a Doomsday cast that has not resolved yet
+    doomsday_cast: BTreeSet<String>,
+    /// player → (seq of the latest put-on-top line, length of the run of them it ends)
+    puts_run: BTreeMap<String, (u32, u32)>,
+    doomsday_resolved: BTreeMap<String, u32>,
     /// card name → players with positive own-evidence (cast/played/discarded/milled/revealed/cycled).
     /// MTGO re-numbers an object's instance id on every zone change, so ownership is tracked by name.
     owner: BTreeMap<String, BTreeSet<String>>,
@@ -178,6 +224,10 @@ impl GameBuilder {
             loss_line: None,
             per_player: BTreeMap::new(),
             events: Vec::new(),
+            card_events: Vec::new(),
+            doomsday_cast: BTreeSet::new(),
+            puts_run: BTreeMap::new(),
+            doomsday_resolved: BTreeMap::new(),
             owner: BTreeMap::new(),
         }
     }
@@ -195,6 +245,16 @@ impl GameBuilder {
 
     fn foreign(&self, player: &str, c: &CardRef) -> bool {
         self.owner.get(&c.name).is_some_and(|ps| !ps.contains(player) && !ps.is_empty())
+    }
+
+    /// The other player of the game, once both have appeared.
+    fn opponent(&self, player: &str) -> Option<String> {
+        self.players.iter().find(|p| *p != player).cloned()
+    }
+
+    fn note(&mut self, turn: u32, owner: &str, actor: &str, card: &CardRef, verb: Verb, other: Option<String>) {
+        let seq = self.events.len() as u32;
+        self.card_events.push(CardEvent { seq, turn, owner: owner.to_string(), actor: actor.to_string(), card: card.clone(), verb, other });
     }
 
     fn pg(&mut self, name: &str) -> &mut PlayerGame {
@@ -234,57 +294,97 @@ impl GameBuilder {
                 }
                 self.pg(player);
             }
-            Event::Casts { player, card, .. } => {
+            Event::Casts { player, card, targets, .. } => {
                 self.claim(player, card);
-                let pg = self.pg(player);
-                pg.spells_cast += 1;
-                note_card(&mut pg.played, card, turn, true);
-                note_card(&mut pg.seen, card, turn, true);
+                self.pg(player);
+                self.note(turn, player, player, card, Verb::Cast, target_cards(targets).next().map(|c| c.name.clone()));
+                if card.name == "Doomsday" {
+                    self.doomsday_cast.insert(player.clone());
+                }
             }
             Event::PlaysLand { player, card } => {
                 self.claim(player, card);
-                let pg = self.pg(player);
-                pg.lands_played += 1;
-                note_card(&mut pg.played, card, turn, true);
-                note_card(&mut pg.seen, card, turn, true);
+                self.pg(player);
+                self.note(turn, player, player, card, Verb::Land, None);
             }
-            Event::Activates { player, source, .. } => {
+            Event::Activates { player, source, targets, .. } => {
+                self.pg(player);
                 // activating = controlling; treat as own unless known foreign (stolen permanents are rare)
                 if !self.foreign(player, source) {
                     self.claim(player, source);
-                    let pg = self.pg(player);
-                    note_card(&mut pg.seen, source, turn, false);
+                    self.note(turn, player, player, source, Verb::Activated, target_cards(targets).next().map(|c| c.name.clone()));
                 }
             }
-            Event::Triggers { player, source: Some(source), .. } => {
+            Event::Triggers { player, source: Some(source), targets, .. } => {
+                self.pg(player);
                 if !self.foreign(player, source) {
                     self.claim(player, source);
-                    let pg = self.pg(player);
-                    note_card(&mut pg.seen, source, turn, false);
+                    self.note(turn, player, player, source, Verb::Triggered, target_cards(targets).next().map(|c| c.name.clone()));
+                }
+            }
+            Event::Attacks { defender, attackers, .. } => {
+                self.pg(defender);
+                if let Some(attacker) = self.opponent(defender) {
+                    for c in attackers {
+                        self.note(turn, &attacker, &attacker, c, Verb::Attacked, None);
+                    }
                 }
             }
             // Own-zone evidence: these act on the actor's own cards.
             Event::Discards { player, cards } | Event::Mills { player, cards } | Event::Reveals { player, cards, .. } => {
+                self.pg(player);
+                let verb = match &le.event {
+                    Event::Discards { .. } => Verb::Discarded,
+                    Event::Mills { .. } => Verb::Milled,
+                    _ => Verb::Revealed,
+                };
                 for c in cards {
                     self.claim(player, c);
-                }
-                let pg = self.pg(player);
-                for c in cards {
-                    note_card(&mut pg.seen, c, turn, false);
+                    self.note(turn, player, player, c, verb, None);
                 }
             }
             Event::Cycles { player, card } => {
                 self.claim(player, card);
-                let pg = self.pg(player);
-                note_card(&mut pg.seen, card, turn, false);
+                self.pg(player);
+                // the log writes the discard that pays for cycling first, as its own line
+                if self.card_events.last().is_some_and(|e| e.verb == Verb::Discarded && e.owner == *player && e.card.instance_id == card.instance_id) {
+                    self.card_events.pop();
+                }
+                self.note(turn, player, player, card, Verb::Cycled, None);
             }
             // Mixed evidence: sacrifice / to-graveyard / exile / return may act on the other
-            // player's cards (Ghost Vacuum, bounce, edicts). Only count instances not known to be foreign.
+            // player's cards (Ghost Vacuum, bounce, edicts); a card neither player has shown is left out.
             Event::Sacrifices { player, cards } | Event::ToGraveyard { player, cards } | Event::Exiles { player, cards, .. } | Event::Returns { player, cards, .. } => {
-                let own: Vec<CardRef> = cards.iter().filter(|c| self.owns(player, c)).cloned().collect();
-                let pg = self.pg(player);
-                for c in &own {
-                    note_card(&mut pg.seen, c, turn, false);
+                self.pg(player);
+                let (verb, other) = match &le.event {
+                    Event::Sacrifices { .. } => (Verb::Sacrificed, None),
+                    Event::ToGraveyard { .. } => (Verb::ToGraveyard, None),
+                    Event::Exiles { rest, .. } => (Verb::Exiled, other_card(rest)),
+                    Event::Returns { rest, .. } => (Verb::Returned, other_card(rest)),
+                    _ => unreachable!(),
+                };
+                let opp = self.opponent(player);
+                for c in cards {
+                    let owner = if self.owns(player, c) {
+                        player.clone()
+                    } else if let Some(o) = opp.as_ref().filter(|o| self.owns(o, c)) {
+                        o.clone()
+                    } else {
+                        continue;
+                    };
+                    self.note(turn, &owner, player, c, verb, other.clone());
+                }
+            }
+            Event::PutsOnTop { player, .. } => {
+                self.pg(player);
+                let seq = self.events.len() as u32;
+                let run = match self.puts_run.get(player) {
+                    Some(&(last, n)) if last + 1 == seq => n + 1,
+                    _ => 1,
+                };
+                self.puts_run.insert(player.clone(), (seq, run));
+                if run == 5 && self.doomsday_cast.remove(player) {
+                    self.doomsday_resolved.entry(player.clone()).or_insert(seq);
                 }
             }
             Event::Concedes { player } => {
@@ -339,6 +439,8 @@ impl GameBuilder {
             outcome,
             per_player: self.per_player,
             events: self.events,
+            card_events: self.card_events,
+            doomsday_resolved: self.doomsday_resolved,
         }
     }
 }
