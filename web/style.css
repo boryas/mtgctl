@@ -36,7 +36,7 @@ pre { background: #f3f3f3; padding: 8px; overflow: auto; }
 .cards.mini .card { width: 56px; min-height: 78px; }
 .cards.mini .card:hover img { transform: scale(3); }
 .peek { color: #36c; cursor: pointer; margin-left: 6px; font-size: 11px; }
-a.key { color: inherit; text-decoration: underline dotted; }
+a.key { color: #36c; text-decoration: none; } a.key:hover { text-decoration: underline; }
 td.share { position: relative; min-width: 70px; }
 td.share span { position: absolute; left: 0; top: 0; bottom: 0; background: #dde8f5; z-index: 0; }
 td.share { text-align: right; } td.share span + * { position: relative; }

@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=55"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=56"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="windows/">windows uploader</a></nav>
@@ -335,8 +335,8 @@ function renderEntries(mode) {
   let divided = false;
   for (const i of order) {
     const f = items[i], open = editing && editing.mode === mode && editing.i === i;
-    if (kindOf(f) === 'stat' && !divided) { divided = true; el.insertAdjacentHTML('beforeend', '<div class="sechead fdiv">on groups <span class="muted">(after grouping)</span></div>'); }
-    const row = document.createElement('div'); row.className = 'frow' + (open ? ' open' : '') + (entryActive(mode, f) ? '' : ' idle');
+    if (kindOf(f) === 'stat' && !divided) { divided = true; el.insertAdjacentHTML('beforeend', `<div class="sechead fdiv">on groups <span class="muted">${view() === 'rows' ? '(not used by the rows view)' : '(after grouping)'}</span></div>`); }
+    const row = document.createElement('div'); row.className = 'frow' + (open ? ' open' : '') + (entryActive(mode, f) && !(kindOf(f) === 'stat' && view() === 'rows') ? '' : ' idle');
     row.innerHTML = `<span class="ftext"></span><button class="fx" title="remove">×</button>`;
     row.querySelector('.ftext').textContent = entryText(mode, f);
     // a column group entry has nothing to edit
@@ -520,7 +520,7 @@ async function pickValues(f, i, el, touch) {
     const peek = PEEKABLE[col] && v.value !== null ? `<span class="peek" data-peek="${String(v.value).replace(/"/g, '&quot;')}">view</span>` : '';
     return `<label data-j="${j}"><input type="checkbox" ${f.values.includes(v.value) ? 'checked' : ''}> ${key} <span class="muted">⟨${game ? `${v.games} games` : `${v.matches} matches`}⟩</span>${peek}</label>`;
   }).join('');
-  list.querySelectorAll('[data-peek]').forEach(s => hoverable(s, () => preview(col, s.dataset.peek)));
+  list.querySelectorAll('[data-peek]').forEach(s => peekOnClick(s, () => preview(col, s.dataset.peek)));
   list.querySelectorAll('label').forEach(l => {
     const v = vals[+l.dataset.j].value;
     l.querySelector('input').onchange = e => { e.target.checked ? f.values.push(v) : f.values.splice(f.values.indexOf(v), 1); touch(); };
@@ -614,6 +614,7 @@ function syncViewOpts() {
   // Output: statistics for table and time series, columns for rows
   document.getElementById('sMatchSec').hidden = v === 'rows'; document.getElementById('sGameSec').hidden = v === 'rows'; document.getElementById('sRowsSec').hidden = v !== 'rows';
   if (v === 'rows') renderRowCols();
+  renderFilters();
   document.getElementById('optTable').hidden = v !== 'table';
   document.getElementById('optSeries').hidden = v !== 'series';
   document.getElementById('optRows').hidden = v !== 'rows';
@@ -649,15 +650,10 @@ async function references() {
   if (!refIndex) { refIndex = new Map(); for (const r of await api('api/reference')) { if (!refIndex.has(r.deck)) refIndex.set(r.deck, []); refIndex.get(r.deck).push(r); } }
   return refIndex;
 }
-// ---- side panel (hover to show, click to pin) ----
-let pinned = false, hideTimer = null;
+// ---- side panel (opened by a click, stays until closed) ----
 const panel = () => document.getElementById('preview');
-function hidePreview() { if (!pinned) { panel().hidden = true; } }
-function scheduleHide() { clearTimeout(hideTimer); hideTimer = setTimeout(hidePreview, 250); }
-function cancelHide() { clearTimeout(hideTimer); }
-function closeBtn() { return pinned ? `<span class="peek" style="float:right" onclick="pinned=false;document.getElementById('preview').hidden=true">close ✕</span>` : ''; }
-function hoverable(el, show) { el.onmouseenter = () => { cancelHide(); if (!pinned) show(); }; el.onmouseleave = scheduleHide; el.onclick = e => { e.preventDefault(); pinned = true; show(); }; }
-document.addEventListener('DOMContentLoaded', () => { const p = panel(); p.onmouseenter = cancelHide; p.onmouseleave = scheduleHide; });
+function closeBtn() { return `<span class="peek" style="float:right" onclick="document.getElementById('preview').hidden=true">close ✕</span>`; }
+function peekOnClick(el, show) { el.onclick = e => { e.preventDefault(); show(); }; }
 function renderGrid(p, cards) {
   for (const sb of [false, true]) {
     const cs = cards.filter(c => c.sideboard === sb); if (!cs.length) continue;
@@ -691,7 +687,7 @@ async function preview(col, val) {
 const replayLink = id => `<a class="rpl" href="replay.html#game=${id}" target="_blank" title="replay this game">▶</a>`;
 const QUIET = new Set(['Draws', 'Turn', 'Joined', 'SkipsDraw', 'Other', 'Triggers']);
 async function showGame(id) {
-  pinned = true; const p = panel(); p.hidden = false; p.innerHTML = '…';
+  const p = panel(); p.hidden = false; p.innerHTML = '…';
   try {
     const d = await api(`api/game?id=${id}`); const g = d.game;
     p.innerHTML = `${closeBtn()}<h4>Game ${g.game_number} vs ${g.opponent || '?'} · ${g.start_ts.slice(0, 16)}</h4><div class="muted">${g.on_play ? 'on the play' : 'on the draw'} · mulligans ${g.my_mulligans}/${g.opp_mulligans} · ${g.turns} turns · ${g.winner === 'me' ? 'won' : 'lost'}${g.win_by ? ' by ' + g.win_by : ''} · <a href="replay.html#game=${g.id}" target="_blank">replay ↗</a></div>`;
@@ -710,11 +706,11 @@ async function showGame(id) {
   } catch (e) { p.innerHTML = `<span class="err">${e.message}</span>`; }
 }
 // ---- views ----
-function keyCell(col, k, key) {
-  return `<td>${PEEKABLE[col] && !key.startsWith('(') ? `<a class="key" href="lists.html" data-col="${col}" data-val="${k.replace(/"/g, '&quot;')}">${k}</a>` : valText(col, k)}</td>`;
+function keyCell(col, k, key, i) {
+  return `<td${i == null || key.startsWith('(') ? '' : ` data-k="${i}" title="${DBL_TITLE}"`}>${PEEKABLE[col] && !key.startsWith('(') && k !== '∅' ? `<a class="key" href="lists.html" data-col="${col}" data-val="${k.replace(/"/g, '&quot;')}">${k}</a>` : valText(col, k)}</td>`;
 }
 function wireKeys(out) {
-  out.querySelectorAll('a.key').forEach(a => hoverable(a, () => preview(a.dataset.col, a.dataset.val)));
+  out.querySelectorAll('a.key').forEach(a => peekOnClick(a, () => preview(a.dataset.col, a.dataset.val)));
   out.querySelectorAll('[data-game]').forEach(s => { s.style.cursor = 'pointer'; s.onclick = () => showGame(+s.dataset.game); });
 }
 async function runView(seq) {
@@ -743,7 +739,7 @@ async function showTable(seq) {
     const mk = x => {
       const key = x.key || ''; const keys = labels.length > 1 && !key.startsWith('(') ? key.split(' │ ') : [key];
       while (keys.length < Math.max(labels.length, 1)) keys.push('');
-      const cells = keys.map((k, i) => keyCell(by[i], k, key)); const sortv = keys.map(k => k.toLowerCase());
+      const cells = keys.map((k, i) => keyCell(by[i], k, key, labels.length ? i : null)); const sortv = keys.map(k => k.toLowerCase());
       const rr = Object.assign({ n: r.game_mode ? x.games : x.matches }, x);
       for (const k of chosen) {
         const s = STATS[k]; const a = s.acc(rr, total); const val = statValue(s, a);
@@ -752,7 +748,7 @@ async function showTable(seq) {
         sortv.push(s.pair ? a[0] : (val == null ? -Infinity : val));
         if (s.ci) { const c = s.rate ? wilson(a[0], a[1]) : null; cells.push(`<td>${c ? `${c[0].toFixed(0)}–${c[1].toFixed(0)}` : ''}</td>`); sortv.push(c ? c[0] : -Infinity); }
       }
-      return { key, cells, sortv, total: key.startsWith('(') };
+      return { key, keys, cells, sortv, total: key.startsWith('(') };
     };
     let recs = r.rows.map(mk); const tail = [...(r.rollup ? [r.rollup] : []), ...(r.total ? [r.total] : [])].map(mk);
     if (tableSort && tableSort.col < head.length) {
@@ -760,8 +756,18 @@ async function showTable(seq) {
       recs.sort((a, b) => { const x = a.sortv[col], y = b.sortv[col]; return (typeof x === 'string' ? x.localeCompare(y, undefined, { numeric: true }) : x - y) * dir; });
     }
     let html = '<table><tr>' + head.map((h, i) => `<th class="sortable" data-col="${i}">${h}${tableSort && tableSort.col === i ? (tableSort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
-    for (const x of [...recs, ...tail]) html += `<tr class="${x.total ? 'total' : ''}">${x.cells.join('')}</tr>`;
+    const shown = [...recs, ...tail];
+    shown.forEach((x, i) => { html += `<tr data-r="${i}" class="${x.total ? 'total' : ''}">${x.cells.join('')}</tr>`; });
     out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
+    // a group column's key part is its raw value (NULL as ∅); a card split's is yes / no
+    const splits = groups.filter(g => groupActive(g) && CARD_FIELDS[g.field]);
+    out.querySelector('table').ondblclick = e => {
+      const td = e.target.closest('td[data-k]'); if (!td) return;
+      const x = shown[+td.parentElement.dataset.r], i = +td.dataset.k;
+      const v = x.keys[i]; window.getSelection().removeAllRanges();
+      if (i < by.length) addValueFilter(by[i], v === '∅' ? null : v, e.shiftKey);
+      else if (splits[i - by.length]) addFilter(Object.assign(JSON.parse(JSON.stringify(splits[i - by.length])), { not: (v === 'no') !== e.shiftKey }));
+    };
     out.querySelectorAll('th.sortable').forEach(th => th.onclick = () => {
       const col = +th.dataset.col;
       // numeric columns start descending (biggest first), key columns ascending
@@ -850,12 +856,17 @@ const ROW_FIELD = {
   pd: ['on_play', g => g.on_play == null ? null : g.on_play ? '1' : '0'], mulls: ['my_mulligans', g => g.my_mulligans], turns: ['turns', g => g.turns], min: ['minutes', g => g.minutes], how: ['win_by', g => g.win_by],
 };
 const GAME_ROW_FIELD = Object.assign({}, ROW_FIELD, { id: [null, g => g.game_id], result: [null, g => g.winner] });
+const DBL_TITLE = 'double-click: filter on this value (shift: exclude it)';
 // Adds `field is value` (`is not` when `not`) unless that exact filter is already there.
 function addValueFilter(field, v, not) {
   const k = FIELDS[field] && FIELDS[field].kind;
   if (!k || (v == null && (k === 'colors' || k === 'date'))) return;
   const f = k === 'date' ? { field, op: 'between', not: false, values: [v, v] } : k === 'colors' ? { field, op: 'exact', not, values: [v] } : { field, op: 'is', not, values: [v == null ? null : String(v)] };
   if (filters.some(x => x.field === f.field && x.op === f.op && !!x.not === !!f.not && JSON.stringify(x.values) === JSON.stringify(f.values))) return;
+  addFilter(f);
+}
+function addFilter(f) {
+  if (filters.some(x => JSON.stringify(x) === JSON.stringify(f))) return;
   closeEditor(); editing = null; filters.push(f); renderFilters(); filtersChanged();
 }
 let rowSort = null; // { col: a rows-view column key, dir: 1 | -1 }; sorts the rows already fetched, null = the server's order (newest first)
@@ -867,7 +878,7 @@ function rowTable(out, fetched, cols, defs, cell, fields) {
     rows = rows.slice().sort((a, b) => { const x = get(a), y = get(b), mx = x == null || x === '', my = y == null || y === ''; if (mx || my) return mx - my; return dir * (typeof x === 'number' && typeof y === 'number' ? x - y : natural(String(x), String(y))); });
   }
   let html = '<table><tr>' + cols.map(c => `<th${fields[c] ? ` class="sortable" data-c="${c}"` : ''}>${defs[c]}${rowSort && rowSort.col === c ? (rowSort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
-  rows.forEach((r, i) => { html += `<tr data-i="${i}">` + cols.map(c => `<td data-c="${c}"${TEXT_COLS.has(c) ? ' class="text"' : ''}${fields[c] && fields[c][0] ? ' title="double-click: filter on this value (shift: exclude it)"' : ''}>${cell[c](r)}</td>`).join('') + '</tr>'; });
+  rows.forEach((r, i) => { html += `<tr data-i="${i}">` + cols.map(c => `<td data-c="${c}"${TEXT_COLS.has(c) ? ' class="text"' : ''}${fields[c] && fields[c][0] ? ' title="${DBL_TITLE}"' : ''}>${cell[c](r)}</td>`).join('') + '</tr>'; });
   out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
   out.querySelectorAll('th.sortable').forEach(th => th.onclick = () => { const c = th.dataset.c; rowSort = !rowSort || rowSort.col !== c ? { col: c, dir: 1 } : rowSort.dir > 0 ? { col: c, dir: -1 } : null; rowTable(out, fetched, cols, defs, cell, fields); });
   out.querySelector('table').ondblclick = e => {
@@ -877,6 +888,7 @@ function rowTable(out, fetched, cols, defs, cell, fields) {
     addValueFilter(fd[0], fd[1](rows[+td.parentElement.dataset.i]), e.shiftKey);
   };
 }
+const resultSigil = (res, rest) => `<span class="g${res === 'W' ? ' gw' : res === 'L' ? ' gl' : ''}">${res}${rest}</span>`;
 const natural = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
 // Rows: one per match, or one per game when the filters touch anything per game.
 async function showMatches(seq) {
@@ -891,7 +903,7 @@ async function showMatches(seq) {
         id: g => g.game_id, date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || NONE, opp_cands: cands, opp_arch: g => g.opp_archetype || NONE, opp_col: g => g.opp_colors || NONE, opp_seen: seenCell, my_deck: g => g.my_deck || '<span class="muted">—</span>',
         my_list: g => g.my_list ? `<a class="key" data-col="my_list" data-val="${g.my_list.replace(/"/g, '&quot;')}" href="lists.html">${g.my_list}</a>` : '<span class="muted">no list</span>', event: g => g.event_name || '',
         game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>${replayLink(g.game_id)}`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
-        turns: g => g.turns, min: g => g.minutes ?? '', result: g => `<b>${g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?'}</b>`, how: g => g.win_by || '' };
+        turns: g => g.turns, min: g => g.minutes ?? '', result: g => resultSigil(g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?', ''), how: g => g.win_by || '' };
       const cols = Object.keys(defs).filter(c => set.has(c));
       rowTable(out, rows, cols, Object.assign({}, defs, { mulls: 'mulls (me/opp)' }), cell, GAME_ROW_FIELD);
       setSummary(`per-game rows: ${rows.length} games${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
@@ -906,7 +918,7 @@ async function showMatches(seq) {
       opp_deck: r => r.opp_deck || NONE, opp_cands: cands, opp_arch: r => r.opp_archetype || NONE, opp_col: r => r.opp_colors || NONE, opp_seen: seenCell,
       my_deck: r => r.my_deck ? `${r.my_deck}${r.my_deck_source === 'cards' ? ' <span class="muted">(inferred)</span>' : ''}` : (r.my_archetype ? `<span class="muted">${r.my_archetype} (deck ambiguous)</span>` : '<span class="muted">—</span>'),
       my_list: r => r.my_list ? `<a class="key" data-col="my_list" data-val="${r.my_list.replace(/"/g, '&quot;')}" href="lists.html">${r.my_list}</a>` : `<span class="muted">no list</span>`,
-      event: r => r.event_name || '', result: r => `<b>${r.match_result}</b> ${r.my_game_wins}–${r.opp_game_wins}`, games: r => (r.games || '').split('|').filter(Boolean).map(game).join(' ') };
+      event: r => r.event_name || '', result: r => resultSigil(r.match_result, ` ${r.my_game_wins}–${r.opp_game_wins}`), games: r => (r.games || '').split('|').filter(Boolean).map(game).join(' ') };
     const cols = Object.keys(defs).filter(c => set.has(c));
     rowTable(out, rows, cols, Object.assign({}, defs, { games: 'games (W/L, play/draw, mulls, turns)' }), cell, ROW_FIELD);
     setSummary(`${rows.length} matches${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
