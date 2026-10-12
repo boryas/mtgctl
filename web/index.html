@@ -1,5 +1,5 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=56"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=57"></head>
 <body>
 <h1>mtgctl · results</h1>
 <nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="windows/">windows uploader</a></nav>
@@ -9,13 +9,16 @@
     <h3 class="toggle"><span class="caret">▾</span> View <span class="psum muted"></span></h3>
     <div class="pbody">
     <div>data <select id="dsSel"></select> <span class="muted" id="dsAbout"></span></div>
-    <div><label><input type="radio" name="view" value="table" checked> table</label> <label><input type="radio" name="view" value="series"> time series</label> <label><input type="radio" name="view" value="rows"> rows</label></div>
+    <div><label><input type="radio" name="view" value="table" checked> table</label> <label><input type="radio" name="view" value="series"> time series</label> <label><input type="radio" name="view" value="rows"> rows</label> <label><input type="radio" name="view" value="matrix"> matrix</label></div>
     <div class="optgroup" id="optTable">
       <div>sort <select id="sort"><option value="games">size</option><option value="wr">win rate</option><option value="key">key</option><option value="time">time</option></select></div>
     </div>
     <div class="optgroup" id="optSeries" hidden>
       <div>per <select id="bucket"><option value="week">week</option><option value="month" selected>month</option><option value="date">day</option></select> · smoothing <select id="smooth"><option value="1">none</option><option value="3">3 buckets</option><option value="5">5 buckets</option><option value="9">9 buckets</option></select></div>
       <div>max lines <input id="topn" type="number" value="6" size="2"></div>
+    </div>
+    <div class="optgroup" id="optMatrix" hidden>
+      <div>top <input id="mtop" type="number" value="12" size="2"> rows and columns</div>
     </div>
     <div class="optgroup" id="optRows" hidden>
       <div>newest <input id="rowlimit" type="number" value="500" size="4"></div>
@@ -570,7 +573,7 @@ async function init() {
   document.getElementById('pStats').addEventListener('change', () => { tableSort = null; schedule(); });
   document.getElementById('pView').addEventListener('change', e => { if (e.target.id !== 'dsSel') schedule(); });
   document.getElementById('sort').addEventListener('change', () => { tableSort = null; });
-  for (const id of ['topn', 'rowlimit']) document.getElementById(id).addEventListener('input', schedule);
+  for (const id of ['topn', 'rowlimit', 'mtop']) document.getElementById(id).addEventListener('input', schedule);
   document.querySelectorAll('input[name=view]').forEach(r => r.addEventListener('change', schedule));
 }
 // The query comes from the link on the first load and from the dataset's defaults on a switch.
@@ -619,7 +622,8 @@ function summarizePanels() {
   sum('pGroup', groupLabels().join(', ') || 'none');
   sum('pStats', view() === 'rows' ? `${rowCols(gameQuery()).set.size} columns` : (chosenStats().map(k => STATS[k].label).join(', ') || 'none'));
   const v = view();
-  const vname = { table: "table", series: "time series", rows: "rows" }[v];
+  const vname = { table: "table", series: "time series", rows: "rows", matrix: "matrix" }[v];
+  if (v === 'matrix') { sum('pView', `matrix · top ${document.getElementById('mtop').value}`); return; }
   sum('pView', v === 'table' ? `${vname} · sort ${document.getElementById('sort').selectedOptions[0].text}` : v === 'series' ? `${vname} · per ${document.getElementById('bucket').value}, smoothing ${document.getElementById('smooth').selectedOptions[0].text}, ${document.getElementById('topn').value} lines` : `${vname} · newest ${document.getElementById('rowlimit').value}`);
 }
 document.addEventListener('DOMContentLoaded', () => {
@@ -639,12 +643,13 @@ function syncViewOpts() {
   const v = view();
   document.getElementById('pGroup').disabled = v === 'rows';
   // Output: statistics for table and time series, columns for rows
-  document.getElementById('sMatchSec').hidden = v === 'rows'; document.getElementById('sGameSec').hidden = v === 'rows'; document.getElementById('sRowsSec').hidden = v !== 'rows';
+  document.getElementById('sMatchSec').hidden = v === 'rows' || v === 'matrix'; document.getElementById('sGameSec').hidden = v === 'rows' || v === 'matrix'; document.getElementById('sRowsSec').hidden = v !== 'rows';
   if (v === 'rows') renderRowCols();
   renderFilters();
   document.getElementById('optTable').hidden = v !== 'table';
   document.getElementById('optSeries').hidden = v !== 'series';
   document.getElementById('optRows').hidden = v !== 'rows';
+  document.getElementById('optMatrix').hidden = v !== 'matrix';
   document.querySelectorAll('input[name=stat]').forEach(i => { const s = STATS[i.value]; i.parentElement.classList.toggle('noplot', v === 'series' && !s.plot); });
 }
 // A column toggle redraws the rows it already has; only a changed query refetches.
@@ -744,6 +749,7 @@ async function runView(seq) {
   const v = view();
   if (v === 'rows') return showMatches(seq);
   if (v === 'series') return showSeries(seq);
+  if (v === 'matrix') return showMatrix(seq);
   return showTable(seq);
 }
 // Clicking a table heading sorts by that column (again: reverse); the Options sort is the
@@ -850,6 +856,57 @@ async function showSeries(seq) {
     }
     out.innerHTML = html + `<div class="muted">${names.length} of ${size.size} groups shown (largest by ${r.game_mode ? 'games' : 'matches'}${qualified.length < size.size ? `, ${size.size - qualified.length} hidden by the filters on groups` : ''}); hover a point for the value and sample size</div>`;
     setSummary(`per ${bucket}${groupLabels().length ? ' by ' + groupLabels().join(', ') : ''}; ${r.all_matches} matches / ${r.all_games} games; where: ${whereSql() || '(none)'}`);
+  } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
+}
+// Matchup matrix: the first group-by field gives the rows, the second the columns; a cell is the
+// row's win rate against the column (match WR, game WR when the query is per game). The band is
+// set by the point estimate, the opacity by how tight its 95% interval is.
+const BANDS = [[55, '34,150,75', 'over 55%'], [51, '20,170,160', '51–55%'], [49, '140,140,140', '49–51%'], [45, '235,135,30', '45–49%'], [-1, '215,55,45', 'under 45%']];
+// banded on the whole percent the cell shows, so a cell's colour always agrees with its text
+const band = shown => BANDS.find(([lo]) => shown > lo || (lo === 49 && shown >= 49) || (lo === 45 && shown >= 45));
+// fully saturated at an interval 10 points wide or less, faintest at 50 or more
+const ciAlpha = w => Math.max(0.12, Math.min(1, 1 - (w - 10) / 40 * 0.88));
+function matrixCell(w, n) {
+  if (!n) return { style: '', text: '' };
+  const pct = 100 * w / n, ci = wilson(w, n), a = ciAlpha(ci[1] - ci[0]), [, rgb] = band(Math.round(pct));
+  return { style: `background: rgba(${rgb},${a.toFixed(2)});${a > 0.6 ? ' color: #fff;' : ''}`, text: `${pct.toFixed(0)}%`, title: `${w}–${n - w} (${pct.toFixed(1)}%), 95% CI ${ci[0].toFixed(0)}–${ci[1].toFixed(0)}%` };
+}
+async function showMatrix(seq) {
+  const out = document.getElementById('out'), by = groupBy();
+  if (by.length < 2) { out.innerHTML = '<span class="muted">The matrix needs two group-by fields: the first gives the rows, the second the columns (for example deck A, then deck B).</span>'; return; }
+  const [rc, cc] = by, top = +document.getElementById('mtop').value || 12;
+  try {
+    const r = await api('api/stats?' + statsParams({ by: `${rc},${cc}`, sort: 'games', min: '1', limit: '100000', full: 'true' }));
+    if (stale(seq)) return;
+    const game = r.game_mode, cells = new Map(), rowN = new Map(), colN = new Map(), rowWL = new Map();
+    for (const x of r.rows) {
+      if (!x.key || x.key.startsWith('(')) continue;
+      const [a, b] = x.key.split(' │ ');
+      const w = game ? x.wins : x.match_wins, n = game ? x.decided : x.match_decided, size = game ? x.games : x.matches;
+      cells.set(a + '\u0000' + b, [w, n]);
+      rowN.set(a, (rowN.get(a) || 0) + size); colN.set(b, (colN.get(b) || 0) + size);
+      const t = rowWL.get(a) || [0, 0]; rowWL.set(a, [t[0] + w, t[1] + n]);
+    }
+    const bySize = m => [...m].sort((p, q) => q[1] - p[1]).map(e => e[0]);
+    const rows = bySize(rowN).slice(0, top);
+    // the two sides of one thing (deck A / deck B) share an order, so the mirror is the diagonal
+    const square = rc.replace(/^my_/, 'opp_') === cc;
+    const cols = square ? rows.filter(v => colN.has(v)) : bySize(colN).slice(0, top);
+    if (!rows.length) { out.innerHTML = '<span class="muted">nothing in range</span>'; return; }
+    const head = `<tr><th class="corner">${LABEL[rc] || rc} ↓ · ${LABEL[cc] || cc} →</th>${cols.map(c => `<th class="mcol"><span>${valText(cc, c)}</span></th>`).join('')}<th class="mcol"><span>overall</span></th></tr>`;
+    const body = rows.map(a => {
+      const tds = cols.map(b => { const [w, n] = cells.get(a + '\u0000' + b) || [0, 0]; const c = matrixCell(w, n); return `<td class="mcell" style="${c.style}" title="${c.title || ''}" data-a="${a.replace(/"/g, '&quot;')}" data-b="${b.replace(/"/g, '&quot;')}">${c.text}</td>`; });
+      const [tw, tn] = rowWL.get(a); const t = matrixCell(tw, tn);
+      return `<tr><th class="mrow">${valText(rc, a)}</th>${tds.join('')}<td class="mcell mtotal" style="${t.style}" title="${t.title || ''}">${t.text}</td></tr>`;
+    }).join('');
+    const legend = BANDS.map(([, rgb, l]) => `<span class="lg"><i style="background:rgb(${rgb})"></i>${l}</span>`).join('') + '<span class="muted"> · paler = wider 95% interval (fewer matches); hover a cell for the record</span>';
+    out.innerHTML = `<div class="tabwrap"><table class="matrix">${head}${body}</table></div><div class="legend">${legend}</div>`;
+    out.querySelector('table').ondblclick = e => {
+      const td = e.target.closest('td[data-a]'); if (!td) return; window.getSelection().removeAllRanges();
+      const v = s => s === '∅' ? null : s;
+      addValueFilter(rc, v(td.dataset.a), false); addValueFilter(cc, v(td.dataset.b), false);
+    };
+    setSummary(`${game ? 'game' : 'match'} win rate of each row against each column; ${rows.length} × ${cols.length} of ${rowN.size} × ${colN.size}; ${r.all_matches} matches; where: ${whereSql() || '(none)'}`);
   } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
 }
 const PALETTE = ['#2a6fdb', '#d9534f', '#3a9d5d', '#e8a33d', '#8e5ec9', '#1fa2b3', '#b5651d', '#777'];

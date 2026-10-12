@@ -137,3 +137,11 @@ th.sortable { cursor: pointer; user-select: none; } th.sortable:hover { backgrou
 .card.known { border: 2px solid #d66; } .card.maybe { border: 2px dashed #d66; opacity: .55; }
 .card.back { background: repeating-linear-gradient(45deg, #8a6d4b, #8a6d4b 4px, #7a5d3b 4px, #7a5d3b 8px); }
 .log .ev { cursor: pointer; } .log .ev.now { background: #fff3c4; font-weight: 600; } .log .ev.future { opacity: .45; }
+
+/* matchup matrix */
+table.matrix td.mcell { text-align: center; min-width: 3.2em; font-variant-numeric: tabular-nums; cursor: default; }
+table.matrix td.mtotal { border-left: 2px solid #999; font-weight: 600; }
+table.matrix th.mcol { vertical-align: bottom; padding: 4px 2px; }
+table.matrix th.mcol span { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; font-weight: 500; }
+table.matrix th.mrow { text-align: left; font-weight: 500; }
+table.matrix th.corner { text-align: left; vertical-align: bottom; font-weight: 400; color: #666; }
