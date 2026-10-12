@@ -14,7 +14,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use mtgctl::mtgolog::pipeline::{self, PlayerDir, Reference};
-use mtgctl::mtgolog::{picker, stats};
+use mtgctl::mtgolog::dataset::{self, Dataset};
+use mtgctl::mtgolog::{ldc, picker, stats};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -79,6 +80,13 @@ enum Cmd {
     },
     /// Eras from the timeline with their match counts, and a check that no banned card was played after its ban took effect. --all re-places every match.
     Eras {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Download new Legacy Data Collection sheets and rebuild `<data>/ldc.db` from all of them. --all downloads every sheet again.
+    LdcSync {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
         #[arg(long)]
@@ -626,6 +634,8 @@ struct StatsParams {
     split: String,
     #[serde(default)]
     game: Option<bool>,
+    #[serde(default)]
+    ds: Option<String>,
 }
 fn one() -> i64 {
     1
@@ -641,12 +651,19 @@ fn split_cols(s: &str) -> Vec<String> {
     s.split(',').map(str::trim).filter(|c| !c.is_empty()).map(String::from).collect()
 }
 
+/// The dataset a request names (`ds`), the uploaded logs when it names none.
+fn dataset(key: Option<&str>) -> Result<&'static Dataset, ApiError> {
+    let key = key.filter(|k| !k.is_empty()).unwrap_or("mtgo");
+    dataset::by_key(key).ok_or_else(|| bad(format!("no dataset {key}")))
+}
+
 async fn stats_api(State(st): State<Shared>, Query(p): Query<StatsParams>) -> Result<Json<stats::StatsResult>, ApiError> {
+    let ds = dataset(p.ds.as_deref())?;
     let split: Vec<String> = if p.split.is_empty() { vec![] } else { serde_json::from_str(&p.split).map_err(|e| bad(format!("split: {e}")))? };
     let query = stats::StatsQuery { by: split_cols(&p.by), split, game: p.game, per: None, where_sql: p.where_sql.filter(|w| !w.trim().is_empty()), min_games: p.min, sort: p.sort, limit: p.limit, full: p.full, hist: split_cols(&p.hist) };
     let r = tokio::task::spawn_blocking(move || {
-        let conn = &mut pool(&st)?;
-        stats::compute(conn, &query)
+        let conn = &mut ds.connect(&st.data)?;
+        stats::compute(conn, ds, &query)
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -654,10 +671,11 @@ async fn stats_api(State(st): State<Shared>, Query(p): Query<StatsParams>) -> Re
     Ok(Json(r))
 }
 
-async fn columns(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiError> {
+async fn columns(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<String>>, ApiError> {
+    let ds = dataset(q.get("ds").map(String::as_str))?;
     let cols = tokio::task::spawn_blocking(move || {
-        let conn = &mut pool(&st)?;
-        picker::view_columns(conn).map_err(|e| e.to_string())
+        let conn = &mut ds.connect(&st.data)?;
+        picker::view_columns(conn, ds).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -716,15 +734,39 @@ async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String
     if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(bad("bad column"));
     }
+    let ds = dataset(q.get("ds").map(String::as_str))?;
     let wher: Vec<String> = q.get("where").filter(|w| !w.trim().is_empty()).cloned().into_iter().collect();
     let rows = tokio::task::spawn_blocking(move || {
-        let conn = &mut pool(&st)?;
-        picker::column_values(conn, &col, &wher).map_err(|e| e.to_string())
+        let conn = &mut ds.connect(&st.data)?;
+        picker::column_values(conn, ds, &col, &wher).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| internal(e.to_string()))?
     .map_err(bad)?;
     Ok(Json(rows.into_iter().map(|(value, matches, games)| ValueRow { value, matches, games }).collect()))
+}
+
+#[derive(Serialize)]
+struct Schema {
+    datasets: Vec<(&'static str, &'static str)>,
+    dataset: &'static Dataset,
+    /// the catalog's columns the view really has
+    present: Vec<String>,
+    defaults: serde_json::Value,
+}
+
+/// What the stats page builds itself from: the dataset's column catalog, features and default query.
+async fn schema(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Schema>, ApiError> {
+    let ds = dataset(q.get("ds").map(String::as_str))?;
+    let present = tokio::task::spawn_blocking(move || {
+        let conn = &mut ds.connect(&st.data)?;
+        picker::view_columns(conn, ds).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(internal)?;
+    let datasets = dataset::ALL.iter().map(|d| (d.key, d.title)).collect();
+    Ok(Json(Schema { datasets, dataset: ds, present, defaults: ds.defaults() }))
 }
 
 #[derive(diesel::QueryableByName, Serialize)]
@@ -1438,6 +1480,22 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Cmd::LdcSync { repo, all } => {
+            let timeline = Reference::locate(&repo, &cli.data).timeline;
+            let run = || -> Result<(), String> {
+                println!("{} sheets downloaded", ldc::fetch(&cli.data, all)?);
+                let r = ldc::import(&cli.data, &timeline)?;
+                println!("ldc.db: {} events, {} matches (one per side), {} .. {}", r.events, r.matches, r.first, r.last);
+                for s in &r.skipped {
+                    println!("  skipped {s}");
+                }
+                Ok(())
+            };
+            if let Err(e) = run() {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         Cmd::PlayerRemove { player } => {
             let conn = &mut pipeline::connect(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             match mtgctl::mtgolog::db::ensure_schema(conn).and_then(|_| mtgctl::mtgolog::db::remove_player(conn, &player)) {
@@ -1462,6 +1520,9 @@ async fn main() {
             let conn = &mut pipeline::connect(&cli.data).expect("database");
             mtgctl::mtgolog::db::ensure_schema(conn).expect("schema");
             stats::ensure_view(conn).expect("view");
+            for ds in dataset::ALL {
+                ds.open(&cli.data).expect("dataset tables and view");
+            }
             let reference = Reference::locate(&repo, &cli.data);
             // a deploy that changed the timeline re-places the matches from the first changed era on
             match mtgctl::mtgolog::eras::stamp(conn, &reference.timeline, false) {
@@ -1486,6 +1547,7 @@ async fn main() {
                 .route("/api/replay", get(replay_api))
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))
+                .route("/api/schema", get(schema))
                 .route("/api/cards-seen", get(cards_seen))
                 .route("/api/list/experimental", post(list_experimental))
                 .route("/api/lists", get(lists))

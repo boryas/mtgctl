@@ -8,6 +8,7 @@
   <fieldset class="box" id="pView">
     <h3 class="toggle"><span class="caret">▾</span> View <span class="psum muted"></span></h3>
     <div class="pbody">
+    <div>data <select id="dsSel"></select> <span class="muted" id="dsAbout"></span></div>
     <div><label><input type="radio" name="view" value="table" checked> table</label> <label><input type="radio" name="view" value="series"> time series</label> <label><input type="radio" name="view" value="rows"> rows</label></div>
     <div class="optgroup" id="optTable">
       <div>sort <select id="sort"><option value="games">size</option><option value="wr">win rate</option><option value="key">key</option><option value="time">time</option></select></div>
@@ -54,12 +55,22 @@
 <aside id="preview" hidden></aside>
 <script src="common.js?v=45"></script>
 <script>
-// The columns a person can filter or group on, by level. Anything not listed (ids, empty
-// legacy label columns, raw outcomes) is deliberately unavailable; see the audit in mtgo-web.org.
-const MATCH_COLS = { my_deck: 'my deck', my_archetype: 'my archetype', my_deck_grade: 'my deck list source', my_list: 'my list (version)', my_experimental: 'experimental list', opp_deck: 'opponent deck', opp_archetype: 'opponent archetype', opp_deck_candidates: 'opponent deck (candidates)', opp_colors: 'opponent colours', my_colors: 'my colours', player: 'player', opponent: 'opponent', match_result: 'match result', event_type: 'event type', event_name: 'event', week: 'week', month: 'month', date: 'date', era: 'era' };
-const GAME_COLS_L = { game_number: 'game number', on_play: 'on the play', my_mulligans: 'my mulligans', opp_mulligans: 'opp mulligans', my_hand: 'my opening hand size', opp_hand: 'opp opening hand size', win_by: 'how the game ended', turns: 'turns', minutes: 'minutes', my_lands: 'lands I played', opp_lands: 'lands opp played', my_spells: 'spells I cast', opp_spells: 'spells opp cast', my_dd_resolved: 'my Doomsday resolved', my_dd_turn: 'turn my Doomsday resolved', my_hand_known: 'my hands known (session log)', my_pile_known: 'my Doomsday pile known' };
-const LABEL = Object.assign({}, MATCH_COLS, GAME_COLS_L);
-const GAME_COLS = Object.keys(GAME_COLS_L);
+// The dataset's column catalog and features come from api/schema (src/mtgolog/dataset.rs): the
+// columns a person can filter or group on, their labels, level, kind and value labels.
+let DS = 'mtgo', SCHEMA = null;
+let LABEL = {}, GAME_COLS = [], NUMERIC = new Set(), VALUE_LABEL = {}, KIND_OF = {};
+const feature = k => !!(SCHEMA && SCHEMA.dataset.features[k]);
+function applySchema(s) {
+  SCHEMA = s; LABEL = {}; GAME_COLS = []; NUMERIC = new Set(); VALUE_LABEL = {}; KIND_OF = {};
+  for (const c of s.dataset.columns) {
+    if (!s.present.includes(c.name)) continue;
+    LABEL[c.name] = c.label; KIND_OF[c.name] = c.kind;
+    if (c.level === 'game') GAME_COLS.push(c.name);
+    if (c.kind === 'num') NUMERIC.add(c.name);
+    if (c.values.length) VALUE_LABEL[c.name] = Object.fromEntries(c.values);
+  }
+  PEEKABLE = feature('lists') ? { my_list: 'my_list', my_deck: 'my_deck', opp_deck: 'my_deck' } : {};
+}
 // Output statistics. `level` says which view mode a statistic belongs to: match statistics are
 // meaningless once a per-game column is in the query, and vice versa for game statistics.
 // Every statistic is a ratio num/den of additive quantities, so a smoothing window pools the
@@ -72,12 +83,13 @@ const STATS = {
   games:     { label: 'games',          level: 'any',   acc: r => [r.games, 1],                       fmt: v => v.toFixed(v % 1 ? 1 : 0), plot: true },
   gwl:       { label: 'game W–L',       level: 'any',   acc: r => [r.wins, r.decided],                fmt: (v, a) => `${a[0]}–${a[1] - a[0]}`, plot: false, pair: true },
   gwr:       { label: 'game WR',        level: 'any',   acc: r => [r.wins, r.decided],                fmt: v => v == null ? '' : (100 * v).toFixed(1) + '%', ci: true, plot: true, rate: true },
-  turns:     { label: 'avg turns',      level: 'any',   acc: r => [(r.avg_turns || 0) * r.games, r.avg_turns == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(1), plot: true },
-  minutes:   { label: 'avg minutes',    level: 'any',   acc: r => [(r.avg_minutes || 0) * r.games, r.avg_minutes == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(0), plot: true },
-  mymulls:   { label: 'avg my mulligans', level: 'any', acc: r => [(r.avg_my_mulls || 0) * r.games, r.avg_my_mulls == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(2), plot: true },
-  oppmulls:  { label: 'avg opp mulligans', level: 'any', acc: r => [(r.avg_opp_mulls || 0) * r.games, r.avg_opp_mulls == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(2), plot: true },
+  turns:     { detail: true, label: 'avg turns',      level: 'any',   acc: r => [(r.avg_turns || 0) * r.games, r.avg_turns == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(1), plot: true },
+  minutes:   { detail: true, label: 'avg minutes',    level: 'any',   acc: r => [(r.avg_minutes || 0) * r.games, r.avg_minutes == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(0), plot: true },
+  mymulls:   { detail: true, label: 'avg my mulligans', level: 'any', acc: r => [(r.avg_my_mulls || 0) * r.games, r.avg_my_mulls == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(2), plot: true },
+  oppmulls:  { detail: true, label: 'avg opp mulligans', level: 'any', acc: r => [(r.avg_opp_mulls || 0) * r.games, r.avg_opp_mulls == null ? 0 : r.games], fmt: v => v == null ? '' : v.toFixed(2), plot: true },
 };
 const statValue = (s, a) => a[1] ? a[0] / a[1] : null;
+const offered = ([, s]) => !s.detail || feature('game_details');
 const DEFAULT_STATS = ['matches', 'share', 'mwl', 'mwr'];
 // Columns of the rows view (match rows, and game rows under a per-game filter); the choice is remembered.
 const ROW_COLS = { id: 'id', date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_col: 'opponent colours', opp_seen: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', result: 'result', games: 'games' };
@@ -108,16 +120,12 @@ function rowCols(game) {
   const set = new Set(on || Object.keys(defs).filter(c => !ROW_DEFAULT_OFF.has(c)));
   return { defs, key, set };
 }
-let columns = [];
 // The query: every filter holds (AND); within one, the values are alternatives (OR). A filter
 // with no field or no values yet is inactive. Entries: {field, op, not, values}; see FIELDS.
 let filters = [];
 const sq = v => `'${String(v).replace(/'/g, "''")}'`;
 const like = v => `${sq('%' + v.replace(/[\\%_]/g, m => '\\' + m) + '%')} ESCAPE '\\'`;
-// Compared with unquoted literals: my_experimental is an expression without type affinity, which a quoted '0' never equals.
-const NUMERIC = new Set(['my_experimental', 'game_number', 'my_mulligans', 'opp_mulligans', 'my_hand', 'opp_hand', 'turns', 'minutes', 'my_lands', 'opp_lands', 'my_spells', 'opp_spells', 'my_dd_resolved', 'my_dd_turn', 'my_hand_known', 'my_pile_known']);
 const lit = (col, v) => NUMERIC.has(col) && /^-?\d+(\.\d+)?$/.test(v) ? v : sq(v);
-const VALUE_LABEL = { my_deck_grade: { hard: 'exact from logs', inferred: 'inferred from game', none: 'unknown' }, my_experimental: { 0: 'no', 1: 'yes' }, my_dd_resolved: { 0: 'no', 1: 'yes' }, my_hand_known: { 0: 'no', 1: 'yes' }, my_pile_known: { 0: 'no', 1: 'yes' }, on_play: { 0: 'on the draw', 1: 'on the play' } };
 const valText = (col, v) => v === null ? '∅' : (VALUE_LABEL[col] || {})[v] || v;
 // What a card sentence can say happened, by mtgo_card_events.verb (see model::Verb): `active`
 // verbs read "I cast X", `passive` ones "my X was milled"; `other` names what `other` holds.
@@ -227,12 +235,12 @@ const KINDS = {
 let FIELDS = {}; // key → {label, group, kind}
 function buildFields() {
   FIELDS = {};
-  for (const c of columns) {
-    const kind = c === 'date' ? 'date' : c.endsWith('_colors') ? 'colors' : NUMERIC.has(c) ? 'num' : 'col';
-    FIELDS[c] = { label: LABEL[c], group: GAME_COLS_L[c] ? 'per game' : 'match', kind };
+  for (const c of Object.keys(LABEL)) {
+    const kind = { text: 'col', num: 'num', colors: 'colors', date: 'date' }[KIND_OF[c]];
+    FIELDS[c] = { label: LABEL[c], group: GAME_COLS.includes(c) ? 'per game' : 'match', kind };
   }
-  for (const [k, d] of Object.entries(CARD_FIELDS)) FIELDS[k] = { label: d.label, group: 'cards', kind: d.kind };
-  for (const [k, s] of Object.entries(STATS)) if (!s.pair) FIELDS['stat:' + k] = { label: s.label, group: 'on groups (after grouping)', kind: 'stat' };
+  if (feature('cards')) for (const [k, d] of Object.entries(CARD_FIELDS)) FIELDS[k] = { label: d.label, group: 'cards', kind: d.kind };
+  for (const [k, s] of Object.entries(STATS).filter(offered)) if (!s.pair) FIELDS['stat:' + k] = { label: s.label, group: 'on groups (after grouping)', kind: 'stat' };
 }
 const kindOf = f => f.field && FIELDS[f.field] ? FIELDS[f.field].kind : null;
 const active = f => kindOf(f) && f.values.some(v => v === null || String(v).trim() !== '');
@@ -287,16 +295,16 @@ function parseOutVal(stat, text) { const t = String(text).trim(); const pct = t.
 function passesOut(rr, total) {
   return filters.filter(f => kindOf(f) === 'stat' && active(f)).every(f => { const s = STATS[f.field.slice(5)]; const v = statValue(s, s.acc(rr, total)); return v != null && OPS[f.op](v, f.values[0]); });
 }
+const copy = x => JSON.parse(JSON.stringify(x));
 function defaultFilters() {
   const fs = [];
-  if (getPlayer()) fs.push({ field: 'player', op: 'is', not: false, values: [getPlayer()] });
-  fs.push({ field: 'my_deck_grade', op: 'is', not: false, values: ['hard'] }, { field: 'my_experimental', op: 'is', not: false, values: ['0'] });
-  return fs;
+  if (feature('players') && getPlayer()) fs.push({ field: 'player', op: 'is', not: false, values: [getPlayer()] });
+  return [...fs, ...copy(SCHEMA.defaults.defaults)].filter(f => FIELDS[f.field]);
 }
 // The query lives in the URL: `#q={"f": filters, "g": group entries}`; a `#col=value` link (statsLink) starts from the defaults plus that value.
 function queryFromHash() {
   const h = decodeURIComponent(location.hash || '');
-  const g0 = [{ field: 'opp_archetype' }];
+  const g0 = FIELDS[SCHEMA.dataset.default_group] ? [{ field: SCHEMA.dataset.default_group }] : [];
   if (h.startsWith('#q=')) {
     try {
       // a bare array is a link from before group entries were kept
@@ -309,10 +317,15 @@ function queryFromHash() {
 function linkFilters(h) {
   const pre = /^#([a-z_]+)=(.*)$/.exec(h);
   if (pre && FIELDS[pre[1]]) return [...defaultFilters(), { field: pre[1], op: 'is', not: false, values: [pre[2]] }];
-  // opponents nothing explains are out by default
-  return [...defaultFilters(), ...(FIELDS.opp_archetype ? [{ field: 'opp_archetype', op: 'is', not: true, values: [null] }] : [])];
+  return [...defaultFilters(), ...copy(SCHEMA.defaults.start).filter(f => FIELDS[f.field])];
 }
-function saveHash() { try { history.replaceState(null, '', '#q=' + encodeURIComponent(JSON.stringify({ f: filters.filter(active), g: groups.filter(groupActive) }))); } catch (e) {} }
+function saveHash() { try { history.replaceState(null, '', '#q=' + encodeURIComponent(JSON.stringify({ ds: DS, f: filters.filter(active), g: groups.filter(groupActive) }))); } catch (e) {} }
+// The dataset a link names (`ds` in #q=…), else the one last used here.
+function dsFromHash() {
+  const h = decodeURIComponent(location.hash || '');
+  if (h.startsWith('#q=')) { try { const q = JSON.parse(h.slice(3)); if (q && q.ds) return q.ds; } catch (e) {} }
+  try { return localStorage.getItem('mtgctl.ds') || 'mtgo'; } catch (e) { return 'mtgo'; }
+}
 // The Filters and Group by panels are two lists of entries over the same FIELDS, built with the
 // same picker and editor: a filter restricts the rows; a group entry splits them, a column by its
 // values and a card sentence into yes/no. At most one editor is open: {mode, i}.
@@ -508,7 +521,7 @@ async function pickValues(f, i, el, touch) {
   const col = f.field;
   el.innerHTML = '…';
   let vals;
-  try { vals = await api(`api/values?col=${encodeURIComponent(col)}&where=${encodeURIComponent(whereSql(i))}`); }
+  try { vals = await api(`api/values?ds=${DS}&col=${encodeURIComponent(col)}&where=${encodeURIComponent(whereSql(i))}`); }
   catch (e) { el.innerHTML = `<span class="err">${e.message}</span>`; return; }
   for (const v of f.values) if (!vals.some(x => x.value === v)) vals.unshift({ value: v, matches: 0, games: 0 });
   el.innerHTML = '';
@@ -547,29 +560,43 @@ const groupBy = () => groups.filter(g => groupActive(g) && isColumn(g)).map(g =>
 const groupSplits = () => groups.filter(g => groupActive(g) && CARD_FIELDS[g.field]).map(g => ({ label: groupText(g), sql: kindOf(g) === 'play' ? playSql(g, false) : deckSql(g, false) }));
 // the server's key order: the columns, then the splits
 const groupLabels = () => [...groupBy().map(c => LABEL[c] || c), ...groupSplits().map(x => x.label)];
-const statsParams = extra => new URLSearchParams(Object.assign({ where: whereSql(), split: JSON.stringify(groupSplits().map(x => x.sql)), game: String(gameQuery()) }, extra));
+const statsParams = extra => new URLSearchParams(Object.assign({ ds: DS, where: whereSql(), split: JSON.stringify(groupSplits().map(x => x.sql)), game: String(gameQuery()) }, extra));
 
 async function init() {
-  // the player is the one this browser uploaded as (a default filter), else the first with data
-  if (!getPlayer()) { try { const ps = await api('api/players'); if (ps.length) setPlayer(ps[0]); } catch (e) {} }
-  columns = (await api('api/columns')).filter(c => LABEL[c]);
-  const sl = ([k, s]) => `<label><input type="checkbox" name="stat" value="${k}" ${DEFAULT_STATS.includes(k) ? 'checked' : ''}> ${s.label}</label><br>`;
-  document.getElementById('sMatch').innerHTML = Object.entries(STATS).filter(([, s]) => s.level === 'match').map(sl).join('');
-  document.getElementById('sGame').innerHTML = Object.entries(STATS).filter(([, s]) => s.level !== 'match').map(sl).join('');
   document.querySelectorAll('input[name=view]').forEach(r => r.onchange = syncViewOpts);
-  buildFields();
-  ({ f: filters, g: groups } = queryFromHash());
-  renderEntries('filter'); renderEntries('group'); renderRequired();
-  renderAdd('filter', false); renderAdd('group', false);
-  renderStatChoices(); syncViewOpts();
+  await setupDataset(dsFromHash(), true);
+  document.getElementById('dsSel').onchange = e => { closeEditor(); editing = null; setupDataset(e.target.value, false); };
   // Live: any change in any panel re-renders (debounced); a stale response never overwrites a newer one.
-  api('api/cards-seen').then(names => { cardNames = new Set(names); document.getElementById('cardnames').innerHTML = names.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
   document.getElementById('pStats').addEventListener('change', () => { tableSort = null; schedule(); });
-  document.getElementById('pView').addEventListener('change', schedule);
+  document.getElementById('pView').addEventListener('change', e => { if (e.target.id !== 'dsSel') schedule(); });
   document.getElementById('sort').addEventListener('change', () => { tableSort = null; });
   for (const id of ['topn', 'rowlimit']) document.getElementById(id).addEventListener('input', schedule);
   document.querySelectorAll('input[name=view]').forEach(r => r.addEventListener('change', schedule));
-  schedule();
+}
+// The query comes from the link on the first load and from the dataset's defaults on a switch.
+async function setupDataset(ds, fromLink) {
+  let s;
+  try { s = await api(`api/schema?ds=${encodeURIComponent(ds)}`); } catch (e) { if (ds === 'mtgo') throw e; ds = 'mtgo'; fromLink = false; s = await api('api/schema?ds=mtgo'); }
+  DS = ds; try { localStorage.setItem('mtgctl.ds', ds); } catch (e) {}
+  applySchema(s);
+  document.getElementById('dsSel').innerHTML = s.datasets.map(([k, t]) => `<option value="${k}" ${k === ds ? 'selected' : ''}>${t}</option>`).join('');
+  document.getElementById('dsAbout').textContent = s.dataset.about;
+  // the player is the one this browser uploaded as (a default filter), else the first with data
+  if (feature('players') && !getPlayer()) { try { const ps = await api('api/players'); if (ps.length) setPlayer(ps[0]); } catch (e) {} }
+  const sl = ([k, s]) => `<label><input type="checkbox" name="stat" value="${k}" ${DEFAULT_STATS.includes(k) ? 'checked' : ''}> ${s.label}</label><br>`;
+  document.getElementById('sMatch').innerHTML = Object.entries(STATS).filter(offered).filter(([, s]) => s.level === 'match').map(sl).join('');
+  document.getElementById('sGame').innerHTML = Object.entries(STATS).filter(offered).filter(([, s]) => s.level !== 'match').map(sl).join('');
+  const rowsRadio = document.querySelector('input[name=view][value=rows]');
+  rowsRadio.disabled = !feature('rows'); rowsRadio.parentElement.title = feature('rows') ? '' : 'not available for this dataset';
+  if (!feature('rows') && rowsRadio.checked) document.querySelector('input[name=view][value=table]').checked = true;
+  buildFields();
+  if (fromLink) ({ f: filters, g: groups } = queryFromHash());
+  else { filters = linkFilters(''); groups = FIELDS[SCHEMA.dataset.default_group] ? [{ field: SCHEMA.dataset.default_group }] : []; }
+  renderEntries('filter'); renderEntries('group'); renderRequired();
+  renderAdd('filter', false); renderAdd('group', false);
+  renderStatChoices(); syncViewOpts();
+  if (feature('cards') && !cardNames.size) api('api/cards-seen').then(names => { cardNames = new Set(names); document.getElementById('cardnames').innerHTML = names.map(n => `<option value="${n.replace(/"/g, '&quot;')}">`).join(''); }).catch(() => {});
+  saveHash(); schedule();
 }
 // Collapsible panels: the heading toggles the body and shows a one-line summary of the panel's
 // state while collapsed; state is remembered per panel, and phones start with everything collapsed.
@@ -644,7 +671,7 @@ function renderStatChoices() {
   document.querySelectorAll('#sMatch input[name=stat]').forEach(i => { if (game && i.checked && twin[i.value]) document.querySelector(`input[name=stat][value=${twin[i.value]}]`).checked = true; i.disabled = game; if (game) i.checked = false; });
   if (game && ![...document.querySelectorAll('input[name=stat]:checked')].length) ['games', 'share', 'gwl', 'gwr'].forEach(k => document.querySelector(`input[name=stat][value=${k}]`).checked = true);
 }
-const PEEKABLE = { my_list: 'my_list', my_deck: 'my_deck', opp_deck: 'my_deck' };
+let PEEKABLE = {}; // see applySchema
 let refIndex = null; // deck name → [reference rows]
 async function references() {
   if (!refIndex) { refIndex = new Map(); for (const r of await api('api/reference')) { if (!refIndex.has(r.deck)) refIndex.set(r.deck, []); refIndex.get(r.deck).push(r); } }

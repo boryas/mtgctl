@@ -23,3 +23,4 @@ sha2 = "0.10"
 # static SQLite so the mtgctl-web binary runs on hosts without matching sqlite-libs
 libsqlite3-sys = { version = "0.35", features = ["bundled"] }
 flate2 = "1"
+calamine = "0.36.1"

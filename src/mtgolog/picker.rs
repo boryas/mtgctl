@@ -2,7 +2,8 @@
 //! what actually exists in `mtgo_game_view`, then hand a `StatsQuery` to the same SQL engine
 //! the flag-driven path uses. Prints the equivalent command line so the flags are learnable.
 
-use super::stats::{ensure_view, Source, StatsQuery};
+use super::dataset::{Dataset, MTGO};
+use super::stats::{Source, StatsQuery};
 use super::MtgoConfig;
 use crate::game::fuzzy_multi_select;
 use dialoguer::{Input, MultiSelect, Select};
@@ -81,16 +82,16 @@ struct ValRow {
     games: i64,
 }
 
-pub fn view_columns(conn: &mut SqliteConnection) -> QueryResult<Vec<String>> {
-    ensure_view(conn)?;
-    let cols: Vec<ColName> = diesel::sql_query("SELECT name FROM pragma_table_info('mtgo_game_view')").load(conn)?;
+/// `conn` holds `ds`'s view (see `Dataset::open`).
+pub fn view_columns(conn: &mut SqliteConnection, ds: &Dataset) -> QueryResult<Vec<String>> {
+    let cols: Vec<ColName> = diesel::sql_query(format!("SELECT name FROM pragma_table_info('{}')", ds.view)).load(conn)?;
     Ok(cols.into_iter().map(|c| c.name).filter(|c| c != "game_id" && c != "match_id").collect())
 }
 
 /// Distinct values of a column with match (and game) counts, most matches first.
-pub fn column_values(conn: &mut SqliteConnection, col: &str, where_sql: &[String]) -> QueryResult<Vec<(Option<String>, i64, i64)>> {
+pub fn column_values(conn: &mut SqliteConnection, ds: &Dataset, col: &str, where_sql: &[String]) -> QueryResult<Vec<(Option<String>, i64, i64)>> {
     let wher = if where_sql.is_empty() { String::new() } else { format!("WHERE {}", where_sql.join(" AND ")) };
-    let sql = format!("SELECT CAST({col} AS TEXT) AS val, COUNT(DISTINCT match_id) AS n, COUNT(*) AS games FROM mtgo_game_view {wher} GROUP BY {col} ORDER BY n DESC, val LIMIT 500");
+    let sql = format!("SELECT CAST({col} AS TEXT) AS val, COUNT(DISTINCT match_id) AS n, COUNT(*) AS games FROM {} {wher} GROUP BY {col} ORDER BY n DESC, val LIMIT 500", ds.view);
     let rows: Vec<ValRow> = diesel::sql_query(sql).load(conn)?;
     Ok(rows.into_iter().map(|r| (r.val, r.n, r.games)).collect())
 }
@@ -146,7 +147,7 @@ pub fn pick(src: &mut Source, cfg: &MtgoConfig, base: StatsQuery, player: Option
             continue;
         }
         let values = src.values(col, &terms)?;
-        let game_col = super::stats::GAME_COLS.contains(&col.as_str());
+        let game_col = MTGO.is_game_col(col);
         let labels: Vec<String> = values
             .iter()
             .map(|(v, n, g)| {

@@ -1,11 +1,13 @@
-//! Generic slicing over imported MTGO games: group by any column(s) of `mtgo_game_view`,
-//! with an optional SQL WHERE clause. One flat view = one uniform set of axes.
+//! Generic slicing over a dataset's per-game view (see `dataset`): group by any column(s), with
+//! an optional SQL WHERE clause. One flat view = one uniform set of axes.
 
 use comfy_table::{presets::UTF8_FULL_CONDENSED, Cell, CellAlignment, Table};
 use diesel::prelude::*;
 use diesel::sql_types::{BigInt, Double, Nullable, Text};
 use diesel::sqlite::SqliteConnection;
 use std::collections::HashMap;
+
+use super::dataset::{Dataset, MTGO};
 
 /// One row per game, joined with its match and both sides' deck labels.
 pub const VIEW_SQL: &str = "CREATE VIEW mtgo_game_view AS
@@ -259,13 +261,13 @@ impl Source {
     /// `data`: a directory holding the pooled database `mtgctl-web --data <dir> rebuild` made; None: the site.
     pub fn open(data: Option<&std::path::Path>, site: String) -> Result<Source, String> {
         Ok(match data {
-            Some(d) => Source::Db(super::pipeline::connect(d)?),
+            Some(d) => Source::Db(MTGO.open(d)?),
             None => Source::Site(site),
         })
     }
     pub fn stats(&mut self, q: &StatsQuery) -> Result<StatsResult, String> {
         match self {
-            Source::Db(conn) => compute(conn, q),
+            Source::Db(conn) => compute(conn, &MTGO, q),
             Source::Site(base) => site_get(
                 base,
                 "api/stats",
@@ -275,14 +277,14 @@ impl Source {
     }
     pub fn columns(&mut self) -> Result<Vec<String>, String> {
         match self {
-            Source::Db(conn) => super::picker::view_columns(conn).map_err(|e| e.to_string()),
+            Source::Db(conn) => super::picker::view_columns(conn, &MTGO).map_err(|e| e.to_string()),
             Source::Site(base) => site_get(base, "api/columns", &[]),
         }
     }
     /// Distinct values of `col` under the ANDed `terms`: (value, matches, games), most matches first.
     pub fn values(&mut self, col: &str, terms: &[String]) -> Result<Vec<(Option<String>, i64, i64)>, String> {
         match self {
-            Source::Db(conn) => super::picker::column_values(conn, col, terms).map_err(|e| e.to_string()),
+            Source::Db(conn) => super::picker::column_values(conn, &MTGO, col, terms).map_err(|e| e.to_string()),
             Source::Site(base) => {
                 #[derive(serde::Deserialize)]
                 struct V {
@@ -359,9 +361,9 @@ pub struct StatsResult {
     pub game_mode: bool,
 }
 
-pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResult, String> {
-    super::db::ensure_schema(conn).map_err(|e| e.to_string())?;
-    ensure_view(conn).map_err(|e| e.to_string())?;
+/// `conn` holds `ds`'s view (see `Dataset::open`).
+pub fn compute(conn: &mut SqliteConnection, ds: &Dataset, q: &StatsQuery) -> Result<StatsResult, String> {
+    let view = ds.view;
     let by = &q.by;
     let (where_sql, min_games, sort, limit) = (q.where_sql.as_deref(), q.min_games, q.sort.as_str(), q.limit);
     for c in by.iter().chain(q.hist.iter()) {
@@ -394,7 +396,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
             AVG(opp_mulligans) AS avg_opp_mulls,
             AVG(CASE WHEN won=1 THEN turns END) AS avg_turns_win,
             AVG(CASE WHEN won=0 THEN turns END) AS avg_turns_loss
-         FROM mtgo_game_view {wher}"
+         FROM {view} {wher}"
     );
     let sql = format!("SELECT {key_expr} AS key, {select_body} {group}");
     let total_sql = format!("SELECT '(total)' AS key, {select_body}");
@@ -404,7 +406,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
     let all_groups = rows.len();
     let all_games = total_games;
     let all_matches: i64 = total.as_ref().map_or(0, |t| t.matches);
-    let (kept, mut hidden): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| if is_game_mode(q) || q.full { r.games >= min_games } else { r.matches >= min_games });
+    let (kept, mut hidden): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| if is_game_mode(ds, q) || q.full { r.games >= min_games } else { r.matches >= min_games });
     let mut rows = kept;
 
     // Per-group histograms of arbitrary columns (e.g. --hist win_by, --hist opp_deck).
@@ -412,7 +414,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
     for hcol in &q.hist {
         let hsql = format!(
             "SELECT {key_expr} AS key, COALESCE(CAST({hcol} AS TEXT),'∅') AS val, COUNT(*) AS n
-             FROM mtgo_game_view {wher} GROUP BY key, val ORDER BY key, n DESC"
+             FROM {view} {wher} GROUP BY key, val ORDER BY key, n DESC"
         );
         let hrows: Vec<HistRow> = diesel::sql_query(&hsql).load(conn).map_err(|e| e.to_string())?;
         let mut m: HashMap<String, Vec<(String, i64)>> = HashMap::new();
@@ -433,7 +435,7 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
         }),
         "key" => rows.sort_by(|a, b| natural_cmp(a.key.as_deref().unwrap_or(""), b.key.as_deref().unwrap_or(""))),
         _ => {
-            if is_game_mode(q) || q.full {
+            if is_game_mode(ds, q) || q.full {
                 rows.sort_by(|a, b| b.games.cmp(&a.games))
             } else {
                 rows.sort_by(|a, b| b.matches.cmp(&a.matches).then(b.games.cmp(&a.games)))
@@ -445,11 +447,11 @@ pub fn compute(conn: &mut SqliteConnection, q: &StatsQuery) -> Result<StatsResul
         hidden.extend(rows.drain(limit..));
     }
     let rollup = if hidden.is_empty() { None } else { Some(rollup_rows(&hidden)) };
-    Ok(StatsResult { by: by.clone(), rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups: hidden.len(), game_mode: is_game_mode(q) })
+    Ok(StatsResult { by: by.clone(), rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups: hidden.len(), game_mode: is_game_mode(ds, q) })
 }
 
 fn print_result(q: &StatsQuery, r: StatsResult) {
-    let StatsResult { by, rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups, .. } = r;
+    let StatsResult { by, rows, rollup, total, hists, all_matches, all_games, all_groups, hidden_groups, game_mode: rows_are_games } = r;
     let (min_games, limit) = (q.min_games, q.limit);
     let total_games = all_games;
 
@@ -458,7 +460,7 @@ fn print_result(q: &StatsQuery, r: StatsResult) {
     // the group columns are what a row *is*; a double bar separates them from what was measured
     let mut header: Vec<String> = if by.is_empty() { vec!["all".into()] } else { by.clone() };
     header.push("║".into());
-    let game_mode = is_game_mode(q) || q.full;
+    let game_mode = rows_are_games || q.full;
     if game_mode {
         header.extend(["matches", "W–L", "match WR", "95% CI", "games", "W–L", "game WR", "95% CI", "avg turns", "avg min"].map(String::from));
     } else {
@@ -533,7 +535,7 @@ fn print_result(q: &StatsQuery, r: StatsResult) {
     println!("{t}");
     let shown_matches: i64 = rows.iter().map(|r| r.matches).sum();
     let shown_games: i64 = rows.iter().map(|r| r.games).sum();
-    let covering = if is_game_mode(q) { format!("{shown_games} games") } else { format!("{shown_matches} matches / {shown_games} games") };
+    let covering = if rows_are_games { format!("{shown_games} games") } else { format!("{shown_matches} matches / {shown_games} games") };
     println!(
         "filter: {all_matches} matches / {all_games} games in {all_groups} groups; shown: {} groups covering {covering}{}",
         rows.len(),
@@ -576,14 +578,6 @@ fn rollup_rows(hidden: &[Row]) -> Row {
     }
 }
 
-/// Game-level columns of mtgo_game_view. If none is used in --by/--where/--hist the table is
-/// presented match-first (match WR, games W–L) — game WR etc. only in game mode or with --full.
-pub const GAME_COLS: &[&str] = &[
-    "game_id", "game_number", "on_play", "turns", "duration_secs", "minutes", "winner", "won", "win_by",
-    "my_mulligans", "opp_mulligans", "my_hand", "opp_hand", "my_lands", "opp_lands", "my_spells", "opp_spells",
-    "my_dd_resolved", "my_dd_turn", "my_hand_known", "my_pile_known",
-];
-
 fn mentions_col(sql: &str, col: &str) -> bool {
     // word-boundary match so "turns" doesn't trigger on "returns"
     let bytes = sql.as_bytes();
@@ -601,12 +595,14 @@ fn mentions_col(sql: &str, col: &str) -> bool {
     false
 }
 
-pub fn is_game_mode(q: &StatsQuery) -> bool {
+/// Whether the rows are games: the query names one of `ds`'s per-game columns. If none is used in
+/// --by/--where/--hist the table is presented match-first (match WR, games W–L).
+pub fn is_game_mode(ds: &Dataset, q: &StatsQuery) -> bool {
     if let Some(g) = q.game {
         return g;
     }
-    q.by.iter().chain(q.hist.iter()).any(|c| GAME_COLS.contains(&c.as_str()))
-        || q.where_sql.iter().chain(q.split.iter()).any(|w| GAME_COLS.iter().any(|c| mentions_col(w, c)))
+    q.by.iter().chain(q.hist.iter()).any(|c| ds.is_game_col(c))
+        || q.where_sql.iter().chain(q.split.iter()).any(|w| ds.game_cols.iter().any(|c| mentions_col(w, c)))
 }
 
 /// Printed with `mtgo columns`.
