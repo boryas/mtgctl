@@ -14,7 +14,7 @@
       <div>sort <select id="sort"><option value="games">size</option><option value="wr">win rate</option><option value="key">key</option><option value="time">time</option></select></div>
     </div>
     <div class="optgroup" id="optSeries" hidden>
-      <div>per <select id="bucket"><option value="week">week</option><option value="month" selected>month</option><option value="date">day</option></select> · smoothing <select id="smooth"><option value="1">none</option><option value="3">3 buckets</option><option value="5">5 buckets</option><option value="9">9 buckets</option></select></div>
+      <div>per <select id="bucket"><option value="week">week</option><option value="month" selected>month</option><option value="date">day</option></select> · smoothing <select id="smooth"><option value="1">none</option><option value="3">3 buckets</option><option value="5">5 buckets</option><option value="9">9 buckets</option></select> <select id="smode"><option value="trailing" selected>trailing</option><option value="centred">centred</option></select></div>
       <div>max lines <input id="topn" type="number" value="6" size="2"></div>
     </div>
     <div class="optgroup" id="optMatrix" hidden>
@@ -624,7 +624,7 @@ function summarizePanels() {
   const v = view();
   const vname = { table: "table", series: "time series", rows: "rows", matrix: "matrix" }[v];
   if (v === 'matrix') { sum('pView', `matrix · top ${document.getElementById('mtop').value}`); return; }
-  sum('pView', v === 'table' ? `${vname} · sort ${document.getElementById('sort').selectedOptions[0].text}` : v === 'series' ? `${vname} · per ${document.getElementById('bucket').value}, smoothing ${document.getElementById('smooth').selectedOptions[0].text}, ${document.getElementById('topn').value} lines` : `${vname} · newest ${document.getElementById('rowlimit').value}`);
+  sum('pView', v === 'table' ? `${vname} · sort ${document.getElementById('sort').selectedOptions[0].text}` : v === 'series' ? `${vname} · per ${document.getElementById('bucket').value}, smoothing ${document.getElementById('smooth').selectedOptions[0].text}${document.getElementById('smooth').value > 1 ? ' ' + document.getElementById('smode').value : ''}, ${document.getElementById('topn').value} lines` : `${vname} · newest ${document.getElementById('rowlimit').value}`);
 }
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.panels h3.toggle').forEach(h => h.onclick = () => setPanel(h.parentElement.id, h.parentElement.classList.contains('collapsed')));
@@ -813,10 +813,12 @@ async function showTable(seq) {
 }
 // Time series: the same group-by and output statistics as the table; the bucket is prepended to
 // the group-by, one chart per plottable statistic, one line per group (largest N kept), and a
-// smoothing window that pools each statistic's numerator and denominator over neighbouring buckets.
+// smoothing window that pools each statistic's numerator and denominator over neighbouring buckets:
+// trailing (the bucket and the ones before it, so a point uses only data up to its own time) or
+// centred (as many after as before).
 async function showSeries(seq) {
   const out = document.getElementById('out');
-  const bucket = document.getElementById('bucket').value, win = +document.getElementById('smooth').value || 1, topn = +document.getElementById('topn').value || 6;
+  const bucket = document.getElementById('bucket').value, win = +document.getElementById('smooth').value || 1, trailing = document.getElementById('smode').value === 'trailing', topn = +document.getElementById('topn').value || 6;
   const groups = groupBy(), stats = chosenStats().filter(k => STATS[k].plot);
   if (!stats.length) { out.innerHTML = '<span class="err">pick at least one plottable output (counts, rates, averages)</span>'; return; }
   try {
@@ -846,13 +848,13 @@ async function showSeries(seq) {
         const m = rows.get(g); const accs = xs.map(b => m.get(b) ? st.acc(m.get(b), 1) : null);
         const data = xs.map((b, i) => {
           if (!accs[i] && win === 1) return null;
-          let num = 0, den = 0, n = 0; const h = Math.floor(win / 2);
-          for (let j = Math.max(0, i - h); j <= Math.min(xs.length - 1, i + h); j++) if (accs[j]) { num += accs[j][0]; den += accs[j][1]; n += m.get(xs[j]).n; }
+          let num = 0, den = 0, n = 0; const back = trailing ? win - 1 : Math.floor(win / 2), fwd = trailing ? 0 : Math.floor(win / 2);
+          for (let j = Math.max(0, i - back); j <= Math.min(xs.length - 1, i + fwd); j++) if (accs[j]) { num += accs[j][0]; den += accs[j][1]; n += m.get(xs[j]).n; }
           const v = den ? num / den : null; return v == null ? null : { v, n };
         });
         return { name: g, data };
       });
-      html += `<h3 class="charttitle">${st.label}${win > 1 ? ` <span class="muted">(smoothed over ${win} ${bucket === 'date' ? 'days' : bucket + 's'})</span>` : ''}</h3>` + chart(xs, series, st);
+      html += `<h3 class="charttitle">${st.label}${win > 1 ? ` <span class="muted">(smoothed over ${win} ${bucket === 'date' ? 'days' : bucket + 's'}, ${trailing ? 'trailing' : 'centred'})</span>` : ''}</h3>` + chart(xs, series, st);
     }
     out.innerHTML = html + `<div class="muted">${names.length} of ${size.size} groups shown (largest by ${r.game_mode ? 'games' : 'matches'}${qualified.length < size.size ? `, ${size.size - qualified.length} hidden by the filters on groups` : ''}); hover a point for the value and sample size</div>`;
     setSummary(`per ${bucket}${groupLabels().length ? ' by ' + groupLabels().join(', ') : ''}; ${r.all_matches} matches / ${r.all_games} games; where: ${whereSql() || '(none)'}`);
