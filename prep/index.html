@@ -1,0 +1,841 @@
+<title>EW Legacy Prep</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one narrow column (study on a phone); sticky tab strip; each tab is a single working surface. */
+:root {
+  --bg: #eef1f6; --surface: #ffffff; --ink: #18202e; --muted: #5d6779; --line: #d5dbe5;
+  --accent: #4a3aa8; --accent-ink: #ffffff; --accent-soft: #e6e2f8;
+  --good: #1f7a4d; --good-soft: #dff2e7; --bad: #b3362b; --bad-soft: #f8e1de; --warn: #8a6100; --warn-soft: #f6ecd2;
+  --pip-w: #f3eccd; --pip-u: #9fc7ea; --pip-b: #a49c98; --pip-r: #ea9a80; --pip-g: #9cc9a5; --pip-c: #cfcac4;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121722; --surface: #1b2230; --ink: #e5e9f1; --muted: #98a2b5; --line: #2d3647;
+  --accent: #a597ff; --accent-ink: #15112e; --accent-soft: #2a2550;
+  --good: #6fd3a0; --good-soft: #173528; --bad: #ff8f84; --bad-soft: #3d1d1b; --warn: #e8c46b; --warn-soft: #3a3019;
+  --pip-w: #d9d2b2; --pip-u: #6fa2cf; --pip-b: #7c7470; --pip-r: #cf7a62; --pip-g: #6fa67a; --pip-c: #9c978f;
+  color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121722; --surface: #1b2230; --ink: #e5e9f1; --muted: #98a2b5; --line: #2d3647;
+  --accent: #a597ff; --accent-ink: #15112e; --accent-soft: #2a2550;
+  --good: #6fd3a0; --good-soft: #173528; --bad: #ff8f84; --bad-soft: #3d1d1b; --warn: #e8c46b; --warn-soft: #3a3019;
+  --pip-w: #d9d2b2; --pip-u: #6fa2cf; --pip-b: #7c7470; --pip-r: #cf7a62; --pip-g: #6fa67a; --pip-c: #9c978f;
+  color-scheme: dark }
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--body); }
+.wrap { max-width: 760px; margin: 0 auto; padding-inline: 16px; padding-block: 0 48px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h1 { font-size: 1.6rem; font-weight: 800; letter-spacing: -0.01em; }
+h2 { font-size: 1.25rem; font-weight: 800; }
+h3 { font-size: 1rem; font-weight: 600; }
+.mono, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; }
+.label { font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+button, select, textarea, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+header.top { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; justify-content: space-between; padding-block: 20px 8px; }
+.countdown { font-family: var(--mono); font-size: 0.85rem; color: var(--muted); }
+.countdown b { color: var(--accent); font-weight: 500; }
+
+nav.tabs { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); display: flex; gap: 4px; overflow-x: auto; padding-block: 8px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+nav.tabs button { border: 0; background: none; padding: 6px 12px; border-radius: 999px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+nav.tabs button[aria-selected="true"] { background: var(--ink); color: var(--bg); }
+
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.chip { border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 3px 10px; font-size: 0.85rem; }
+.chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 8px 14px; font-weight: 600; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.banner { font-size: 0.85rem; padding: 8px 12px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); }
+
+/* flashcard */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 14px; min-height: 260px; }
+.card .deck { font-family: var(--display); font-weight: 600; color: var(--accent); }
+.card .cname { font-family: var(--display); font-size: 1.7rem; font-weight: 800; line-height: 1.15; }
+.typeline { font-size: 0.85rem; color: var(--muted); }
+.oracle { font-size: 0.85rem; white-space: pre-wrap; border-left: 2px solid var(--line); padding-left: 10px; color: var(--muted); }
+.answers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.answers .btn { padding: 12px; }
+.answers .btn.right { background: var(--good-soft); border-color: var(--good); color: var(--good); }
+.answers .btn.wrong { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+.verdict { font-weight: 600; }
+.verdict.good { color: var(--good); } .verdict.bad { color: var(--bad); }
+.zones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.zone { border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+.zone .big { font-family: var(--mono); font-size: 1.4rem; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+.trend-up { color: var(--good); } .trend-down { color: var(--bad); }
+
+.pip { display: inline-grid; place-items: center; width: 1.25em; height: 1.25em; border-radius: 50%; font: 600 0.7rem/1 var(--mono); color: #1a1a1a; margin-right: 1px; vertical-align: 0.1em; }
+.pip.W { background: var(--pip-w); } .pip.U { background: var(--pip-u); } .pip.B { background: var(--pip-b); }
+.pip.R { background: var(--pip-r); } .pip.G { background: var(--pip-g); } .pip.C { background: var(--pip-c); }
+
+/* tables */
+.tbl-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 0.75rem; letter-spacing: 0.05em; text-transform: uppercase; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.num, th.num { text-align: right; }
+tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
+
+/* plans */
+.plan-list { display: flex; flex-direction: column; gap: 6px; }
+.plan-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-align: left; width: 100%; }
+.status { font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; white-space: nowrap; font-weight: 600; }
+.status.none { background: var(--bad-soft); color: var(--bad); }
+.status.ok { background: var(--good-soft); color: var(--good); }
+.status.work { background: var(--warn-soft); color: var(--warn); }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field-input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.field textarea { width: 100%; min-height: 4.5em; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); resize: vertical; line-height: 1.45; }
+.plan-read { white-space: pre-wrap; }
+
+/* sideboarding */
+.swap-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 560px) { .swap-grid { grid-template-columns: minmax(0, 1fr); } }
+.swap { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
+.swap .n { font-family: var(--mono); color: var(--muted); width: 1.6em; }
+.swap .nm { flex: 1; min-width: 0; }
+.swap .hist { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
+.step { display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.step button { border: 0; background: var(--bg); width: 2em; height: 1.9em; }
+.step span { width: 1.8em; text-align: center; font-family: var(--mono); }
+.step.on { border-color: var(--accent); }
+.step.on span { color: var(--accent); font-weight: 600; }
+.balance { font-family: var(--mono); }
+.balance.off { color: var(--bad); }
+.guide-line { font-family: var(--mono); font-size: 0.85rem; }
+.todo { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.todo input[type="checkbox"] { width: 1.15rem; height: 1.15rem; margin-top: 0.2rem; accent-color: var(--accent); flex: none; }
+.todo-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.todo-title { font-weight: 500; cursor: pointer; }
+.todo.done .todo-title { color: var(--muted); text-decoration: line-through; }
+.linkish { border: 0; background: none; padding: 0; color: var(--accent); font-size: 0.85rem; }
+.accent { color: var(--accent); }
+details.panel summary { cursor: pointer; }
+.prose p { margin: 0.4em 0; } .prose ul { margin: 0.4em 0; padding-left: 1.2em; }
+.guide-line .in { color: var(--good); } .guide-line .out { color: var(--bad); }
+
+/* matchup dossier */
+details.dossier { border-top: 1px solid var(--line); padding-top: 10px; }
+details.dossier summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 8px; }
+details.dossier summary::before { content: "▸"; color: var(--muted); font-size: 0.8rem; transition: transform 0.15s; }
+details.dossier[open] summary::before { transform: rotate(90deg); }
+td.heat { background: color-mix(in srgb, var(--accent) calc(var(--v) * 70%), transparent); }
+.tell { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.chip.up { border-color: var(--good); color: var(--good); background: var(--good-soft); }
+.chip.down { border-color: var(--bad); color: var(--bad); background: var(--bad-soft); }
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <h1>EW Legacy Prep</h1>
+    <span class="countdown" id="countdown"></span>
+  </header>
+  <nav class="tabs" role="tablist" id="tabs"></nav>
+  <div id="notice"></div>
+  <main id="view" class="stack"><p class="muted">Loading the current Challenge meta…</p></main>
+</div>
+
+<script>
+"use strict";
+const EVENT_DAY = "2026-10-31";
+const TABS = [["schedule", "Schedule"], ["quiz", "Quiz"], ["decks", "Decks"], ["plans", "Matchups"], ["sb", "Sideboarding"], ["guide", "Guide"]];
+const PLAN_FIELDS = [
+  ["range", "Their reasonable range: opening hands and first three turns"],
+  ["plan", "Their plan and clock against Doomsday"],
+  ["threats", "Cards that beat me (main / side)"],
+  ["posture", "My game 1 posture"],
+  ["board", "Board notes (in / out, play vs draw)"],
+  ["playaround", "What to play around, turn by turn"],
+  ["reps", "Notes from reps"],
+];
+const BASICS = new Set(["Island", "Swamp", "Mountain", "Forest", "Plains"]);
+
+let META = null, RANGES = null;
+const S = { rangeShown: {}, rangeSide: "all", tab: "quiz", deckSet: null, quizMode: "guess", deckView: null, planDeck: null, sbList: 0, sbScenario: null, sbIn: {}, sbOut: {} };
+const DATA = { todos: {}, notes: {}, plans: {}, drills: {}, lists: { worry: {}, pile: {} }, attempts: { guesses: {}, "pile-attempts": {} } };
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const pct = (x) => (x == null ? "–" : Math.round(x * 100) + "%");
+const slug = (s) => s.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase() || "x";
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+function lsGet(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+
+/* ---------- storage: the artifact db when granted, else this browser ---------- */
+const Store = {
+  db: null, local: true,
+  async init() {
+    let db = null;
+    try { db = await window.claude?.use?.("db"); } catch {}
+    if (db) { this.db = db; this.local = false; }
+    else $("#notice").innerHTML = `<p class="banner">Saved data is unavailable in this view, so your schedule, plans and answers are kept in this browser only.</p>`;
+  },
+  async loadAll() {
+    if (this.local) {
+      DATA.todos = lsGet("todos", {}); DATA.notes = lsGet("notes", {}); DATA.plans = lsGet("plans", {}); DATA.drills = lsGet("drills", {});
+      for (const k in DATA.lists) DATA.lists[k] = lsGet(k, {});
+      for (const k in DATA.attempts) DATA.attempts[k] = lsGet(k, {});
+      return;
+    }
+    const lists = Object.keys(DATA.lists), atts = Object.keys(DATA.attempts);
+    const [todos, notes, plans, drills, ...rest] = await Promise.all([
+      this.db.collection("todos").get(), this.db.collection("notes").get(), this.db.collection("plans").get(), this.db.collection("drills").get(),
+      ...lists.map((k) => this.db.doc(LIST_DOC[k]).get()), ...atts.map((k) => this.db.collection(k).get())]);
+    // Snapshot bodies are frozen; every edit path mutates DATA in place, so keep editable copies.
+    const own = (snap) => structuredClone(snap.data());
+    todos.docs.forEach((d) => { DATA.todos[d.id] = own(d); });
+    notes.docs.forEach((d) => { DATA.notes[d.id] = own(d); });
+    lists.forEach((k, i) => { const s = rest[i]; DATA.lists[k] = s.exists ? (own(s).cards || {}) : {}; });
+    atts.forEach((k, i) => { rest[lists.length + i].docs.forEach((d) => { DATA.attempts[k][d.id] = own(d); }); });
+    plans.docs.forEach((d) => { DATA.plans[d.id] = own(d); });
+    drills.docs.forEach((d) => { DATA.drills[d.id] = own(d); });
+  },
+  async del(path) {
+    if (this.local) { const [col, id] = path.split("/"); const all = lsGet(col, {}); delete all[id]; lsSet(col, all); return; }
+    try { await this.db.doc(path).delete(); }
+    catch (e) { $("#notice").innerHTML = `<p class="banner">Couldn't delete (${esc(e?.code || "error")}).</p>`; }
+  },
+  // One write in flight per document; a newer value queued while one is in flight replaces the older queued one.
+  q: {},
+  async put(path, body) {
+    if (this.local) {
+      const [col, id] = path.split("/");
+      if (col in LIST_DOC) lsSet(col, body.cards);
+      else { const all = lsGet(col, {}); all[id] = body; lsSet(col, all); }
+      return;
+    }
+    const st = this.q[path] || (this.q[path] = { busy: false, next: null });
+    st.next = body;
+    if (st.busy) return;
+    st.busy = true;
+    while (st.next) {
+      const b = st.next; st.next = null;
+      try { await this.db.doc(path).set(b); }
+      catch (e) { $("#notice").innerHTML = `<p class="banner">Couldn't save (${esc(e?.code || "error")}). Your last change may be lost if you reload.</p>`; }
+    }
+    st.busy = false;
+  },
+};
+/* ---------- meta helpers ---------- */
+const deckByName = (n) => META.decks.find((d) => d.name === n);
+function defaultDeckSet() {
+  return META.decks.filter((d) => d.focus || d.share >= 0.03).map((d) => d.name);
+}
+function prepDecks() { return S.deckSet.map(deckByName).filter(Boolean); }
+const changed = (z) => !!z?.moved;
+function cardChanged(d, c) { return changed(c.main) || changed(c.side); }
+function costHtml(cost) {
+  if (!cost) return "";
+  return cost.replace(/\{([^}]+)\}/g, (_, s) => {
+    const k = /^[WUBRG]$/.test(s) ? s : "C";
+    return `<span class="pip ${k}">${esc(/^[WUBRG]$/.test(s) ? "" : s)}</span>`;
+  });
+}
+function trendHtml(z, d) {
+  if (!z || d.n_old < 4 || d.n_new < 4 || z.old == null || z.new == null) return "";
+  const delta = z.new - z.old;
+  if (Math.abs(delta) < 0.1) return `<span class="muted">steady</span>`;
+  return `<span class="${delta > 0 ? "trend-up" : "trend-down"}">${delta > 0 ? "▲" : "▼"} ${pct(z.old)} → ${pct(z.new)}</span>`;
+}
+
+function oracleOf(n) { return META.oracle[n] || META.oracle[n.split(" // ")[0]] || { cost: "", type: "", text: "" }; }
+
+/* ---------- quiz: naming games (name a deck's cards, graded against current lists and your own card list) ---------- */
+// A named card is right when ≥10% of lists play it in the stage's zone; a card on your list that ≥25% play and you didn't name is a miss.
+const GUESS_HIT = 0.10, MISS_AT = 0.25;
+const GAMES = {
+  guess: { list: "worry", attempts: "guesses", listName: "worry list", on: "Worry", off: "Not a worry",
+    stages: [{ zone: "side", label: "Sideboard", title: (d) => `What could ${d} bring in against you?`,
+      help: "Name the sideboard cards you'd worry about." }] },
+  pile: { list: "pile", attempts: "pile-attempts", listName: "pile-interaction list", on: "Interacts", off: "Doesn't",
+    stages: [
+      { zone: "main", label: "Game 1", title: (d) => `Game 1: what in ${d}'s main deck interacts with your Doomsday pile?`,
+        help: "Name the main-deck cards that can interact with a Doomsday pile." },
+      { zone: "side", label: "Postboard", title: (d) => `After sideboarding, what does ${d} add?`,
+        help: "Everything from game 1 still counts. Name only the sideboard cards that add pile interaction." }] },
+};
+const LIST_DOC = { worry: "worry/cards", pile: "pile/cards" };
+const onList = (list, n) => !!DATA.lists[list][n];
+const isWorry = (n) => onList("worry", n);
+const freshGame = (deck) => ({ deck, stage: 0, names: [], graded: false, q: "", saved: false });
+let GS = freshGame(null);
+const game = () => GAMES[S.quizMode];
+function cardUniverse() {
+  if (!cardUniverse.list) {
+    const pop = {};
+    for (const d of META.decks) for (const c of d.cards) if (!BASICS.has(c.name))
+      pop[c.name] = (pop[c.name] || 0) + d.n * Math.max(c.main?.incl || 0, c.side?.incl || 0);
+    cardUniverse.list = Object.keys(pop).sort((a, b) => pop[b] - pop[a]);
+  }
+  return cardUniverse.list;
+}
+const allNamed = () => GS.names.flat();
+function suggestions(q) {
+  q = q.trim().toLowerCase();
+  if (q.length < 2) return [];
+  const named = new Set(allNamed()), all = cardUniverse().filter((n) => !named.has(n));
+  const starts = all.filter((n) => n.toLowerCase().startsWith(q));
+  const words = all.filter((n) => !starts.includes(n) && n.toLowerCase().split(/[ ,'-]+/).some((w) => w.startsWith(q)));
+  return [...starts, ...words].slice(0, 8);
+}
+function suggHtml() {
+  return suggestions(GS.q).map((n) => `<button class="chip" data-add-guess="${esc(n)}">${esc(n)}</button>`).join("");
+}
+const inclOf = (c, zone) => c?.[zone]?.incl || 0;
+// Per stage: each named card is "hit", "neutral" (a sideboard-stage card that's in their main deck, so an earlier
+// stage's job), or "false" (including a sideboard-only card named for game 1).
+function gradeGame(g, d) {
+  const card = (n) => d.cards.find((c) => c.name === n) || { name: n };
+  const claimed = new Set();
+  return g.stages.map((st, i) => {
+    const rows = (GS.names[i] || []).map((n) => {
+      const c = card(n);
+      const kind = inclOf(c, st.zone) >= GUESS_HIT ? "hit" : st.zone === "side" && inclOf(c, "main") >= GUESS_HIT ? "neutral" : "false";
+      return { n, c, kind };
+    });
+    const named = new Set(GS.names.slice(0, i + 1).flat());
+    const missed = d.cards.filter((c) => inclOf(c, st.zone) >= MISS_AT && onList(g.list, c.name) && !named.has(c.name) && !claimed.has(c.name));
+    missed.forEach((c) => claimed.add(c.name));
+    const tp = rows.filter((r) => r.kind === "hit").length, fp = rows.filter((r) => r.kind === "false").length;
+    return { st, rows, missed, tp, fp, fn: missed.length };
+  });
+}
+function toggleListCard(list, n, deck) {
+  const L = DATA.lists[list];
+  if (L[n]) delete L[n]; else L[n] = { at: new Date().toISOString(), deck };
+  Store.put(LIST_DOC[list], { cards: L });
+}
+function saveAttempt(final) {
+  const g = game(), d = GS.deck, key = slug(d.name), store = DATA.attempts[g.attempts];
+  const doc = store[key] || { deck: d.name, attempts: [] };
+  const att = { at: new Date().toISOString(), stages: gradeGame(g, d).map((r, i) => ({ zone: r.st.zone, names: GS.names[i] || [], tp: r.tp, fp: r.fp, fn: r.fn })) };
+  // Written when graded and rewritten once the list is settled, so the attempt scores against the final list.
+  doc.attempts = final && GS.saved ? [...doc.attempts.slice(0, -1), att] : [...doc.attempts, att];
+  GS.saved = true; store[key] = doc;
+  Store.put(g.attempts + "/" + key, doc);
+}
+function attemptSummary(a) {
+  const st = a.stages || [{ tp: a.tp, fp: a.fp, fn: a.fn }];
+  return st.map((s) => `${s.tp} right, ${s.fp} wrong, ${s.fn} missed`).join(" / ");
+}
+function quizGame() {
+  const g = game(), decks = prepDecks();
+  if (!GS.deck || !decks.includes(GS.deck)) GS = freshGame(pick(decks));
+  const d = GS.deck, past = DATA.attempts[g.attempts][slug(d.name)]?.attempts || [];
+  const nList = Object.keys(DATA.lists[g.list]).length;
+  const deckSel = `<select id="guess-deck" aria-label="Deck">${decks.map((x) => `<option ${x === d ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select>`;
+  const top = `<div class="row" style="justify-content:space-between">${deckSel}
+      <span class="small muted">${past.length ? `${past.length} attempt${past.length > 1 ? "s" : ""}; last: ${attemptSummary(past[past.length - 1])}` : "First attempt"}</span></div>`;
+  if (!GS.graded) {
+    const st = g.stages[GS.stage], last = GS.stage === g.stages.length - 1;
+    const cur = GS.names[GS.stage] || [];
+    const earlier = g.stages.slice(0, GS.stage).map((s, i) => `<p class="small"><span class="label">${esc(s.label)}</span><br>${(GS.names[i] || []).map(esc).join(", ") || "<span class=\"muted\">nothing</span>"}</p>`).join("");
+    const chips = cur.map((n) => `<button class="chip" data-del-guess="${esc(n)}" aria-label="Remove ${esc(n)}">${esc(n)} ×</button>`).join("");
+    return `<div class="card">${top}
+      <div class="cname">${esc(st.title(d.name))}</div>
+      ${earlier}
+      <p class="small muted">${esc(st.help)} You're graded against ${d.n} current lists.</p>
+      <input id="guess-input" type="text" autocomplete="off" placeholder="Type a card name" value="${esc(GS.q)}" class="field-input">
+      <div class="row" id="guess-sugg">${suggHtml()}</div>
+      <div class="row">${chips || `<span class="small muted">No cards named yet.</span>`}</div>
+      <div class="row">${last ? `<button class="btn primary" data-act="guess-grade" ${allNamed().length ? "" : "disabled"}>Grade</button>`
+        : `<button class="btn primary" data-act="guess-stage">Next: ${esc(g.stages[GS.stage + 1].label.toLowerCase())}</button>`}
+        ${GS.stage > 0 ? `<button class="btn" data-act="guess-back">Back</button>` : ""}<button class="btn" data-act="guess-next">Different deck</button></div>
+    </div>`;
+  }
+  const res = gradeGame(g, d);
+  const label = { hit: ["ok", "They play it"], neutral: ["work", "Main deck (game 1)"], false: ["none", "Not played here"] };
+  const scoreBoxes = res.map((r) => `<div class="zone"><div class="label">${esc(r.st.label)}</div>
+      <div class="big">${r.tp}/${r.rows.length}</div><div class="small muted">right · ${r.fn} missed</div></div>`).join("");
+  const named = res.flatMap((r) => r.rows.map((x) => ({ ...x, st: r.st })));
+  const namedRows = named.map((r) => { const [cls, txt] = r.kind === "false" && r.st.zone === "main" && inclOf(r.c, "side") >= GUESS_HIT ? ["none", "Sideboard only"] : label[r.kind];
+    return `<tr><td>${esc(r.n)}${g.stages.length > 1 ? `<div class="small muted">${esc(r.st.label)}</div>` : ""}</td><td><span class="status ${cls}">${txt}</span></td><td class="num">${pct(inclOf(r.c, r.st.zone))}</td></tr>`; }).join("");
+  const missedSet = new Set(res.flatMap((r) => r.missed.map((c) => c.name))), namedSet = new Set(allNamed());
+  const universe = (st) => {
+    const cs = d.cards.filter((c) => !BASICS.has(c.name) && inclOf(c, st.zone) >= GUESS_HIT).sort((a, b) => b[st.zone].incl - a[st.zone].incl);
+    const rows = cs.map((c) => {
+      const on = onList(g.list, c.name), z = c[st.zone];
+      const tag = namedSet.has(c.name) ? `<span class="status ok">Named</span>` : missedSet.has(c.name) && z.incl >= MISS_AT ? `<span class="status none">Missed</span>` : on ? `<span class="status work">Fringe</span>` : "";
+      return `<tr><td>${esc(c.name)} ${costHtml(oracleOf(c.name).cost)}<div class="small muted">${esc(oracleOf(c.name).type)}</div></td>
+        <td class="num">${pct(z.incl)}<div class="small muted">avg ${z.avg.toFixed(1)}</div></td><td>${tag}</td>
+        <td><button class="chip" data-listcard="${esc(c.name)}" aria-pressed="${on}">${on ? g.on : g.off}</button></td></tr>`; }).join("");
+    return `<h3>${st.zone === "main" ? "Their main deck" : "Their sideboard"} (cards in ${pct(GUESS_HIT)}+ of lists)</h3>
+      <div class="tbl-wrap"><table><thead><tr><th>Card</th><th class="num">Lists</th><th></th><th>${esc(g.listName)}</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  };
+  return `<div class="card">${top}
+    <div class="cname">${esc(d.name)}: graded</div>
+    <div class="zones">${scoreBoxes}</div>
+    <div class="tbl-wrap"><table><thead><tr><th>You named</th><th></th><th class="num">Lists</th></tr></thead><tbody>${namedRows}</tbody></table></div>
+    <p class="small muted">Mark the cards below that belong on your ${esc(g.listName)} (${nList} card${nList === 1 ? "" : "s"} so far, shared across decks). On later attempts, a listed card that ${pct(MISS_AT)}+ of lists play and you didn't name counts as a miss. Cards you named correctly were added automatically.</p>
+    ${g.stages.map(universe).join("")}
+    <div class="row"><button class="btn primary" data-act="guess-next">Next deck</button><button class="btn" data-act="guess-retry">Retry this deck</button></div>
+  </div>`;
+}
+function gradeNow() {
+  const g = game(), d = GS.deck;
+  GS.graded = true;
+  let added = false;
+  gradeGame(g, d).forEach((r) => r.rows.forEach((x) => {
+    if (x.kind === "hit" && !onList(g.list, x.n)) { DATA.lists[g.list][x.n] = { at: new Date().toISOString(), deck: d.name }; added = true; }
+  }));
+  if (added) Store.put(LIST_DOC[g.list], { cards: DATA.lists[g.list] });
+  saveAttempt(false); render();
+}
+function addGuess(n) {
+  const cur = GS.names[GS.stage] || (GS.names[GS.stage] = []);
+  if (n && !allNamed().includes(n)) cur.push(n);
+  GS.q = ""; render();
+  const el = $("#guess-input"); if (el) el.focus();
+}
+
+/* ---------- quiz: plan check ---------- */
+let PC = { deck: null, shown: false };
+function quizPlan() {
+  const decks = prepDecks();
+  if (!PC.deck || !decks.includes(PC.deck)) PC.deck = pick(decks);
+  const d = PC.deck, plan = DATA.plans[slug(d.name)];
+  const hasPlan = plan && PLAN_FIELDS.some(([k]) => (plan[k] || "").trim());
+  let body;
+  if (!PC.shown) body = `<p class="muted">Say your plan against ${esc(d.name)} out loud: their clock, the cards that beat you, how you sequence game 1, what you board. Then compare with what you wrote.</p>
+      <div class="row"><button class="btn primary" data-act="plan-show">Show my plan</button></div>`;
+  else if (!hasPlan) body = `<p class="verdict bad">No plan written for ${esc(d.name)} yet.</p>
+      <div class="row"><button class="btn primary" data-act="plan-edit" data-deck="${esc(d.name)}">Write it now</button><button class="btn" data-act="plan-next">Another deck</button></div>`;
+  else body = `${PLAN_FIELDS.filter(([k]) => (plan[k] || "").trim()).map(([k, l]) => `<div class="field"><span class="label">${esc(l)}</span><div class="plan-read">${esc(plan[k])}</div></div>`).join("")}
+      <div class="row"><button class="btn" data-act="plan-flag" data-v="ok">Still agree</button><button class="btn" data-act="plan-flag" data-v="work">Needs work</button><button class="btn primary" data-act="plan-next">Another deck</button></div>`;
+  return `<div class="card"><span class="deck">${esc(d.name)} · ${pct(d.share)} of the meta</span><div class="cname">What's your plan?</div>${body}</div>`;
+}
+
+function viewQuiz() {
+  const modes = [["guess", "Their sideboard"], ["pile", "Pile interaction"], ["plan", "Plan check"]];
+  const body = GAMES[S.quizMode] ? quizGame() : quizPlan();
+  return `<div class="row">${modes.map(([k, l]) => `<button class="chip" data-mode="${k}" aria-pressed="${S.quizMode === k}">${l}</button>`).join("")}</div>
+    ${body}${deckSetPicker()}`;
+}
+function deckSetPicker() {
+  return `<details class="panel"><summary class="label">Decks in the quiz (${S.deckSet.length})</summary>
+    <div class="row" style="margin-top:10px">${META.decks.filter((d) => d.n >= 3).map((d) =>
+      `<button class="chip" data-toggle-deck="${esc(d.name)}" aria-pressed="${S.deckSet.includes(d.name)}">${esc(d.name)} <span class="num muted">${d.n}</span></button>`).join("")}</div></details>`;
+}
+
+/* ---------- decks ---------- */
+function viewDecks() {
+  const decks = META.decks.filter((d) => d.n >= 3);
+  if (!S.deckView) S.deckView = decks[0].name;
+  const d = deckByName(S.deckView);
+  const moves = prepDecks().flatMap((pd) => pd.cards.flatMap((c) =>
+    [["main", c.main], ["side", c.side]].filter(([, z]) => changed(z)).map(([zn, z]) => ({ d: pd, c, zn, z }))));
+  moves.sort((a, b) => b.d.share - a.d.share || Math.abs(b.z.new - b.z.old) - Math.abs(a.z.new - a.z.old));
+  const tbl = (zone) => {
+    const cs = d.cards.filter((c) => c[zone] && c[zone].incl >= 0.1).sort((a, b) => b[zone].incl - a[zone].incl || b[zone].avg - a[zone].avg);
+    return `<div class="tbl-wrap"><table><thead><tr><th>${zone === "main" ? "Main deck" : "Sideboard"}</th><th class="num">Lists</th><th class="num">Avg</th><th>Trend</th></tr></thead><tbody>
+      ${cs.map((c) => `<tr class="${cardChanged(d, c) && changed(c[zone]) ? "changed" : ""}"><td>${esc(c.name)} ${costHtml(oracleOf(c.name).cost)}${onList("pile", c.name) ? ` <span class="status work">pile</span>` : ""}${isWorry(c.name) ? ` <span class="status none">worry</span>` : ""}</td><td class="num">${pct(c[zone].incl)}</td><td class="num">${c[zone].avg.toFixed(1)}</td><td class="small">${trendHtml(c[zone], d)}</td></tr>`).join("")}
+    </tbody></table></div>`;
+  };
+  return `<section class="panel stack">
+      <h2>What moved</h2>
+      <p class="small muted">Prep decks only. Lists from ${META.mid} on, compared with ${META.since} to ${META.mid}. Shown when the change in a card's share of lists is too large to be sampling noise (about 2 standard errors; each half needs at least 4 lists).</p>
+      ${moves.length ? `<div class="tbl-wrap"><table><thead><tr><th>Deck</th><th>Card</th><th>Zone</th><th>Change</th></tr></thead><tbody>
+        ${moves.map((m) => `<tr><td>${esc(m.d.name)}</td><td>${esc(m.c.name)}</td><td>${m.zn === "main" ? "Main" : "Side"}</td><td class="small">${trendHtml(m.z, m.d)}</td></tr>`).join("")}
+      </tbody></table></div>` : `<p class="muted">Nothing moved that much.</p>`}
+    </section>
+    <section class="stack">
+      <div class="row"><label class="label" for="deck-pick">Deck</label>
+        <select id="deck-pick">${decks.map((x) => `<option ${x.name === d.name ? "selected" : ""}>${esc(x.name)}</option>`).join("")}</select></div>
+      <div class="row small muted"><span class="num">${d.n} lists · ${pct(d.share)} of top 32s · ${d.top8} top 8s</span>
+        ${d.goldfish.length > 1 || d.goldfish[0] !== d.name ? `<span>MTGGoldfish name: ${esc(d.goldfish.join(", "))}</span>` : ""}</div>
+      ${tbl("main")}${tbl("side")}
+      <div class="small"><span class="label">Recent lists</span><br>${d.lists.map((l) => `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.date)} #${l.pos} ${esc(l.player)}</a>`).join(" · ")}</div>
+    </section>`;
+}
+
+/* ---------- plans ---------- */
+function planStatus(name) {
+  const p = DATA.plans[slug(name)];
+  if (!p || !PLAN_FIELDS.some(([k]) => (p[k] || "").trim())) return ["none", "No plan"];
+  if (p.flag === "work") return ["work", "Needs work"];
+  return ["ok", "Written " + (p.updated || "").slice(5, 10)];
+}
+function listLine(d, list, zone, title) {
+  const cs = d.cards.filter((c) => inclOf(c, zone) >= GUESS_HIT && onList(list, c.name)).sort((a, b) => b[zone].incl - a[zone].incl);
+  return `<p class="small"><span class="label">${esc(title)}</span><br>${cs.length ? cs.map((c) => `${esc(c.name)} <span class="num muted">${pct(c[zone].incl)}</span>`).join(" · ")
+    : `<span class="muted">Nothing marked yet. The quiz games for this deck build this list.</span>`}</p>`;
+}
+// Opponent behaviour in your own games; hidden until revealed so a written range isn't anchored on it.
+// Data shape: build_ranges.py. Counts are games; "mine" = the card was cast during my turn (flash, instants).
+function rangePanel(name) {
+  const R = RANGES?.decks?.[name];
+  if (!R) return `<p class="small muted">No games of yours against ${esc(name)} in the logs yet (needs 10+).</p>`;
+  if (!S.rangeShown[name]) return `<div class="row"><button class="btn" data-act="range-show" data-deck="${esc(name)}">Show what actually happens (${R.n} games)</button>
+    <span class="small muted">Write your range first.</span></div>`;
+  const n = R.n;
+  const sides = [["all", "All games"], ["me_draw", "They're on the play"], ["me_play", "They're on the draw"]].filter(([k]) => R.splits[k]);
+  const sideKey = R.splits[S.rangeSide] ? S.rangeSide : "all", sp = R.splits[sideKey];
+  const tag = (c) => (onList("pile", c) ? ` <span class="status work">pile</span>` : "") + (onList("worry", c) ? ` <span class="status none">worry</span>` : "");
+  const frac = (k, m) => `<span class="num">${pct(k / m)}</span> <span class="small muted num">${k}/${m}</span>`;
+  const heat = (k, m) => `<td class="num heat" style="--v:${m ? k / m : 0}">${k ? pct(k / m) : "<span class=muted>·</span>"}</td>`;
+  const list = (rows, m, min = 2) => rows.filter(([, k]) => k >= min).map(([c, k]) => `${esc(c)}${tag(c)} <span class="num muted">${pct(k / m)}</span>`).join(" · ") || `<span class="muted">nothing</span>`;
+  const section = (title, body, open) => `<details class="dossier" ${open ? "open" : ""}><summary><h3>${title}</h3></summary><div class="stack" style="margin-top:8px">${body}</div></details>`;
+
+  // 1. openings: what their own turn 1 looked like, and what came at me during round 1
+  const t1 = sp.t1.filter(([, k]) => k >= 2 || sp.n < 12);
+  const openings = `<div class="tbl-wrap"><table><thead><tr><th>Their turn 1</th><th class="num">Games</th></tr></thead><tbody>
+      ${t1.map(([lab, k]) => `<tr><td>${lab ? esc(lab) : "<i>No spell</i>"}</td><td class="num">${pct(k / sp.n)} <span class="small muted">${k}</span></td></tr>`).join("")}
+    </tbody></table></div>
+    <p class="small"><span class="label">On your turn 1</span><br>${list(sp.turns[0].mine, sp.turns[0].reached, 1)}</p>`;
+
+  // 2. turn by turn
+  const turns = sp.turns.map((t, i) => `<tr><td class="num"><b>${i + 1}</b><br><span class="small muted">${t.reached} games</span></td><td>${list(t.own, t.reached)}</td><td>${list(t.mine, t.reached, 1)}</td></tr>`).join("");
+  const byTurn = `<div class="tbl-wrap"><table><thead><tr><th>Turn</th><th>On their turn</th><th>On yours (flash, instants)</th></tr></thead><tbody>${turns}</tbody></table></div>`;
+
+  // 3. tells: an early observable that moves the chance a card shows up at all
+  const tells = R.tells.length ? R.tells.map((t) => `<div class="tell"><div><b>${esc(t.cond)}</b> <span class="small muted num">${t.n} games</span></div>
+      <div class="row">${t.cards.slice(0, 8).map(([c, k]) => { const a = k / t.n, b = R.shown[c] / n;
+        return `<span class="chip ${a > b ? "up" : "down"}">${esc(c)} <span class="num">${pct(a)}</span> <span class="small num">vs ${pct(b)}</span></span>`; }).join("")}</div></div>`).join("")
+    : `<p class="muted">Nothing moved by more than 10 points.</p>`;
+
+  // 4. timing: first cast per game, by round, lighter = rarer
+  const T = RANGES.timing_rounds;
+  const timing = `<div class="tbl-wrap"><table><thead><tr><th>Card</th><th class="num">Seen</th>${Array.from({ length: T }, (_, i) => `<th class="num">${i + 1 === T ? T + "+" : i + 1}</th>`).join("")}</tr></thead><tbody>
+      ${R.timing.map((t) => { const tot = t.first.reduce((a, [x, y]) => a + x + y, 0), mine = t.first.reduce((a, [, y]) => a + y, 0);
+        return `<tr><td>${esc(t.card)}${tag(t.card)}${mine * 2 >= tot && tot ? ` <span class="small muted">on your turn</span>` : ""}</td><td class="num">${pct((R.shown[t.card.replace(" (activated)", "")] || 0) / n)}</td>${t.first.map(([x, y], i) => heat(x + y, R.reached[i])).join("")}</tr>`; }).join("")}
+    </tbody></table></div>
+    <p class="small muted">Each cell: share of the games that reached that round in which the card was first cast then. Games reaching rounds 1 to ${T}: <span class="num">${R.reached.slice(0, T).join(", ")}</span>.</p>`;
+
+  // 5. what their interaction was pointed at
+  const targets = R.targets.length ? `<div class="tbl-wrap"><table><thead><tr><th>Spell</th><th class="num">Casts</th><th>At</th></tr></thead><tbody>
+      ${R.targets.map((t) => `<tr><td>${esc(t.card)}</td><td class="num">${t.casts}</td><td class="small">${t.targets.map(([x, k]) => `${esc(x)} <span class="num muted">${k}</span>`).join(" · ")}</td></tr>`).join("")}
+    </tbody></table></div>` : `<p class="muted">No targeted spells recorded.</p>`;
+
+  // 6. game 1 vs postboard
+  const board = R.board.rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Card</th><th class="num">Game 1 (${R.board.g1})</th><th class="num">Postboard (${R.board.post})</th><th class="num">Their T1 postboard</th></tr></thead><tbody>
+      ${R.board.rows.map(([c, a, b, t]) => `<tr><td>${esc(c)}${tag(c)}</td><td class="num">${pct(a / R.board.g1)}</td><td class="num ${b / R.board.post > a / R.board.g1 ? "trend-up" : "trend-down"}">${pct(b / R.board.post)}</td><td class="num">${t ? pct(t / R.board.post) : "<span class=muted>·</span>"}</td></tr>`).join("")}
+    </tbody></table></div>` : `<p class="muted">Nothing shifted by 10 points between game 1 and postboard.</p>`;
+
+  return `<div class="stack">
+    <p class="small muted num">${n} games since ${esc(RANGES.since)}: ${R.play} with you on the play, ${R.draw} on the draw; ${R.g1} game 1s, ${R.post} postboard. They mulliganed in ${pct(R.mull / n)}. You won ${pct(R.won / n)} of the games.
+      Only cards they cast or showed count, so every rate is a floor on what they held.</p>
+    <div class="row">${sides.map(([k, l]) => `<button class="chip" data-rangeside="${k}" aria-pressed="${sideKey === k}">${l}</button>`).join("")}</div>
+    ${section("Openings", openings, true)}
+    ${section("Turn by turn", byTurn, true)}
+    ${section("Tells", `<p class="small muted">When the first thing is true, how often the card showed up in the game at all, against its rate across all ${n} games. Only shifts of 10 points or more, from at least 5 games.</p>${tells}`, true)}
+    ${section("When cards first appear", timing, false)}
+    ${section("What their interaction hits", targets, false)}
+    ${section("Game 1 vs postboard", board, false)}
+  </div>`;
+}
+function viewPlans() {
+  const decks = prepDecks();
+  if (S.planDeck) {
+    const d = deckByName(S.planDeck), p = DATA.plans[slug(S.planDeck)] || {};
+    return `<div class="row"><button class="btn" data-act="plan-back">← All matchups</button></div>
+      <section class="panel stack"><h2>${esc(S.planDeck)}</h2>
+        ${d ? `<p class="small muted num">${d.n} lists, ${pct(d.share)} of the meta.</p>
+          ${listLine(d, "pile", "main", "Game 1 pile interaction")}${listLine(d, "pile", "side", "Postboard pile interaction")}${listLine(d, "worry", "side", "Your worry cards in their sideboards")}` : ""}
+        ${PLAN_FIELDS.map(([k, l]) => `<div class="field"><label class="label" for="pf-${k}">${esc(l)}</label><textarea id="pf-${k}" data-pf="${k}">${esc(p[k] || "")}</textarea></div>
+          ${k === "range" ? `<div class="panel stack"><h3>What actually happens in your games</h3>${rangePanel(S.planDeck)}</div>` : ""}`).join("")}
+        <div class="row"><button class="btn primary" data-act="plan-save">Save plan</button><span class="small muted" id="plan-saved"></span></div>
+      </section>`;
+  }
+  const done = decks.filter((d) => planStatus(d.name)[0] === "ok").length;
+  return `<p>Matchup plans written for <b class="num">${done} of ${decks.length}</b> prep decks.</p>
+    <div class="plan-list">${decks.map((d) => { const [cls, txt] = planStatus(d.name);
+      return `<button class="plan-item" data-act="plan-edit" data-deck="${esc(d.name)}"><span><b>${esc(d.name)}</b> <span class="small muted num">${pct(d.share)}</span></span><span class="status ${cls}">${txt}</span></button>`; }).join("")}</div>`;
+}
+// Re-rendering the plan editor rebuilds its textareas, so unsaved text is carried in the plan record first.
+function keepPlanDraft() {
+  if (!S.planDeck) return;
+  const k = slug(S.planDeck), p = { ...(DATA.plans[k] || {}) };
+  document.querySelectorAll("[data-pf]").forEach((t) => { p[t.dataset.pf] = t.value; });
+  DATA.plans[k] = p;
+}
+async function savePlan() {
+  const body = { deck: S.planDeck, updated: new Date().toISOString(), flag: "ok" };
+  document.querySelectorAll("[data-pf]").forEach((t) => { body[t.dataset.pf] = t.value; });
+  DATA.plans[slug(S.planDeck)] = body;
+  await Store.put("plans/" + slug(S.planDeck), body);
+  const el = $("#plan-saved"); if (el) el.textContent = "Saved.";
+}
+
+/* ---------- sideboarding drill ---------- */
+function scenarioKey(sc) { return slug(META.my_lists[S.sbList].label) + "--" + slug(sc.deck) + "--" + sc.pd; }
+function newScenario() {
+  S.sbScenario = { deck: pick(prepDecks()).name, pd: Math.random() < 0.5 ? "play" : "draw" };
+  S.sbIn = {}; S.sbOut = {}; S.sbDone = false; render();
+}
+const sumv = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+// Agreement of two answers: shared swapped copies over all swapped copies (1 when both change nothing).
+function agreement(a, b) {
+  const keys = new Set([...Object.keys(a.ins), ...Object.keys(b.ins), ...Object.keys(a.outs).map((k) => "-" + k), ...Object.keys(b.outs).map((k) => "-" + k)]);
+  let mn = 0, mx = 0;
+  for (const k of keys) {
+    const [x, y] = k.startsWith("-") ? [a.outs[k.slice(1)] || 0, b.outs[k.slice(1)] || 0] : [a.ins[k] || 0, b.ins[k] || 0];
+    mn += Math.min(x, y); mx += Math.max(x, y);
+  }
+  return mx === 0 ? 1 : mn / mx;
+}
+function consistency(answers) {
+  if (answers.length < 2) return null;
+  let s = 0, n = 0;
+  for (let i = 0; i < answers.length; i++) for (let j = i + 1; j < answers.length; j++) { s += agreement(answers[i], answers[j]); n++; }
+  return s / n;
+}
+function stepper(kind, name, max) {
+  const v = (kind === "in" ? S.sbIn : S.sbOut)[name] || 0;
+  return `<span class="step ${v ? "on" : ""}"><button data-step="${kind}" data-card="${esc(name)}" data-d="-1" aria-label="Fewer ${esc(name)}" ${v <= 0 || S.sbDone ? "disabled" : ""}>−</button><span>${v}</span><button data-step="${kind}" data-card="${esc(name)}" data-d="1" aria-label="More ${esc(name)}" ${v >= max || S.sbDone ? "disabled" : ""}>+</button></span>`;
+}
+function viewSb() {
+  if (!META.my_lists.length) return `<p class="muted">No list of yours is loaded.</p>`;
+  if (!S.sbScenario) newScenario();
+  const L = META.my_lists[S.sbList], sc = S.sbScenario, key = scenarioKey(sc);
+  const past = (DATA.drills[key]?.answers || []);
+  const hist = (kind, name) => {
+    if (!S.sbDone || !past.length) return "";
+    const hits = past.filter((a) => (kind === "in" ? a.ins : a.outs)[name]).length;
+    return hits ? `<span class="hist">${hits}/${past.length}</span>` : "";
+  };
+  const nin = sumv(S.sbIn), nout = sumv(S.sbOut);
+  const mainRows = Object.entries(L.main).sort((a, b) => a[0].localeCompare(b[0])).map(([n, q]) =>
+    `<div class="swap"><span class="n">${q}</span><span class="nm">${esc(n)}</span>${hist("out", n)}${stepper("out", n, q)}</div>`).join("");
+  const sideRows = Object.entries(L.side).sort((a, b) => a[0].localeCompare(b[0])).map(([n, q]) =>
+    `<div class="swap"><span class="n">${q}</span><span class="nm">${esc(n)}</span>${hist("in", n)}${stepper("in", n, q)}</div>`).join("");
+  const c = S.sbDone ? consistency(past) : null;
+  const last = S.sbDone && past.length > 1 ? agreement(past[past.length - 1], { ins: modal(past.slice(0, -1), "ins"), outs: modal(past.slice(0, -1), "outs") }) : null;
+  return `<div class="row">${META.my_lists.map((l, i) => `<button class="chip" data-sblist="${i}" aria-pressed="${i === S.sbList}">${esc(l.label)}</button>`).join("")}
+      <span class="small muted">${esc(L.name)}</span></div>
+    <section class="card">
+      <span class="deck">Game 2 or 3</span>
+      <div class="cname">vs ${esc(sc.deck)}, on the ${sc.pd}</div>
+      <p class="small muted">Board for this matchup. Your past answers stay hidden until you save, so this measures whether you land in the same place each time.</p>
+      <div class="swap-grid">
+        <div><div class="label">Out of the main deck</div>${mainRows}</div>
+        <div><div class="label">In from the sideboard</div>${sideRows}</div>
+      </div>
+      <div class="row"><span class="balance ${nin !== nout ? "off" : ""}">In ${nin} · Out ${nout}</span></div>
+      ${S.sbDone ? `<div class="stack">
+          <div class="verdict">Saved. ${past.length} answer${past.length === 1 ? "" : "s"} for this scenario.
+            ${last != null ? `This one matches your usual plan ${pct(last)}.` : ""} ${c != null ? `Average agreement across all your answers: ${pct(c)}.` : ""}</div>
+          <p class="small muted">The x/y next to each card counts how many of your answers swapped it.</p>
+          <div class="row"><button class="btn primary" data-act="sb-next">Next scenario</button><button class="btn" data-act="sb-again">Same matchup, other side of the coin</button></div></div>`
+        : `<div class="row"><button class="btn primary" data-act="sb-save" ${nin !== nout ? "disabled" : ""}>Save answer</button><button class="btn" data-act="sb-next">Skip</button></div>`}
+    </section>`;
+}
+async function saveSb() {
+  const key = scenarioKey(S.sbScenario);
+  const doc = DATA.drills[key] || { list: META.my_lists[S.sbList].label, deck: S.sbScenario.deck, pd: S.sbScenario.pd, answers: [] };
+  doc.answers = [...doc.answers, { at: new Date().toISOString(), list_name: META.my_lists[S.sbList].name, ins: { ...S.sbIn }, outs: { ...S.sbOut } }];
+  DATA.drills[key] = doc; S.sbDone = true; render();
+  await Store.put("drills/" + key, doc);
+}
+// Most common count per card across answers, kept when at least half the answers swap that card.
+function modal(answers, field) {
+  const out = {}, cards = new Set(answers.flatMap((a) => Object.keys(a[field])));
+  for (const c of cards) {
+    const counts = answers.map((a) => a[field][c] || 0);
+    if (counts.filter((x) => x > 0).length * 2 < answers.length) continue;
+    const freq = {}; counts.filter((x) => x > 0).forEach((x) => { freq[x] = (freq[x] || 0) + 1; });
+    out[c] = +Object.entries(freq).sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+  }
+  return out;
+}
+
+/* ---------- guide ---------- */
+function viewGuide() {
+  const docs = Object.values(DATA.drills).filter((d) => d.answers?.length);
+  if (!docs.length) return `<p class="muted">The guide fills in from your Sideboarding answers. Each matchup's line is the swap you make most often, with how consistently you make it.</p>`;
+  const byList = {};
+  docs.forEach((d) => { (byList[d.list] = byList[d.list] || []).push(d); });
+  const line = (o, cls, sign) => Object.entries(o).map(([c, n]) => `<span class="${cls}">${sign}${n} ${esc(c)}</span>`).join(", ");
+  return Object.entries(byList).map(([list, ds]) => {
+    ds.sort((a, b) => a.deck.localeCompare(b.deck) || a.pd.localeCompare(b.pd));
+    return `<section class="panel stack"><h2>${esc(list)}</h2>
+      <div class="tbl-wrap"><table><thead><tr><th>Matchup</th><th>Usual swap</th><th class="num">Answers</th><th class="num">Agreement</th></tr></thead><tbody>
+      ${ds.map((d) => { const ins = modal(d.answers, "ins"), outs = modal(d.answers, "outs"), c = consistency(d.answers);
+        return `<tr><td>${esc(d.deck)}<br><span class="small muted">on the ${d.pd}</span></td>
+          <td class="guide-line">${line(ins, "in", "+") || "–"}<br>${line(outs, "out", "−") || "–"}</td>
+          <td class="num">${d.answers.length}</td><td class="num">${c == null ? "–" : pct(c)}</td></tr>`; }).join("")}
+      </tbody></table></div></section>`;
+  }).join("");
+}
+
+/* ---------- schedule (to-dos, the deck decision, reference notes) ---------- */
+const WEEKS = [["2026-10-11", "Week 1 · Oct 5–11"], ["2026-10-18", "Week 2 · Oct 12–18"], ["2026-10-25", "Week 3 · Oct 19–25"], ["2026-10-31", "Final days · Oct 26–31"]];
+const todayIso = () => new Date().toLocaleDateString("en-CA");
+const fmtDay = (iso) => new Date(iso + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+let SCH = { confirmDel: null, open: {} };
+function todoRow(id, t) {
+  const today = todayIso(), late = !t.done && t.due && t.due < today, isToday = !t.done && t.due === today;
+  const decks = (t.decks || []).map((n) => { const [cls, txt] = planStatus(n);
+    return `<button class="chip" data-act="plan-edit" data-deck="${esc(n)}">${esc(n)} <span class="status ${cls}">${txt}</span></button>`; }).join("");
+  return `<div class="todo ${t.done ? "done" : ""}">
+    <input type="checkbox" id="td-${esc(id)}" data-todo="${esc(id)}" ${t.done ? "checked" : ""}>
+    <div class="todo-body">
+      <label for="td-${esc(id)}" class="todo-title">${esc(t.title)}</label>
+      <div class="row small">${t.due ? `<span class="num ${late ? "trend-down" : isToday ? "accent" : "muted"}">${late ? "Overdue · " : isToday ? "Today · " : ""}${fmtDay(t.due)}</span>` : ""}
+        ${t.notes ? `<button class="linkish" data-act="todo-notes" data-id="${esc(id)}">${SCH.open[id] ? "Hide notes" : "Notes"}</button>` : ""}
+        <button class="linkish" data-act="todo-del" data-id="${esc(id)}">${SCH.confirmDel === id ? "Confirm delete" : "Delete"}</button></div>
+      ${t.notes && SCH.open[id] ? `<div class="plan-read small">${esc(t.notes)}</div>` : ""}
+      ${decks ? `<div class="row">${decks}</div>` : ""}
+    </div></div>`;
+}
+function proseHtml(body) {
+  const out = []; let list = null;
+  for (const line of String(body || "").split("\n")) {
+    if (line.startsWith("- ")) { (list = list || []).push(`<li>${esc(line.slice(2))}</li>`); continue; }
+    if (list) { out.push(`<ul>${list.join("")}</ul>`); list = null; }
+    if (line.trim()) out.push(`<p>${esc(line)}</p>`);
+  }
+  if (list) out.push(`<ul>${list.join("")}</ul>`);
+  return out.join("");
+}
+function viewSchedule() {
+  const items = Object.entries(DATA.todos).sort((a, b) => (a[1].due || "9") .localeCompare(b[1].due || "9") || (a[1].order || 0) - (b[1].order || 0));
+  const today = todayIso();
+  const due = items.filter(([, t]) => !t.done && t.due && t.due <= today);
+  const left = items.filter(([, t]) => !t.done).length;
+  const groups = WEEKS.map(([end, label], i) => {
+    const start = i ? WEEKS[i - 1][0] : "";
+    return [label, items.filter(([, t]) => t.due && t.due > start && t.due <= end)];
+  });
+  groups.push(["No date", items.filter(([, t]) => !t.due || t.due > WEEKS[WEEKS.length - 1][0])]);
+  const dec = DATA.notes.decision || {};
+  const guide = (DATA.notes.guide?.sections || []);
+  if (!items.length && !guide.length) return `<p class="muted">Your schedule hasn't loaded. If this persists, the schedule data hasn't been added to this page yet.</p>`;
+  return `<section class="panel stack">
+      <h2>Due now</h2>
+      ${due.length ? due.map(([id, t]) => todoRow(id, t)).join("") : `<p class="muted">Nothing due today. ${left} item${left === 1 ? "" : "s"} left in the plan.</p>`}
+    </section>
+    <section class="panel stack">
+      <h2>Deck decision</h2>
+      <p class="small muted">Default UB Tempo DD. Switch to Turbo + creature sideboard only for a concrete reason: Turbo's post-board plan answers the specific cards that beat Tempo against the blue decks. Decide by Sunday Oct 11, then don't reopen it.</p>
+      <div class="field"><label class="label" for="dec-deck">Decision</label><input id="dec-deck" class="field-input" value="${esc(dec.decision || "")}" placeholder="UB Tempo DD or Turbo DD"></div>
+      <div class="field"><label class="label" for="dec-reason">Reason (one sentence)</label><textarea id="dec-reason">${esc(dec.reason || "")}</textarea></div>
+      <div class="row"><button class="btn primary" data-act="dec-save">Save decision</button><span class="small muted" id="dec-saved">${dec.at ? "Saved " + fmtDay(dec.at.slice(0, 10)) : ""}</span></div>
+    </section>
+    ${groups.filter(([, g]) => g.length).map(([label, g]) => `<section class="stack">
+      <h3>${esc(label)} <span class="small muted num">${g.filter(([, t]) => t.done).length}/${g.length} done</span></h3>
+      ${g.map(([id, t]) => todoRow(id, t)).join("")}</section>`).join("")}
+    <section class="panel stack">
+      <h3>Add a to-do</h3>
+      <div class="row"><input id="new-todo" class="field-input" style="flex:1;min-width:12em" placeholder="What needs doing"><input id="new-todo-due" type="date" class="field-input" style="width:auto"></div>
+      <div class="row"><button class="btn" data-act="todo-add">Add</button></div>
+    </section>
+    ${guide.map((s) => `<details class="panel"><summary><h3 style="display:inline">${esc(s.title)}</h3></summary><div class="prose">${proseHtml(s.body)}</div></details>`).join("")}`;
+}
+function saveTodo(id) { Store.put("todos/" + id, DATA.todos[id]); }
+
+/* ---------- shell ---------- */
+function render() {
+  $("#tabs").innerHTML = TABS.map(([k, l]) => `<button role="tab" data-tab="${k}" aria-selected="${S.tab === k}">${l}</button>`).join("");
+  const v = { schedule: viewSchedule, quiz: viewQuiz, decks: viewDecks, plans: viewPlans, sb: viewSb, guide: viewGuide }[S.tab];
+  $("#view").innerHTML = v() + `<p class="small muted">Meta: ${META.n_decks} top-32 lists from ${META.events.length} MTGO Legacy Challenges, ${META.since} to ${META.built}.</p>`;
+}
+function countdown() {
+  const days = Math.round((new Date(EVENT_DAY + "T12:00:00") - new Date()) / 864e5);
+  $("#countdown").innerHTML = days > 0 ? `<b>${days}</b> days to the Legacy Championship` : "Legacy Championship";
+}
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button"); if (!t) return;
+  if (t.dataset.tab) { S.tab = t.dataset.tab; lsSet("tab", S.tab); render(); window.scrollTo(0, 0); return; }
+  if (t.dataset.mode) { if (S.quizMode !== t.dataset.mode) GS = freshGame(GS.deck); S.quizMode = t.dataset.mode; render(); return; }
+  if (t.dataset.addGuess) { addGuess(t.dataset.addGuess); return; }
+  if (t.dataset.delGuess) { GS.names[GS.stage] = (GS.names[GS.stage] || []).filter((n) => n !== t.dataset.delGuess); render(); return; }
+  if (t.dataset.listcard) { toggleListCard(game().list, t.dataset.listcard, GS.deck?.name); render(); return; }
+  if (t.dataset.toggleDeck) {
+    const n = t.dataset.toggleDeck;
+    S.deckSet = S.deckSet.includes(n) ? S.deckSet.filter((x) => x !== n) : [...S.deckSet, n];
+    if (!S.deckSet.length) S.deckSet = [n];
+    lsSet("deckSet", S.deckSet); render(); return;
+  }
+  if (t.dataset.rangeside) { keepPlanDraft(); S.rangeSide = t.dataset.rangeside; render(); return; }
+  if (t.dataset.sblist) { S.sbList = +t.dataset.sblist; S.sbIn = {}; S.sbOut = {}; S.sbDone = false; render(); return; }
+  if (t.dataset.step) {
+    const o = t.dataset.step === "in" ? S.sbIn : S.sbOut, c = t.dataset.card;
+    o[c] = Math.max(0, (o[c] || 0) + +t.dataset.d); if (!o[c]) delete o[c]; render(); return;
+  }
+  switch (t.dataset.act) {
+    case "guess-grade": gradeNow(); break;
+    case "guess-stage": GS.stage++; GS.q = ""; render(); break;
+    case "guess-back": GS.stage--; GS.q = ""; render(); break;
+    case "guess-next": if (GS.graded) saveAttempt(true); GS = freshGame(null); render(); break;
+    case "guess-retry": if (GS.graded) saveAttempt(true); GS = freshGame(GS.deck); render(); break;
+    case "plan-show": PC.shown = true; render(); break;
+    case "plan-next": PC = { deck: null, shown: false }; render(); break;
+    case "plan-flag": {
+      const k = slug(PC.deck.name), p = DATA.plans[k];
+      if (p) { p.flag = t.dataset.v; Store.put("plans/" + k, p); }
+      PC = { deck: null, shown: false }; render(); break;
+    }
+    case "plan-edit": S.tab = "plans"; S.planDeck = t.dataset.deck; render(); window.scrollTo(0, 0); break;
+    case "plan-back": S.planDeck = null; render(); break;
+    case "plan-save": savePlan(); break;
+    case "range-show": keepPlanDraft(); S.rangeShown[t.dataset.deck] = true; render(); break;
+    case "todo-notes": SCH.open[t.dataset.id] = !SCH.open[t.dataset.id]; render(); break;
+    case "todo-del":
+      if (SCH.confirmDel === t.dataset.id) { delete DATA.todos[t.dataset.id]; Store.del("todos/" + t.dataset.id); SCH.confirmDel = null; }
+      else SCH.confirmDel = t.dataset.id;
+      render(); break;
+    case "todo-add": {
+      const title = $("#new-todo").value.trim(); if (!title) break;
+      const id = "t" + Date.now().toString(36);
+      DATA.todos[id] = { title, due: $("#new-todo-due").value || "", done: false, order: 99 };
+      saveTodo(id); render(); break;
+    }
+    case "dec-save": {
+      DATA.notes.decision = { decision: $("#dec-deck").value.trim(), reason: $("#dec-reason").value.trim(), at: new Date().toISOString() };
+      Store.put("notes/decision", DATA.notes.decision); render(); break;
+    }
+    case "sb-save": saveSb(); break;
+    case "sb-next": newScenario(); break;
+    case "sb-again": S.sbScenario = { ...S.sbScenario, pd: S.sbScenario.pd === "play" ? "draw" : "play" }; S.sbIn = {}; S.sbOut = {}; S.sbDone = false; render(); break;
+  }
+});
+document.addEventListener("change", (e) => {
+  if (e.target.dataset?.todo) {
+    const t = DATA.todos[e.target.dataset.todo];
+    t.done = e.target.checked; t.done_at = t.done ? new Date().toISOString() : null;
+    saveTodo(e.target.dataset.todo); render(); return;
+  }
+  if (e.target.id === "deck-pick") { S.deckView = e.target.value; render(); }
+  if (e.target.id === "guess-deck") { GS = freshGame(deckByName(e.target.value)); render(); }
+});
+document.addEventListener("input", (e) => {
+  if (e.target.id !== "guess-input") return;
+  GS.q = e.target.value; $("#guess-sugg").innerHTML = suggHtml();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.target.id !== "guess-input" || e.key !== "Enter") return;
+  e.preventDefault(); addGuess(suggestions(GS.q)[0]);
+});
+
+function showError(msg) { $("#notice").innerHTML = `<p class="banner">Something went wrong and your last change may not be saved: ${esc(msg)}. Reload the page to see what's stored.</p>`; }
+window.addEventListener("error", (e) => showError(e.message || "script error"));
+window.addEventListener("unhandledrejection", (e) => showError(e.reason?.message || e.reason?.code || "save failed"));
+(async function start() {
+  countdown();
+  try { META = await (await fetch("meta.json")).json(); }
+  catch { $("#view").innerHTML = `<p class="banner">Couldn't load the meta data file (meta.json). Republish the page with it.</p>`; return; }
+  try { RANGES = await (await fetch("ranges.json")).json(); } catch { RANGES = null; }
+  const saved = lsGet("deckSet", null);
+  S.deckSet = Array.isArray(saved) && saved.some((n) => deckByName(n)) ? saved.filter((n) => deckByName(n)) : defaultDeckSet();
+  S.tab = lsGet("tab", "schedule");
+  if (!TABS.some(([k]) => k === S.tab)) S.tab = "schedule";
+  render();
+  await Store.init();
+  try { await Store.loadAll(); } catch (e) { $("#notice").innerHTML = `<p class="banner">Couldn't load your saved plans and answers (${esc(e?.code || "error")}).</p>`; }
+  render();
+})();
+</script>

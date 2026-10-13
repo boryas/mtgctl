@@ -8,3 +8,10 @@ web-data/
 target-bullseye/
 !web/*.html
 !deploy/linux/*.py
+!prep/*.py
+!prep/*.html
+prep/.pooled/
+!challenge_cache/*.py
+challenge_cache/*.html
+challenge_cache/decks/
+challenge_cache/__pycache__/
