@@ -1,5 +1,5 @@
-//! Elo over (player, deck) entities from the LDC: a pilot on a deck is one rated thing, so
-//! `boryas-Doomsday` and `boryas-Doomsday:Vroomsday` are separate. Challenge matches only.
+//! Elo over (player, deck) entities from the LDC: a pilot on a deck is one rated thing, so the
+//! same pilot on two decks is two entities. Challenge matches only.
 //! Matches are replayed by (date, round); all matches of one round update together, so the
 //! order sheets list pairings in cannot matter. Draws score 0.5.
 //! A regularized Bradley-Terry fit (order-independent) is reported on the same scale as a check.
@@ -18,8 +18,6 @@ const PROVISIONAL: usize = 20;
 /// undefeated entity has a finite strength.
 const BT_PRIOR: f64 = 2.0;
 const BT_ITERS: usize = 200;
-/// LDC notes that name a variant worth rating apart from the base deck.
-const VARIANT_NOTES: &[(&str, &str)] = &[("vroomsday", "Vroomsday"), ("car", "Car"), ("car doomsday", "Car")];
 
 #[derive(Serialize)]
 pub struct Entity {
@@ -58,26 +56,13 @@ struct Row {
     #[diesel(sql_type = Nullable<Text>)]
     a_deck: Option<String>,
     #[diesel(sql_type = Nullable<Text>)]
-    a_notes: Option<String>,
-    #[diesel(sql_type = Nullable<Text>)]
     b_deck: Option<String>,
-    #[diesel(sql_type = Nullable<Text>)]
-    b_notes: Option<String>,
-}
-
-fn deck_label(deck: Option<&str>, notes: Option<&str>) -> String {
-    let deck = deck.unwrap_or("?");
-    let note = notes.unwrap_or("").trim().to_lowercase();
-    match VARIANT_NOTES.iter().find(|(n, _)| *n == note) {
-        Some((_, v)) => format!("{deck}:{v}"),
-        None => deck.to_string(),
-    }
 }
 
 pub fn compute(conn: &mut SqliteConnection, event_type: &str) -> Result<EloResult, String> {
     let rows: Vec<Row> = diesel::sql_query(
         "SELECT e.date, m.round, lower(m.player) AS a, lower(m.opponent) AS b, m.game_wins AS gw, m.game_losses AS gl,
-                p.deck AS a_deck, p.notes AS a_notes, o.deck AS b_deck, o.notes AS b_notes
+                p.deck AS a_deck, o.deck AS b_deck
          FROM ldc_matches m
          JOIN ldc_events e ON e.event = m.event
          LEFT JOIN ldc_players p ON p.event = m.event AND p.player_key = lower(m.player)
@@ -106,8 +91,8 @@ pub fn compute(conn: &mut SqliteConnection, event_type: &str) -> Result<EloResul
             continue;
         }
         let s = if r.gw > r.gl { 1.0 } else if r.gw < r.gl { 0.0 } else { 0.5 };
-        let a = id_of(&r.a, deck_label(r.a_deck.as_deref(), r.a_notes.as_deref()), &mut ents);
-        let b = id_of(&r.b, deck_label(r.b_deck.as_deref(), r.b_notes.as_deref()), &mut ents);
+        let a = id_of(&r.a, r.a_deck.clone().unwrap_or_else(|| "?".into()), &mut ents);
+        let b = id_of(&r.b, r.b_deck.clone().unwrap_or_else(|| "?".into()), &mut ents);
         matches.push((r.date.clone(), r.round, a, b, s));
     }
 
