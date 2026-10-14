@@ -26,6 +26,9 @@ use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+#[path = "mtgctl-web/mcp.rs"]
+mod mcp;
+
 #[derive(Parser)]
 #[command(name = "mtgctl-web")]
 struct Cli {
@@ -1556,6 +1559,7 @@ async fn main() {
                 .route("/api/list/experimental", post(list_experimental))
                 .route("/api/lists", get(lists))
                 .route("/api/list", get(list_detail))
+                .route("/mcp", post(mcp::mcp).get(mcp::mcp_get))
                 .fallback_service(ServeDir::new(&web))
                 .layer(axum::middleware::from_fn(plain_text_scripts))
                 // pages and scripts change together on every deploy; never serve a stale script against a new page

@@ -9,6 +9,7 @@ pub mod db;
 pub mod decklist;
 pub mod eras;
 pub mod event;
+pub mod filter;
 pub mod format;
 pub mod hands;
 pub mod ldc;
