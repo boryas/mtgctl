@@ -12,4 +12,5 @@ rsync -az deploy/windows/ "$H":mtgctl-web/web/windows/
 rsync -az definitions/mtgo/*.toml "$H":mtgctl-web/definitions/mtgo/
 rsync -az deploy/mtgo_cards_seed.sql "$H":mtgctl-web/deploy/
 rsync -az deploy/mtgctl-web.service "$H":.config/systemd/user/mtgctl-web.service
-ssh "$H" 'mv ~/mtgctl-web/bin/mtgctl-web.new ~/mtgctl-web/bin/mtgctl-web && systemctl --user daemon-reload && systemctl --user restart mtgctl-web && sleep 1 && systemctl --user is-active mtgctl-web'
+rsync -az deploy/ldc-sync.service deploy/ldc-sync.timer "$H":.config/systemd/user/
+ssh "$H" 'mv ~/mtgctl-web/bin/mtgctl-web.new ~/mtgctl-web/bin/mtgctl-web && systemctl --user daemon-reload && systemctl --user restart mtgctl-web && systemctl --user enable --now ldc-sync.timer && sleep 1 && systemctl --user is-active mtgctl-web'

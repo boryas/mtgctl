@@ -1,0 +1,7 @@
+[Unit]
+Description=mtgctl-web: fetch new Legacy Data Collection sheets and published lists, rebuild ldc.db
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/mtgctl-web
+ExecStart=%h/mtgctl-web/bin/mtgctl-web --data /mnt/mtgctl_data/data ldc-sync --repo %h/mtgctl-web

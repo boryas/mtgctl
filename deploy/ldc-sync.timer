@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily LDC sync (sheets appear a day or two after an event, goldfish pages within hours)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00 UTC
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
