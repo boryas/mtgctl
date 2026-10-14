@@ -1484,8 +1484,12 @@ async fn main() {
             let timeline = Reference::locate(&repo, &cli.data).timeline;
             let run = || -> Result<(), String> {
                 println!("{} sheets downloaded", ldc::fetch(&cli.data, all)?);
-                let r = ldc::import(&cli.data, &timeline)?;
-                println!("ldc.db: {} events, {} matches (one per side), {} .. {}", r.events, r.matches, r.first, r.last);
+                let (pages, lists) = ldc::fetch_lists(&cli.data)?;
+                println!("{pages} tournament pages and {lists} lists downloaded");
+                let eras = mtgctl::mtgolog::eras::eras_from_file(&timeline)?;
+                let refs = mtgctl::mtgolog::reference::load_references(&mut shared_db(&cli.data)?, &eras).map_err(|e| e.to_string())?;
+                let r = ldc::import(&cli.data, &timeline, &refs)?;
+                println!("ldc.db: {} events, {} matches (one per side), {} .. {}; {} published lists, {} placed on a reference deck", r.events, r.matches, r.first, r.last, r.lists, r.lists_named);
                 for s in &r.skipped {
                     println!("  skipped {s}");
                 }
