@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use mtgctl::mtgolog::pipeline::{self, PlayerDir, Reference};
 use mtgctl::mtgolog::dataset::{self, Dataset};
-use mtgctl::mtgolog::{ldc, picker, stats};
+use mtgctl::mtgolog::{elo, ldc, picker, stats};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -730,6 +730,20 @@ async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiEr
     .map_err(|e| internal(e.to_string()))?
     .map_err(internal)?;
     Ok(Json(rows))
+}
+
+/// Player-deck Elo over the LDC's Challenge matches (`event_type` overrides); see elo::compute.
+async fn elo_api(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<elo::EloResult>, ApiError> {
+    let ds = dataset(Some("ldc"))?;
+    let event_type = q.get("event_type").filter(|e| !e.is_empty()).cloned().unwrap_or_else(|| "Challenge".into());
+    let r = tokio::task::spawn_blocking(move || {
+        let conn = &mut ds.connect(&st.data)?;
+        elo::compute(conn, &event_type)
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(internal)?;
+    Ok(Json(r))
 }
 
 async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
@@ -1555,6 +1569,7 @@ async fn main() {
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))
                 .route("/api/schema", get(schema))
+                .route("/api/elo", get(elo_api))
                 .route("/api/cards-seen", get(cards_seen))
                 .route("/api/list/experimental", post(list_experimental))
                 .route("/api/lists", get(lists))

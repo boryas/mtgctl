@@ -1,0 +1,49 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl elo</title><link rel="stylesheet" href="style.css?v=45"></head>
+<body>
+<h1>mtgctl · elo</h1>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="windows/">windows uploader</a></nav>
+<p class="muted">Bragging rights. Every (pilot, deck) pair in the Legacy Data Collection's Challenge sheets is rated separately, so a pilot's Doomsday and Vroomsday are two entries. Matches replay in order of date and round; all pairings of a round update together. K is 40 for an entry's first 20 matches, 24 after. <b>BT</b> is a Bradley-Terry fit of the same matches on the same scale, ignoring order: when it disagrees with Elo, the entry's recent form differs from its whole record. <b>peak</b> is the highest Elo the entry ever held.</p>
+<div id="ctl">
+  <label>min matches <input id="minN" type="number" min="1" value="25" style="width:4em"></label>
+  <label>search <input id="search" placeholder="player or deck"></label>
+  <label><input id="ddOnly" type="checkbox"> Doomsday only</label>
+  <span id="meta" class="muted"></span>
+</div>
+<div id="out">…</div>
+<script src="common.js?v=45"></script>
+<script>
+(async () => {
+  const out = document.getElementById('out'), meta = document.getElementById('meta');
+  const minN = document.getElementById('minN'), search = document.getElementById('search'), ddOnly = document.getElementById('ddOnly');
+  let data, sort = { col: 'elo', dir: -1 };
+  const me = (getPlayer() || '').toLowerCase();
+  const cols = [['player', 'player'], ['deck', 'deck'], ['n', 'matches'], ['wr', 'win %'], ['elo', 'elo'], ['peak', 'peak'], ['bt', 'BT'], ['last', 'last played']];
+  function render() {
+    const n = +minN.value || 1, q = search.value.trim().toLowerCase(), dd = ddOnly.checked;
+    const pool = data.entities.filter(e => e.n >= n);
+    const rank = new Map(pool.map((e, i) => [e, i + 1])); // pool is Elo-ordered from the server
+    let rows = pool.filter(e => (!dd || e.deck.startsWith('Doomsday')) && (!q || e.player.includes(q) || e.deck.toLowerCase().includes(q)));
+    const val = e => sort.col === 'wr' ? e.wins / e.n : e[sort.col];
+    rows.sort((a, b) => { const x = val(a), y = val(b); return (x < y ? -1 : x > y ? 1 : 0) * sort.dir; });
+    let html = '<table><tr><th>#</th>' + cols.map(([c, h]) => `<th class="sortable" data-c="${c}">${h}${sort.col === c ? (sort.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
+    for (const e of rows) {
+      html += `<tr${e.player === me ? ' class="me"' : ''}><td>${rank.get(e)}</td><td>${e.player}</td><td>${e.deck}</td><td>${e.n}</td><td>${(100 * e.wins / e.n).toFixed(1)}</td><td><b>${e.elo.toFixed(0)}</b></td><td>${e.peak.toFixed(0)}</td><td>${e.bt.toFixed(0)}</td><td>${e.last}</td></tr>`;
+    }
+    out.innerHTML = html + '</table>';
+    meta.textContent = `${data.matches} matches, ${data.first} .. ${data.last}; ${pool.length} of ${data.entities.length} entries have ${n}+ matches`;
+    out.querySelectorAll('th.sortable').forEach(th => th.onclick = () => { const c = th.dataset.c; sort = sort.col === c ? { col: c, dir: -sort.dir } : { col: c, dir: c === 'player' || c === 'deck' ? 1 : -1 }; render(); });
+  }
+  try {
+    data = await api('api/elo');
+    for (const el of [minN, search, ddOnly]) el.addEventListener('input', render);
+    render();
+  } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
+})();
+</script>
+<style>
+#ctl label { margin-right: 14px; }
+tr.me td { background: #fff3c4; }
+#out td:nth-child(2), #out td:nth-child(3), #out th:nth-child(2), #out th:nth-child(3) { text-align: left; }
+</style>
+</body></html>
