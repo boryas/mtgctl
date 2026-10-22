@@ -98,7 +98,9 @@ tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--warn); }
 .status.work { background: var(--warn-soft); color: var(--warn); }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field-input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
-.field textarea { width: 100%; min-height: 4.5em; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); resize: vertical; line-height: 1.45; }
+textarea, input#sb-list-name { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); resize: vertical; line-height: 1.45; }
+.field textarea { min-height: 4.5em; }
+input#sb-list-name { width: auto; flex: 1; }
 .plan-read { white-space: pre-wrap; }
 
 /* sideboarding */
@@ -136,6 +138,42 @@ td.heat { background: color-mix(in srgb, var(--accent) calc(var(--v) * 70%), tra
 .tell { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
 .chip.up { border-color: var(--good); color: var(--good); background: var(--good-soft); }
 .chip.down { border-color: var(--bad); color: var(--bad); background: var(--bad-soft); }
+.chip.weak { opacity: .45; }
+.chip.warn { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+.pull.rough { border-color: var(--warn); border-style: dashed; }
+.rough-mark { color: var(--warn); font-weight: 800; }
+
+/* board map: pull sheet on screen, and as a single landscape page */
+.pull-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.pull { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; break-inside: avoid; }
+.pull.off { border-color: var(--bad); }
+.pull h3 { display: flex; gap: 6px; align-items: baseline; font-size: 0.95rem; margin-bottom: 4px; }
+.pull h3 .pull-n { margin-left: auto; color: var(--muted); font-size: 0.8rem; }
+.pull h3 .pull-share { color: var(--accent); font-size: 0.75rem; }
+.pull-list { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; font-size: 0.82rem; }
+.pull.side { border-color: var(--accent); }
+.pl { display: flex; gap: 6px; line-height: 1.35; } .pl .num { color: var(--muted); width: 1.1em; flex: none; text-align: right; }
+.pull-issue { color: var(--bad); font-size: 0.78rem; margin-top: 4px; }
+.sheet-head { margin-bottom: 8px; }
+.sbgrid th:first-child, .sbgrid td:first-child { position: sticky; left: 0; background: var(--surface); text-align: left; }
+.sbgrid td.c, .sbgrid th.c { text-align: center; font-family: var(--mono); padding: 3px 5px; }
+.sbgrid td.out { color: var(--bad); } .sbgrid td.in { color: var(--good); } .sbgrid td.bad { color: var(--bad); font-weight: 600; }
+.sbgrid tr.muted th, .sbgrid tr.muted td { color: var(--muted); }
+.sbgrid tr.tot th, .sbgrid tr.tot td { border-top: 2px solid var(--line); font-weight: 600; }
+.sbgrid tr.sep th { padding-top: 12px; }
+textarea.mono { font-family: var(--mono); font-size: 0.85rem; }
+@media print {
+  @page { size: landscape; margin: 8mm; }
+  body { background: #fff; color: #000; font-size: 8.5pt; }
+  .wrap { max-width: none; padding: 0; }
+  header.top, nav.tabs, #notice, .noprint, main > p:last-child { display: none !important; }
+  .pull-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; }
+  .sbgrid { font-size: 7.5pt; } .sbgrid td.c, .sbgrid th.c { padding: 1px 3px; }
+  .pull { border: 1px solid #999; border-radius: 4px; padding: 3px 5px; }
+  .pull h3 { font-size: 8.5pt; } .pull-list { font-size: 7.3pt; gap: 0 6px; } .pl { line-height: 1.25; } .pl .num { color: #444; }
+  .pull.off { border-color: #c00; }
+  .pull.rough { border-color: #8a6100; border-style: dashed; }
+}
 </style>
 
 <div class="wrap">
@@ -151,7 +189,7 @@ td.heat { background: color-mix(in srgb, var(--accent) calc(var(--v) * 70%), tra
 <script>
 "use strict";
 const EVENT_DAY = "2026-10-31";
-const TABS = [["schedule", "Schedule"], ["quiz", "Quiz"], ["decks", "Decks"], ["plans", "Matchups"], ["sb", "Sideboarding"], ["guide", "Guide"]];
+const TABS = [["schedule", "Schedule"], ["quiz", "Quiz"], ["decks", "Decks"], ["plans", "Matchups"], ["sb", "Sideboard"], ["guide", "Guide"]];
 const PLAN_FIELDS = [
   ["range", "Their reasonable range: opening hands and first three turns"],
   ["plan", "Their plan and clock against Doomsday"],
@@ -163,9 +201,9 @@ const PLAN_FIELDS = [
 ];
 const BASICS = new Set(["Island", "Swamp", "Mountain", "Forest", "Plains"]);
 
-let META = null, RANGES = null;
-const S = { rangeShown: {}, rangeSide: "all", tab: "quiz", deckSet: null, quizMode: "guess", deckView: null, planDeck: null, sbList: 0, sbScenario: null, sbIn: {}, sbOut: {} };
-const DATA = { todos: {}, notes: {}, plans: {}, drills: {}, lists: { worry: {}, pile: {} }, attempts: { guesses: {}, "pile-attempts": {} } };
+let META = null, RANGES = null, SBMAPS = null;
+const S = { rangeShown: {}, rangeSide: "all", tab: "quiz", deckSet: null, quizMode: "guess", deckView: null, planDeck: null, sbScenario: null, sbIn: {}, sbOut: {} };
+const DATA = { todos: {}, notes: {}, plans: {}, drills: {}, sbmaps: {}, lists: { worry: {}, pile: {} }, attempts: { guesses: {}, "pile-attempts": {}, tells: {} } };
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -186,14 +224,14 @@ const Store = {
   },
   async loadAll() {
     if (this.local) {
-      DATA.todos = lsGet("todos", {}); DATA.notes = lsGet("notes", {}); DATA.plans = lsGet("plans", {}); DATA.drills = lsGet("drills", {});
+      DATA.todos = lsGet("todos", {}); DATA.notes = lsGet("notes", {}); DATA.plans = lsGet("plans", {}); DATA.drills = lsGet("drills", {}); DATA.sbmaps = lsGet("sbmaps", {});
       for (const k in DATA.lists) DATA.lists[k] = lsGet(k, {});
       for (const k in DATA.attempts) DATA.attempts[k] = lsGet(k, {});
       return;
     }
     const lists = Object.keys(DATA.lists), atts = Object.keys(DATA.attempts);
-    const [todos, notes, plans, drills, ...rest] = await Promise.all([
-      this.db.collection("todos").get(), this.db.collection("notes").get(), this.db.collection("plans").get(), this.db.collection("drills").get(),
+    const [todos, notes, plans, drills, sbmaps, ...rest] = await Promise.all([
+      this.db.collection("todos").get(), this.db.collection("notes").get(), this.db.collection("plans").get(), this.db.collection("drills").get(), this.db.collection("sbmaps").get(),
       ...lists.map((k) => this.db.doc(LIST_DOC[k]).get()), ...atts.map((k) => this.db.collection(k).get())]);
     // Snapshot bodies are frozen; every edit path mutates DATA in place, so keep editable copies.
     const own = (snap) => structuredClone(snap.data());
@@ -203,6 +241,7 @@ const Store = {
     atts.forEach((k, i) => { rest[lists.length + i].docs.forEach((d) => { DATA.attempts[k][d.id] = own(d); }); });
     plans.docs.forEach((d) => { DATA.plans[d.id] = own(d); });
     drills.docs.forEach((d) => { DATA.drills[d.id] = own(d); });
+    sbmaps.docs.forEach((d) => { DATA.sbmaps[d.id] = own(d); });
   },
   async del(path) {
     if (this.local) { const [col, id] = path.split("/"); const all = lsGet(col, {}); delete all[id]; lsSet(col, all); return; }
@@ -419,9 +458,93 @@ function quizPlan() {
   return `<div class="card"><span class="deck">${esc(d.name)} · ${pct(d.share)} of the meta</span><div class="cname">What's your plan?</div>${body}</div>`;
 }
 
+/* ---------- quiz: tells (what your own games say they do; data shape in build_ranges.py) ---------- */
+// Per deck, "tells/<deck>" keeps right/wrong counts per question key; missed questions come back sooner.
+let TQ = { deck: null, q: null, choice: null, right: 0, total: 0 };
+const TELL_MIN = 5;
+const shuffle = (a) => a.map((x) => [Math.random(), x]).sort((p, q) => p[0] - q[0]).map(([, x]) => x);
+function tellQuestions(d) {
+  const R = RANGES?.decks?.[d.name];
+  if (!R) return [];
+  const n = R.n, qs = [], f = (k, m) => `${pct(k / m)} (${k} of ${m})`, name = d.name;
+  const t1 = [...R.splits.all.t1].sort((a, b) => b[1] - a[1]).slice(0, 4);
+  if (t1.length >= 3 && t1[0][1] >= t1[1][1] + 3)
+    qs.push({ key: "t1", prompt: `What is ${name}'s most common turn 1 against you?`, options: shuffle(t1.map(([l]) => l || "No spell")),
+      answer: t1[0][0] || "No spell", why: t1.map(([l, k]) => `${l || "No spell"} ${f(k, R.splits.all.n)}`).join(" · ") });
+  // Only tells that survive the significance test (build_ranges.py) are worth memorising.
+  for (const t of R.tells) for (const [c, k, p, sig] of t.cards.filter((r) => r[3]).slice(0, 4)) {
+    const a = k / t.n, b = (R.shown[c] - k) / (n - t.n);
+    qs.push({ key: `tell:${t.cond}:${c}`, prompt: `${name} · ${t.cond}. Does ${c} become more or less likely to show up?`,
+      options: ["More likely", "Less likely"], answer: a > b ? "More likely" : "Less likely", why: `${pct(a)} of those ${t.n} games, against ${pct(b)} of the other ${n - t.n}; p = ${p}.` });
+  }
+  const lab = ["Turn 1", "Turn 2", "Turn 3", "Turn 4 or later"];
+  for (const t of R.timing) {
+    const per = t.first.map(([x, y]) => x + y), tot = [per[0], per[1], per[2], per.slice(3).reduce((a, b) => a + b, 0)], sum = tot.reduce((a, b) => a + b, 0);
+    const max = Math.max(...tot);
+    if (sum < TELL_MIN || tot.filter((x) => x === max).length !== 1) continue;
+    qs.push({ key: `timing:${t.card}`, prompt: `When does ${name} most often first cast ${t.card}?`, options: lab, answer: lab[tot.indexOf(max)],
+      why: `First casts by turn: ${tot.map((k, i) => `${lab[i].toLowerCase()} ${k}`).join(", ")}; ${sum} games in all.` });
+  }
+  for (const t of R.targets) {
+    const tg = [...t.targets].sort((a, b) => b[1] - a[1]).slice(0, 4);
+    if (t.casts < TELL_MIN || tg.length < 2 || tg[0][1] <= tg[1][1]) continue;
+    qs.push({ key: `target:${t.card}`, prompt: `What does ${name}'s ${t.card} hit most often?`, options: shuffle(tg.map(([x]) => x)), answer: tg[0][0],
+      why: `${tg.map(([x, k]) => `${x} ${k}`).join(" · ")}, of ${t.casts} casts.` });
+  }
+  for (const [c, a, b] of R.board.rows)
+    qs.push({ key: `board:${c}`, prompt: `Postboard, does ${name} show ${c} more or less often than in game 1?`, options: ["More", "Less"],
+      answer: b / R.board.post > a / R.board.g1 ? "More" : "Less", why: `Game 1 ${f(a, R.board.g1)}, postboard ${f(b, R.board.post)}.` });
+  return qs;
+}
+function tellDecks() { return prepDecks().filter((d) => RANGES?.decks?.[d.name]); }
+function tellStat(deck, key) { return DATA.attempts.tells[slug(deck)]?.q?.[key] || { r: 0, w: 0 }; }
+function nextTell() {
+  const decks = TQ.deck ? tellDecks().filter((d) => d.name === TQ.deck) : tellDecks();
+  const pool = decks.flatMap((d) => tellQuestions(d).map((q) => ({ ...q, deck: d.name })));
+  // Kinds (opener, tell, timing, target, postboard) are drawn evenly, since tell questions outnumber the rest many times over.
+  const byKind = {};
+  for (const q of pool) if (!(TQ.q && q.deck === TQ.q.deck && q.key === TQ.q.key)) (byKind[q.key.split(":")[0]] ||= []).push(q);
+  const kind = pick(Object.keys(byKind));
+  const weighted = (byKind[kind] || []).map((q) => { const s = tellStat(q.deck, q.key); return [q, Math.max(0.25, 1 + 2 * s.w - 0.5 * s.r)]; });
+  let r = Math.random() * weighted.reduce((a, [, w]) => a + w, 0);
+  TQ.q = weighted.find(([, w]) => (r -= w) <= 0)?.[0] || weighted[0]?.[0] || null;
+  TQ.choice = null;
+}
+function answerTell(choice) {
+  if (!TQ.q || TQ.choice != null) return;
+  TQ.choice = choice; TQ.total++;
+  const ok = choice === TQ.q.answer; if (ok) TQ.right++;
+  const k = slug(TQ.q.deck), doc = DATA.attempts.tells[k] || (DATA.attempts.tells[k] = { deck: TQ.q.deck, q: {} });
+  const st = doc.q[TQ.q.key] || (doc.q[TQ.q.key] = { r: 0, w: 0 });
+  st[ok ? "r" : "w"]++; st.last = new Date().toISOString();
+  Store.put("tells/" + k, doc); render();
+}
+function quizTells() {
+  if (!RANGES) return `<p class="muted">No game data is published with the page (ranges.json).</p>`;
+  if (!tellDecks().length) return `<p class="muted">None of your prep decks has 10 or more logged games yet.</p>`;
+  if (!TQ.q) nextTell();
+  const q = TQ.q, done = TQ.choice != null;
+  const deckSel = `<select id="tell-deck" aria-label="Deck"><option value="">All prep decks with games</option>${tellDecks().map((d) =>
+    `<option ${d.name === TQ.deck ? "selected" : ""}>${esc(d.name)}</option>`).join("")}</select>`;
+  const top = `<div class="row" style="justify-content:space-between">${deckSel}<span class="small muted num">${TQ.total ? `${TQ.right} of ${TQ.total} this session` : "Keys 1–4 answer, Enter moves on"}</span></div>`;
+  if (!q) return `<div class="card">${top}<p class="muted">No questions for this deck.</p></div>`;
+  const s = tellStat(q.deck, q.key);
+  const opts = q.options.map((o, i) => { const cls = !done ? "" : o === q.answer ? "up" : o === TQ.choice ? "down" : "";
+    return `<button class="chip ${cls}" data-tell="${esc(o)}" ${done ? "disabled" : ""}><span class="muted num">${i + 1}</span> ${esc(o)}</button>`; }).join("");
+  const verdict = done ? `<p class="verdict ${TQ.choice === q.answer ? "good" : "bad"}">${TQ.choice === q.answer ? "Right." : `No: ${esc(q.answer)}.`}</p><p class="small num">${esc(q.why)}</p>` : "";
+  return `<div class="card">${top}
+    <span class="deck">${esc(q.deck)}${s.r + s.w ? ` · <span class="num">${s.r} right, ${s.w} wrong before</span>` : ""}</span>
+    <div class="cname">${esc(q.prompt)}</div>
+    <div class="row">${opts}</div>${verdict}
+    <div class="row">${done ? `<button class="btn primary" data-act="tell-next">Next</button>` : `<button class="btn" data-act="tell-next">Skip</button>`}
+      <button class="btn" data-act="tell-range" data-deck="${esc(q.deck)}">Open the deck's range</button></div>
+    <p class="small muted">Rates count only cards they cast or showed, so each is a floor. Questions you miss come back sooner.</p>
+  </div>`;
+}
+
 function viewQuiz() {
-  const modes = [["guess", "Their sideboard"], ["pile", "Pile interaction"], ["plan", "Plan check"]];
-  const body = GAMES[S.quizMode] ? quizGame() : quizPlan();
+  const modes = [["guess", "Their sideboard"], ["pile", "Pile interaction"], ["plan", "Plan check"], ["tells", "Tells"]];
+  const body = GAMES[S.quizMode] ? quizGame() : S.quizMode === "tells" ? quizTells() : quizPlan();
   return `<div class="row">${modes.map(([k, l]) => `<button class="chip" data-mode="${k}" aria-pressed="${S.quizMode === k}">${l}</button>`).join("")}</div>
     ${body}${deckSetPicker()}`;
 }
@@ -503,8 +626,8 @@ function rangePanel(name) {
 
   // 3. tells: an early observable that moves the chance a card shows up at all
   const tells = R.tells.length ? R.tells.map((t) => `<div class="tell"><div><b>${esc(t.cond)}</b> <span class="small muted num">${t.n} games</span></div>
-      <div class="row">${t.cards.slice(0, 8).map(([c, k]) => { const a = k / t.n, b = R.shown[c] / n;
-        return `<span class="chip ${a > b ? "up" : "down"}">${esc(c)} <span class="num">${pct(a)}</span> <span class="small num">vs ${pct(b)}</span></span>`; }).join("")}</div></div>`).join("")
+      <div class="row">${t.cards.slice(0, 8).map(([c, k, p, sig]) => { const a = k / t.n, b = R.shown[c] / n;
+        return `<span class="chip ${a > b ? "up" : "down"}${sig ? "" : " weak"}" title="p = ${p}">${esc(c)} <span class="num">${pct(a)}</span> <span class="small num">vs ${pct(b)}</span></span>`; }).join("")}</div></div>`).join("")
     : `<p class="muted">Nothing moved by more than 10 points.</p>`;
 
   // 4. timing: first cast per game, by round, lighter = rarer
@@ -531,7 +654,7 @@ function rangePanel(name) {
     <div class="row">${sides.map(([k, l]) => `<button class="chip" data-rangeside="${k}" aria-pressed="${sideKey === k}">${l}</button>`).join("")}</div>
     ${section("Openings", openings, true)}
     ${section("Turn by turn", byTurn, true)}
-    ${section("Tells", `<p class="small muted">When the first thing is true, how often the card showed up in the game at all, against its rate across all ${n} games. Only shifts of 10 points or more, from at least 5 games.</p>${tells}`, true)}
+    ${section("Tells", `<p class="small muted">When the first thing is true, how often the card showed up in the game at all, against its rate across all ${n} games. Only shifts of 10 points or more, from at least 5 games. Solid chips pass a Fisher exact test against the deck's other games (false-discovery rate 10% per deck); faded ones are within what a sample this small produces by chance.</p>${tells}`, true)}
     ${section("When cards first appear", timing, false)}
     ${section("What their interaction hits", targets, false)}
     ${section("Game 1 vs postboard", board, false)}
@@ -570,13 +693,170 @@ async function savePlan() {
   const el = $("#plan-saved"); if (el) el.textContent = "Saved.";
 }
 
-/* ---------- sideboarding drill ---------- */
-function scenarioKey(sc) { return slug(META.my_lists[S.sbList].label) + "--" + slug(sc.deck) + "--" + sc.pd; }
-function newScenario() {
-  S.sbScenario = { deck: pick(prepDecks()).name, pd: Math.random() < 0.5 ? "play" : "draw" };
-  S.sbIn = {}; S.sbOut = {}; S.sbDone = false; render();
-}
+/* ---------- sideboard: the working map (edit, grid, pull sheet, drill) ---------- */
+// A working map is a copy of a published map (sbmaps.json) under the same key, kept in
+// the db once edited; the published copy is only the reset target.
 const sumv = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+const mapKey = (seed) => slug(seed.name);
+function seedMaps() { return SBMAPS?.maps || []; }
+function cloneSeed(seed) {
+  const inMeta = new Set((seed.meta_order || []).map((o) => o.deck));
+  const decks = [...(seed.meta_order || []).map((o) => ({ deck: o.deck, meta: o.meta, share: o.share })),
+    ...Object.keys(seed.plans).filter((d) => !inMeta.has(d)).map((d) => ({ deck: d, meta: null, share: null }))];
+  return { name: seed.name, seed: seed.name, main: { ...seed.main }, side: { ...seed.side }, aliases: { ...(seed.aliases || {}) }, codes: { ...(seed.codes || {}) },
+    roles: structuredClone(seed.roles || {}), decks, plans: Object.fromEntries(decks.map((x) => [x.deck, { out: { ...(seed.plans[x.deck]?.out || {}) }, in: { ...(seed.plans[x.deck]?.in || {}) }, note: "" }])) };
+}
+function curSeed() {
+  const maps = seedMaps(); if (!maps.length) return null;
+  S.mapIdx = Math.min(S.mapIdx ?? lsGet("mapIdx", 0), maps.length - 1);
+  return maps[S.mapIdx];
+}
+function curMap() {
+  const seed = curSeed(); if (!seed) return null;
+  return DATA.sbmaps[mapKey(seed)] || (DATA.sbmaps[mapKey(seed)] = cloneSeed(seed));
+}
+const isEdited = (seed) => !!DATA.sbmaps[mapKey(seed)]?.at;
+function saveMap(map) { map.at = new Date().toISOString(); Store.put("sbmaps/" + mapKey(curSeed()), map); }
+const planOf = (map, d) => map.plans[d] || (map.plans[d] = { out: {}, in: {}, note: "" });
+const balance = (p) => sumv(p.in) - sumv(p.out);
+const planEmpty = (p) => !sumv(p.in) && !sumv(p.out);
+const codeOf = (map, d) => map.codes[d] || d.replace(/[^A-Z0-9]/g, "").slice(0, 4) || d.slice(0, 4);
+function planIssues(map, d) {
+  const p = planOf(map, d), out = [];
+  if (planEmpty(p)) return ["no plan yet"];
+  const b = balance(p);
+  if (b) out.push(b > 0 ? `${b} more in than out` : `${-b} more out than in`);
+  for (const [c, n] of Object.entries(p.out)) if (n > (map.main[c] || 0)) out.push(`cuts ${n} ${c}, runs ${map.main[c] || 0}`);
+  for (const [c, n] of Object.entries(p.in)) if (n > (map.side[c] || 0)) out.push(`brings ${n} ${c}, has ${map.side[c] || 0}`);
+  return out;
+}
+// Parse "N Card" lines; a blank line or a SIDEBOARD line starts the sideboard.
+function parseList(text) {
+  const main = {}, side = {}; let cur = main;
+  for (let line of text.split("\n")) {
+    line = line.trim();
+    if (!line || /^sideboard/i.test(line)) { if (sumv(main)) cur = side; continue; }
+    const m = /^(\d+)x?\s+(.+)$/.exec(line); if (m) cur[m[2]] = (cur[m[2]] || 0) + +m[1];
+  }
+  return { main, side };
+}
+// Clip every plan to the cards the new 75 has; what a plan lost goes into its note.
+function rebaseMap(map, main, side, name) {
+  for (const [d, p] of Object.entries(map.plans)) {
+    const lost = [];
+    for (const [zone, have] of [["out", main], ["in", side]]) {
+      for (const c of Object.keys(p[zone])) {
+        const keep = Math.min(p[zone][c], have[c] || 0);
+        if (keep < p[zone][c]) lost.push(`${p[zone][c] - keep} ${c} (${zone})`);
+        if (keep) p[zone][c] = keep; else delete p[zone][c];
+      }
+    }
+    if (lost.length) p.note = [p.note, `Rebase ${todayIso()} lost: ${lost.join(", ")}`].filter(Boolean).join("\n");
+  }
+  map.main = main; map.side = side; if (name) map.name = name;
+}
+function stepperHtml(attr, kind, name, v, max, disabled) {
+  return `<span class="step ${v ? "on" : ""}"><button data-${attr}="${kind}" data-card="${esc(name)}" data-d="-1" aria-label="Fewer ${esc(name)}" ${v <= 0 || disabled ? "disabled" : ""}>−</button><span>${v}</span><button data-${attr}="${kind}" data-card="${esc(name)}" data-d="1" aria-label="More ${esc(name)}" ${v >= max || disabled ? "disabled" : ""}>+</button></span>`;
+}
+function swapGrid(map, ins, outs, attr, disabled, hist) {
+  const rows = (zone, o) => Object.entries(zone).sort((a, b) => a[0].localeCompare(b[0])).map(([n, q]) =>
+    `<div class="swap"><span class="n">${q}</span><span class="nm">${esc(n)}</span>${hist ? hist(o === ins ? "in" : "out", n) : ""}${stepperHtml(attr, o === ins ? "in" : "out", n, o[n] || 0, q, disabled)}</div>`).join("");
+  return `<div class="swap-grid"><div><div class="label">Out of the main deck</div>${rows(map.main, outs)}</div><div><div class="label">In from the sideboard</div>${rows(map.side, ins)}</div></div>`;
+}
+const deckChip = (map, x, sel) => {
+  const p = planOf(map, x.deck), bad = planIssues(map, x.deck).length;
+  return `<button class="chip ${bad ? "down" : p.rough ? "warn" : ""}" data-sbdeck="${esc(x.deck)}" aria-pressed="${sel === x.deck}">${p.rough ? "~ " : ""}${esc(x.deck)}${x.share != null ? ` <span class="small">${Math.round(x.share * 100)}%</span>` : ""}${planEmpty(p) ? "" : ` <span class="small">−${sumv(p.out)}/+${sumv(p.in)}</span>`}</button>`;
+};
+function sbHead(map) {
+  const seeds = seedMaps();
+  return `<div class="row noprint">${seeds.map((m, i) => `<button class="chip" data-sbmap="${i}" aria-pressed="${i === S.mapIdx}">${esc(m.name)}${isEdited(m) ? " · edited" : ""}</button>`).join("")}</div>
+    <div class="row noprint">${[["edit", "Edit"], ["grid", "Grid"], ["pull", "Pull sheet"], ["drill", "Drill"]].map(([k, l]) => `<button class="chip" data-sbview="${k}" aria-pressed="${S.sbView === k}">${l}</button>`).join("")}
+      <span class="small muted">${esc(map.name)} · ${sumv(map.main)} + ${sumv(map.side)}</span></div>`;
+}
+function viewSb() {
+  const map = curMap();
+  if (!map) return `<p class="muted">No sideboard map is published with the page (sbmaps.json).</p>`;
+  S.sbView = S.sbView ?? lsGet("sbView", "edit");
+  const body = { edit: sbEdit, grid: sbGrid, pull: sbPull, drill: sbDrill }[S.sbView] || sbEdit;
+  return sbHead(map) + body(map);
+}
+function sbEdit(map) {
+  if (!map.decks.some((x) => x.deck === S.sbDeck)) S.sbDeck = map.decks[0]?.deck || null;
+  const d = S.sbDeck, p = d ? planOf(map, d) : null, issues = d ? planIssues(map, d) : [];
+  const others = map.decks.filter((x) => x.deck !== d && !planEmpty(planOf(map, x.deck)));
+  const deckOptions = META.decks.map((x) => x.name).filter((n) => !map.decks.some((x) => x.deck === n || map.aliases[x.deck] === n));
+  const tools = `<div class="row noprint">
+      <button class="btn" data-act="sb-paste" aria-pressed="${!!S.sbPaste}">Paste a new 75</button>
+      <button class="btn" data-act="sb-reset">${S.sbConfirmReset ? "Really discard your edits?" : "Reset to the published map"}</button>
+      ${S.sbMsg ? `<span class="small muted">${esc(S.sbMsg)}</span>` : ""}</div>
+    ${S.sbPaste ? `<section class="card stack"><div class="label">New 75 (N Card per line, a blank line or SIDEBOARD before the sideboard). Plans are clipped to the cards the list has; what each plan lost goes in its note.</div>
+      <textarea id="sb-list" rows="8" class="mono">${esc(S.sbPasteText || "")}</textarea>
+      <div class="row"><input id="sb-list-name" placeholder="Map name" value="${esc(map.name)}"><button class="btn primary" data-act="sb-apply-list">Apply</button></div></section>` : ""}`;
+  const chips = `<div class="row">${map.decks.map((x) => deckChip(map, x, d)).join("")}
+      <select id="sb-add-deck"><option value="">Add a deck…</option>${deckOptions.map((n) => `<option>${esc(n)}</option>`).join("")}</select></div>`;
+  if (!d) return tools + chips;
+  const x = map.decks.find((y) => y.deck === d);
+  return tools + chips + `<section class="card stack">
+      <div class="cname">${esc(d)}${x.meta && x.meta !== d ? `<span class="muted"> · ${esc(x.meta)}</span>` : ""}${map.aliases[d] && map.aliases[d] !== d ? `<span class="muted"> · ${esc(map.aliases[d])}</span>` : ""}
+        ${x.share != null ? `<span class="small muted"> · ${Math.round(x.share * 100)}% of the expected meta</span>` : `<span class="small muted"> · outside the expected meta</span>`}</div>
+      ${swapGrid(map, p.in, p.out, "mstep", false)}
+      <div class="row"><span class="balance ${balance(p) ? "off" : ""}">In ${sumv(p.in)} · Out ${sumv(p.out)}</span>
+        ${issues.length ? `<span class="small" style="color:var(--bad)">${issues.map(esc).join(" · ")}</span>` : ""}
+        ${others.length ? `<select id="sb-copyfrom"><option value="">Copy the plan from…</option>${others.map((y) => `<option>${esc(y.deck)}</option>`).join("")}</select>` : ""}
+        ${x.share == null ? `<button class="btn" data-act="sb-del-deck">Remove this deck</button>` : ""}</div>
+      <div class="row"><button class="chip ${p.rough ? "warn" : ""}" data-act="sb-rough" aria-pressed="${!!p.rough}">~ Doesn't map cleanly</button>
+        <span class="small muted">Flag it when the swap depends on their build or on play/draw, so the sheet reminds you to think at the table.</span></div>
+      <div class="label">Note</div><textarea id="sb-note" rows="2">${esc(p.note || "")}</textarea>
+    </section>`;
+}
+function sbGrid(map) {
+  const decks = map.decks;
+  const w = (c, zone) => decks.reduce((a, x) => a + ((planOf(map, x.deck)[zone][c] || 0) > 0 ? (x.share || 0) : 0), 0);
+  const row = (c, q, zone) => {
+    const used = decks.filter((x) => planOf(map, x.deck)[zone][c]).length;
+    return `<tr class="${used ? "" : "muted"}"><th>${esc(c)}</th><td class="num">${q}</td>${decks.map((x) => { const n = planOf(map, x.deck)[zone][c] || 0; return `<td class="c ${n ? zone : ""}">${n ? (zone === "out" ? "−" : "+") + n : ""}</td>`; }).join("")}<td class="num">${used}</td><td class="num">${pct(w(c, zone))}</td></tr>`;
+  };
+  const head = `<tr><th>Card</th><th class="num">#</th>${decks.map((x) => `<th class="c" title="${esc(x.deck)}">${planOf(map, x.deck).rough ? "~" : ""}${esc(codeOf(map, x.deck))}${x.share != null ? `<br><span class="small muted">${Math.round(x.share * 100)}%</span>` : ""}</th>`).join("")}<th class="num">Decks</th><th class="num">Meta</th></tr>`;
+  const foot = (zone) => `<tr class="tot"><th>${zone === "out" ? "Out" : "In"}</th><td></td>${decks.map((x) => `<td class="c">${sumv(planOf(map, x.deck)[zone])}</td>`).join("")}<td></td><td></td></tr>`;
+  const bal = `<tr class="tot"><th>Balance</th><td></td>${decks.map((x) => { const b = balance(planOf(map, x.deck)); return `<td class="c ${b ? "bad" : ""}">${b ? (b > 0 ? "+" : "") + b : "✓"}</td>`; }).join("")}<td></td><td></td></tr>`;
+  const mains = Object.entries(map.main).sort((a, b) => a[0].localeCompare(b[0])).map(([c, q]) => row(c, q, "out")).join("");
+  const sides = Object.entries(map.side).sort((a, b) => a[0].localeCompare(b[0])).map(([c, q]) => row(c, q, "in")).join("");
+  return `<div class="row noprint"><button class="btn" data-act="print">Print this grid</button><span class="small muted">Rows are your 75; a cell is copies cut (−) or brought in (+). Decks = matchups that touch the card; Meta = their summed share. A grey row is never swapped.</span></div>
+    <div class="tbl-wrap sheet"><table class="sbgrid"><thead>${head}</thead><tbody>${mains}${foot("out")}<tr class="sep"><th colspan="${decks.length + 4}">Sideboard</th></tr>${sides}${foot("in")}${bal}</tbody></table></div>`;
+}
+// The table format is "all 75 in, then pull 15": a plan's pull list is its main-deck cuts
+// plus every sideboard copy it does not bring in, so each card reads as what leaves the deck.
+function pullList(map, plan) {
+  const out = Object.entries(plan.out);
+  const stays = Object.entries(map.side).map(([c, n]) => [c, n - (plan.in[c] || 0)]).filter(([, n]) => n > 0);
+  return { out, stays, total: sumv(plan.out) + stays.reduce((a, [, n]) => a + n, 0) };
+}
+function sbPull(map) {
+  const box = (x) => {
+    const plan = planOf(map, x.deck), { out, stays, total } = pullList(map, plan), issues = planIssues(map, x.deck), empty = planEmpty(plan);
+    const title = x.meta && x.meta !== x.deck ? `${esc(x.meta)}<span class="muted"> · ${esc(x.deck)}</span>` : esc(x.deck) + (map.aliases[x.deck] && map.aliases[x.deck] !== x.deck ? `<span class="muted"> · ${esc(map.aliases[x.deck])}</span>` : "");
+    return `<section class="pull ${total !== 15 || issues.length ? "off" : plan.rough ? "rough" : ""}">
+      <h3>${plan.rough ? `<span class="rough-mark" title="Doesn't map cleanly">~</span>` : ""}${title}${x.share != null ? `<span class="num pull-share">${Math.round(x.share * 100)}%</span>` : ""}<span class="num pull-n">${total}</span></h3>
+      ${empty ? `<div class="pull-issue">No plan yet.</div>` : `<div class="pull-list">${[...out, ...stays].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => `<div class="pl"><span class="num">${n}</span>${esc(c)}</div>`).join("")}</div>`}
+      ${issues.length && !empty ? `<div class="pull-issue">${issues.map(esc).join("<br>")}</div>` : ""}
+    </section>`;
+  };
+  const sideBox = `<section class="pull side"><h3>Sideboard<span class="num pull-n">${sumv(map.side)}</span></h3>
+      <div class="pull-list">${Object.entries(map.side).sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => `<div class="pl"><span class="num">${n}</span>${esc(c)}</div>`).join("")}</div></section>`;
+  return `<div class="row noprint"><button class="btn" data-act="print">Print this sheet</button>
+      <span class="small muted">Table procedure: all 75 go in, then pull the cards listed. Each box should total 15; a red box has no plan or does not balance.</span></div>
+    <div class="sheet"><div class="sheet-head"><b>${esc(map.name)}</b></div>
+      <div class="pull-grid">${sideBox}${map.decks.map(box).join("")}</div></div>`;
+}
+
+/* ---------- drill: board a random matchup from memory, graded against the map ---------- */
+function scenarioKey(sc) { return mapKey(curSeed()) + "--" + slug(sc.deck) + "--" + sc.pd; }
+function makeScenario() {
+  const map = curMap(), decks = map.decks.filter((x) => !planEmpty(planOf(map, x.deck)));
+  S.sbScenario = { deck: pick(decks.length ? decks : map.decks).deck, pd: Math.random() < 0.5 ? "play" : "draw" };
+  S.sbIn = {}; S.sbOut = {}; S.sbDone = false;
+}
+function newScenario() { makeScenario(); render(); }
 // Agreement of two answers: shared swapped copies over all swapped copies (1 when both change nothing).
 function agreement(a, b) {
   const keys = new Set([...Object.keys(a.ins), ...Object.keys(b.ins), ...Object.keys(a.outs).map((k) => "-" + k), ...Object.keys(b.outs).map((k) => "-" + k)]);
@@ -593,50 +873,40 @@ function consistency(answers) {
   for (let i = 0; i < answers.length; i++) for (let j = i + 1; j < answers.length; j++) { s += agreement(answers[i], answers[j]); n++; }
   return s / n;
 }
-function stepper(kind, name, max) {
-  const v = (kind === "in" ? S.sbIn : S.sbOut)[name] || 0;
-  return `<span class="step ${v ? "on" : ""}"><button data-step="${kind}" data-card="${esc(name)}" data-d="-1" aria-label="Fewer ${esc(name)}" ${v <= 0 || S.sbDone ? "disabled" : ""}>−</button><span>${v}</span><button data-step="${kind}" data-card="${esc(name)}" data-d="1" aria-label="More ${esc(name)}" ${v >= max || S.sbDone ? "disabled" : ""}>+</button></span>`;
+function diffLine(mine, plan, sign) {
+  const cards = new Set([...Object.keys(mine), ...Object.keys(plan)]), out = [];
+  for (const c of cards) { const d = (mine[c] || 0) - (plan[c] || 0); if (d) out.push(`<span class="${d > 0 ? "in" : "out"}">${sign}${c}: you ${mine[c] || 0}, map ${plan[c] || 0}</span>`); }
+  return out.join(", ");
 }
-function viewSb() {
-  if (!META.my_lists.length) return `<p class="muted">No list of yours is loaded.</p>`;
-  if (!S.sbScenario) newScenario();
-  const L = META.my_lists[S.sbList], sc = S.sbScenario, key = scenarioKey(sc);
-  const past = (DATA.drills[key]?.answers || []);
+function sbDrill(map) {
+  if (!S.sbScenario || !map.decks.some((x) => x.deck === S.sbScenario.deck)) makeScenario();
+  const sc = S.sbScenario, key = scenarioKey(sc), plan = planOf(map, sc.deck), past = DATA.drills[key]?.answers || [];
   const hist = (kind, name) => {
-    if (!S.sbDone || !past.length) return "";
-    const hits = past.filter((a) => (kind === "in" ? a.ins : a.outs)[name]).length;
-    return hits ? `<span class="hist">${hits}/${past.length}</span>` : "";
+    if (!S.sbDone) return "";
+    const want = (kind === "in" ? plan.in : plan.out)[name];
+    return want ? `<span class="hist">map ${want}</span>` : "";
   };
   const nin = sumv(S.sbIn), nout = sumv(S.sbOut);
-  const mainRows = Object.entries(L.main).sort((a, b) => a[0].localeCompare(b[0])).map(([n, q]) =>
-    `<div class="swap"><span class="n">${q}</span><span class="nm">${esc(n)}</span>${hist("out", n)}${stepper("out", n, q)}</div>`).join("");
-  const sideRows = Object.entries(L.side).sort((a, b) => a[0].localeCompare(b[0])).map(([n, q]) =>
-    `<div class="swap"><span class="n">${q}</span><span class="nm">${esc(n)}</span>${hist("in", n)}${stepper("in", n, q)}</div>`).join("");
+  const vsMap = S.sbDone ? agreement({ ins: S.sbIn, outs: S.sbOut }, { ins: plan.in, outs: plan.out }) : null;
   const c = S.sbDone ? consistency(past) : null;
-  const last = S.sbDone && past.length > 1 ? agreement(past[past.length - 1], { ins: modal(past.slice(0, -1), "ins"), outs: modal(past.slice(0, -1), "outs") }) : null;
-  return `<div class="row">${META.my_lists.map((l, i) => `<button class="chip" data-sblist="${i}" aria-pressed="${i === S.sbList}">${esc(l.label)}</button>`).join("")}
-      <span class="small muted">${esc(L.name)}</span></div>
-    <section class="card">
+  const diffs = S.sbDone ? [diffLine(S.sbIn, plan.in, "+"), diffLine(S.sbOut, plan.out, "−")].filter(Boolean).join(", ") : "";
+  return `<section class="card">
       <span class="deck">Game 2 or 3</span>
       <div class="cname">vs ${esc(sc.deck)}, on the ${sc.pd}</div>
-      <p class="small muted">Board for this matchup. Your past answers stay hidden until you save, so this measures whether you land in the same place each time.</p>
-      <div class="swap-grid">
-        <div><div class="label">Out of the main deck</div>${mainRows}</div>
-        <div><div class="label">In from the sideboard</div>${sideRows}</div>
-      </div>
+      <p class="small muted">Board this matchup from memory, then save to see the map's plan next to yours.</p>
+      ${swapGrid(map, S.sbIn, S.sbOut, "step", S.sbDone, hist)}
       <div class="row"><span class="balance ${nin !== nout ? "off" : ""}">In ${nin} · Out ${nout}</span></div>
       ${S.sbDone ? `<div class="stack">
-          <div class="verdict">Saved. ${past.length} answer${past.length === 1 ? "" : "s"} for this scenario.
-            ${last != null ? `This one matches your usual plan ${pct(last)}.` : ""} ${c != null ? `Average agreement across all your answers: ${pct(c)}.` : ""}</div>
-          <p class="small muted">The x/y next to each card counts how many of your answers swapped it.</p>
-          <div class="row"><button class="btn primary" data-act="sb-next">Next scenario</button><button class="btn" data-act="sb-again">Same matchup, other side of the coin</button></div></div>`
+          <div class="verdict">${planEmpty(plan) ? "The map has no plan for this deck yet." : `Matches the map ${pct(vsMap)}.`}${plan.rough ? " This matchup is flagged as not mapping cleanly." : ""} ${past.length > 1 && c != null ? `Agreement across your ${past.length} answers: ${pct(c)}.` : ""}</div>
+          ${diffs ? `<p class="small guide-line">${diffs}</p>` : ""}
+          <div class="row"><button class="btn primary" data-act="sb-next">Next matchup</button><button class="btn" data-act="sb-again">Same matchup, other side of the coin</button><button class="btn" data-act="sb-edit-this">Edit this plan</button></div></div>`
         : `<div class="row"><button class="btn primary" data-act="sb-save" ${nin !== nout ? "disabled" : ""}>Save answer</button><button class="btn" data-act="sb-next">Skip</button></div>`}
     </section>`;
 }
 async function saveSb() {
-  const key = scenarioKey(S.sbScenario);
-  const doc = DATA.drills[key] || { list: META.my_lists[S.sbList].label, deck: S.sbScenario.deck, pd: S.sbScenario.pd, answers: [] };
-  doc.answers = [...doc.answers, { at: new Date().toISOString(), list_name: META.my_lists[S.sbList].name, ins: { ...S.sbIn }, outs: { ...S.sbOut } }];
+  const key = scenarioKey(S.sbScenario), map = curMap();
+  const doc = DATA.drills[key] || { list: map.name, deck: S.sbScenario.deck, pd: S.sbScenario.pd, answers: [] };
+  doc.answers = [...doc.answers, { at: new Date().toISOString(), list_name: map.name, ins: { ...S.sbIn }, outs: { ...S.sbOut } }];
   DATA.drills[key] = doc; S.sbDone = true; render();
   await Store.put("drills/" + key, doc);
 }
@@ -750,6 +1020,14 @@ function countdown() {
 document.addEventListener("click", (e) => {
   const t = e.target.closest("button"); if (!t) return;
   if (t.dataset.tab) { S.tab = t.dataset.tab; lsSet("tab", S.tab); render(); window.scrollTo(0, 0); return; }
+  if (t.dataset.sbmap != null) { S.mapIdx = +t.dataset.sbmap; lsSet("mapIdx", S.mapIdx); S.sbScenario = null; S.sbConfirmReset = false; render(); return; }
+  if (t.dataset.sbview) { S.sbView = t.dataset.sbview; lsSet("sbView", S.sbView); S.sbConfirmReset = false; render(); return; }
+  if (t.dataset.sbdeck) { S.sbDeck = t.dataset.sbdeck; render(); return; }
+  if (t.dataset.mstep) {
+    const map = curMap(), p = planOf(map, S.sbDeck), o = t.dataset.mstep === "in" ? p.in : p.out, c = t.dataset.card;
+    o[c] = Math.max(0, (o[c] || 0) + +t.dataset.d); if (!o[c]) delete o[c]; saveMap(map); render(); return;
+  }
+  if (t.dataset.act === "print") { window.print(); return; }
   if (t.dataset.mode) { if (S.quizMode !== t.dataset.mode) GS = freshGame(GS.deck); S.quizMode = t.dataset.mode; render(); return; }
   if (t.dataset.addGuess) { addGuess(t.dataset.addGuess); return; }
   if (t.dataset.delGuess) { GS.names[GS.stage] = (GS.names[GS.stage] || []).filter((n) => n !== t.dataset.delGuess); render(); return; }
@@ -761,7 +1039,7 @@ document.addEventListener("click", (e) => {
     lsSet("deckSet", S.deckSet); render(); return;
   }
   if (t.dataset.rangeside) { keepPlanDraft(); S.rangeSide = t.dataset.rangeside; render(); return; }
-  if (t.dataset.sblist) { S.sbList = +t.dataset.sblist; S.sbIn = {}; S.sbOut = {}; S.sbDone = false; render(); return; }
+  if (t.dataset.tell != null) { answerTell(t.dataset.tell); return; }
   if (t.dataset.step) {
     const o = t.dataset.step === "in" ? S.sbIn : S.sbOut, c = t.dataset.card;
     o[c] = Math.max(0, (o[c] || 0) + +t.dataset.d); if (!o[c]) delete o[c]; render(); return;
@@ -773,6 +1051,8 @@ document.addEventListener("click", (e) => {
     case "guess-next": if (GS.graded) saveAttempt(true); GS = freshGame(null); render(); break;
     case "guess-retry": if (GS.graded) saveAttempt(true); GS = freshGame(GS.deck); render(); break;
     case "plan-show": PC.shown = true; render(); break;
+    case "tell-next": nextTell(); render(); break;
+    case "tell-range": S.tab = "plans"; S.planDeck = t.dataset.deck; S.rangeShown[t.dataset.deck] = true; render(); window.scrollTo(0, 0); break;
     case "plan-next": PC = { deck: null, shown: false }; render(); break;
     case "plan-flag": {
       const k = slug(PC.deck.name), p = DATA.plans[k];
@@ -800,6 +1080,24 @@ document.addEventListener("click", (e) => {
     }
     case "sb-save": saveSb(); break;
     case "sb-next": newScenario(); break;
+    case "sb-edit-this": S.sbView = "edit"; lsSet("sbView", "edit"); S.sbDeck = S.sbScenario.deck; render(); window.scrollTo(0, 0); break;
+    case "sb-paste": S.sbPaste = !S.sbPaste; S.sbMsg = ""; render(); break;
+    case "sb-apply-list": {
+      const { main, side } = parseList($("#sb-list").value);
+      if (sumv(main) < 40) { S.sbMsg = `That reads as ${sumv(main)} main-deck cards; check the list.`; S.sbPasteText = $("#sb-list").value; render(); break; }
+      const map = curMap(); rebaseMap(map, main, side, $("#sb-list-name").value.trim());
+      saveMap(map); S.sbPaste = false; S.sbPasteText = ""; S.sbMsg = `Applied: ${sumv(main)} + ${sumv(side)}.`; render(); break;
+    }
+    case "sb-reset": {
+      if (!S.sbConfirmReset) { S.sbConfirmReset = true; render(); break; }
+      const seed = curSeed(); DATA.sbmaps[mapKey(seed)] = cloneSeed(seed); Store.del("sbmaps/" + mapKey(seed));
+      S.sbConfirmReset = false; S.sbMsg = "Back to the published map."; render(); break;
+    }
+    case "sb-rough": { const map = curMap(), p = planOf(map, S.sbDeck); p.rough = !p.rough; saveMap(map); render(); break; }
+    case "sb-del-deck": {
+      const map = curMap(); map.decks = map.decks.filter((x) => x.deck !== S.sbDeck); delete map.plans[S.sbDeck];
+      S.sbDeck = null; saveMap(map); render(); break;
+    }
     case "sb-again": S.sbScenario = { ...S.sbScenario, pd: S.sbScenario.pd === "play" ? "draw" : "play" }; S.sbIn = {}; S.sbOut = {}; S.sbDone = false; render(); break;
   }
 });
@@ -811,14 +1109,26 @@ document.addEventListener("change", (e) => {
   }
   if (e.target.id === "deck-pick") { S.deckView = e.target.value; render(); }
   if (e.target.id === "guess-deck") { GS = freshGame(deckByName(e.target.value)); render(); }
+  if (e.target.id === "tell-deck") { TQ.deck = e.target.value || null; TQ.q = null; render(); }
+  if (e.target.id === "sb-note") { const map = curMap(); planOf(map, S.sbDeck).note = e.target.value.trim(); saveMap(map); }
+  if (e.target.id === "sb-add-deck" && e.target.value) {
+    const map = curMap(), n = e.target.value; map.decks.push({ deck: n, meta: null, share: null }); map.aliases[n] = n; planOf(map, n);
+    S.sbDeck = n; saveMap(map); render();
+  }
+  if (e.target.id === "sb-copyfrom" && e.target.value) {
+    const map = curMap(), src = planOf(map, e.target.value), p = planOf(map, S.sbDeck);
+    p.in = { ...src.in }; p.out = { ...src.out }; saveMap(map); render();
+  }
 });
 document.addEventListener("input", (e) => {
   if (e.target.id !== "guess-input") return;
   GS.q = e.target.value; $("#guess-sugg").innerHTML = suggHtml();
 });
 document.addEventListener("keydown", (e) => {
-  if (e.target.id !== "guess-input" || e.key !== "Enter") return;
-  e.preventDefault(); addGuess(suggestions(GS.q)[0]);
+  if (e.target.id === "guess-input" && e.key === "Enter") { e.preventDefault(); addGuess(suggestions(GS.q)[0]); return; }
+  if (S.tab !== "quiz" || S.quizMode !== "tells" || !TQ.q || /INPUT|SELECT|TEXTAREA/.test(e.target.tagName)) return;
+  if (e.key === "Enter" && TQ.choice != null) { e.preventDefault(); nextTell(); render(); }
+  else if (/^[1-9]$/.test(e.key) && TQ.choice == null && TQ.q.options[+e.key - 1]) answerTell(TQ.q.options[+e.key - 1]);
 });
 
 function showError(msg) { $("#notice").innerHTML = `<p class="banner">Something went wrong and your last change may not be saved: ${esc(msg)}. Reload the page to see what's stored.</p>`; }
@@ -829,9 +1139,12 @@ window.addEventListener("unhandledrejection", (e) => showError(e.reason?.message
   try { META = await (await fetch("meta.json")).json(); }
   catch { $("#view").innerHTML = `<p class="banner">Couldn't load the meta data file (meta.json). Republish the page with it.</p>`; return; }
   try { RANGES = await (await fetch("ranges.json")).json(); } catch { RANGES = null; }
+  try { SBMAPS = await (await fetch("sbmaps.json")).json(); } catch { SBMAPS = null; }
   const saved = lsGet("deckSet", null);
   S.deckSet = Array.isArray(saved) && saved.some((n) => deckByName(n)) ? saved.filter((n) => deckByName(n)) : defaultDeckSet();
-  S.tab = lsGet("tab", "schedule");
+  const qs = new URLSearchParams(location.search);
+  S.tab = qs.get("tab") || lsGet("tab", "schedule");
+  if (qs.get("view")) S.sbView = qs.get("view");
   if (!TABS.some(([k]) => k === S.tab)) S.tab = "schedule";
   render();
   await Store.init();

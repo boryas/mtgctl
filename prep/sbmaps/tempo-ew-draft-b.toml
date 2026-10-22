@@ -1,0 +1,258 @@
+list = "UB Tempo DD (EW draft B: 2 Bowmasters for Flusterstorm + Murktide)"
+
+[main]
+"Brainstorm" = 4
+"Cavern of Souls" = 1
+"Consider" = 1
+"Dark Ritual" = 4
+"Daze" = 2
+"Doomsday" = 4
+"Duress" = 1
+"Edge of Autumn" = 2
+"Flooded Strand" = 3
+"Flow State" = 4
+"Force of Will" = 4
+"Island" = 1
+"Lion's Eye Diamond" = 1
+"Lotus Petal" = 2
+"Marsh Flats" = 1
+"Murktide Regent" = 2
+"Polluted Delta" = 4
+"Ponder" = 3
+"Street Wraith" = 2
+"Swamp" = 1
+"Tamiyo, Inquisitive Student" = 4
+"Thassa's Oracle" = 1
+"Thoughtseize" = 2
+"Undercity Sewers" = 1
+"Underground Sea" = 4
+"Unearth" = 1
+
+[side]
+"Barrowgoyf" = 4
+"Bloodchief's Thirst" = 1
+"Dauthi Voidwalker" = 2
+"Fatal Push" = 3
+"Force of Negation" = 2
+"Thoughtseize" = 1
+"Orcish Bowmasters" = 2
+
+[aliases]
+"UR Cutter" = "Izzet Tempo"
+"UB Tempo" = "Dimir Tempo"
+"UW Phelia" = "Azorius Tempo"
+"4 Color Beanstalk" = "Beanstalk Control"
+"WB Death & Taxes" = "WB Death & Taxes"
+"Lands" = "Lands"
+"Fast Reanimator" = "Reanimator"
+"Sneak & Show" = "Sneak and Show"
+"Doomsday" = "Doomsday (mirror)"
+"TES" = "The EPIC Storm"
+"Cradle Control" = "Cradle Control"
+"Mardu Energy" = "Mardu Energy"
+"Eldrazi" = "Eldrazi"
+
+[codes]
+"UR Cutter" = "UR"
+"UB Tempo" = "UB"
+"UW Phelia" = "UW"
+"4 Color Beanstalk" = "4C"
+"WB Death & Taxes" = "DnT"
+"Lands" = "Land"
+"Fast Reanimator" = "Rean"
+"Sneak & Show" = "SnS"
+"Doomsday" = "DD"
+"TES" = "TES"
+"Cradle Control" = "Crdl"
+"Mardu Energy" = "Mrdu"
+"Eldrazi" = "Eld"
+"Welder Cam" = "Cam"
+"Blue Tron" = "Tron"
+
+[meta]
+"Energy" = "Mardu Energy"
+"UR Delver" = "UR Cutter"
+"UB Tempo" = "UB Tempo"
+"UW Tempo" = "UW Phelia"
+"Bant Beans" = "4 Color Beanstalk"
+"BR Reanimator" = "Fast Reanimator"
+"Welder Cam" = "Welder Cam"
+"Blue Tron" = "Blue Tron"
+"Lands" = "Lands"
+"DnT" = "WB Death & Taxes"
+"Doomsday" = "Doomsday"
+"SnT" = "Sneak & Show"
+"Storm" = "TES"
+"Eldrazi" = "Eldrazi"
+"Green" = "Cradle Control"
+
+[roles]
+"threats" = ["Barrowgoyf", "Bilbo, Thief in the Night", "Dauthi Voidwalker", "Orcish Bowmasters", "Murktide Regent"]
+"removal" = ["Fatal Push", "Long Goodbye", "Orcish Bowmasters", "Bloodchief's Thirst"]
+"counters" = ["Force of Negation", "Flusterstorm"]
+"grave_hate" = ["Dauthi Voidwalker"]
+"discard" = ["Thoughtseize", "Duress"]
+
+[plans."UR Cutter".out]
+"Doomsday" = 4
+"Edge of Autumn" = 2
+"Force of Will" = 1
+"Lion's Eye Diamond" = 1
+"Street Wraith" = 2
+"Tamiyo, Inquisitive Student" = 1
+"Thassa's Oracle" = 1
+
+[plans."UR Cutter".in]
+"Barrowgoyf" = 4
+"Bloodchief's Thirst" = 1
+"Dauthi Voidwalker" = 2
+"Fatal Push" = 3
+"Orcish Bowmasters" = 2
+
+[plans."UB Tempo".out]
+"Dark Ritual" = 1
+"Doomsday" = 4
+"Edge of Autumn" = 2
+"Force of Will" = 2
+"Lion's Eye Diamond" = 1
+"Street Wraith" = 2
+"Thassa's Oracle" = 1
+
+[plans."UB Tempo".in]
+"Barrowgoyf" = 4
+"Bloodchief's Thirst" = 1
+"Dauthi Voidwalker" = 2
+"Fatal Push" = 3
+"Thoughtseize" = 1
+"Orcish Bowmasters" = 2
+
+[plans."UW Phelia".out]
+"Force of Will" = 2
+"Murktide Regent" = 2
+"Street Wraith" = 1
+"Unearth" = 1
+
+[plans."UW Phelia".in]
+"Fatal Push" = 3
+"Thoughtseize" = 1
+"Orcish Bowmasters" = 2
+
+[plans."4 Color Beanstalk".out]
+"Murktide Regent" = 2
+"Unearth" = 1
+
+[plans."4 Color Beanstalk".in]
+"Thoughtseize" = 1
+"Orcish Bowmasters" = 2
+
+[plans."WB Death & Taxes".out]
+"Cavern of Souls" = 1
+"Murktide Regent" = 2
+"Thoughtseize" = 2
+
+[plans."WB Death & Taxes".in]
+"Fatal Push" = 3
+"Force of Negation" = 2
+
+[plans."Lands".out]
+"Cavern of Souls" = 1
+"Daze" = 1
+"Murktide Regent" = 2
+
+[plans."Lands".in]
+"Dauthi Voidwalker" = 2
+"Force of Negation" = 2
+
+[plans."Fast Reanimator".out]
+"Cavern of Souls" = 1
+"Murktide Regent" = 2
+"Unearth" = 1
+
+[plans."Fast Reanimator".in]
+"Dauthi Voidwalker" = 2
+"Force of Negation" = 2
+
+[plans."Sneak & Show".out]
+"Daze" = 2
+"Edge of Autumn" = 1
+"Island" = 1
+"Murktide Regent" = 2
+"Unearth" = 1
+
+[plans."Sneak & Show".in]
+"Fatal Push" = 2
+"Force of Negation" = 2
+"Thoughtseize" = 1
+"Orcish Bowmasters" = 2
+
+[plans."Doomsday".out]
+"Consider" = 1
+"Doomsday" = 4
+"Edge of Autumn" = 2
+"Island" = 1
+"Lion's Eye Diamond" = 1
+"Street Wraith" = 2
+"Thassa's Oracle" = 1
+"Unearth" = 1
+
+[plans."Doomsday".in]
+"Barrowgoyf" = 4
+"Bloodchief's Thirst" = 1
+"Dauthi Voidwalker" = 2
+"Fatal Push" = 1
+"Force of Negation" = 2
+"Thoughtseize" = 1
+"Orcish Bowmasters" = 2
+
+[plans."TES".out]
+"Cavern of Souls" = 1
+"Consider" = 1
+"Daze" = 2
+"Flow State" = 1
+"Island" = 1
+"Murktide Regent" = 1
+"Unearth" = 1
+
+[plans."TES".in]
+"Dauthi Voidwalker" = 2
+"Fatal Push" = 3
+"Force of Negation" = 2
+"Thoughtseize" = 1
+
+[plans."Cradle Control".out]
+"Cavern of Souls" = 1
+"Tamiyo, Inquisitive Student" = 4
+"Unearth" = 1
+
+[plans."Cradle Control".in]
+"Bloodchief's Thirst" = 1
+"Fatal Push" = 3
+"Force of Negation" = 2
+
+[plans."Mardu Energy".out]
+"Flow State" = 1
+"Murktide Regent" = 2
+"Thoughtseize" = 1
+
+[plans."Mardu Energy".in]
+"Fatal Push" = 2
+"Force of Negation" = 2
+
+[plans."Eldrazi".out]
+"Street Wraith" = 1
+"Tamiyo, Inquisitive Student" = 4
+"Thoughtseize" = 2
+"Unearth" = 1
+
+[plans."Eldrazi".in]
+"Barrowgoyf" = 4
+"Fatal Push" = 2
+"Force of Negation" = 2
+
+[plans."Welder Cam".out]
+
+[plans."Welder Cam".in]
+
+[plans."Blue Tron".out]
+
+[plans."Blue Tron".in]

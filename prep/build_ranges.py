@@ -8,7 +8,7 @@ Rounds are MTGO turn numbers: round N = my turn N and their turn N; the active p
 line comes from the log's "Turn N: player" markers, so a flash threat on my turn is told apart
 from a sorcery-speed one on theirs.
 """
-import collections, json, os, re, sqlite3, sys
+import collections, json, math, os, re, sqlite3, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Opponent deck names in the logs → deck names on the prep page (meta.json).
@@ -19,6 +19,7 @@ ROUNDS = 3          # turn-by-turn tables
 TIMING_ROUNDS = 6   # first-cast histogram; the last bucket is "6 or later"
 MIN_GAMES = 10
 MIN_COND = 5        # games a tell needs before it is reported
+FDR_Q = 0.10        # false-discovery rate for the tells that count as real (see bh)
 SHOWN = ("cast", "land", "activated", "revealed", "discarded", "in_hand", "opening_hand", "exiled", "milled", "boarded_in")
 KEEP_LANDS = {"Wasteland"}
 TARGET_RE = re.compile(r"targeting (.*?)\.(?: \(|$)")
@@ -27,6 +28,19 @@ REF_RE = re.compile(r"@\[([^@]*?)@:[0-9,]*:@\]")
 
 BASIC_COLOR = {"Plains": "W", "Island": "U", "Swamp": "B", "Mountain": "R", "Forest": "G"}
 
+
+def fisher(a, b, c, d):
+    """Two-sided Fisher exact p for the table [[a, b], [c, d]]: tables at least as unlikely as the observed one."""
+    n, r1, c1 = a + b + c + d, a + b, a + c
+    pr = lambda x: math.comb(r1, x) * math.comb(n - r1, c1 - x) / math.comb(n, c1)
+    p0 = pr(a)
+    return min(1.0, sum(pr(x) for x in range(max(0, c1 - (n - r1)), min(r1, c1) + 1) if pr(x) <= p0 * (1 + 1e-9)))
+
+def bh(tests):
+    """Indices into `tests` (p is the last field) that pass Benjamini-Hochberg at FDR_Q."""
+    order = sorted(range(len(tests)), key=lambda i: tests[i][-1])
+    cut = max((r for r, i in enumerate(order, 1) if tests[i][-1] <= r / len(tests) * FDR_Q), default=0)
+    return set(order[:cut])
 
 def classify_land(name, o):
     """(label for land-pattern tells, colours it taps for). Fetches are grouped; their find is not logged."""
@@ -194,20 +208,28 @@ def main():
         for c, k in early_mine.most_common():
             if k >= MIN_COND:
                 conds.append((f"Cast {c} on your turn 1 or 2", [g for g in gids if c in spells(g, 1, True) + spells(g, 2, True)], c))
-        tells = []
+        # Every (condition, card) pair is one Fisher test of the condition's games against the deck's other
+        # games; "sig" is Benjamini-Hochberg at FDR_Q over all pairs tested for this deck, so among a deck's
+        # flagged tells about one in ten is expected to be noise. Rows are still only shifts of 10+ points.
+        tests = []
         for label, sel, own in conds:
             if len(sel) < MIN_COND or len(sel) == n:
                 continue
             own = own if isinstance(own, set) else {own}
-            rows = []
             for c in cards:
                 if c in own:
                     continue
                 k = sum(1 for g in sel if c in shown[g])
-                if abs(k / len(sel) - base[c] / n) >= 0.10:
-                    rows.append([c, k])
-            rows.sort(key=lambda r: -abs(r[1] / len(sel) - base[r[0]] / n))
+                tests.append((label, len(sel), c, k, fisher(k, len(sel) - k, base[c] - k, n - len(sel) - (base[c] - k))))
+        sig = bh(tests)
+        tells, rows_by = [], collections.defaultdict(list)
+        for i, (label, m, c, k, pv) in enumerate(tests):
+            if abs(k / m - base[c] / n) >= 0.10:
+                rows_by[(label, m)].append([c, k, round(pv, 3), i in sig])
+        for label, sel, own in conds:
+            rows = rows_by.get((label, len(sel)))
             if rows:
+                rows.sort(key=lambda r: (not r[3], -abs(r[1] / len(sel) - base[r[0]] / n)))
                 tells.append({"cond": label, "n": len(sel), "cards": rows})
         d["tells"] = tells
 

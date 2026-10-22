@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Build prep/meta.json for the EW prep page from cached Challenge top-32 lists.
+"""Build prep/meta.json for the EW prep page from the published Challenge top-32 lists.
 
 Usage: build_meta.py [DAYS=28]
-Reads ../challenge_cache/legacy-challenge-32-*.html (+ decks/<id>.txt from
-fetch_decklists.py) for the last DAYS days. Card text comes from Scryfall,
-cached in card_cache.json so a refresh only asks for new cards.
+Reads the stats site's LDC cache (.pooled/ldc/pages/<id>.json + lists/<id>.txt,
+rsynced by refresh.sh; the site's daily ldc-sync keeps it current) for the last
+DAYS days. Card text comes from Scryfall, cached in card_cache.json so a refresh
+only asks for new cards.
 """
 import collections, datetime, glob, json, os, re, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CACHE = os.path.join(HERE, "..", "challenge_cache")
+LDC = os.path.join(HERE, ".pooled", "ldc")
 CARD_CACHE = os.path.join(HERE, "card_cache.json")
 MY_LISTS = os.path.join(HERE, "my_lists.json")
 
@@ -66,15 +67,18 @@ def moved(p1, p2, n1, n2):
     return se > 0 and abs(p2 - p1) / se >= 2
 
 def events(since):
-    row = re.compile(r"tournament-decklist-(?:odd|event)[^>]*>.*?<td[^>]*>\s*(\w+)\s*</td>.*?"
-                     r'<a href="/deck/(\d+)">([^<]+)</a>.*?<a href="/player/([^"]+)"', re.S)
-    for path in sorted(glob.glob(os.path.join(CACHE, "legacy-challenge-32-*.html"))):
-        m = re.search(r"(\d{4}-\d{2}-\d{2})(-1)?\.html$", path)
-        if not m or m.group(1) < since:
+    """(label, [(placement, goldfish deck id, goldfish deck name, player)]) per Challenge page since
+    `since`. Placement is the page's row order. Goldfish republishes some events under a second
+    id ("... (1)") with fresh deck ids but the same players in the same order, so the player
+    sequence identifies an event."""
+    pages = [json.load(open(p)) for p in glob.glob(os.path.join(LDC, "pages", "*.json"))]
+    seen = set()
+    for p in sorted(pages, key=lambda p: (p["date"], p["id"])):
+        players = tuple(r[2] for r in p["rows"])
+        if p["date"] < since or "Challenge" not in p["name"] or players in seen:
             continue
-        rows = row.findall(open(path).read())
-        if rows:
-            yield m.group(1) + (m.group(2) or ""), rows
+        seen.add(players)
+        yield f'{p["date"]} {p["name"]}', [(i, *r) for i, r in enumerate(p["rows"], 1)]
 
 def scryfall(names):
     cache = json.load(open(CARD_CACHE)) if os.path.exists(CARD_CACHE) else {}
@@ -107,12 +111,12 @@ def main():
     for ev, rows in events(since):
         ev_list.append(ev)
         for pos, did, gname, player in rows:
-            path = os.path.join(CACHE, "decks", f"{did}.txt")
+            path = os.path.join(LDC, "lists", f"{did}.txt")
             if not os.path.exists(path):
                 missing += 1
                 continue
             main, side = parse_list(open(path).read())
-            decks.append({"date": ev[:10], "pos": int(re.match(r"\d+", pos).group()), "player": player,
+            decks.append({"date": ev[:10], "pos": pos, "player": player,
                           "deck": deck_name(gname.strip(), main), "goldfish": gname.strip(),
                           "main": main, "side": side, "id": did})
 
