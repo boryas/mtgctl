@@ -101,6 +101,7 @@ pub const DDL: &[&str] = &[
         match_db_id INTEGER,                -- linked mtgo_matches.id
         event_kind TEXT,                    -- e.g. League / Tournament / Constructed (from the duel-scene line)
         event_name TEXT                     -- 'League' or the tournament name ('Legacy Challenge 32')
+        -- format TEXT: the play format, see format_name (added in ensure_schema)
     )",
     "CREATE TABLE IF NOT EXISTS mtgo_cards (
         catalog_id INTEGER PRIMARY KEY,
@@ -149,6 +150,42 @@ struct DeckUsed {
     event_kind: Option<String>,
     /// "League", or the tournament's name ("Legacy Challenge 32"), from the session log
     event_name: Option<String>,
+    /// the event's play format, see `format_name`; from its description when the extract predates
+    /// the `PlayFormatCd=` line (2026-11-13)
+    format: Option<String>,
+}
+
+/// The format MTGO's `PlayFormatCd=` names ("CLEGACY", "Legacy", "CVINTAGE", ...); an unknown
+/// code is kept as it is.
+pub fn format_name(code: &str) -> String {
+    match code.trim().to_ascii_uppercase().as_str() {
+        "CLEGACY" | "LEGACY" => "Legacy",
+        "CVINTAGE" | "VINTAGE" => "Vintage",
+        "CMODERN" | "MODERN" => "Modern",
+        "CPAUPER" | "PAUPER" => "Pauper",
+        "CPREMODERN" | "PREMODERN" => "Premodern",
+        "CSTANDARD" | "STANDARD" => "Standard",
+        "CPIONEER" | "PIONEER" => "Pioneer",
+        "CCMDR" | "CCMDRDUEL" => "Commander",
+        "CFREEFORM" => "Freeform",
+        "CMOMIR" => "Momir",
+        _ => return code.trim().to_string(),
+    }
+    .to_string()
+}
+
+/// The format an event's description implies: a league's "with your Legacy deck", a tournament
+/// name's leading format word, or Limited for a cube, draft or sealed event.
+pub fn format_from_text(text: &str) -> Option<String> {
+    static BLURB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"with your ([A-Za-z]+) deck").unwrap());
+    if let Some(m) = BLURB.captures(text) {
+        return Some(format_name(&m[1]));
+    }
+    let first = text.split_whitespace().next().unwrap_or("");
+    if ["Legacy", "Vintage", "Modern", "Pauper", "Premodern", "Standard", "Pioneer", "Commander"].contains(&first) {
+        return Some(first.to_string());
+    }
+    ["Cube", "Draft", "Sealed"].iter().any(|k| text.contains(k)).then(|| "Limited".to_string())
 }
 
 static TS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d\d):(\d\d):(\d\d) ").unwrap());
@@ -204,7 +241,7 @@ pub fn session_extract(text: &str) -> String {
         // substring tests, not the parsing regexes: the collector page applies the same tests, so
         // both sides produce byte-identical extracts for the same raw log
         let keep = line.contains("Deck Used in Game ID:") || line.contains("Game Play Status Update for Game ID:") || line.contains("CreateAndFlipToDuelScene")
-            || line.starts_with("Description=") || line.starts_with("EventId=") || line.contains("Deck Used to Join Event ID:")
+            || line.starts_with("Description=") || line.starts_with("EventId=") || line.starts_with("PlayFormatCd=") || line.contains("Deck Used to Join Event ID:")
             || (hour.is_some() && hour != last_hour);
         if keep {
             out.push_str(line);
@@ -292,7 +329,13 @@ fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
     let mut event_names: HashMap<i64, String> = HashMap::new();
     let mut pending_event_id: Option<i64> = None;
     let mut current_event: Option<String> = None;
+    // the block's PlayFormatCd= follows its Description=, so it overrides the description's guess
+    let mut current_format: Option<String> = None;
     for line in text.lines() {
+        if let Some(code) = line.strip_prefix("PlayFormatCd=") {
+            current_format = Some(format_name(code));
+            continue;
+        }
         if let Some(id) = line.strip_prefix("EventId=").and_then(|s| s.trim().parse::<i64>().ok()) {
             pending_event_id = Some(id);
             continue;
@@ -314,6 +357,10 @@ fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
             } else {
                 Some(desc.to_string())
             };
+            // a league's format is in its blurb, a tournament's in its name
+            if !desc.is_empty() {
+                current_format = format_from_text(desc).or_else(|| current_event.as_deref().and_then(format_from_text));
+            }
             continue;
         }
         let Some(at) = clock.stamp(line) else {
@@ -337,7 +384,7 @@ fn parse_session_log(path: &Path) -> Vec<DeckUsed> {
             if let Some(prev) = out.iter().position(|d| d.game_id == game_id) {
                 out.remove(prev);
             }
-            out.push(DeckUsed { at, game_id, entries, source: name.to_string(), match_id: None, event_kind: None, event_name: current_event.clone() });
+            out.push(DeckUsed { at, game_id, entries, source: name.to_string(), match_id: None, event_kind: None, event_name: current_event.clone(), format: current_format.clone() });
             pending_scene = Some(out.len() - 1);
         }
     }
@@ -631,11 +678,12 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fe
             }
             let ek = d.event_kind.as_deref().map(|e| format!("'{e}'")).unwrap_or("NULL".into());
             let en = d.event_name.as_deref().map(|e| format!("'{}'", e.replace('\'', "''"))).unwrap_or("NULL".into());
+            let fm = d.format.as_deref().map(|e| format!("'{}'", e.replace('\'', "''"))).unwrap_or("NULL".into());
             let mid = d.match_id.map(|m| m.to_string()).unwrap_or("NULL".into());
             diesel::sql_query(format!(
-                "INSERT INTO mtgo_decklists(me, mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind, event_name)
-                 VALUES ({}, {}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek}, {en})
-                 ON CONFLICT(me, mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), event_name = COALESCE(excluded.event_name, mtgo_decklists.event_name), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
+                "INSERT INTO mtgo_decklists(me, mtgo_game_id, mtgo_match_id, seen_at, source_file, list_id, game_db_id, match_db_id, event_kind, event_name, format)
+                 VALUES ({}, {}, {mid}, '{seen_at}', '{}', {list_id}, {}, {}, {ek}, {en}, {fm})
+                 ON CONFLICT(me, mtgo_game_id) DO UPDATE SET list_id = excluded.list_id, game_db_id = excluded.game_db_id, match_db_id = excluded.match_db_id, event_kind = COALESCE(excluded.event_kind, mtgo_decklists.event_kind), event_name = COALESCE(excluded.event_name, mtgo_decklists.event_name), format = COALESCE(excluded.format, mtgo_decklists.format), mtgo_match_id = COALESCE(excluded.mtgo_match_id, mtgo_decklists.mtgo_match_id)",
                 sq(me), d.game_id, d.source.replace('\'', "''"),
                 game_db_id.map(|x| x.to_string()).unwrap_or("NULL".into()), match_db_id.map(|x| x.to_string()).unwrap_or("NULL".into())
             ))
@@ -645,6 +693,9 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fe
             }
             if let (Some(mid), Some(_)) = (match_db_id, d.event_name.as_deref()) {
                 diesel::sql_query(format!("UPDATE mtgo_matches SET event_name = {en} WHERE id = {mid}")).execute(conn)?;
+            }
+            if let (Some(mid), Some(_)) = (match_db_id, d.format.as_deref()) {
+                diesel::sql_query(format!("UPDATE mtgo_matches SET format = {fm} WHERE id = {mid}")).execute(conn)?;
             }
         }
         // match-level list = the list of its earliest linked game (the registered list)
@@ -835,4 +886,29 @@ pub fn print_list(conn: &mut SqliteConnection, id: i32, diff: Option<i32>) -> Qu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn play_format_codes_and_event_descriptions_name_the_format() {
+        assert_eq!(format_name("CLEGACY"), "Legacy");
+        assert_eq!(format_name("Legacy"), "Legacy");
+        assert_eq!(format_name("CVINTAGE"), "Vintage");
+        assert_eq!(format_name("S6FRA"), "S6FRA");
+        assert_eq!(format_from_text("Play up to 5 rounds with your Vintage deck - on your schedule!").as_deref(), Some("Vintage"));
+        assert_eq!(format_from_text("Legacy Challenge 32").as_deref(), Some("Legacy"));
+        assert_eq!(format_from_text("Vintage Cube x3").as_deref(), Some("Vintage"));
+        assert_eq!(format_from_text("Chaos Draft").as_deref(), Some("Limited"));
+        assert_eq!(format_from_text("Bracket 2"), None);
+    }
+
+    #[test]
+    fn the_extract_keeps_the_play_format_line() {
+        let raw = "12:00:00 [INF] x\nEventId=11321\nDescription=Play up to 5 rounds with your Legacy deck\nPlayFormatCd=Legacy\nGameStructureCd= Legacy\n";
+        let e = session_extract(raw);
+        assert!(e.contains("PlayFormatCd=Legacy\n") && !e.contains("GameStructureCd"));
+    }
 }

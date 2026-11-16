@@ -247,6 +247,29 @@ pub fn remove(conn: &mut SqliteConnection, id: i32) -> QueryResult<usize> {
 }
 
 #[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    fn reference(id: i32, era: &str, cards: &[(&str, i32)]) -> RefList {
+        RefList { id, archetype: "A".into(), deck: format!("deck{id}"), era: era.into(), main: cards.iter().map(|(n, q)| (n.to_string(), *q)).collect(), side: BTreeMap::new(), colors: String::new() }
+    }
+    #[test]
+    fn a_match_is_scored_against_the_set_of_the_last_seeded_era_begun_by_its_date() {
+        let mut refs = vec![reference(1, "2026-04-21", &[("Swamp", 60)])];
+        refs.extend((2..12).map(|i| reference(i, "2026-08-11", &[("Island", 60)])));
+        refs.extend((12..15).map(|i| reference(i, "2026-09-29", &[("Forest", 60)])));
+        let mut r = References { refs, produces: Default::default(), fetches: Default::default(), lands: Default::default(), eras: vec![], bg: Background::default(), all_cards: vec![], pools: Default::default(), max_copies: Default::default(), snapshots: vec![] };
+        r.prepare();
+        r.snapshot();
+        assert_eq!(r.snapshots.iter().map(|(s, x)| (s.as_str(), x.refs.len())).collect::<Vec<_>>(), vec![("2026-08-11", 11), ("2026-09-29", 14)]);
+        assert_eq!(r.at("2026-02-01").refs.len(), 11);
+        assert_eq!(r.at("2026-09-28").refs.len(), 11);
+        assert_eq!(r.at("2026-09-29").refs.len(), 14);
+        assert_eq!(r.snapshot_index("2026-11-01"), Some(1));
+        assert!(r.at("2026-10-01").snapshots.is_empty() && r.at("2026-10-01").all_cards.len() == 14);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -312,9 +335,56 @@ pub struct References {
     pub pools: std::collections::HashMap<String, (BTreeMap<String, i32>, BTreeMap<String, i32>)>,
     /// the most copies of a card any reference runs, main and side together, when above four
     pub max_copies: std::collections::HashMap<String, i32>,
+    /// (era start, the references of that era and every earlier one, prepared) for each seeded
+    /// era, ascending; empty on a snapshot itself and on `with_lists`. See `at`.
+    pub snapshots: Vec<(String, Box<References>)>,
 }
 
+/// References an era's cumulative set needs to score matches on its own. Below it the set is a
+/// stray early list (4c DD of 2026-04-25, Cradle Control of 2026-07-25) that joins the next era's.
+pub const SEEDED_MIN: usize = 10;
+
 impl References {
+    /// The references a match played on `date` is scored against: the set of the last seeded era
+    /// begun by then, so a later era's references never relabel earlier matches. Matches before the
+    /// first seeded era take its set (notes 2026-09-23: "Jan/Feb matches vs current-era anchors").
+    pub fn at(&self, date: &str) -> &References {
+        match self.snapshot_index(date) {
+            Some(i) => &self.snapshots[i].1,
+            None => self,
+        }
+    }
+    /// Index into `snapshots` of the set `at` picks; None when there are no snapshots.
+    pub fn snapshot_index(&self, date: &str) -> Option<usize> {
+        (!self.snapshots.is_empty()).then(|| self.snapshots.iter().rposition(|(start, _)| start.as_str() <= date).unwrap_or(0))
+    }
+    /// `with_lists` per snapshot, in `snapshots` order; one entry for a set without snapshots.
+    pub fn with_lists_all(&self, lists: &[PlayerList]) -> Vec<References> {
+        if self.snapshots.is_empty() {
+            vec![self.with_lists(lists)]
+        } else {
+            self.snapshots.iter().map(|(_, x)| x.with_lists(lists)).collect()
+        }
+    }
+    fn bare(refs: Vec<RefList>, from: &References) -> References {
+        References { refs, produces: from.produces.clone(), fetches: from.fetches.clone(), lands: from.lands.clone(), eras: from.eras.clone(), bg: Background::default(), all_cards: vec![], pools: Default::default(), max_copies: Default::default(), snapshots: vec![] }
+    }
+    /// Build `snapshots` from `refs` (see `at`); call on the full set after `prepare`.
+    pub fn snapshot(&mut self) {
+        let mut starts: Vec<String> = self.refs.iter().map(|x| x.era.clone()).collect();
+        starts.sort();
+        starts.dedup();
+        self.snapshots.clear();
+        for start in starts {
+            let refs: Vec<RefList> = self.refs.iter().filter(|x| x.era <= start).cloned().collect();
+            if refs.len() < SEEDED_MIN {
+                continue;
+            }
+            let mut snap = References::bare(refs, self);
+            snap.prepare();
+            self.snapshots.push((start, Box::new(snap)));
+        }
+    }
     /// Derive the scoring tables from `refs`; call after any change to `refs`.
     pub fn prepare(&mut self) {
         self.bg = Background::new(&self.refs);
@@ -366,7 +436,7 @@ impl References {
     }
     /// The references plus the player's registered lists as extra hypotheses (see `player_lists`).
     pub fn with_lists(&self, lists: &[PlayerList]) -> References {
-        let mut r = References { refs: self.refs.clone(), produces: self.produces.clone(), fetches: self.fetches.clone(), lands: self.lands.clone(), eras: vec![], bg: Background::default(), all_cards: vec![], pools: Default::default(), max_copies: Default::default() };
+        let mut r = References::bare(self.refs.clone(), self);
         r.refs.extend(lists.iter().map(|l| l.list.clone()));
         r.prepare();
         r
@@ -387,8 +457,9 @@ pub fn load_references(conn: &mut SqliteConnection, eras: &[(String, String)]) -
         let (main, side) = (canon(&main, &fetches), canon(&side, &fetches));
         refs.push(RefList { id: r.id, archetype: r.archetype, deck: r.deck, era: r.era_start.unwrap_or_default(), main, side, colors });
     }
-    let mut r = References { refs, produces, fetches, lands, eras: eras.to_vec(), bg: Background::default(), all_cards: vec![], pools: Default::default(), max_copies: Default::default() };
+    let mut r = References { refs, produces, fetches, lands, eras: eras.to_vec(), bg: Background::default(), all_cards: vec![], pools: Default::default(), max_copies: Default::default(), snapshots: vec![] };
     r.prepare();
+    r.snapshot();
     Ok(r)
 }
 
@@ -563,7 +634,23 @@ pub fn canon(cards: &BTreeMap<String, i32>, fetches: &Fetches) -> BTreeMap<Strin
 fn ensure_facts(conn: &mut SqliteConnection) -> QueryResult<()> {
     diesel::sql_query(FACTS_DDL).execute(conn)?;
     let _ = diesel::sql_query("ALTER TABLE card_facts ADD COLUMN fetch BOOLEAN NOT NULL DEFAULT 0").execute(conn);
+    let _ = diesel::sql_query("ALTER TABLE card_facts ADD COLUMN legacy TEXT NOT NULL DEFAULT ''").execute(conn);
     Ok(())
+}
+
+/// name → Legacy legality for every card Scryfall does not call legal (`banned` | `not_legal` |
+/// `restricted`), as of the last `cards-import`; the timeline dates the bans (see legality::markers).
+pub fn load_legacy_illegal(conn: &mut SqliteConnection) -> QueryResult<std::collections::HashMap<String, String>> {
+    ensure_facts(conn)?;
+    #[derive(QueryableByName)]
+    struct R {
+        #[diesel(sql_type = Text)]
+        name: String,
+        #[diesel(sql_type = Text)]
+        legacy: String,
+    }
+    let rows: Vec<R> = diesel::sql_query("SELECT name, legacy FROM card_facts WHERE legacy NOT IN ('', 'legal')").load(conn)?;
+    Ok(rows.into_iter().map(|r| (r.name, r.legacy)).collect())
 }
 
 pub fn load_lands(conn: &mut SqliteConnection) -> QueryResult<Fetches> {
@@ -588,7 +675,7 @@ pub fn load_fetches(conn: &mut SqliteConnection) -> QueryResult<Fetches> {
     Ok(rows.into_iter().map(|r| r.name).collect())
 }
 
-/// Load `card_colors.json` (name → {c, p, land}, written by fetch_scryfall.py) into the shared db.
+/// Load `card_colors.json` (name → {c, p, land, f, l}, written by deploy/fetch_scryfall.py) into the shared db.
 pub fn import_card_facts(conn: &mut SqliteConnection, path: &std::path::Path) -> Result<usize, String> {
     ensure_facts(conn).map_err(|e| e.to_string())?;
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -601,7 +688,8 @@ pub fn import_card_facts(conn: &mut SqliteConnection, path: &std::path::Path) ->
             let p = f.get("p").and_then(|x| x.as_str()).unwrap_or("");
             let land = f.get("land").and_then(|x| x.as_bool()).unwrap_or(false);
             let fetch = f.get("f").and_then(|x| x.as_bool()).unwrap_or(false);
-            diesel::sql_query(format!("INSERT OR REPLACE INTO card_facts(name, colors, produces, land, fetch) VALUES ({}, {}, {}, {}, {})", q(name), q(c), q(p), land as i32, fetch as i32)).execute(conn)?;
+            let legacy = f.get("l").and_then(|x| x.as_str()).unwrap_or("");
+            diesel::sql_query(format!("INSERT OR REPLACE INTO card_facts(name, colors, produces, land, fetch, legacy) VALUES ({}, {}, {}, {}, {}, {})", q(name), q(c), q(p), land as i32, fetch as i32, q(legacy))).execute(conn)?;
             n += 1;
         }
         Ok(())
@@ -994,9 +1082,10 @@ pub fn pool_runs(matches: &[(i32, String)], games: &std::collections::HashMap<i3
         }
     }
     let mut pooled = std::collections::HashMap::new();
-    let sc: std::collections::HashMap<i32, Vec<(f64, f64)>> = games.iter().map(|(id, gs)| (*id, scores(gs, refs))).collect();
+    let sc: std::collections::HashMap<i32, Vec<(f64, f64)>> = matches.iter().filter(|(id, _)| games.contains_key(id)).map(|(id, date)| (*id, scores(&games[id], refs.at(date)))).collect();
     let add = |a: &[(f64, f64)], b: &[(f64, f64)]| -> Vec<(f64, f64)> { a.iter().zip(b).map(|(x, y)| (x.0 + y.0, x.1 + y.1)).collect() };
-    for ids in days.values_mut() {
+    for (date, ids) in days.iter_mut() {
+        let refs = refs.at(date);
         ids.sort();
         let (mut run, mut acc, mut acc_sc): (Vec<i32>, Vec<GameSeen>, Vec<(f64, f64)>) = (vec![], vec![], vec![]);
         for id in ids.iter() {
@@ -1131,8 +1220,9 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References, me: &str) -
     let t = std::time::Instant::now();
     let mut mine = games_by_match(conn, "me", &refs.fetches, me)?;
     let mut opp = games_by_match(conn, "opp", &refs.fetches, me)?;
-    for gs in mine.values_mut().chain(opp.values_mut()) {
-        cap_revealed(gs, refs);
+    let date_of: std::collections::HashMap<i32, &str> = matches.iter().map(|m| (m.id, m.date.as_str())).collect();
+    for (id, gs) in mine.iter_mut().chain(opp.iter_mut()) {
+        cap_revealed(gs, refs.at(date_of.get(id).copied().unwrap_or("")));
     }
     if timing { eprintln!("label: load games {:.1}s", t.elapsed().as_secs_f64()); }
     let t = std::time::Instant::now();
@@ -1141,7 +1231,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References, me: &str) -
     let t = std::time::Instant::now();
     let mut counts = MatchDeckCounts { me_list: 0, me_cards: 0, me_list_inferred: 0, opp_named: 0, opp_archetype_only: 0 };
     let lists = player_lists(conn, &refs.fetches, me)?;
-    let with_lists = refs.with_lists(&lists);
+    let with_lists = refs.with_lists_all(&lists);
     let list_deck: std::collections::HashMap<i32, ListDeckRow> = {
         let rows: Vec<ListDeckRow> = diesel::sql_query("SELECT list_id, deck, archetype, reference_id, colors FROM list_assignments").load(conn)?;
         rows.into_iter().map(|d| (d.list_id, d)).collect()
@@ -1178,7 +1268,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References, me: &str) -
                 counts.me_list += 1;
             } else if let Some((gs, gsc)) = pooled.get(&m.id) {
                 // the list from this match alone: a run pools across version switches a card apart, which the fit test cannot see
-                if let Some((lid, p)) = infer_list(&mine[&m.id], &m.date, &with_lists) {
+                if let Some((lid, p)) = infer_list(&mine[&m.id], &m.date, &with_lists[refs.snapshot_index(&m.date).unwrap_or(0)]) {
                     // the games were played with a registered list: its assigned deck, if it has one
                     let la = list_deck.get(&lid);
                     let deck = la.and_then(|a| a.deck.clone());
@@ -1190,7 +1280,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References, me: &str) -
                     }
                 } else {
                     let n: i32 = gs.iter().map(|g| g.revealed.values().sum::<i32>()).sum();
-                    let i = decide(&revealed_all(gs), n, gsc, gs, refs);
+                    let i = decide(&revealed_all(gs), n, gsc, gs, refs.at(&m.date));
                     ins(conn, m.id, "me", "cards", &i, None)?;
                     if i.deck.is_some() || i.archetype.is_some() {
                         counts.me_cards += 1;
@@ -1198,7 +1288,7 @@ pub fn label_matches(conn: &mut SqliteConnection, refs: &References, me: &str) -
                 }
             }
             if let Some(gs) = opp.get(&m.id) {
-                let i = infer(gs, refs);
+                let i = infer(gs, refs.at(&m.date));
                 ins(conn, m.id, "opp", "cards", &i, None)?;
                 if i.deck.is_some() {
                     counts.opp_named += 1;

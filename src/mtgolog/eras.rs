@@ -181,28 +181,34 @@ pub fn staleness(conn: &mut SqliteConnection, path: &Path, me: &str) -> Result<O
     })
 }
 
-/// Per banned card: (effective date, card, games it was played in before, games on or after). MTGO
-/// applies bans the day they take effect, so any game after means the effective date is wrong.
-pub fn ban_check(conn: &mut SqliteConnection, path: &Path) -> Result<Vec<(String, String, i64, i64)>, String> {
+/// Per banned card: (effective date, card, games it was played in before, games on or after in
+/// matches the session log calls Legacy, games on or after elsewhere). MTGO applies bans the day
+/// they take effect, so a Legacy game after means the effective date is wrong; the others are
+/// another format's (legality::stamp marks them).
+pub fn ban_check(conn: &mut SqliteConnection, path: &Path) -> Result<Vec<(String, String, i64, i64, i64)>, String> {
     #[derive(QueryableByName)]
     struct N {
         #[diesel(sql_type = BigInt)]
         before: i64,
         #[diesel(sql_type = BigInt)]
         after: i64,
+        #[diesel(sql_type = BigInt)]
+        elsewhere: i64,
     }
     let mut out = Vec::new();
     for e in load_timeline(path)?.into_iter().filter(|e| !e.banned.is_empty()) {
         for card in &e.banned {
             let n: N = diesel::sql_query(format!(
-                "SELECT COUNT(DISTINCT CASE WHEN m.start_ts < '{d}' THEN c.game_id END) AS before, COUNT(DISTINCT CASE WHEN m.start_ts >= '{d}' THEN c.game_id END) AS after
+                "SELECT COUNT(DISTINCT CASE WHEN m.start_ts < '{d}' THEN c.game_id END) AS before,
+                        COUNT(DISTINCT CASE WHEN m.start_ts >= '{d}' AND m.format = 'Legacy' THEN c.game_id END) AS after,
+                        COUNT(DISTINCT CASE WHEN m.start_ts >= '{d}' AND COALESCE(m.format, '') <> 'Legacy' THEN c.game_id END) AS elsewhere
                  FROM mtgo_card_events c JOIN mtgo_matches m ON m.id = c.match_id WHERE c.verb IN ('cast', 'land') AND c.card = '{}'",
                 card.replace('\'', "''"),
                 d = e.effective
             ))
             .get_result(conn)
             .map_err(|e| e.to_string())?;
-            out.push((e.effective.clone(), card.clone(), n.before, n.after));
+            out.push((e.effective.clone(), card.clone(), n.before, n.after, n.elsewhere));
         }
     }
     Ok(out)

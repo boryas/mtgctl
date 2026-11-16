@@ -1,8 +1,8 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=57"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=58"></head>
 <body>
 <h1>mtgctl · results</h1>
-<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="windows/">windows uploader</a></nav>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="clocks.html">clocks</a><a href="windows/">windows uploader</a></nav>
 <div class="layout">
 <aside class="panels">
   <fieldset class="box" id="pView">
@@ -56,7 +56,7 @@
 </main>
 </div>
 <aside id="preview" hidden></aside>
-<script src="common.js?v=45"></script>
+<script src="common.js?v=46"></script>
 <script>
 // The dataset's column catalog and features come from api/schema (src/mtgolog/dataset.rs): the
 // columns a person can filter or group on, their labels, level, kind and value labels.
@@ -95,13 +95,15 @@ const statValue = (s, a) => a[1] ? a[0] / a[1] : null;
 const offered = ([, s]) => !s.detail || feature('game_details');
 const DEFAULT_STATS = ['matches', 'share', 'mwl', 'mwr'];
 // Columns of the rows view (match rows, and game rows under a per-game filter); the choice is remembered.
-const ROW_COLS = { id: 'id', date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_col: 'opponent colours', opp_seen: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', result: 'result', games: 'games' };
-const GAME_ROW_COLS = { id: 'id', date: 'date', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_col: 'opponent colours', opp_seen: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', game: 'game', pd: 'play/draw', mulls: 'mulligans', turns: 'turns', min: 'minutes', result: 'result', how: 'how it ended' };
+const ROW_COLS = { id: 'id', date: 'date', player: 'player', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_col: 'opponent colours', opp_seen: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', fmt: 'format', result: 'result', games: 'games', note: 'note' };
+const GAME_ROW_COLS = { id: 'id', date: 'date', player: 'player', opponent: 'opponent', opp_arch: 'opponent archetype', opp_cands: 'opponent deck candidates', opp_deck: 'opponent deck', opp_col: 'opponent colours', opp_seen: 'opponent cards seen', my_deck: 'my deck', my_list: 'my list', event: 'event', fmt: 'format', note: 'note', game: 'game', pd: 'play/draw', mulls: 'mulligans', turns: 'turns', min: 'minutes', result: 'result', how: 'how it ended' };
 const ROW_DEFAULT_OFF = new Set(['opp_seen']);
-const TEXT_COLS = new Set(['opponent', 'opp_deck', 'opp_cands', 'opp_arch', 'opp_seen', 'my_deck', 'my_list', 'event']);
+const TEXT_COLS = new Set(['player', 'opponent', 'fmt', 'note', 'opp_deck', 'opp_cands', 'opp_arch', 'opp_seen', 'my_deck', 'my_list', 'event']);
 const seenCell = r => r.opp_seen ? r.opp_seen.split('|').join(', ') : NONE;
 // Deck and archetype are shown only when the inference is sure of them; the candidates are the decks not ruled out, most likely first.
 const NONE = '<span class="muted">—</span>';
+// A cell that can carry a hand mark (marks.rs): the value, underlined when it is the mark, and the pencil that opens the editor.
+const mk = (f, html, marked) => `${marked ? `<span class="marked" title="marked by hand">${html}</span>` : html}<a class="mk" data-mk="${f}" title="mark by hand">✎</a>`;
 const COLOR_NAMES = { W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green' };
 // Why no single deck: no list fits (the archetype's pooled lists may still), or the odds are split; then what the closest list does not run.
 function why(r) {
@@ -118,7 +120,7 @@ const cands = r => {
   return `<span class="muted">${r.opp_deck_candidates.split('|').map((d, i) => ps[i] ? `${d} ${Math.round(ps[i] * 100)}%` : d).join(' · ')}</span>` + why(r);
 };
 function rowCols(game) {
-  const defs = game ? GAME_ROW_COLS : ROW_COLS; const key = game ? 'mtgctl.gamecols' : 'mtgctl.rowcols';
+  const defs = game ? GAME_ROW_COLS : ROW_COLS; const key = game ? 'mtgctl.gamecols2' : 'mtgctl.rowcols2';
   let on = null; try { on = JSON.parse(localStorage.getItem(key)); } catch (e) {}
   const set = new Set(on || Object.keys(defs).filter(c => !ROW_DEFAULT_OFF.has(c)));
   return { defs, key, set };
@@ -936,9 +938,9 @@ function chart(xs, series, stat) {
 // A rows-view column's filter field, raw value (the filter a double-click adds) and sort key
 // (default: the raw value); columns without a field sort only, those without either do neither.
 const ROW_FIELD = {
-  id: [null, r => r.match_id], date: ['date', r => r.date, r => r.start], opponent: ['opponent', r => r.opponent], opp_deck: ['opp_deck', r => r.opp_deck], opp_cands: ['opp_deck_candidates', r => r.opp_deck_candidates],
+  id: [null, r => r.match_id], date: ['date', r => r.date, r => r.start], player: ['player', r => r.player], opponent: ['opponent', r => r.opponent], opp_deck: ['opp_deck', r => r.opp_deck], opp_cands: ['opp_deck_candidates', r => r.opp_deck_candidates],
   opp_arch: ['opp_archetype', r => r.opp_archetype], opp_col: ['opp_colors', r => r.opp_colors], my_deck: ['my_deck', r => r.my_deck], my_list: ['my_list', r => r.my_list],
-  event: ['event_name', r => r.event_name], result: ['match_result', r => r.match_result], game: ['game_number', g => g.game_number],
+  event: ['event_name', r => r.event_name], fmt: ['format', r => r.format], note: [null, r => r.note], result: ['match_result', r => r.match_result], game: ['game_number', g => g.game_number],
   pd: ['on_play', g => g.on_play == null ? null : g.on_play ? '1' : '0'], mulls: ['my_mulligans', g => g.my_mulligans], turns: ['turns', g => g.turns], min: ['minutes', g => g.minutes], how: ['win_by', g => g.win_by],
 };
 const GAME_ROW_FIELD = Object.assign({}, ROW_FIELD, { id: [null, g => g.game_id], result: [null, g => g.winner] });
@@ -967,6 +969,7 @@ function rowTable(out, fetched, cols, defs, cell, fields) {
   rows.forEach((r, i) => { html += `<tr data-i="${i}">` + cols.map(c => `<td data-c="${c}"${TEXT_COLS.has(c) ? ' class="text"' : ''}${fields[c] && fields[c][0] ? ' title="${DBL_TITLE}"' : ''}>${cell[c](r)}</td>`).join('') + '</tr>'; });
   out.innerHTML = '<div class="tabwrap">' + html + '</table></div>'; wireKeys(out);
   out.querySelectorAll('th.sortable').forEach(th => th.onclick = () => { const c = th.dataset.c; rowSort = !rowSort || rowSort.col !== c ? { col: c, dir: 1 } : rowSort.dir > 0 ? { col: c, dir: -1 } : null; rowTable(out, fetched, cols, defs, cell, fields); });
+  out.querySelectorAll('a.mk').forEach(a => a.onclick = e => { e.preventDefault(); e.stopPropagation(); markEditor(a, rows[+a.closest('tr').dataset.i], () => { rowsCache = { url: null, rows: null }; run(); }); });
   out.querySelector('table').ondblclick = e => {
     const td = e.target.closest('td[data-c]'); if (!td) return;
     const fd = fields[td.dataset.c]; if (!fd || !fd[0]) return;
@@ -986,7 +989,8 @@ async function showMatches(seq) {
       if (stale(seq)) return;
       const { defs, set } = rowCols(true);
       const cell = {
-        id: g => g.game_id, date: g => g.date, opponent: g => g.opponent || '', opp_deck: g => g.opp_deck || NONE, opp_cands: cands, opp_arch: g => g.opp_archetype || NONE, opp_col: g => g.opp_colors || NONE, opp_seen: seenCell, my_deck: g => g.my_deck || '<span class="muted">—</span>',
+        id: g => g.game_id, date: g => g.date, player: g => g.player, opponent: g => g.opponent || '', opp_deck: g => mk('opp_deck', g.opp_deck || NONE, g.opp_deck_source === 'mark'), opp_cands: cands, opp_arch: g => g.opp_archetype || NONE, opp_col: g => g.opp_colors || NONE, opp_seen: seenCell, my_deck: g => mk('my_deck', g.my_deck || NONE, g.my_deck_source === 'mark'),
+        fmt: g => mk('format', g.format || NONE, g.format_source === 'mark'), note: g => mk('note', `${g.excluded ? '<span class="muted">excluded</span> ' : ''}${g.note ? esc(g.note) : ''}`, !!g.note),
         my_list: g => g.my_list ? `<a class="key" data-col="my_list" data-val="${g.my_list.replace(/"/g, '&quot;')}" href="lists.html">${g.my_list}</a>` : '<span class="muted">no list</span>', event: g => g.event_name || '',
         game: g => `<span class="g ${g.winner === 'me' ? 'gw' : 'gl'}" data-game="${g.game_id}" title="click for the log">${g.game_number}</span>${replayLink(g.game_id)}`, pd: g => g.on_play == null ? '' : g.on_play ? 'play' : 'draw', mulls: g => `${g.my_mulligans}/${g.opp_mulligans}`,
         turns: g => g.turns, min: g => g.minutes ?? '', result: g => resultSigil(g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?', ''), how: g => g.win_by || '' };
@@ -1000,9 +1004,10 @@ async function showMatches(seq) {
     const game = g => { const [id, n, pd, m, t, w, by] = g.split(':'); return `<span class="g ${w === 'me' ? 'gw' : 'gl'}" data-game="${id}" title="game ${n}: ${pd}, ${m} mulligan${m === '1' ? '' : 's'}, ${t} turns, ${w === 'me' ? 'won' : 'lost'}${by ? ' by ' + by : ''} — click for the log">${w === 'me' ? 'W' : 'L'}<small>${pd === 'play' ? 'p' : 'd'}${m !== '0' ? 'm' + m : ''}·${t}</small></span>${replayLink(id)}`; };
     const { defs, set } = rowCols(false);
     const cell = {
-      id: r => r.match_id, date: r => r.date, opponent: r => r.opponent || '',
-      opp_deck: r => r.opp_deck || NONE, opp_cands: cands, opp_arch: r => r.opp_archetype || NONE, opp_col: r => r.opp_colors || NONE, opp_seen: seenCell,
-      my_deck: r => r.my_deck ? `${r.my_deck}${r.my_deck_source === 'cards' ? ' <span class="muted">(inferred)</span>' : ''}` : (r.my_archetype ? `<span class="muted">${r.my_archetype} (deck ambiguous)</span>` : '<span class="muted">—</span>'),
+      id: r => r.match_id, date: r => r.date, player: r => r.player, opponent: r => r.opponent || '',
+      opp_deck: r => mk('opp_deck', r.opp_deck || NONE, r.opp_deck_source === 'mark'), opp_cands: cands, opp_arch: r => r.opp_archetype || NONE, opp_col: r => r.opp_colors || NONE, opp_seen: seenCell,
+      my_deck: r => mk('my_deck', r.my_deck ? `${r.my_deck}${r.my_deck_source === 'cards' ? ' <span class="muted">(inferred)</span>' : ''}` : (r.my_archetype ? `<span class="muted">${r.my_archetype} (deck ambiguous)</span>` : NONE), r.my_deck_source === 'mark'),
+      fmt: r => mk('format', r.format || NONE, r.format_source === 'mark'), note: r => mk('note', `${r.excluded ? '<span class="muted">excluded</span> ' : ''}${r.note ? esc(r.note) : ''}`, !!r.note),
       my_list: r => r.my_list ? `<a class="key" data-col="my_list" data-val="${r.my_list.replace(/"/g, '&quot;')}" href="lists.html">${r.my_list}</a>` : `<span class="muted">no list</span>`,
       event: r => r.event_name || '', result: r => resultSigil(r.match_result, ` ${r.my_game_wins}–${r.opp_game_wins}`), games: r => (r.games || '').split('|').filter(Boolean).map(game).join(' ') };
     const cols = Object.keys(defs).filter(c => set.has(c));

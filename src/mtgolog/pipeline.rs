@@ -119,6 +119,9 @@ pub fn sync(conn: &mut SqliteConnection, dir: &PlayerDir, username: &str, refere
     timed(&mut steps, format!("hands: {} games read from session logs, {} with every hand fact known, {} Doomsday piles, {} without snapshots", hs.games, hs.hand_known, hs.pile_known, hs.no_snapshots));
 
     let shared = &mut crate::db::establish_connection_at(&reference.shared_db)?;
+    let markers = super::legality::markers(&super::reference::load_legacy_illegal(shared).map_err(|e| format!("card facts: {e}"))?, &super::eras::load_timeline(&reference.timeline)?);
+    let lg = super::legality::stamp(conn, username, &markers)?;
+    timed(&mut steps, format!("format: {} matches named by the session log, {} not Legacy", lg.session, lg.not_legacy));
     let eras = super::eras::eras_from_file(&reference.timeline)?;
     let refs = super::reference::load_references(shared, &eras).map_err(|e| format!("references: {e}"))?;
     let assigned = super::reference::assign_player(conn, &refs, username).map_err(|e| format!("assign: {e}"))?;
@@ -126,6 +129,8 @@ pub fn sync(conn: &mut SqliteConnection, dir: &PlayerDir, username: &str, refere
     timed(&mut steps, format!("decks: {lists_assigned} of {} lists named by {} reference decklists", assigned.len(), refs.refs.len()));
     let md = super::reference::label_matches(conn, &refs, username).map_err(|e| format!("match decks: {e}"))?;
     timed(&mut steps, format!("match decks: mine from list {}, from cards {} ({} placed on a registered list); opponents named {}, archetype only {}", md.me_list, md.me_cards, md.me_list_inferred, md.opp_named, md.opp_archetype_only));
+    let mk = super::marks::apply(conn, reference.shared_db.parent().unwrap_or(Path::new(".")), Some(username))?;
+    timed(&mut steps, format!("marks: {mk} by hand applied"));
 
 
     Ok(SyncReport { imported: st.matches, refreshed: st.refreshed, skipped: st.skipped, in_progress: st.in_progress, failed: st.failed, lists: dl.lists, linked_games: dl.linked, lists_assigned, steps })

@@ -41,7 +41,7 @@ def session_extract(path):
         for line in f:
             line = line.rstrip('\r\n')
             hour = line[:2] if len(line) >= 9 and line[2] == ':' and line[5] == ':' and line[8] == ' ' else None
-            if any(k in line for k in KEEP) or line.startswith('Description=') or line.startswith('EventId=') or (hour and hour != last): out.append(line)
+            if any(k in line for k in KEEP) or line.startswith('Description=') or line.startswith('EventId=') or line.startswith('PlayFormatCd=') or (hour and hour != last): out.append(line)
             if hour: last = hour
     return gzip.compress(('\n'.join(out) + '\n').encode())
 

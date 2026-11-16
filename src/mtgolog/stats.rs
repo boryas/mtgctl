@@ -37,7 +37,9 @@ SELECT
     WHEN m.event_name IS NULL THEN NULL
     ELSE 'Other'
   END                 AS event_type,
-  m.format            AS format,
+  COALESCE(mkf.value, m.format) AS format,
+  CASE WHEN mkf.value IS NOT NULL THEN 'mark' WHEN m.format IS NOT NULL THEN 'session' END AS format_source,
+  CASE WHEN mkf.value IS NOT NULL THEN mkf.value = 'Legacy' ELSE m.legacy END AS legacy,
   md.colors           AS my_colors,
   od.colors           AS opp_colors,
   md.reference_id     AS my_reference_id,
@@ -46,13 +48,14 @@ SELECT
   COALESCE(m.my_list_id, md.list_id) AS my_list_id,
   CASE WHEN m.my_list_id IS NOT NULL THEN 1 ELSE 0 END AS has_decklist,
   COALESCE(li.name, li.auto_name, CASE WHEN li.id IS NOT NULL THEN 'list#' || li.id END) AS my_list,
-  md.deck             AS my_deck,
-  md.archetype        AS my_archetype,
-  md.source           AS my_deck_source,
-  CASE WHEN md.source = 'list' AND md.deck IS NOT NULL THEN 'hard' WHEN md.deck IS NOT NULL OR md.archetype IS NOT NULL THEN 'inferred' ELSE 'none' END AS my_deck_grade,
+  COALESCE(mkm.value, md.deck) AS my_deck,
+  COALESCE(mkm.extra, md.archetype) AS my_archetype,
+  CASE WHEN mkm.value IS NOT NULL THEN 'mark' ELSE md.source END AS my_deck_source,
+  CASE WHEN mkm.value IS NOT NULL THEN 'mark' WHEN md.source = 'list' AND md.deck IS NOT NULL THEN 'hard' WHEN md.deck IS NOT NULL OR md.archetype IS NOT NULL THEN 'inferred' ELSE 'none' END AS my_deck_grade,
   CASE WHEN la.deck IS NOT NULL THEN 1 ELSE 0 END AS my_deck_known,
-  od.deck             AS opp_deck,
-  od.archetype        AS opp_archetype,
+  COALESCE(mko.value, od.deck) AS opp_deck,
+  COALESCE(mko.extra, od.archetype) AS opp_archetype,
+  CASE WHEN mko.value IS NOT NULL THEN 'mark' WHEN od.deck IS NOT NULL THEN 'cards' END AS opp_deck_source,
   od.candidates       AS opp_deck_candidates,
   od.candidate_posteriors AS opp_candidate_posteriors,
   od.posterior        AS opp_posterior,
@@ -61,6 +64,8 @@ SELECT
   od.misfit           AS opp_misfit,
   od.seen             AS opp_seen,
   COALESCE(li.experimental, 0) AS my_experimental,
+  mkn.value           AS note,
+  CASE WHEN mkx.value IS NOT NULL THEN 1 ELSE 0 END AS excluded,
   g.list_id           AS game_list_id,
   dl.event_kind       AS event_kind,
   g.game_number       AS game_number,
@@ -92,6 +97,11 @@ LEFT JOIN match_decks od ON od.match_id = m.id AND od.side = 'opp'
 LEFT JOIN mtgo_lists li ON li.id = COALESCE(m.my_list_id, md.list_id)
 LEFT JOIN list_assignments la ON la.list_id = COALESCE(m.my_list_id, md.list_id)
 LEFT JOIN mtgo_decklists dl ON dl.game_db_id = g.id
+LEFT JOIN match_marks mko ON mko.me = m.me AND mko.guid = m.guid AND mko.field = 'opp_deck'
+LEFT JOIN match_marks mkm ON mkm.me = m.me AND mkm.guid = m.guid AND mkm.field = 'my_deck'
+LEFT JOIN match_marks mkf ON mkf.me = m.me AND mkf.guid = m.guid AND mkf.field = 'format'
+LEFT JOIN match_marks mkn ON mkn.me = m.me AND mkn.guid = m.guid AND mkn.field = 'note'
+LEFT JOIN match_marks mkx ON mkx.me = m.me AND mkx.guid = m.guid AND mkx.field = 'exclude'
 WHERE m.replay = 0";
 
 /// Recreates the view only when its stored SQL differs from VIEW_SQL, so a reader takes no write lock.
@@ -606,7 +616,7 @@ pub fn is_game_mode(ds: &Dataset, q: &StatsQuery) -> bool {
 }
 
 /// Printed with `mtgo columns`.
-pub const COLUMNS_NOTE: &str = "note: my_deck/my_archetype and opp_deck/opp_archetype = the reference deck a registered list is nearest to, or the side's revealed cards fit; my_deck_grade = hard (a registered list, from the client's 'Deck Used' session logs, 2026-08-18 on, named by a reference) | inferred (from the cards played) | none; opp_deck_candidates = the decks not ruled out; my_colors/opp_colors = WUBRG letters the revealed lands (or the list's lands) can make; my_list = the exact registered list; my_experimental = 1 for a throwaway brew.";
+pub const COLUMNS_NOTE: &str = "note: my_deck/my_archetype and opp_deck/opp_archetype = the reference deck a registered list is nearest to, or the side's revealed cards fit; my_deck_grade = hard (a registered list, from the client's 'Deck Used' session logs, 2026-08-18 on, named by a reference) | inferred (from the cards played) | none; opp_deck_candidates = the decks not ruled out; my_colors/opp_colors = WUBRG letters the revealed lands (or the list's lands) can make; my_list = the exact registered list; my_experimental = 1 for a throwaway brew; a hand mark overrides my_deck, opp_deck and format (their sources read 'mark'), note is a hand note and excluded = 1 a match left out by hand.";
 
 pub fn print_columns(src: &mut Source) -> Result<(), String> {
     let cols = src.columns()?;

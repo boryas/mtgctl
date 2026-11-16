@@ -8,7 +8,7 @@
 //! per-game rows of `ldc_game_view` carry a result but no order, play/draw or turns.
 //!
 //! The sheets name decks at the LDC's own grain ("Doomsday"). For the top 32 of each Challenge
-//! mtggoldfish publishes the list, and `ldc_lists` places it on the reference decks the way a
+//! mtgo.com publishes the list, and `ldc_lists` places it on the reference decks the way a
 //! registered list is placed (`reference::assign_one`), which splits the LDC's name further.
 
 use super::dataset::{Column, Dataset, Features, Kind::*, Level::*};
@@ -18,9 +18,6 @@ use diesel::sql_types::Text as SqlText;
 use diesel::sqlite::SqliteConnection;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-
-/// Concurrent goldfish list downloads; one at a time took over two seconds a list.
-const FETCH_WORKERS: usize = 6;
 
 /// The LDC's link-shared "Public Facing Sheets" folders, one per year; no credentials needed.
 const YEAR_FOLDERS: &[(&str, &str)] = &[("2026", "1hcNxR3csKUXx4367-A-CltHlWWQkgO8G")];
@@ -74,7 +71,7 @@ fn sheets_dir(data: &Path) -> PathBuf {
 fn pages_dir(data: &Path) -> PathBuf {
     data.join("ldc").join("pages")
 }
-fn lists_dir(data: &Path) -> PathBuf {
+pub(super) fn lists_dir(data: &Path) -> PathBuf {
     data.join("ldc").join("lists")
 }
 
@@ -123,8 +120,8 @@ const DDL: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS ldc_lists (
         event TEXT NOT NULL,
         player_key TEXT NOT NULL,
-        goldfish_id TEXT NOT NULL,       -- mtggoldfish deck id, the list is <data>/ldc/lists/<id>.txt
-        goldfish_deck TEXT NOT NULL,     -- the name mtggoldfish gives the list
+        goldfish_id TEXT NOT NULL,       -- list id (see Page::rows), the list is <data>/ldc/lists/<id>.txt
+        goldfish_deck TEXT NOT NULL,     -- the name mtggoldfish gave the list; '' for a list from mtgo.com
         n_main INTEGER NOT NULL,
         n_side INTEGER NOT NULL,
         deck TEXT,                       -- see reference::assign_one; NULL when no reference is near enough
@@ -204,13 +201,25 @@ fn ensure_view(conn: &mut SqliteConnection) -> Result<(), String> {
     Ok(())
 }
 
-fn curl(url: &str) -> Result<Vec<u8>, String> {
+pub(super) fn curl(url: &str) -> Result<Vec<u8>, String> {
+    curl_with(url, None)
+}
+
+/// `jar`: a cookie file read and written by the request (mtgo.com's session cookie pins the
+/// backend that answered, see curl_page).
+fn curl_with(url: &str, jar: Option<&Path>) -> Result<Vec<u8>, String> {
     let mut err = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
-        let out = std::process::Command::new("curl").args(["-sSL", "--max-time", "60", "-A", "Mozilla/5.0", url]).output().map_err(|e| format!("curl: {e}"))?;
+        let mut args = vec!["-sSL", "--max-time", "60", "-A", "Mozilla/5.0"];
+        let jar = jar.map(|j| j.to_string_lossy().to_string());
+        if let Some(j) = &jar {
+            args.extend(["-b", j, "-c", j]);
+        }
+        args.push(url);
+        let out = std::process::Command::new("curl").args(&args).output().map_err(|e| format!("curl: {e}"))?;
         if out.status.success() {
             return Ok(out.stdout);
         }
@@ -236,7 +245,7 @@ fn list_folder(id: &str, out: &mut Vec<(String, String)>) -> Result<(), String> 
     Ok(())
 }
 
-fn unescape(s: &str) -> String {
+pub(super) fn unescape(s: &str) -> String {
     s.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">")
 }
 
@@ -294,52 +303,100 @@ fn event_date(name: &str) -> Option<String> {
     Some(format!("{}-{:02}-{:02}", &d[3], d[1].parse::<u32>().ok()?, d[2].parse::<u32>().ok()?))
 }
 
-/// One mtggoldfish tournament page: `<data>/ldc/pages/<id>.json`.
+/// One event's published lists: `<data>/ldc/pages/<id>.json`. From mtgo.com since 2026-11 (`id` =
+/// the MTGO event id, rows in final-rank order, no deck name); before that from mtggoldfish, which
+/// answers list downloads with a browser challenge since 2026-11-07 (`id` = its tournament id,
+/// rows in its order with its deck name).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Page {
     id: String,
     name: String,
-    /// goldfish's date, the event's end in UTC: a Friday-evening Challenge is dated Saturday
+    /// the event's day; goldfish dated a page by the event's end in UTC, so its Friday-evening
+    /// Challenges are dated Saturday
     date: String,
-    /// (goldfish deck id, deck name, player)
+    /// (list id, deck name, player); the list is `<data>/ldc/lists/<list id>.txt`
     rows: Vec<(String, String, String)>,
 }
 
-/// (tournament id, name, date) of every Legacy event goldfish's tournament search lists from
-/// `from` to today, a month per search, 20 rows per result page.
-fn search_tournaments(from: &str) -> Result<Vec<(String, String, String)>, String> {
-    use chrono::Datelike;
-    let today = chrono::Local::now().date_naive();
-    let mut d = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d").map_err(|e| format!("{from}: {e}"))?;
-    let row = regex::Regex::new(r#"(?s)<td>(\d{4}-\d{2}-\d{2})</td>\s*<td>\s*<a href="/tournament/(\d+)">([^<]*)</a>"#).unwrap();
-    let mut out = vec![];
-    while d <= today {
-        let end = chrono::NaiveDate::from_ymd_opt(d.year() + (d.month() == 12) as i32, d.month() % 12 + 1, 1).unwrap().pred_opt().unwrap().min(today);
-        for page in 1.. {
-            let url = format!(
-                "https://www.mtggoldfish.com/tournament_searches/create?commit=Search&tournament_search%5Bdate_range%5D={}+-+{}&tournament_search%5Bformat%5D=legacy&tournament_search%5Bname%5D=&page={page}",
-                d.format("%m%%2F%d%%2F%Y"),
-                end.format("%m%%2F%d%%2F%Y")
-            );
-            let html = String::from_utf8_lossy(&curl(&url)?).to_string();
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let n = out.len();
-            for c in row.captures_iter(&html) {
-                out.push((c[2].to_string(), unescape(c[3].trim()), c[1].to_string()));
-            }
-            if out.len() == n {
-                break;
-            }
-        }
-        d = end.succ_opt().unwrap();
-    }
-    Ok(out)
+/// (slug, date, event id) of every Legacy event but the leagues on mtgo.com's decklist index for
+/// the month; the slug ends in the date followed by the event id, `legacy-challenge-32-2026-11-0312857422`.
+fn month_events(year: i32, month: u32, jar: &Path) -> Result<Vec<(String, String, String)>, String> {
+    Ok(parse_month_index(&curl_page(&format!("https://www.mtgo.com/decklists/{year}/{month:02}"), jar, |h| !parse_month_index(h).is_empty())?))
 }
 
-/// (goldfish deck id, deck name, player) per row of a tournament page.
-fn parse_page(html: &str) -> Vec<(String, String, String)> {
-    let row = regex::Regex::new(r#"(?s)<a href="/deck/(\d+)">([^<]*)</a>.*?<a href="/player/[^"]*">([^<]*)</a>"#).unwrap();
-    row.captures_iter(html).map(|c| (c[1].to_string(), unescape(c[2].trim()), unescape(c[3].trim()))).collect()
+/// `curl` through the cookie `jar`, repeated while `complete` rejects the body. About half of
+/// mtgo.com's backends answer with the page shell and none of the data, or an event without its
+/// lists; its session cookie pins the backend that answered, so a complete answer's cookie is
+/// kept and an incomplete one's thrown away.
+fn curl_page(url: &str, jar: &Path, complete: impl Fn(&str) -> bool) -> Result<String, String> {
+    let mut html = String::new();
+    for attempt in 0..6 {
+        if attempt > 0 {
+            let _ = std::fs::remove_file(jar);
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        html = String::from_utf8_lossy(&curl_with(url, Some(jar))?).to_string();
+        if complete(&html) {
+            break;
+        }
+    }
+    Ok(html)
+}
+
+fn parse_month_index(html: &str) -> Vec<(String, String, String)> {
+    let re = regex::Regex::new(r"decklist/(legacy-[a-z0-9-]*?(\d{4}-\d{2}-\d{2})(\d+))").unwrap();
+    let mut out: Vec<(String, String, String)> = re.captures_iter(html).filter(|c| !c[1].contains("-league-")).map(|c| (c[1].to_string(), c[2].to_string(), c[3].to_string())).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The page's embedded `window.MTGO.decklists.data`: the Page, rows in final-rank order, and each
+/// list's text in the `parse_decklist` format by list id. Only Legacy events (`format` CLEGACY).
+fn parse_event_page(html: &str) -> Result<(Page, Vec<(String, String)>), String> {
+    let at = html.find("window.MTGO.decklists.data").ok_or("no decklist data on the page")?;
+    let rest = &html[at..];
+    let json = &rest[rest.find('{').ok_or("no decklist data on the page")?..];
+    let mut de = serde_json::Deserializer::from_str(json);
+    let v: serde_json::Value = serde::Deserialize::deserialize(&mut de).map_err(|e| format!("decklist data: {e}"))?;
+    // ids are numbers in `decklists` and strings in the rank tables
+    let s = |v: &serde_json::Value| match v {
+        serde_json::Value::String(x) => x.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    };
+    if s(&v["format"]) != "CLEGACY" {
+        return Err(format!("format {:?}", s(&v["format"])));
+    }
+    let mut rank: HashMap<String, i64> = HashMap::new();
+    for key in ["standings", "final_rank"] {
+        for r in v[key].as_array().into_iter().flatten() {
+            if let Ok(n) = s(&r["rank"]).parse::<i64>() {
+                rank.insert(s(&r["loginid"]), n);
+            }
+        }
+    }
+    let mut rows = vec![];
+    let mut lists = vec![];
+    for d in v["decklists"].as_array().ok_or("no decklists")? {
+        let id = s(&d["decktournamentid"]);
+        let mut text = String::new();
+        for (key, side) in [("main_deck", false), ("sideboard_deck", true)] {
+            let cards: Vec<_> = d[key].as_array().into_iter().flatten().collect();
+            if side && !cards.is_empty() {
+                text.push('\n');
+            }
+            for c in cards {
+                text.push_str(&format!("{} {}\n", s(&c["qty"]), s(&c["card_attributes"]["card_name"])));
+            }
+        }
+        rows.push((rank.get(&s(&d["loginid"])).copied().unwrap_or(i64::MAX), id.clone(), s(&d["player"])));
+        lists.push((id, text));
+    }
+    rows.sort();
+    let date: String = s(&v["starttime"]).chars().take(10).collect();
+    let page = Page { id: s(&v["event_id"]), name: format!("{} {date}", s(&v["description"])), date, rows: rows.into_iter().map(|(_, id, p)| (id, String::new(), p)).collect() };
+    Ok((page, lists))
 }
 
 fn load_pages(data: &Path) -> Result<Vec<Page>, String> {
@@ -355,79 +412,88 @@ fn load_pages(data: &Path) -> Result<Vec<Page>, String> {
     Ok(pages)
 }
 
-/// Downloads the published lists of the events the sheets cover: the page of every Legacy
-/// Challenge, qualifier or last-chance event goldfish lists from the first sheet (or a week
-/// before the newest page) to today, to `<data>/ldc/pages/<id>.json`, and each list to
-/// `<data>/ldc/lists/<id>.txt`. Which sheet a page belongs to is decided at import, see `pair_pages`.
-/// Returns (pages, lists) downloaded.
+/// Downloads the published lists of the events the sheets cover: every Legacy Challenge,
+/// qualifier or last-chance event on mtgo.com's monthly decklist index from a week before the
+/// newest stored page (or the first sheet) to today, the page to `<data>/ldc/pages/<id>.json`
+/// and its lists to `<data>/ldc/lists/<id>.txt`. Which sheet a page belongs to is decided at
+/// import, see `pair_pages`. Returns (pages, lists) downloaded.
 pub fn fetch_lists(data: &Path) -> Result<(usize, usize), String> {
+    use chrono::Datelike;
     let (pages, lists) = (pages_dir(data), lists_dir(data));
     std::fs::create_dir_all(&pages).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&lists).map_err(|e| e.to_string())?;
     let names: BTreeMap<String, String> = std::fs::read_to_string(sheets_dir(data).join("sheets.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-    let stored = load_pages(data)?;
-    let from = match stored.iter().map(|p| p.date.as_str()).max() {
-        Some(d) => (chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|e| e.to_string())? - chrono::Days::new(7)).to_string(),
+    // a page none of whose lists downloaded (goldfish's, after 2026-11-07) does not count as covered
+    let mut stored = load_pages(data)?;
+    stored.retain(|p| p.rows.iter().any(|r| lists.join(format!("{}.txt", r.0)).exists()));
+    let today = chrono::Local::now().date_naive();
+    let mut from = match stored.iter().map(|p| p.date.as_str()).max() {
+        Some(d) => chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|e| e.to_string())? - chrono::Days::new(7),
         None => match names.values().filter_map(|n| event_date(n)).min() {
-            Some(d) => d,
+            Some(d) => chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").map_err(|e| e.to_string())?,
             None => return Ok((0, 0)),
         },
     };
-    let mut np = 0;
-    let mut found = search_tournaments(&from)?;
-    found.retain(|(_, name, _)| ["Challenge", "Qualifier", "Last Chance"].iter().any(|k| name.contains(k)));
-    for (id, name, date) in found {
-        let path = pages.join(format!("{id}.json"));
-        if path.exists() {
-            continue;
+    // a recent sheet no covered page pairs with (its page came back without lists) is fetched again
+    let mut sheets: Vec<(String, String, String, Sheet)> = vec![];
+    for (id, name) in &names {
+        if let Some(date) = event_date(name) {
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") {
+                if d + chrono::Days::new(45) >= today {
+                    if let Ok(sheet) = std::fs::read_to_string(sheets_dir(data).join(format!("{id}.json"))).map_err(|e| e.to_string()).and_then(|t| serde_json::from_str::<Sheet>(&t).map_err(|e| e.to_string())) {
+                        sheets.push((date, id.clone(), name.clone(), sheet));
+                    }
+                }
+            }
         }
-        // a page that fails to download is left to the next sync
-        let html = match curl(&format!("https://www.mtggoldfish.com/tournament/{id}")) {
-            Ok(b) => String::from_utf8_lossy(&b).to_string(),
-            Err(e) => {
-                eprintln!("ldc: {e}");
+    }
+    let paired = pair_pages(&sheets, &stored);
+    for (date, _, name, _) in &sheets {
+        if !paired.contains_key(name) {
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") {
+                from = from.min(d);
+            }
+        }
+    }
+    let (mut np, mut nl) = (0, 0);
+    let jar = data.join("ldc").join("mtgo-cookies.txt");
+    let _ = std::fs::remove_file(&jar);
+    let mut month = from.with_day(1).unwrap();
+    while month <= today {
+        for (slug, date, id) in month_events(month.year(), month.month(), &jar)? {
+            let path = pages.join(format!("{id}.json"));
+            if date < from.to_string() || path.exists() || !["challenge", "qualifier", "last-chance"].iter().any(|k| slug.contains(k)) {
                 continue;
             }
-        };
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let rows = parse_page(&html);
-        if rows.is_empty() {
-            eprintln!("ldc: {name} ({id}): no lists on the page");
-            continue;
-        }
-        std::fs::write(&path, serde_json::to_string(&Page { id, name, date, rows }).unwrap()).map_err(|e| e.to_string())?;
-        np += 1;
-    }
-    // a list is immutable once published; `FETCH_WORKERS` downloads at once, each paced
-    let mut todo: Vec<String> = load_pages(data)?.into_iter().flat_map(|p| p.rows.into_iter().map(|r| r.0)).filter(|id| !lists.join(format!("{id}.txt")).exists()).collect();
-    todo.sort();
-    todo.dedup();
-    let queue = std::sync::Mutex::new(todo);
-    let done = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|sc| {
-        for _ in 0..FETCH_WORKERS {
-            sc.spawn(|| loop {
-                let Some(id) = queue.lock().unwrap().pop() else { break };
-                let path = lists.join(format!("{id}.txt"));
-                let text = match curl(&format!("https://www.mtggoldfish.com/deck/download/{id}")) {
-                    Ok(b) => String::from_utf8_lossy(&b).to_string(),
-                    Err(e) => {
-                        eprintln!("ldc: list {id}: {e}");
-                        continue;
-                    }
-                };
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                if reference::parse_decklist(&text).is_err() {
-                    eprintln!("ldc: list {id}: not a decklist");
+            // a page that fails to download or read is left to the next sync
+            let html = match curl_page(&format!("https://www.mtgo.com/decklist/{slug}"), &jar, |h| parse_event_page(h).is_ok_and(|(p, _)| !p.rows.is_empty())) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("ldc: {e}");
                     continue;
                 }
-                if std::fs::write(&path, text).is_ok() {
-                    done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            };
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let (page, texts) = match parse_event_page(&html) {
+                Ok(x) => x,
+                Err(e) => {
+                    eprintln!("ldc: {slug}: {e}");
+                    continue;
                 }
-            });
+            };
+            for (lid, text) in &texts {
+                let p = lists.join(format!("{lid}.txt"));
+                if !p.exists() {
+                    std::fs::write(&p, text).map_err(|e| e.to_string())?;
+                    nl += 1;
+                }
+            }
+            std::fs::write(&path, serde_json::to_string(&page).unwrap()).map_err(|e| e.to_string())?;
+            np += 1;
         }
-    });
-    let nl = done.into_inner();
+        month = chrono::NaiveDate::from_ymd_opt(month.year() + (month.month() == 12) as i32, month.month() % 12 + 1, 1).unwrap();
+    }
+    let _ = std::fs::remove_file(&jar);
     Ok((np, nl))
 }
 
@@ -597,7 +663,8 @@ fn write_all(conn: &mut SqliteConnection, data: &Path, sheets: &[(String, String
         }
         loaded.push((date.clone(), id.clone(), name.clone(), sheet));
     }
-    let pages = load_pages(data)?;
+    let mut pages = load_pages(data)?;
+    pages.retain(|p| p.rows.iter().any(|r| lists_dir(data).join(format!("{}.txt", r.0)).exists()));
     let paired = pair_pages(&loaded, &pages);
     for (date, id, name, sheet) in &loaded {
         let era = super::eras::era_for(eras, date);
@@ -661,4 +728,47 @@ fn write_lists(conn: &mut SqliteConnection, data: &Path, event: &str, page: &Pag
         out.lists_named += a.deck.is_some() as usize;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn month_index_lists_events_but_not_leagues() {
+        let html = r#"<a href="/decklist/legacy-league-2026-11-0111169">x</a> <a href="/decklist/legacy-challenge-32-2026-11-0312857422">y</a><a href="/decklist/legacy-rc-super-qualifier-2026-11-0812857690">z</a><a href="/decklist/legacy-challenge-32-2026-11-0312857422">y again</a>"#;
+        assert_eq!(
+            parse_month_index(html),
+            vec![("legacy-challenge-32-2026-11-0312857422".into(), "2026-11-03".into(), "12857422".into()), ("legacy-rc-super-qualifier-2026-11-0812857690".into(), "2026-11-08".into(), "12857690".into())]
+        );
+    }
+
+    #[test]
+    fn event_page_rows_in_rank_order_with_list_text() {
+        let html = r#"<script>window.MTGO.decklists.data = {"event_id":12857422,"description":"Legacy Challenge 32","starttime":"2026-11-03 14:00:00.0","format":"CLEGACY","decklists":[{"loginid":1,"decktournamentid":501,"player":"b","main_deck":[{"qty":"4","card_attributes":{"card_name":"Brainstorm"}},{"qty":"1","card_attributes":{"card_name":"Rough/Tumble"}}],"sideboard_deck":[{"qty":"2","card_attributes":{"card_name":"Surgical Extraction"}}]},{"loginid":2,"decktournamentid":502,"player":"a","main_deck":[{"qty":"4","card_attributes":{"card_name":"Ponder"}}],"sideboard_deck":[]}],"final_rank":[{"loginid":"2","rank":"1"},{"loginid":"1","rank":"2"}],"standings":[]};</script>"#;
+        let (page, lists) = parse_event_page(html).unwrap();
+        assert_eq!((page.id.as_str(), page.name.as_str(), page.date.as_str()), ("12857422", "Legacy Challenge 32 2026-11-03", "2026-11-03"));
+        assert_eq!(page.rows, vec![("502".into(), String::new(), "a".into()), ("501".into(), String::new(), "b".into())]);
+        let t = &lists.iter().find(|(id, _)| id == "501").unwrap().1;
+        assert_eq!(t, "4 Brainstorm\n1 Rough/Tumble\n\n2 Surgical Extraction\n");
+        let (main, side) = reference::parse_decklist(t).unwrap();
+        assert_eq!((main["Brainstorm"], side["Surgical Extraction"]), (4, 2));
+        assert_eq!(reference::parse_decklist(&lists[1].1).unwrap().1.len(), 0);
+        assert!(parse_event_page(&html.replace("CLEGACY", "CMODERN")).is_err());
+    }
+
+    /// Needs the network: mtgo.com's month index and an event page still carry their data.
+    #[test]
+    #[ignore]
+    fn mtgo_com_still_serves_decklists() {
+        let jar = std::env::temp_dir().join("mtgctl-test-mtgo-cookies.txt");
+        let ev = month_events(2026, 11, &jar).unwrap();
+        eprintln!("{} events: {ev:?}", ev.len());
+        let (slug, _, _) = ev.iter().find(|(s, _, _)| s.contains("challenge")).expect("a Challenge on the index");
+        let html = curl_page(&format!("https://www.mtgo.com/decklist/{slug}"), &jar, |h| parse_event_page(h).is_ok_and(|(p, _)| !p.rows.is_empty())).unwrap();
+        let _ = std::fs::remove_file(&jar);
+        let (page, lists) = parse_event_page(&html).unwrap();
+        eprintln!("{}: {} rows, {} lists", page.name, page.rows.len(), lists.len());
+        assert!(page.rows.len() >= 8 && lists.len() == page.rows.len());
+    }
 }

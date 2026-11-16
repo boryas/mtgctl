@@ -1,8 +1,8 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl elo</title><link rel="stylesheet" href="style.css?v=45"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl elo</title><link rel="stylesheet" href="style.css?v=46"></head>
 <body>
 <h1>mtgctl · elo</h1>
-<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="windows/">windows uploader</a></nav>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="clocks.html">clocks</a><a href="windows/">windows uploader</a></nav>
 <p class="muted">Bragging rights. Every (pilot, deck) pair in the Legacy Data Collection's Challenge sheets is rated separately, so a pilot on two decks is two entries. Matches replay in order of date and round; all pairings of a round update together. K is 40 for an entry's first 20 matches, 24 after. <b>BT</b> is a Bradley-Terry fit of the same matches on the same scale, ignoring order: when it disagrees with Elo, the entry's recent form differs from its whole record. <b>peak</b> is the highest Elo the entry ever held.</p>
 <div id="ctl">
   <label>min matches <input id="minN" type="number" min="1" value="25" style="width:4em"></label>
@@ -10,7 +10,7 @@
   <span id="meta" class="muted"></span>
 </div>
 <div id="out">…</div>
-<script src="common.js?v=45"></script>
+<script src="common.js?v=46"></script>
 <script>
 (async () => {
   const out = document.getElementById('out'), meta = document.getElementById('meta');

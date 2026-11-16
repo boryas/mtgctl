@@ -4,6 +4,7 @@
 //! See ~/org/projects/mtgctl/mtgo-logs.org for the format notes and roadmap.
 #![allow(dead_code)] // parsed fields are consumed by upcoming analyses
 
+pub mod clocks;
 pub mod dataset;
 pub mod db;
 pub mod decklist;
@@ -14,6 +15,10 @@ pub mod filter;
 pub mod format;
 pub mod hands;
 pub mod ldc;
+pub mod legality;
+pub mod marks;
+pub mod meta;
+pub mod observed;
 pub mod model;
 pub mod picker;
 pub mod pipeline;

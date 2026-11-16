@@ -1,4 +1,4 @@
-# Legacy format timeline 2025-01 .. 2026-08. Sources listed per entry.
+# Legacy format timeline 2025-01 .. 2026-11. Sources listed per entry.
 #
 # SUMMARY (compiled 2026-08-20)
 # - 8 Wizards B&R announcements fell in the window: 2025-03-31, 2025-06-30, 2025-11-10,
@@ -386,3 +386,39 @@ code = "HOC"
 name = "The Hobbit Eternal"
 notes = "Scene Box / non-Standard 'eternal' Hobbit cards (Legacy-legal). MTGO article lists Scene Box cards as included on 2026-08-11."
 source = "https://api.scryfall.com/sets/hoc ; https://www.mtgo.com/news/the-hobbit-on-mtgo"
+
+[[event]]
+date = "2026-10-02"
+effective = "2026-09-29"
+kind = "set"
+code = "FRA"
+name = "Reality Fracture"
+notes = "Standard-legal expansion. MTGO: 'Reality Fracture (set code FRA) debuts on Magic Online next Tuesday, September 29 at 10 a.m.' (set article); 'Reality Fracture Launches Today!' (weekly announcements 2026-09-29)."
+source = "https://api.scryfall.com/sets/fra ; https://www.mtgo.com/news/fra-on-mtgo ; https://www.mtgo.com/news/mtgo092926"
+
+[[event]]
+date = "2026-10-02"
+effective = "2026-09-29"
+kind = "set"
+code = "FRC"
+name = "Reality Fracture Commander"
+notes = "1 Commander deck, 18 new cards (Scryfall e:frc -is:reprint); set article: 'This set has one new Commander deck for you to enjoy (set code FRC)', on MTGO with the main set."
+source = "https://api.scryfall.com/sets/frc ; https://www.mtgo.com/news/fra-on-mtgo"
+
+[[event]]
+date = "2026-11-13"
+effective = "2026-11-10"
+kind = "set"
+code = "TRK"
+name = "Star Trek"
+notes = "Universes Beyond, Standard-legal expansion. MTGO: 'Magic: The Gathering | Star Trek (set code TRK) debuts on Magic Online next Tuesday, November 10 at 10 a.m.' (set article 2026-11-03, repeated in the weekly announcements 2026-11-03 and 2026-11-10)."
+source = "https://api.scryfall.com/sets/trk ; https://www.mtgo.com/news/startrek-on-mtgo-110426 ; https://www.mtgo.com/news/mtgo110326"
+
+[[event]]
+date = "2026-11-13"
+effective = "2026-11-10"
+kind = "set"
+code = "TRC"
+name = "Star Trek Commander"
+notes = "4 Commander decks, 33 new cards each ('over 130 total across the entire set'); set article lists them with the main set (set code TRC)."
+source = "https://api.scryfall.com/sets/trc ; https://www.mtgo.com/news/startrek-on-mtgo-110426"

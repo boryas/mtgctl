@@ -34,13 +34,18 @@ async function playerBar(el, onChange) {
   el.querySelector('#playerSel').onchange = e => { setPlayer(e.target.value); if (onChange) onChange(e.target.value); else location.reload(); };
   return cur;
 }
-// Card images: names are resolved in one Scryfall batch call (75 per request, the per-card
-// `cards/named` route throttles a grid's burst) to CDN image URLs, cached in localStorage.
-const IMG_KEY = 'mtgctl.img';
-let imgCache = null;
-function imgCacheGet() { if (!imgCache) { try { imgCache = JSON.parse(localStorage.getItem(IMG_KEY) || '{}'); } catch (e) { imgCache = {}; } } return imgCache; }
-async function resolveImages(names) {
-  const cache = imgCacheGet();
+// Card facts and images: names are resolved in one Scryfall batch call (75 per request, the per-card
+// `cards/named` route throttles a grid's burst) and cached in localStorage. A card is
+// { img, cost, mv, type, pow, kw, pm, text }: `type` names every face ("Instant // Land"), the
+// rest describe the front face; `pm` is the colours of mana any face makes.
+const CARD_KEY = 'mtgctl.cards';
+let cardCache = null;
+function cardCacheGet() {
+  if (!cardCache) { try { cardCache = JSON.parse(localStorage.getItem(CARD_KEY) || '{}'); localStorage.removeItem('mtgctl.img'); } catch (e) { cardCache = {}; } }
+  return cardCache;
+}
+async function resolveCards(names) {
+  const cache = cardCacheGet();
   const missing = [...new Set(names.filter(n => !cache[n]))];
   for (let i = 0; i < missing.length; i += 75) {
     const chunk = missing.slice(i, i + 75);
@@ -48,13 +53,17 @@ async function resolveImages(names) {
       const r = await fetch('https://api.scryfall.com/cards/collection', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ identifiers: chunk.map(n => ({ name: n.split(' // ')[0] })) }) });
       const d = await r.json();
       for (const c of d.data || []) {
-        const uri = (c.image_uris || (c.card_faces && c.card_faces[0].image_uris) || {}).small;
+        const face = (c.card_faces || [])[0] || {};
         const key = chunk.find(n => n.split(' // ')[0].toLowerCase() === c.name.split(' // ')[0].toLowerCase()) || c.name;
-        if (uri) cache[key] = uri;
+        cache[key] = {
+          img: (c.image_uris || face.image_uris || {}).small, cost: c.mana_cost || face.mana_cost || '', mv: c.cmc || 0, type: c.type_line || '',
+          pow: c.power !== undefined ? c.power : face.power, kw: c.keywords || [], pm: (c.produced_mana || []).join(''),
+          text: (c.oracle_text !== undefined ? c.oracle_text : face.oracle_text || '').slice(0, 700),
+        };
       }
     } catch (e) { report({ error: 'scryfall: ' + e.message }); }
   }
-  try { localStorage.setItem(IMG_KEY, JSON.stringify(cache)); } catch (e) {}
+  try { localStorage.setItem(CARD_KEY, JSON.stringify(cache)); } catch (e) {}
   return cache;
 }
 function cardEl(name, qty, cls = '') {
@@ -66,8 +75,8 @@ function cardEl(name, qty, cls = '') {
 }
 async function loadImages(root) {
   const imgs = [...root.querySelectorAll('img[data-name]')];
-  const cache = await resolveImages(imgs.map(i => i.dataset.name));
-  for (const i of imgs) { const u = cache[i.dataset.name]; if (u) i.src = u; else i.alt = i.dataset.name + ' (no image)'; delete i.dataset.name; }
+  const cache = await resolveCards(imgs.map(i => i.dataset.name));
+  for (const i of imgs) { const u = (cache[i.dataset.name] || {}).img; if (u) i.src = u; else i.alt = i.dataset.name + ' (no image)'; delete i.dataset.name; }
 }
 // Compact text form of a list: "4 Brainstorm, 4 Ponder …" main, then sideboard.
 function listText(cards) {
@@ -75,6 +84,7 @@ function listText(cards) {
   return { main: part(false), side: part(true) };
 }
 function diffText(diff) { return diff.map(([n, sb, a, b]) => `${sb ? 'SB ' : ''}${b > a ? '+' : '−'}${Math.abs(b - a)} ${n}`).join(', '); }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function statsLink(col, val) { return `index.html#${encodeURIComponent(col)}=${encodeURIComponent(val)}`; }
 
 // Every <pre class="copy"> gets a copy button; the block's text goes to the clipboard as is.
@@ -85,3 +95,44 @@ document.addEventListener('DOMContentLoaded', () => {
     b.onclick = async () => { try { await navigator.clipboard.writeText(pre.textContent.trim() + '\n'); b.textContent = 'copied'; } catch (e) { b.textContent = 'select it'; } setTimeout(() => b.textContent = 'copy', 1500); };
   });
 });
+
+// The hand-mark editor (marks.rs): a popover under `anchor` for one field of `row` (a match or
+// game row with match_id, the *_source columns, note and excluded); `onSaved` re-renders.
+const FORMATS = ['Legacy', 'Vintage', 'Modern', 'Pauper', 'Premodern', 'Standard', 'Pioneer', 'Commander', 'Limited', 'Freeform'];
+let DECKS = null;
+function closeMarkEditor() { const e = document.getElementById('markEd'); if (e) e.remove(); }
+async function markEditor(anchor, row, onSaved) {
+  closeMarkEditor();
+  const field = anchor.dataset.mk, id = row.match_id;
+  const sel = v => (v ? ' selected' : '');
+  let inner;
+  if (field === 'opp_deck' || field === 'my_deck') {
+    if (!DECKS) DECKS = await api('api/decks');
+    const groups = {}; DECKS.forEach(d => (groups[d.archetype] = groups[d.archetype] || []).push(d.deck));
+    const cur = row[field + '_source'] === 'mark' ? row[field] : '';
+    inner = `<label>${field === 'opp_deck' ? 'opponent deck' : 'my deck'} <select id="mkVal"><option value="">(no mark: the inferred deck)</option>${Object.keys(groups).sort().map(a => `<optgroup label="${esc(a)}">${groups[a].sort().map(d => `<option${sel(d === cur)}>${esc(d)}</option>`).join('')}</optgroup>`).join('')}</select></label>`;
+  } else if (field === 'format') {
+    const cur = row.format_source === 'mark' ? row.format : '';
+    inner = `<label>format <select id="mkVal"><option value="">(no mark: the session log's, else the card test)</option>${FORMATS.map(f => `<option${sel(f === cur)}>${f}</option>`).join('')}</select></label>`;
+  } else {
+    inner = `<label>note <input id="mkVal" value="${esc(row.note || '')}" size="40"></label>`;
+  }
+  inner += `<label><input type="checkbox" id="mkExcl"${row.excluded ? ' checked' : ''}> exclude this match from the stats</label><div><button id="mkSave">save</button> <button id="mkCancel">cancel</button></div>`;
+  const ed = document.createElement('div'); ed.id = 'markEd'; ed.className = 'box'; ed.innerHTML = inner;
+  document.body.appendChild(ed);
+  const r = anchor.getBoundingClientRect();
+  ed.style.left = `${Math.min(window.scrollX + r.left, window.scrollX + window.innerWidth - ed.offsetWidth - 16)}px`;
+  ed.style.top = `${window.scrollY + r.bottom + 4}px`;
+  ed.querySelector('#mkCancel').onclick = closeMarkEditor;
+  const post = (field, value) => api('api/mark', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ match_id: id, field, value }) });
+  ed.querySelector('#mkSave').onclick = async () => {
+    const v = ed.querySelector('#mkVal').value.trim();
+    const excl = ed.querySelector('#mkExcl').checked;
+    const marked = field === 'note' ? !!row.note : row[field + '_source'] === 'mark';
+    try {
+      if (v || marked) await post(field, v || null);
+      if (excl !== !!row.excluded) await post('exclude', excl ? '1' : null);
+      closeMarkEditor(); onSaved();
+    } catch (e) { alert(e.message); }
+  };
+}

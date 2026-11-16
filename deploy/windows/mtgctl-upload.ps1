@@ -53,7 +53,7 @@ function Session-Extract([string]$path) {
     foreach ($line in [System.IO.File]::ReadLines($path)) {
         $hour = if ($line.Length -ge 9 -and $line[2] -eq ':' -and $line[5] -eq ':' -and $line[8] -eq ' ') { $line.Substring(0, 2) } else { $null }
         if ($line.Contains('Deck Used in Game ID:') -or $line.Contains('Game Play Status Update for Game ID:') -or $line.Contains('CreateAndFlipToDuelScene') `
-            -or $line.StartsWith('Description=') -or $line.StartsWith('EventId=') -or $line.Contains('Deck Used to Join Event ID:') `
+            -or $line.StartsWith('Description=') -or $line.StartsWith('EventId=') -or $line.StartsWith('PlayFormatCd=') -or $line.Contains('Deck Used to Join Event ID:') `
             -or ($hour -and $hour -ne $lastHour)) { $out.Add($line) }
         if ($hour) { $lastHour = $hour }
     }

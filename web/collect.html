@@ -1,8 +1,8 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl upload</title><link rel="stylesheet" href="style.css?v=45"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl upload</title><link rel="stylesheet" href="style.css?v=46"></head>
 <body>
 <h1>mtgctl · add my logs</h1>
-<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="windows/">windows uploader</a></nav>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="clocks.html">clocks</a><a href="windows/">windows uploader</a></nav>
 <div class="box">
   <div class="box"><b>On Windows, skip this page.</b> Open PowerShell (Start menu, type <i>PowerShell</i>) and paste this line:
 <pre class="copy">irm https://bur.io/doomsday/stats/windows/install.ps1 | iex</pre>
@@ -18,7 +18,7 @@ pause</pre> Either way a <i>Play MTGO</i> shortcut lands on the desktop: start t
   <div id="result"></div>
   <p class="muted">Nothing to install and no account: your MTGO username is read from the logs. The page finds your match logs and the client's session log, uploads only what the server does not have yet, and updates your results. Session logs are reduced to the lines that name your registered list before upload.</p>
 </div>
-<script src="common.js?v=45"></script>
+<script src="common.js?v=46"></script>
 <script>
 const status = document.getElementById('status'), prog = document.getElementById('prog'), result = document.getElementById('result'), phase = document.getElementById('phase');
 // Progress: determinate (done/total) while reading and uploading, indeterminate with a clock while the server works.
@@ -59,7 +59,7 @@ function sessionExtract(text) {
     line = line.replace(/\r$/, '');
     const m = /^(\d\d):\d\d:\d\d /.exec(line); const hour = m ? m[1] : null;
     if (line.includes('Deck Used in Game ID:') || line.includes('Game Play Status Update for Game ID:') || line.includes('CreateAndFlipToDuelScene')
-        || line.startsWith('Description=') || line.startsWith('EventId=') || line.includes('Deck Used to Join Event ID:')
+        || line.startsWith('Description=') || line.startsWith('EventId=') || line.startsWith('PlayFormatCd=') || line.includes('Deck Used to Join Event ID:')
         || (hour && hour !== lastHour)) out.push(line);
     if (hour) lastHour = hour;
   }

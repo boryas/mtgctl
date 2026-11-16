@@ -200,11 +200,11 @@ pub struct CountRow {
 }
 
 pub fn ensure_schema(conn: &mut SqliteConnection) -> QueryResult<()> {
-    for stmt in DDL.iter().chain(super::decklist::DDL.iter()).chain([super::reference::ASSIGN_DDL, super::reference::MATCH_DECKS_DDL].iter()) {
+    for stmt in DDL.iter().chain(super::decklist::DDL.iter()).chain([super::reference::ASSIGN_DDL, super::reference::MATCH_DECKS_DDL, super::marks::DDL].iter()) {
         diesel::sql_query(*stmt).execute(conn)?;
     }
     // Columns added after the first release (ALTER if missing).
-    for (table, col, ty) in [("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_games", "my_dd_seq", "INTEGER"), ("mtgo_games", "hands", "INTEGER"), ("mtgo_games", "hand_known", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_games", "pile_known", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_matches", "derived", "INTEGER NOT NULL DEFAULT 0"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT"), ("mtgo_lists", "me", "TEXT"), ("mtgo_decklists", "me", "TEXT")] {
+    for (table, col, ty) in [("mtgo_matches", "legacy", "INTEGER"), ("mtgo_decklists", "format", "TEXT"), ("mtgo_matches", "my_list_id", "INTEGER"), ("mtgo_games", "list_id", "INTEGER"), ("mtgo_games", "my_dd_seq", "INTEGER"), ("mtgo_games", "hands", "INTEGER"), ("mtgo_games", "hand_known", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_games", "pile_known", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_matches", "derived", "INTEGER NOT NULL DEFAULT 0"), ("mtgo_lists", "experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "fork", "TEXT"), ("mtgo_lists", "fork_experimental", "BOOLEAN NOT NULL DEFAULT 0"), ("mtgo_lists", "parent_set", "INTEGER"), ("mtgo_lists", "parent_id", "INTEGER"), ("mtgo_lists", "concept", "TEXT"), ("mtgo_decklists", "event_name", "TEXT"), ("mtgo_lists", "me", "TEXT"), ("mtgo_decklists", "me", "TEXT")] {
         if diesel::sql_query(format!("SELECT {col} FROM {table} LIMIT 0")).execute(conn).is_err() {
             diesel::sql_query(format!("ALTER TABLE {table} ADD COLUMN {col} {ty}")).execute(conn)?;
             if col == "me" {
