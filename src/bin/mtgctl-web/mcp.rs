@@ -15,7 +15,8 @@ Datasets: `mtgo` = uploaded game logs of every team member (one row per game; `p
 Players are MTGO usernames; spelling and case vary, so find one with `values` on `player` (or `opponent`) with op `contains` before filtering on it. \
 A filter is {field, op, not, values}: op `is` (default; values ORed, null = unknown), `contains`, `>=`, `<=`; colours take op `all` | `exact` | `none` with one WUBRG string; `date` takes [from, to]. \
 On `mtgo`, card sentences: {field: my_play | opp_play, verb, values: [card names], other?: [targets], when?: any | before | after (my Doomsday resolved), scope?: game | match, n?: at least n times} and {field: my_list_has | opp_list_has, values: [cards], board?: any | main | side, n?: copies}. \
-Grouping by a game-level column or filtering on one turns a query per game. `stats` returns counts, match and game wins, and averages per group; `matches` and `games` return the rows; `game` returns one game's full event log.";
+Card verbs with `needs` (opening_hand, mulliganed, bottomed, drawn, in_hand, boarded_in, boarded_out: `hand`; pile: `pile`) are the player's own hidden cards, read from their client session log, and hold only in games where `my_hand_known` (`my_pile_known`) = 1; a filter on one adds that condition. \
+Grouping by a game-level column or filtering on one turns a query per game. `stats` returns counts, match and game wins, and averages per group; `matches` and `games` return the rows; `cards` counts card events over a selection (e.g. Forces drawn, cards seen, copies in my deck after sideboarding); `game` returns one game's full event log and, where the session log was uploaded, my hidden cards and my hand after every change.";
 
 fn filter_schema() -> Value {
     json!({
@@ -80,8 +81,20 @@ fn tools() -> Value {
             "inputSchema": {"type": "object", "properties": {"filters": filter_schema(), "limit": limit(500)}}
         },
         {
+            "name": "cards",
+            "description": "mtgo only: card events counted over the games the filters select. `rows`: per side, verb and card, the count `n` and the games with at least one; `totals`: the same per side and verb over every card (e.g. opening_hand + drawn = cards I saw; `drawn` counts every draw, so a card Brainstorm put back and drew again counts twice). Verbs are `describe`'s card_verbs plus `deck`: copies in my main deck for that game after sideboarding (its total is the deck size). My hidden verbs and `deck` count only the `games_hand_known` games, `pile` only games with my pile known. `by_game` gives one row per game instead, for per-game expectations (e.g. hypergeometric: cards seen × copies in deck / deck size).",
+            "inputSchema": {"type": "object", "properties": {
+                "filters": filter_schema(),
+                "verbs": {"type": "array", "items": {"type": "string"}, "description": "verbs to count; none = all"},
+                "cards": {"type": "array", "items": {"type": "string"}, "description": "cards for `rows`; none = every card. `totals` always covers every card"},
+                "side": {"type": "string", "enum": ["me", "opp"], "description": "whose cards; none = both"},
+                "by_game": {"type": "boolean", "description": "one row per game rather than summed over the selection"},
+                "limit": limit(500)
+            }}
+        },
+        {
             "name": "game",
-            "description": "mtgo only: one game's cards played per side and its full event log.",
+            "description": "mtgo only: one game's cards played per side and its full event log. Where the player's session log was uploaded (`hand_known`): `my_cards`, their hidden card events by log `seq` (opening hand, mulligans, bottomed, draws, boarding, Doomsday pile); `my_deck`, their main deck after sideboarding; `my_hand`, their hand after every change, each at the `seq` and turn of the last log line at or before it (so the hand when the opponent cast a spell is the last entry with seq <= that cast's seq).",
             "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}
         },
         {
@@ -204,7 +217,19 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
         "game" => {
             mtgo_only()?;
             let id = a.get("id").and_then(Value::as_i64).ok_or("id required")?;
-            Ok(serde_json::to_value(game_detail(State(st.clone()), q(&[("id", id.to_string())])).await.map_err(api)?.0).unwrap())
+            Ok(serde_json::to_value(game_detail(State(st.clone()), q(&[("id", id.to_string()), ("hands", "1".into())])).await.map_err(api)?.0).unwrap())
+        }
+        "cards" => {
+            mtgo_only()?;
+            let p = CardCountParams {
+                where_sql: wher(&[])?,
+                verbs: Some(arg_strings(a, "verbs").join(",")),
+                cards: Some(serde_json::to_string(&arg_strings(a, "cards")).unwrap()),
+                side: arg_str(a, "side"),
+                by_game: a.get("by_game").and_then(Value::as_bool).unwrap_or(false),
+                limit: a.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize,
+            };
+            Ok(serde_json::to_value(card_counts(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap())
         }
         "lists" | "list" => {
             mtgo_only()?;

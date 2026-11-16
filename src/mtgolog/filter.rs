@@ -50,6 +50,11 @@ pub const VERBS: &[(&str, bool, Option<&str>)] = &[
     ("opening_hand", false, Some("hand")),
     ("mulliganed", false, Some("hand")),
     ("bottomed", false, Some("hand")),
+    ("drawn", false, Some("hand")),
+    ("in_hand", false, Some("hand")),
+    ("boarded_in", false, Some("hand")),
+    ("boarded_out", false, Some("hand")),
+    ("pile", false, Some("pile")),
 ];
 
 /// (requirement, SQL) a filter or group implies, see the page's REQUIRE.
@@ -276,6 +281,9 @@ mod tests {
         assert!(w.ends_with(" AND my_archetype = 'Doomsday'"));
         let w = where_sql(&MTGO, &[e(r#"{"field":"opp_list_has","values":["Wasteland"],"board":"main","n":4}"#)], &[]).unwrap().unwrap();
         assert_eq!(w, "((SELECT COALESCE(SUM(lc.qty), 0) FROM shared.reference_cards lc WHERE lc.reference_id = opp_reference_id AND lc.name = 'Wasteland' AND lc.sideboard = 0) >= 4) AND opp_reference_id IS NOT NULL");
+        let w = where_sql(&MTGO, &[e(r#"{"field":"my_play","verb":"drawn","values":["Force of Will"],"n":2}"#)], &[]).unwrap().unwrap();
+        assert!(w.contains("c.verb = 'drawn'") && w.contains("HAVING COUNT(*) >= 2") && w.ends_with(" AND my_hand_known = 1"));
+        assert!(where_sql(&MTGO, &[e(r#"{"field":"my_play","verb":"pile","values":["Thassa's Oracle"]}"#)], &[]).unwrap().unwrap().ends_with(" AND my_pile_known = 1"));
         assert!(where_sql(&MTGO, &[e(r#"{"field":"nope","values":["x"]}"#)], &[]).is_err());
         assert_eq!(where_sql(&MTGO, &[], &["my_dd_turn".into()]).unwrap().unwrap(), "my_archetype = 'Doomsday'");
     }

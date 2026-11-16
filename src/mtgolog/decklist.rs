@@ -495,6 +495,19 @@ pub fn known_names(conn: &mut SqliteConnection) -> QueryResult<HashMap<i64, Stri
     Ok(map)
 }
 
+/// The name of a catalog id no source could name, in lists and the `unknown` cache rows.
+pub fn placeholder_name(catalog_id: i64) -> String {
+    format!("mtgo#{catalog_id}")
+}
+
+/// Caches names found outside resolve_names (see hands::object_names), over their `unknown` rows.
+pub fn remember_names(conn: &mut SqliteConnection, learned: &BTreeMap<i64, String>) -> QueryResult<()> {
+    for (id, name) in learned {
+        diesel::sql_query(format!("INSERT OR REPLACE INTO mtgo_cards(catalog_id, name, source) VALUES ({id}, {}, 'seen')", sq(name))).execute(conn)?;
+    }
+    Ok(())
+}
+
 /// catalog id → name: cache table, then names seen in imported games, then MTGO's CardDataSource,
 /// then Scryfall (curl). DFC names are normalised to the front face.
 pub fn resolve_names(conn: &mut SqliteConnection, cfg: &MtgoConfig, ids: &BTreeSet<i64>, fetch: bool) -> QueryResult<HashMap<i64, String>> {
@@ -530,7 +543,7 @@ pub fn resolve_names(conn: &mut SqliteConnection, cfg: &MtgoConfig, ids: &BTreeS
                     map.insert(*id, n);
                 }
                 None => {
-                    diesel::sql_query(format!("INSERT OR IGNORE INTO mtgo_cards(catalog_id, name, source) VALUES ({id}, 'mtgo#{id}', 'unknown')")).execute(conn)?;
+                    diesel::sql_query(format!("INSERT OR IGNORE INTO mtgo_cards(catalog_id, name, source) VALUES ({id}, {}, 'unknown')", sq(&placeholder_name(*id)))).execute(conn)?;
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -618,7 +631,7 @@ pub fn run_decklists(conn: &mut SqliteConnection, cfg: &MtgoConfig, me: &str, fe
             // merge printings of the same card: (name, sideboard) → (qty, lowest catalog id)
             let mut merged: BTreeMap<(String, bool), (i64, i64)> = BTreeMap::new();
             for e in &d.entries {
-                let name = names.get(&e.catalog_id).cloned().unwrap_or_else(|| format!("mtgo#{}", e.catalog_id));
+                let name = names.get(&e.catalog_id).cloned().unwrap_or_else(|| placeholder_name(e.catalog_id));
                 let ent = merged.entry((name, e.in_sideboard)).or_insert((0, e.catalog_id));
                 ent.0 += e.quantity;
                 ent.1 = ent.1.min(e.catalog_id);

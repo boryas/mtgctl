@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path;
 
 /// Version of what `derive` writes; bump it when that changes and every sync rewrites older games.
-const HANDS: i32 = 1;
+const HANDS: i32 = 2;
 
 pub const VERBS: &[Verb] = &[Verb::OpeningHand, Verb::Mulliganed, Verb::Bottomed, Verb::Drawn, Verb::InHand, Verb::Pile, Verb::BoardedIn, Verb::BoardedOut];
 
@@ -219,6 +219,18 @@ pub fn derive(g: &GameLog, me: &str, snaps: &[Snapshot], names: &HashMap<i64, St
     Derived { events: out, hand_known: known, pile_known }
 }
 
+/// Names for `list`'s cards that no source in `names` knows (a printing too new for the client
+/// data and Scryfall): a snapshot shows the object's catalog id and the game log names the same
+/// object id. Tokens are never asked for, since only list cards are.
+fn object_names(g: &GameLog, snaps: &[Snapshot], list: &[ListCard], names: &HashMap<i64, String>) -> BTreeMap<i64, String> {
+    let wanted: BTreeSet<i64> = list.iter().filter(|c| c.name == super::decklist::placeholder_name(c.catalog_id) && !names.contains_key(&c.catalog_id)).map(|c| c.catalog_id).collect();
+    if wanted.is_empty() {
+        return BTreeMap::new();
+    }
+    let logged: HashMap<i64, String> = g.events.iter().flat_map(|e| super::event::card_refs(&e.raw)).map(|c| (c.instance_id as i64, c.name)).collect();
+    snaps.iter().flat_map(|s| &s.cards).filter(|c| wanted.contains(&c.catalog_id)).filter_map(|c| Some((c.catalog_id, logged.get(&c.id)?.clone()))).collect()
+}
+
 /// Multiset difference a − b.
 fn minus(a: &BTreeMap<String, i32>, b: &BTreeMap<String, i32>) -> BTreeMap<String, i32> {
     a.iter().filter_map(|(n, &q)| {
@@ -291,27 +303,43 @@ pub fn derive_all(conn: &mut SqliteConnection, cfg: &MtgoConfig, logs: &Path, me
             s.cards.iter().filter(move |c| Some(c.owner) == id).map(|c| c.catalog_id)
         })
         .collect();
-    let names = super::decklist::resolve_names(conn, cfg, &ids, true).map_err(e)?;
+    let mut names = super::decklist::resolve_names(conn, cfg, &ids, true).map_err(e)?;
     // the stored path is where the log was when first imported; the file keeps its name
     let by_name: HashMap<String, std::path::PathBuf> = super::scan::find_game_logs(logs).into_iter().filter_map(|p| Some((p.file_name()?.to_string_lossy().to_string(), p))).collect();
+    let file_of = |t: &Todo| Path::new(&t.path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
     let mut matches: HashMap<String, Option<super::model::MatchLog>> = HashMap::new();
+    let mut lists: HashMap<i32, Vec<ListCard>> = HashMap::new();
+    for t in &todo {
+        matches.entry(file_of(t)).or_insert_with_key(|f| by_name.get(f).and_then(|p| super::format::read_log(p).ok()).map(|raw| super::model::build_match(&raw)));
+        if let Some(l) = t.list_id.filter(|l| !lists.contains_key(l)) {
+            let rows: Vec<ListRow> = diesel::sql_query(format!("SELECT name, catalog_id, qty, sideboard FROM mtgo_list_cards WHERE list_id = {l}")).load(conn).map_err(e)?;
+            lists.insert(l, rows.into_iter().map(|r| ListCard { name: r.name, catalog_id: r.catalog_id as i64, qty: r.qty, sideboard: r.sideboard }).collect());
+        }
+    }
+    let game_of = |t: &Todo| matches.get(&file_of(t)).and_then(Option::as_ref).and_then(|m| m.games.iter().find(|g| g.number as i32 == t.game_number));
+    let mut learned: BTreeMap<i64, String> = BTreeMap::new();
+    for t in &todo {
+        if let (Some(g), Some(s), Some(list)) = (game_of(t), snaps.get(&t.mtgo_game_id), t.list_id.and_then(|l| lists.get(&l))) {
+            learned.extend(object_names(g, s, list, &names));
+        }
+    }
+    super::decklist::remember_names(conn, &learned).map_err(e)?;
+    names.extend(learned);
+    // a list stored before its card had a name says `mtgo#<id>` until the next decklists step
+    for c in lists.values_mut().flatten() {
+        if c.name == super::decklist::placeholder_name(c.catalog_id) {
+            if let Some(n) = names.get(&c.catalog_id) {
+                c.name = n.clone();
+            }
+        }
+    }
     let verbs = VERBS.iter().map(|v| format!("'{}'", v.name())).collect::<Vec<_>>().join(", ");
     conn.transaction::<_, diesel::result::Error, _>(|conn| {
         for t in &todo {
-            let file = Path::new(&t.path).file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
-            let m = matches.entry(file.clone()).or_insert_with(|| by_name.get(&file).and_then(|p| super::format::read_log(p).ok()).map(|raw| super::model::build_match(&raw)));
-            let game = m.as_ref().and_then(|m| m.games.iter().find(|g| g.number as i32 == t.game_number));
-            let list: Vec<ListCard> = match t.list_id {
-                Some(l) => diesel::sql_query(format!("SELECT name, catalog_id, qty, sideboard FROM mtgo_list_cards WHERE list_id = {l}"))
-                    .load::<ListRow>(conn)
-                    ?
-                    .into_iter()
-                    .map(|r| ListCard { name: r.name, catalog_id: r.catalog_id as i64, qty: r.qty, sideboard: r.sideboard })
-                    .collect(),
-                None => vec![],
-            };
+            let game = game_of(t);
+            let list: &[ListCard] = t.list_id.and_then(|l| lists.get(&l)).map_or(&[], Vec::as_slice);
             let d = match (game, snaps.get(&t.mtgo_game_id)) {
-                (Some(g), Some(s)) if !list.is_empty() => derive(g, me, s, &names, &list),
+                (Some(g), Some(s)) if !list.is_empty() => derive(g, me, s, &names, list),
                 _ => {
                     st.no_snapshots += 1;
                     Derived { events: vec![], hand_known: false, pile_known: false }

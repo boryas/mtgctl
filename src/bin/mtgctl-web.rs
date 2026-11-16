@@ -18,7 +18,7 @@ use mtgctl::mtgolog::dataset::{self, Dataset};
 use mtgctl::mtgolog::{clocks, elo, ldc, meta, observed, picker, stats};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -1183,6 +1183,9 @@ async fn matches_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -
 struct EventRow {
     #[diesel(sql_type = diesel::sql_types::Integer)]
     seq: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    #[serde(skip)]
+    ts: String,
     #[diesel(sql_type = diesel::sql_types::Integer)]
     turn: i32,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
@@ -1236,6 +1239,69 @@ struct GameDetail {
     game: GameMeta,
     cards: Vec<PlayedCard>,
     events: Vec<EventRow>,
+    /// my hand, draws, sideboarding and pile were all found in my session log (see hands::derive)
+    hand_known: bool,
+    /// my card events only the session log shows, in log order
+    my_cards: Vec<MyCardEvent>,
+    /// my 60 after sideboarding, when hand_known
+    my_deck: Vec<DeckCard>,
+    /// my hand after each change, when asked for (`hands=1`) and the session log was uploaded
+    #[serde(skip_serializing_if = "Option::is_none")]
+    my_hand: Option<Vec<HandState>>,
+}
+
+#[derive(diesel::QueryableByName, Serialize)]
+struct MyCardEvent {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    seq: i32,
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    turn: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    verb: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    card: String,
+}
+
+#[derive(diesel::QueryableByName, Serialize)]
+struct DeckCard {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    card: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    n: i64,
+}
+
+#[derive(Serialize)]
+struct HandState {
+    /// the last log line at or before the state's second
+    seq: i32,
+    turn: i32,
+    cards: Vec<String>,
+}
+
+#[derive(diesel::QueryableByName)]
+struct Flag {
+    #[diesel(sql_type = diesel::sql_types::Bool)]
+    v: bool,
+}
+
+/// Session-log card verbs: mine only, and true only for games with `my_hand_known` (`pile`:
+/// `my_pile_known`); see filter::VERBS.
+fn hidden_verbs() -> impl Iterator<Item = &'static str> {
+    mtgctl::mtgolog::filter::VERBS.iter().filter(|(_, _, needs)| needs.is_some()).map(|(v, _, _)| *v)
+}
+
+/// Per game of `sel` (columns game_id, game_list_id, my_hand_known) whose hand is known, my main
+/// deck after sideboarding as (game_id, card, n): the registered list's main deck plus what the
+/// snapshots show boarded in, less what they show boarded out.
+fn deck_sql(sel: &str) -> String {
+    format!(
+        "SELECT d.game_id, d.card, SUM(d.n) AS n FROM (
+           SELECT s.game_id, lc.name AS card, lc.qty AS n FROM {sel} s JOIN mtgo_list_cards lc ON lc.list_id = s.game_list_id AND lc.sideboard = 0 WHERE s.my_hand_known = 1
+           UNION ALL
+           SELECT c.game_id, c.card, CASE c.verb WHEN 'boarded_in' THEN 1 ELSE -1 END FROM mtgo_card_events c JOIN {sel} s ON s.game_id = c.game_id
+            WHERE s.my_hand_known = 1 AND c.side = 'me' AND c.verb IN ('boarded_in', 'boarded_out')
+         ) d GROUP BY d.game_id, d.card HAVING SUM(d.n) > 0"
+    )
 }
 
 /// MTGO's card markup `@[Name@:catalog,instance:@]`.
@@ -1246,19 +1312,51 @@ fn plain_text(s: &str) -> String {
     CARD_REF.replace_all(s, "$1").into_owned()
 }
 
-/// One game: its facts, the cards each side played (with first turn), and the event log.
+/// One game: its facts, the cards each side played (with first turn), the event log, and my
+/// session-log facts (`hands=1` adds my hand after each change, read from the stored session log).
 async fn game_detail(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<GameDetail>, ApiError> {
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
+    let hands = q.get("hands").is_some_and(|v| v == "1");
     let r = tokio::task::spawn_blocking(move || -> Result<GameDetail, String> {
         use diesel::prelude::*;
         let conn = &mut pool(&st)?;
         let game: GameMeta = diesel::sql_query(format!("SELECT g.id, g.match_id, g.game_number, g.on_play, g.turns, g.winner, g.win_by, g.my_mulligans, g.opp_mulligans, m.opponent, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| format!("no game {id}: {e}"))?;
         let cards: Vec<PlayedCard> = diesel::sql_query(format!("SELECT side, card AS name, COUNT(*) AS plays, MIN(turn) AS first_turn FROM mtgo_card_events WHERE game_id = {id} AND verb IN ('cast', 'land') GROUP BY side, card ORDER BY side, first_turn, name")).load(conn).map_err(|e| e.to_string())?;
-        let mut events: Vec<EventRow> = diesel::sql_query(format!("SELECT seq, turn, side, kind, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
+        let mut events: Vec<EventRow> = diesel::sql_query(format!("SELECT seq, ts, turn, side, kind, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
         for e in &mut events {
             e.text = plain_text(&e.text);
         }
-        Ok(GameDetail { game, cards, events })
+        let hand_known = diesel::sql_query(format!("SELECT COALESCE(hand_known, 0) AS v FROM mtgo_games WHERE id = {id}")).get_result::<Flag>(conn).map_err(|e| e.to_string())?.v;
+        // in_hand is left out: my_hand shows the hand itself
+        let verbs = hidden_verbs().filter(|v| *v != "in_hand").map(|v| format!("'{v}'")).collect::<Vec<_>>().join(", ");
+        let my_cards: Vec<MyCardEvent> = diesel::sql_query(format!("SELECT seq, turn, verb, card FROM mtgo_card_events WHERE game_id = {id} AND side = 'me' AND verb IN ({verbs}) ORDER BY seq, id")).load(conn).map_err(|e| e.to_string())?;
+        let sel = format!("(SELECT id AS game_id, list_id AS game_list_id, CASE WHEN hand_known THEN 1 ELSE 0 END AS my_hand_known FROM mtgo_games WHERE id = {id})");
+        let my_deck: Vec<DeckCard> = diesel::sql_query(format!("SELECT card, n FROM ({}) ORDER BY card", deck_sql(&sel))).load(conn).map_err(|e| e.to_string())?;
+        let my_hand = if hands {
+            let gs = game_states(&st, conn, id, &game.start_ts)?;
+            // states outside the game's own time are from a replay (see hands::derive)
+            let (first, last) = (events.first().map(|e| &e.ts[..19.min(e.ts.len())]), events.last().map(|e| &e.ts[..19.min(e.ts.len())]));
+            let mut out: Vec<HandState> = Vec::new();
+            for s in &gs.snaps {
+                let at = s.at.format("%Y-%m-%d %H:%M:%S").to_string();
+                if first.is_some_and(|f| at.as_str() < f) || last.is_some_and(|l| at.as_str() > l) {
+                    continue;
+                }
+                let me = s.players.iter().find(|p| p.name == gs.me).map(|p| p.id);
+                let mut hand: Vec<String> = s.cards.iter().filter(|c| c.zone == "Hand" && Some(c.owner) == me).map(|c| gs.names.get(&c.catalog_id).cloned().unwrap_or_else(|| mtgctl::mtgolog::decklist::placeholder_name(c.catalog_id))).collect();
+                hand.sort();
+                // before the first deal the hand is empty
+                if out.last().map_or(hand.is_empty(), |h| h.cards == hand) {
+                    continue;
+                }
+                let e = events.iter().rev().find(|e| &e.ts[..19.min(e.ts.len())] <= at.as_str());
+                out.push(HandState { seq: e.map_or(0, |e| e.seq), turn: e.map_or(0, |e| e.turn), cards: hand });
+            }
+            Some(out)
+        } else {
+            None
+        };
+        Ok(GameDetail { game, cards, events, hand_known, my_cards, my_deck, my_hand })
     })
     .await
     .map_err(|e| internal(e.to_string()))?
@@ -1338,13 +1436,43 @@ struct Replay {
     note: Option<String>,
 }
 
+/// One game's state snapshots from its player's stored session logs (see `mtgolog::snapshot`),
+/// with a name for every catalog id they show; `note` says why `snaps` is empty.
+struct GameStates {
+    me: String,
+    snaps: Vec<mtgctl::mtgolog::snapshot::Snapshot>,
+    names: HashMap<i64, String>,
+    note: Option<String>,
+}
+
+fn game_states(st: &AppState, conn: &mut diesel::SqliteConnection, id: i32, start_ts: &str) -> Result<GameStates, String> {
+    use diesel::prelude::*;
+    use mtgctl::mtgolog::{decklist, snapshot};
+    let key: ReplayKey = diesel::sql_query(format!("SELECT m.me, (SELECT d.mtgo_game_id FROM mtgo_decklists d WHERE d.game_db_id = g.id) AS mtgo_game_id FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| e.to_string())?;
+    let Some(mtgo_id) = key.mtgo_game_id else {
+        return Ok(GameStates { me: key.me, snaps: Vec::new(), names: HashMap::new(), note: Some("no session log names this game (the client log of that session was not uploaded)".into()) });
+    };
+    let day = chrono::NaiveDate::parse_from_str(&start_ts[..10], "%Y-%m-%d").map_err(|e| e.to_string())?;
+    let cfg = player_dir(st, &key.me).config(&key.me);
+    let snaps = snapshot::game_snapshots(&cfg, mtgo_id, day);
+    let ids: std::collections::BTreeSet<i64> = snaps.iter().flat_map(|s| s.cards.iter().map(|c| c.catalog_id)).collect();
+    // resolving unknown ids writes the name cache: only while no sync is writing
+    let names = match st.sync_lock.try_lock() {
+        Ok(_g) => decklist::resolve_names(conn, &cfg, &ids, true),
+        Err(_) => decklist::known_names(conn),
+    }
+    .map_err(|e| e.to_string())?;
+    let note = snaps.is_empty().then(|| format!("no snapshots of MTGO game {mtgo_id} in the stored session logs"));
+    Ok(GameStates { me: key.me, snaps, names, note })
+}
+
 /// One game's event log plus its state snapshots from the player's stored session logs (see
 /// `mtgolog::snapshot`), card names resolved; sideboards are left out.
 async fn replay_api(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Replay>, ApiError> {
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
     let r = tokio::task::spawn_blocking(move || -> Result<Replay, String> {
         use diesel::prelude::*;
-        use mtgctl::mtgolog::{decklist, snapshot};
+        use mtgctl::mtgolog::snapshot;
         let conn = &mut pool(&st)?;
         let game: GameMeta = diesel::sql_query(format!("SELECT g.id, g.match_id, g.game_number, g.on_play, g.turns, g.winner, g.win_by, g.my_mulligans, g.opp_mulligans, m.opponent, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| format!("no game {id}: {e}"))?;
         let rows: Vec<ReplayEventRow> = diesel::sql_query(format!("SELECT seq, ts, turn, side, kind, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
@@ -1362,25 +1490,15 @@ async fn replay_api(State(st): State<Shared>, Query(q): Query<HashMap<String, St
             }
             events.push(ReplayEvent { seq: e.seq, ts: e.ts, turn: e.turn, side: e.side, kind: e.kind, text: plain_text(&e.text), cards });
         }
-        let key: ReplayKey = diesel::sql_query(format!("SELECT m.me, (SELECT d.mtgo_game_id FROM mtgo_decklists d WHERE d.game_db_id = g.id) AS mtgo_game_id FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| e.to_string())?;
-        let Some(mtgo_id) = key.mtgo_game_id else {
-            return Ok(Replay { game, events, states: Vec::new(), note: Some("no session log names this game (the client log of that session was not uploaded)".into()) });
-        };
-        let day = chrono::NaiveDate::parse_from_str(&game.start_ts[..10], "%Y-%m-%d").map_err(|e| e.to_string())?;
-        let cfg = player_dir(&st, &key.me).config(&key.me);
-        let snaps = snapshot::game_snapshots(&cfg, mtgo_id, day);
-        let ids: std::collections::BTreeSet<i64> = snaps.iter().flat_map(|s| s.cards.iter().map(|c| c.catalog_id)).collect();
-        // resolving unknown ids writes the name cache: only while no sync is writing
-        let lands = shared_db(&st.data).and_then(|mut sh| mtgctl::mtgolog::reference::load_lands(&mut sh).map_err(|e| e.to_string()))?;
-        let names = match st.sync_lock.try_lock() {
-            Ok(_g) => decklist::resolve_names(conn, &cfg, &ids, true),
-            Err(_) => decklist::known_names(conn),
+        let GameStates { me, snaps, names, note } = game_states(&st, conn, id, &game.start_ts)?;
+        if snaps.is_empty() {
+            return Ok(Replay { game, events, states: Vec::new(), note });
         }
-        .map_err(|e| e.to_string())?;
+        let lands = shared_db(&st.data).and_then(|mut sh| mtgctl::mtgolog::reference::load_lands(&mut sh).map_err(|e| e.to_string()))?;
         let states = snaps
             .into_iter()
             .map(|s| {
-                let side = |pid: i64| if s.players.iter().any(|p| p.id == pid && p.name == key.me) { "me" } else { "opp" };
+                let side = |pid: i64| if s.players.iter().any(|p| p.id == pid && p.name == me) { "me" } else { "opp" };
                 let at = s.at.format("%Y-%m-%d %H:%M:%S").to_string();
                 // the object's name as of this state (a transform keeps the id), else its first
                 let by_object = |obj: i64| {
@@ -1404,7 +1522,6 @@ async fn replay_api(State(st): State<Shared>, Query(q): Query<HashMap<String, St
                 }
             })
             .collect::<Vec<_>>();
-        let note = states.is_empty().then(|| format!("no snapshots of MTGO game {mtgo_id} in the stored session logs"));
         Ok(Replay { game, events, states, note })
     })
     .await
@@ -1503,6 +1620,158 @@ async fn games_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> 
     .map_err(|e| internal(e.to_string()))?
     .map_err(bad)?;
     Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+struct CardCountParams {
+    #[serde(default, rename = "where")]
+    where_sql: Option<String>,
+    /// comma-separated filter::VERBS names and `deck`; none = all
+    #[serde(default)]
+    verbs: Option<String>,
+    /// a JSON array of card names for `rows`; none = every card
+    #[serde(default)]
+    cards: Option<String>,
+    /// me | opp; none = both
+    #[serde(default)]
+    side: Option<String>,
+    #[serde(default)]
+    by_game: bool,
+    #[serde(default = "five_hundred")]
+    limit: usize,
+}
+fn five_hundred() -> usize {
+    500
+}
+
+#[derive(diesel::QueryableByName)]
+struct CardCountRow {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    game_id: i32,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    side: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    verb: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    card: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    n: i64,
+}
+
+#[derive(Serialize)]
+struct CardCount {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    game_id: Option<i32>,
+    side: String,
+    verb: String,
+    /// absent in `totals`, which sum every card
+    #[serde(skip_serializing_if = "Option::is_none")]
+    card: Option<String>,
+    n: i64,
+    /// games with at least one; absent per game
+    #[serde(skip_serializing_if = "Option::is_none")]
+    games: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct CardCounts {
+    games: i64,
+    /// of `games`, those whose session-log verbs and `deck` are counted
+    games_hand_known: i64,
+    rows: Vec<CardCount>,
+    totals: Vec<CardCount>,
+    /// `rows` stopped at the limit
+    truncated: bool,
+}
+
+#[derive(diesel::QueryableByName)]
+struct SelCount {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    games: i64,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    hand: i64,
+}
+
+/// Card events counted over the selected games, per (side, verb, card) or per game; `deck` is my
+/// main deck after sideboarding (see deck_sql). Session-log verbs count only the games whose
+/// facts are known, so a missing count means none happened.
+async fn card_counts(State(st): State<Shared>, Query(p): Query<CardCountParams>) -> Result<Json<CardCounts>, ApiError> {
+    use mtgctl::mtgolog::filter::{sq, VERBS};
+    let wher = p.where_sql.filter(|w| !w.trim().is_empty()).map(|w| format!("WHERE {w}")).unwrap_or_default();
+    let verbs: Vec<String> = p.verbs.iter().flat_map(|v| v.split(',')).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect();
+    if let Some(v) = verbs.iter().find(|v| v.as_str() != "deck" && !VERBS.iter().any(|(k, _, _)| k == v)) {
+        return Err(bad(format!("unknown verb {v:?}")));
+    }
+    let side = p.side.filter(|s| !s.is_empty());
+    if side.as_deref().is_some_and(|s| s != "me" && s != "opp") {
+        return Err(bad("side is me or opp"));
+    }
+    let cards: Option<HashSet<String>> = match p.cards.filter(|c| !c.trim().is_empty()) {
+        Some(c) => Some(serde_json::from_str::<Vec<String>>(&c).map_err(|e| bad(format!("cards: {e}")))?.into_iter().collect()).filter(|c: &HashSet<String>| !c.is_empty()),
+        None => None,
+    };
+    let r = tokio::task::spawn_blocking(move || -> Result<CardCounts, String> {
+        use diesel::prelude::*;
+        let conn = &mut pool(&st)?;
+        let sel: SelCount = diesel::sql_query(format!("SELECT COUNT(*) AS games, COALESCE(SUM(my_hand_known), 0) AS hand FROM mtgo_game_view {wher}")).get_result(conn).map_err(|e| format!("query failed: {e}"))?;
+        let hand_verbs = VERBS.iter().filter(|(_, _, n)| *n == Some("hand")).map(|(v, _, _)| sq(v)).collect::<Vec<_>>().join(", ");
+        let event_verbs: Vec<&String> = verbs.iter().filter(|v| v.as_str() != "deck").collect();
+        let mut parts = vec![];
+        if verbs.is_empty() || !event_verbs.is_empty() {
+            let mut conds = vec![format!("(c.verb NOT IN ({hand_verbs}) OR s.my_hand_known = 1)"), "(c.verb <> 'pile' OR s.my_pile_known = 1)".to_string()];
+            if !event_verbs.is_empty() {
+                conds.push(format!("c.verb IN ({})", event_verbs.iter().map(|v| sq(v)).collect::<Vec<_>>().join(", ")));
+            }
+            if let Some(sd) = &side {
+                conds.push(format!("c.side = {}", sq(sd)));
+            }
+            parts.push(format!("SELECT c.game_id, c.side, c.verb, c.card, COUNT(*) AS n FROM mtgo_card_events c JOIN sel s ON s.game_id = c.game_id WHERE {} GROUP BY c.game_id, c.side, c.verb, c.card", conds.join(" AND ")));
+        }
+        if (verbs.is_empty() || verbs.iter().any(|v| v == "deck")) && side.as_deref() != Some("opp") {
+            parts.push(format!("SELECT game_id, 'me' AS side, 'deck' AS verb, card, n FROM ({})", deck_sql("sel")));
+        }
+        let raw: Vec<CardCountRow> = diesel::sql_query(format!(
+            "WITH sel AS (SELECT game_id, game_list_id, my_hand_known, my_pile_known FROM mtgo_game_view {wher}) {}",
+            parts.join(" UNION ALL ")
+        ))
+        .load(conn)
+        .map_err(|e| format!("query failed: {e}"))?;
+        let keep = |r: &&CardCountRow| cards.as_ref().map_or(true, |c| c.contains(&r.card));
+        let mut rows: Vec<CardCount>;
+        let totals: Vec<CardCount>;
+        if p.by_game {
+            rows = raw.iter().filter(keep).map(|r| CardCount { game_id: Some(r.game_id), side: r.side.clone(), verb: r.verb.clone(), card: Some(r.card.clone()), n: r.n, games: None }).collect();
+            rows.sort_by(|a, b| b.game_id.cmp(&a.game_id).then(a.side.cmp(&b.side)).then(a.verb.cmp(&b.verb)).then(b.n.cmp(&a.n)).then(a.card.cmp(&b.card)));
+            let mut t: BTreeMap<(std::cmp::Reverse<i32>, &str, &str), i64> = BTreeMap::new();
+            for r in &raw {
+                *t.entry((std::cmp::Reverse(r.game_id), &r.side, &r.verb)).or_default() += r.n;
+            }
+            totals = t.into_iter().map(|((g, sd, v), n)| CardCount { game_id: Some(g.0), side: sd.into(), verb: v.into(), card: None, n, games: None }).collect();
+        } else {
+            let mut a: BTreeMap<(&str, &str, &str), (i64, i64)> = BTreeMap::new();
+            for r in raw.iter().filter(keep) {
+                let e = a.entry((&r.side, &r.verb, &r.card)).or_default();
+                e.0 += r.n;
+                e.1 += 1;
+            }
+            rows = a.into_iter().map(|((sd, v, c), (n, g))| CardCount { game_id: None, side: sd.into(), verb: v.into(), card: Some(c.into()), n, games: Some(g) }).collect();
+            rows.sort_by(|a, b| a.side.cmp(&b.side).then(a.verb.cmp(&b.verb)).then(b.n.cmp(&a.n)).then(a.card.cmp(&b.card)));
+            let mut t: BTreeMap<(&str, &str), (i64, HashSet<i32>)> = BTreeMap::new();
+            for r in &raw {
+                let e = t.entry((&r.side, &r.verb)).or_default();
+                e.0 += r.n;
+                e.1.insert(r.game_id);
+            }
+            totals = t.into_iter().map(|((sd, v), (n, g))| CardCount { game_id: None, side: sd.into(), verb: v.into(), card: None, n, games: Some(g.len() as i64) }).collect();
+        }
+        let truncated = rows.len() > p.limit;
+        rows.truncate(p.limit);
+        Ok(CardCounts { games: sel.games, games_hand_known: sel.hand, rows, totals, truncated })
+    })
+    .await
+    .map_err(|e| internal(e.to_string()))?
+    .map_err(bad)?;
+    Ok(Json(r))
 }
 
 #[tokio::main]
@@ -1749,6 +2018,7 @@ async fn main() {
                 .route("/api/clocks", get(clocks_get).put(clocks_put))
                 .route("/api/observed", get(observed_api))
                 .route("/api/cards-seen", get(cards_seen))
+                .route("/api/card-counts", get(card_counts))
                 .route("/api/list/experimental", post(list_experimental))
                 .route("/api/mark", post(mark_api))
                 .route("/api/decks", get(decks_api))
