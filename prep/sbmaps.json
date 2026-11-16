@@ -1,8 +1,8 @@
 {
 "maps": [
 {
-"name": "UB Tempo DD (EW current: Voice of Victory for SB Thoughtseize)",
-"source": null,
+"name": "UB Tempo DD (EW final: Showcase 10-25)",
+"source": "stats site list 34, boryas, Legacy Showcase Challenge 2026-10-25 (10-2)",
 "main": {
 "Brainstorm": 4,
 "Cavern of Souls": 1,
@@ -32,12 +32,12 @@
 "Unearth": 1
 },
 "side": {
-"Barrowgoyf": 4,
+"Barrowgoyf": 3,
 "Bloodchief's Thirst": 1,
-"Dauthi Voidwalker": 2,
+"Dauthi Voidwalker": 4,
 "Fatal Push": 3,
 "Force of Negation": 2,
-"Orcish Bowmasters": 2,
+"Murktide Regent": 1,
 "Voice of Victory": 1
 },
 "aliases": {
@@ -45,15 +45,23 @@
 "UB Tempo": "Dimir Tempo",
 "UW Phelia": "Azorius Tempo",
 "4 Color Beanstalk": "Beanstalk Control",
-"WB Death & Taxes": "WB Death & Taxes",
+"WB Death & Taxes": "BW Yorion",
 "Lands": "Lands",
-"Fast Reanimator": "Reanimator",
+"Fast Reanimator": "Rakdos Reanimator",
 "Sneak & Show": "Sneak and Show",
 "Doomsday": "Doomsday (mirror)",
 "TES": "The EPIC Storm",
 "Cradle Control": "Cradle Control",
-"Mardu Energy": "Mardu Energy",
-"Eldrazi": "Eldrazi"
+"Boros Energy": "Boros Energy",
+"Eldrazi": "Eldrazi",
+"Welder Cam": "Sewer-Cam Combo",
+"Blue Tron": "Blue Tron",
+"Mystic Forge": "Mystic Forge Combo",
+"Red Stompy": "Red Stompy",
+"UB Hogaak (Jund plan)": "Dimir Tempo",
+"BG Hogaak": "Hogaak Moonshadow",
+"Alurentell": "Sultai Aluren",
+"Elves": "Elves"
 },
 "codes": {
 "UR Cutter": "UR",
@@ -67,28 +75,30 @@
 "Doomsday": "DD",
 "TES": "TES",
 "Cradle Control": "Crdl",
-"Mardu Energy": "Mrdu",
+"Boros Energy": "Brs",
 "Eldrazi": "Eld",
 "Welder Cam": "Cam",
-"Blue Tron": "Tron"
+"Blue Tron": "Tron",
+"Mystic Forge": "Forg",
+"Red Stompy": "Red",
+"UB Hogaak (Jund plan)": "UBHg",
+"BG Hogaak": "BGHg",
+"Alurentell": "Alur",
+"Elves": "Elv"
 },
 "roles": {
 "threats": [
 "Barrowgoyf",
-"Bilbo, Thief in the Night",
 "Dauthi Voidwalker",
-"Orcish Bowmasters",
-"Murktide Regent"
+"Murktide Regent",
+"Voice of Victory"
 ],
 "removal": [
 "Fatal Push",
-"Long Goodbye",
-"Orcish Bowmasters",
 "Bloodchief's Thirst"
 ],
 "counters": [
-"Force of Negation",
-"Flusterstorm"
+"Force of Negation"
 ],
 "grave_hate": [
 "Dauthi Voidwalker"
@@ -100,7 +110,7 @@
 },
 "meta_order": [
 {
-"deck": "Mardu Energy",
+"deck": "Boros Energy",
 "meta": "Energy",
 "share": 0.1
 },
@@ -176,376 +186,17 @@
 }
 ],
 "plans": {
-"UR Cutter": {
+"Boros Energy": {
 "out": {
-"Doomsday": 4,
-"Edge of Autumn": 2,
-"Force of Will": 1,
-"Lion's Eye Diamond": 1,
-"Street Wraith": 2,
-"Tamiyo, Inquisitive Student": 1,
-"Thassa's Oracle": 1
-},
-"in": {
-"Barrowgoyf": 4,
-"Bloodchief's Thirst": 1,
-"Dauthi Voidwalker": 2,
-"Fatal Push": 3,
-"Orcish Bowmasters": 2
-}
-},
-"UB Tempo": {
-"out": {
-"Dark Ritual": 1,
-"Doomsday": 4,
-"Edge of Autumn": 2,
-"Force of Will": 2,
-"Lion's Eye Diamond": 1,
-"Street Wraith": 2,
-"Thassa's Oracle": 1
-},
-"in": {
-"Barrowgoyf": 4,
-"Bloodchief's Thirst": 1,
-"Dauthi Voidwalker": 2,
-"Fatal Push": 3,
-"Orcish Bowmasters": 2
-}
-},
-"UW Phelia": {
-"out": {
-"Force of Will": 2,
-"Murktide Regent": 2,
-"Street Wraith": 1,
-"Unearth": 1
-},
-"in": {
-"Fatal Push": 3,
-"Orcish Bowmasters": 2
-}
-},
-"4 Color Beanstalk": {
-"out": {
-"Murktide Regent": 2,
-"Unearth": 1
-},
-"in": {
-"Orcish Bowmasters": 2
-}
-},
-"WB Death & Taxes": {
-"out": {
-"Cavern of Souls": 1,
-"Murktide Regent": 2,
-"Thoughtseize": 2
-},
-"in": {
-"Fatal Push": 3,
-"Force of Negation": 2
-}
-},
-"Lands": {
-"out": {
-"Cavern of Souls": 1,
-"Daze": 1,
-"Murktide Regent": 2
-},
-"in": {
-"Dauthi Voidwalker": 2,
-"Force of Negation": 2
-}
-},
-"Fast Reanimator": {
-"out": {
-"Cavern of Souls": 1,
-"Murktide Regent": 2,
-"Unearth": 1
-},
-"in": {
-"Dauthi Voidwalker": 2,
-"Force of Negation": 2
-}
-},
-"Sneak & Show": {
-"out": {
-"Daze": 2,
-"Edge of Autumn": 1,
-"Island": 1,
-"Murktide Regent": 2,
-"Unearth": 1
-},
-"in": {
-"Fatal Push": 2,
-"Force of Negation": 2,
-"Orcish Bowmasters": 2
-}
-},
-"Doomsday": {
-"out": {
-"Consider": 1,
-"Doomsday": 4,
-"Edge of Autumn": 2,
-"Island": 1,
-"Lion's Eye Diamond": 1,
-"Street Wraith": 2,
-"Thassa's Oracle": 1,
-"Unearth": 1
-},
-"in": {
-"Barrowgoyf": 4,
-"Bloodchief's Thirst": 1,
-"Dauthi Voidwalker": 2,
-"Fatal Push": 1,
-"Force of Negation": 2,
-"Orcish Bowmasters": 2
-}
-},
-"TES": {
-"out": {
-"Cavern of Souls": 1,
-"Consider": 1,
-"Daze": 2,
-"Flow State": 1,
-"Island": 1,
-"Murktide Regent": 1,
-"Unearth": 1
-},
-"in": {
-"Dauthi Voidwalker": 2,
-"Fatal Push": 3,
-"Force of Negation": 2
-}
-},
-"Cradle Control": {
-"out": {
-"Cavern of Souls": 1,
-"Tamiyo, Inquisitive Student": 4,
-"Unearth": 1
-},
-"in": {
-"Bloodchief's Thirst": 1,
-"Fatal Push": 3,
-"Force of Negation": 2
-}
-},
-"Mardu Energy": {
-"out": {
-"Flow State": 1,
-"Murktide Regent": 2,
-"Thoughtseize": 1
-},
-"in": {
-"Fatal Push": 2,
-"Force of Negation": 2
-}
-},
-"Eldrazi": {
-"out": {
-"Street Wraith": 1,
-"Tamiyo, Inquisitive Student": 4,
-"Thoughtseize": 2,
-"Unearth": 1
-},
-"in": {
-"Barrowgoyf": 4,
-"Fatal Push": 2,
-"Force of Negation": 2
-}
-},
-"Welder Cam": {
-"out": {},
-"in": {}
-},
-"Blue Tron": {
-"out": {},
-"in": {}
-}
-},
-"issues": [
-"UB Tempo: out 13 != in 12",
-"UW Phelia: out 6 != in 5",
-"4 Color Beanstalk: out 3 != in 2",
-"Sneak & Show: out 7 != in 6",
-"Doomsday: out 13 != in 12",
-"TES: out 8 != in 7"
-]
-},
-{
-"name": "UB Tempo DD (EW draft B: 2 Bowmasters for Flusterstorm + Murktide)",
-"source": null,
-"main": {
-"Brainstorm": 4,
-"Cavern of Souls": 1,
-"Consider": 1,
-"Dark Ritual": 4,
-"Daze": 2,
-"Doomsday": 4,
 "Duress": 1,
-"Edge of Autumn": 2,
-"Flooded Strand": 3,
-"Flow State": 4,
-"Force of Will": 4,
-"Island": 1,
-"Lion's Eye Diamond": 1,
-"Lotus Petal": 2,
-"Marsh Flats": 1,
-"Murktide Regent": 2,
-"Polluted Delta": 4,
-"Ponder": 3,
-"Street Wraith": 2,
-"Swamp": 1,
-"Tamiyo, Inquisitive Student": 4,
-"Thassa's Oracle": 1,
-"Thoughtseize": 2,
-"Undercity Sewers": 1,
-"Underground Sea": 4,
-"Unearth": 1
+"Flow State": 1,
+"Murktide Regent": 2
 },
-"side": {
-"Barrowgoyf": 4,
-"Bloodchief's Thirst": 1,
-"Dauthi Voidwalker": 2,
-"Fatal Push": 3,
-"Force of Negation": 2,
-"Thoughtseize": 1,
-"Orcish Bowmasters": 2
-},
-"aliases": {
-"UR Cutter": "Izzet Tempo",
-"UB Tempo": "Dimir Tempo",
-"UW Phelia": "Azorius Tempo",
-"4 Color Beanstalk": "Beanstalk Control",
-"WB Death & Taxes": "WB Death & Taxes",
-"Lands": "Lands",
-"Fast Reanimator": "Reanimator",
-"Sneak & Show": "Sneak and Show",
-"Doomsday": "Doomsday (mirror)",
-"TES": "The EPIC Storm",
-"Cradle Control": "Cradle Control",
-"Mardu Energy": "Mardu Energy",
-"Eldrazi": "Eldrazi"
-},
-"codes": {
-"UR Cutter": "UR",
-"UB Tempo": "UB",
-"UW Phelia": "UW",
-"4 Color Beanstalk": "4C",
-"WB Death & Taxes": "DnT",
-"Lands": "Land",
-"Fast Reanimator": "Rean",
-"Sneak & Show": "SnS",
-"Doomsday": "DD",
-"TES": "TES",
-"Cradle Control": "Crdl",
-"Mardu Energy": "Mrdu",
-"Eldrazi": "Eld",
-"Welder Cam": "Cam",
-"Blue Tron": "Tron"
-},
-"roles": {
-"threats": [
-"Barrowgoyf",
-"Bilbo, Thief in the Night",
-"Dauthi Voidwalker",
-"Orcish Bowmasters",
-"Murktide Regent"
-],
-"removal": [
-"Fatal Push",
-"Long Goodbye",
-"Orcish Bowmasters",
-"Bloodchief's Thirst"
-],
-"counters": [
-"Force of Negation",
-"Flusterstorm"
-],
-"grave_hate": [
-"Dauthi Voidwalker"
-],
-"discard": [
-"Thoughtseize",
-"Duress"
-]
-},
-"meta_order": [
-{
-"deck": "Mardu Energy",
-"meta": "Energy",
-"share": 0.1
-},
-{
-"deck": "UR Cutter",
-"meta": "UR Delver",
-"share": 0.1
-},
-{
-"deck": "UB Tempo",
-"meta": "UB Tempo",
-"share": 0.1
-},
-{
-"deck": "UW Phelia",
-"meta": "UW Tempo",
-"share": 0.07
-},
-{
-"deck": "4 Color Beanstalk",
-"meta": "Bant Beans",
-"share": 0.05
-},
-{
-"deck": "Fast Reanimator",
-"meta": "BR Reanimator",
-"share": 0.05
-},
-{
-"deck": "Welder Cam",
-"meta": "Welder Cam",
-"share": 0.03
-},
-{
-"deck": "Blue Tron",
-"meta": "Blue Tron",
-"share": 0.06
-},
-{
-"deck": "Lands",
-"meta": "Lands",
-"share": 0.03
-},
-{
-"deck": "WB Death & Taxes",
-"meta": "DnT",
-"share": 0.05
-},
-{
-"deck": "Doomsday",
-"meta": "Doomsday",
-"share": 0.03
-},
-{
-"deck": "Sneak & Show",
-"meta": "SnT",
-"share": 0.1
-},
-{
-"deck": "TES",
-"meta": "Storm",
-"share": 0.03
-},
-{
-"deck": "Eldrazi",
-"meta": "Eldrazi",
-"share": 0.05
-},
-{
-"deck": "Cradle Control",
-"meta": "Green",
-"share": 0.03
+"in": {
+"Fatal Push": 2,
+"Force of Negation": 2
 }
-],
-"plans": {
+},
 "UR Cutter": {
 "out": {
 "Doomsday": 4,
@@ -557,16 +208,15 @@
 "Thassa's Oracle": 1
 },
 "in": {
-"Barrowgoyf": 4,
+"Barrowgoyf": 3,
 "Bloodchief's Thirst": 1,
-"Dauthi Voidwalker": 2,
+"Dauthi Voidwalker": 4,
 "Fatal Push": 3,
-"Orcish Bowmasters": 2
+"Murktide Regent": 1
 }
 },
 "UB Tempo": {
 "out": {
-"Dark Ritual": 1,
 "Doomsday": 4,
 "Edge of Autumn": 2,
 "Force of Will": 2,
@@ -575,104 +225,125 @@
 "Thassa's Oracle": 1
 },
 "in": {
-"Barrowgoyf": 4,
+"Barrowgoyf": 3,
 "Bloodchief's Thirst": 1,
-"Dauthi Voidwalker": 2,
+"Dauthi Voidwalker": 4,
 "Fatal Push": 3,
-"Thoughtseize": 1,
-"Orcish Bowmasters": 2
+"Murktide Regent": 1
 }
 },
 "UW Phelia": {
 "out": {
 "Force of Will": 2,
 "Murktide Regent": 2,
-"Street Wraith": 1,
 "Unearth": 1
 },
 "in": {
+"Bloodchief's Thirst": 1,
 "Fatal Push": 3,
-"Thoughtseize": 1,
-"Orcish Bowmasters": 2
+"Voice of Victory": 1
 }
 },
 "4 Color Beanstalk": {
 "out": {
+"Force of Will": 1,
 "Murktide Regent": 2,
 "Unearth": 1
 },
 "in": {
-"Thoughtseize": 1,
-"Orcish Bowmasters": 2
-}
-},
-"WB Death & Taxes": {
-"out": {
-"Cavern of Souls": 1,
-"Murktide Regent": 2,
-"Thoughtseize": 2
-},
-"in": {
 "Fatal Push": 3,
-"Force of Negation": 2
-}
-},
-"Lands": {
-"out": {
-"Cavern of Souls": 1,
-"Daze": 1,
-"Murktide Regent": 2
-},
-"in": {
-"Dauthi Voidwalker": 2,
-"Force of Negation": 2
+"Voice of Victory": 1
 }
 },
 "Fast Reanimator": {
 "out": {
 "Cavern of Souls": 1,
+"Flow State": 2,
 "Murktide Regent": 2,
 "Unearth": 1
+},
+"in": {
+"Dauthi Voidwalker": 4,
+"Force of Negation": 2
+}
+},
+"Welder Cam": {
+"out": {
+"Flow State": 1,
+"Island": 1,
+"Murktide Regent": 2,
+"Tamiyo, Inquisitive Student": 4
+},
+"in": {
+"Bloodchief's Thirst": 1,
+"Dauthi Voidwalker": 4,
+"Fatal Push": 3
+}
+},
+"Blue Tron": {
+"out": {
+"Daze": 2,
+"Island": 1,
+"Swamp": 1
 },
 "in": {
 "Dauthi Voidwalker": 2,
 "Force of Negation": 2
 }
 },
-"Sneak & Show": {
+"Lands": {
 "out": {
-"Daze": 2,
-"Edge of Autumn": 1,
-"Island": 1,
-"Murktide Regent": 2,
-"Unearth": 1
+"Murktide Regent": 2
 },
 "in": {
-"Fatal Push": 2,
-"Force of Negation": 2,
-"Thoughtseize": 1,
-"Orcish Bowmasters": 2
+"Force of Negation": 2
+}
+},
+"WB Death & Taxes": {
+"out": {
+"Cavern of Souls": 1,
+"Duress": 1,
+"Murktide Regent": 2,
+"Thoughtseize": 1
+},
+"in": {
+"Fatal Push": 3,
+"Force of Negation": 2
 }
 },
 "Doomsday": {
 "out": {
 "Consider": 1,
+"Dark Ritual": 1,
 "Doomsday": 4,
 "Edge of Autumn": 2,
 "Island": 1,
 "Lion's Eye Diamond": 1,
 "Street Wraith": 2,
-"Thassa's Oracle": 1,
+"Thassa's Oracle": 1
+},
+"in": {
+"Barrowgoyf": 3,
+"Bloodchief's Thirst": 1,
+"Dauthi Voidwalker": 4,
+"Fatal Push": 2,
+"Force of Negation": 2,
+"Murktide Regent": 1
+}
+},
+"Sneak & Show": {
+"out": {
+"Consider": 1,
+"Daze": 2,
+"Island": 1,
+"Murktide Regent": 2,
 "Unearth": 1
 },
 "in": {
-"Barrowgoyf": 4,
-"Bloodchief's Thirst": 1,
 "Dauthi Voidwalker": 2,
-"Fatal Push": 1,
+"Fatal Push": 2,
 "Force of Negation": 2,
-"Thoughtseize": 1,
-"Orcish Bowmasters": 2
+"Voice of Victory": 1
 }
 },
 "TES": {
@@ -680,16 +351,28 @@
 "Cavern of Souls": 1,
 "Consider": 1,
 "Daze": 2,
+"Edge of Autumn": 1,
 "Flow State": 1,
 "Island": 1,
-"Murktide Regent": 1,
+"Street Wraith": 1,
 "Unearth": 1
 },
 "in": {
-"Dauthi Voidwalker": 2,
+"Dauthi Voidwalker": 4,
 "Fatal Push": 3,
-"Force of Negation": 2,
-"Thoughtseize": 1
+"Force of Negation": 2
+}
+},
+"Eldrazi": {
+"out": {
+"Street Wraith": 1,
+"Tamiyo, Inquisitive Student": 4,
+"Thoughtseize": 2
+},
+"in": {
+"Barrowgoyf": 3,
+"Fatal Push": 2,
+"Force of Negation": 2
 }
 },
 "Cradle Control": {
@@ -704,37 +387,90 @@
 "Force of Negation": 2
 }
 },
-"Mardu Energy": {
+"Mystic Forge": {
 "out": {
 "Flow State": 1,
+"Island": 1,
 "Murktide Regent": 2,
-"Thoughtseize": 1
+"Thoughtseize": 2
 },
 "in": {
-"Fatal Push": 2,
+"Dauthi Voidwalker": 4,
 "Force of Negation": 2
 }
 },
-"Eldrazi": {
+"Red Stompy": {
 "out": {
-"Street Wraith": 1,
+"Daze": 2,
+"Flow State": 1,
 "Tamiyo, Inquisitive Student": 4,
-"Thoughtseize": 2,
-"Unearth": 1
+"Thoughtseize": 2
 },
 "in": {
-"Barrowgoyf": 4,
-"Fatal Push": 2,
-"Force of Negation": 2
+"Barrowgoyf": 3,
+"Fatal Push": 3,
+"Force of Negation": 2,
+"Murktide Regent": 1
 }
 },
-"Welder Cam": {
-"out": {},
-"in": {}
+"UB Hogaak (Jund plan)": {
+"out": {
+"Consider": 1,
+"Daze": 2,
+"Edge of Autumn": 1,
+"Flow State": 2,
+"Force of Will": 4,
+"Lion's Eye Diamond": 1,
+"Street Wraith": 1
 },
-"Blue Tron": {
-"out": {},
-"in": {}
+"in": {
+"Barrowgoyf": 3,
+"Bloodchief's Thirst": 1,
+"Dauthi Voidwalker": 4,
+"Fatal Push": 3,
+"Murktide Regent": 1
+}
+},
+"BG Hogaak": {
+"out": {
+"Doomsday": 4,
+"Edge of Autumn": 2,
+"Force of Will": 2,
+"Lion's Eye Diamond": 1,
+"Street Wraith": 2,
+"Thassa's Oracle": 1
+},
+"in": {
+"Barrowgoyf": 3,
+"Bloodchief's Thirst": 1,
+"Dauthi Voidwalker": 4,
+"Fatal Push": 3,
+"Murktide Regent": 1
+}
+},
+"Alurentell": {
+"out": {
+"Consider": 1,
+"Daze": 1,
+"Island": 1,
+"Murktide Regent": 2
+},
+"in": {
+"Dauthi Voidwalker": 2,
+"Force of Negation": 2,
+"Voice of Victory": 1
+}
+},
+"Elves": {
+"out": {
+"Cavern of Souls": 1,
+"Island": 1,
+"Murktide Regent": 2
+},
+"in": {
+"Bloodchief's Thirst": 1,
+"Fatal Push": 3
+}
 }
 },
 "issues": []

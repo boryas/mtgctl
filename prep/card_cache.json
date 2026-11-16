@@ -4,6 +4,11 @@
 "text": "Flash\nFlying\nWhen Aang enters, airbend up to one other target creature or spell. (Exile it. While it's exiled, its owner may cast it for {2} rather than its mana cost.)\nWaterbend {8}: Transform Aang.\n//\nReach, trample\nWhenever Aang and La attack, put a +1/+1 counter on each tapped creature you control.",
 "type": "Legendary Creature \u2014 Human Avatar Ally // Legendary Creature \u2014 Avatar Spirit Ally"
 },
+"Abdel Adrian, Gorion's Ward": {
+"cost": "{4}{W}",
+"text": "When Abdel Adrian enters, exile any number of other nonland permanents you control until Abdel Adrian leaves the battlefield. Create a 1/1 white Soldier creature token for each permanent exiled this way.\nChoose a Background (You can have a Background as a second commander.)",
+"type": "Legendary Creature \u2014 Human Warrior"
+},
 "Abhorrent Oculus": {
 "cost": "{2}{U}",
 "text": "As an additional cost to cast this spell, exile six cards from your graveyard.\nFlying\nAt the beginning of each opponent's upkeep, manifest dread. (Look at the top two cards of your library. Put one onto the battlefield face down as a 2/2 creature and the other into your graveyard. Turn it face up any time for its mana cost if it's a creature card.)",
@@ -53,6 +58,11 @@
 "cost": "{3}{B}{B}",
 "text": "Reveal the top card of your library and put that card into your hand. You lose life equal to its mana value. You may repeat this process any number of times.",
 "type": "Instant"
+},
+"Aether Hub": {
+"cost": "",
+"text": "When this land enters, you get {E} (an energy counter).\n{T}: Add {C}.\n{T}, Pay {E}: Add one mana of any color.",
+"type": "Land"
 },
 "Aether Spellbomb": {
 "cost": "{1}",
@@ -118,6 +128,11 @@
 "cost": "{R}",
 "text": "As this enchantment enters, choose a nonbasic land card name.\nLands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"",
 "type": "Enchantment"
+},
+"Altar of Dementia": {
+"cost": "{2}",
+"text": "Sacrifice a creature: Target player mills cards equal to the sacrificed creature's power.",
+"type": "Artifact"
 },
 "Aluren": {
 "cost": "{2}{G}{G}",
@@ -409,6 +424,11 @@
 "text": "Kicker {2}{B} (You may pay an additional {2}{B} as you cast this spell.)\nDestroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker.",
 "type": "Sorcery"
 },
+"Bloodghast": {
+"cost": "{B}{B}",
+"text": "This creature can't block.\nThis creature has haste as long as an opponent has 10 or less life.\nLandfall \u2014 Whenever a land you control enters, you may return this card from your graveyard to the battlefield.",
+"type": "Creature \u2014 Vampire Spirit"
+},
 "Bloodstained Mire": {
 "cost": "",
 "text": "{T}, Pay 1 life, Sacrifice this land: Search your library for a Swamp or Mountain card, put it onto the battlefield, then shuffle.",
@@ -629,6 +649,11 @@
 "text": "Islands don't untap during their controllers' untap steps.",
 "type": "Enchantment"
 },
+"Chomping Changeling": {
+"cost": "{2}{G}",
+"text": "Changeling (This card is every creature type.)\nWhen this creature enters, destroy up to one target artifact or enchantment.",
+"type": "Creature \u2014 Shapeshifter"
+},
 "Chromatic Star": {
 "cost": "{1}",
 "text": "{1}, {T}, Sacrifice this artifact: Add one mana of any color.\nWhen this artifact is put into a graveyard from the battlefield, draw a card.",
@@ -774,6 +799,11 @@
 "text": "",
 "type": ""
 },
+"Crippling Fatigue": {
+"cost": "{1}{B}{B}",
+"text": "Target creature gets -2/-2 until end of turn.\nFlashback\u2014{1}{B}, Pay 3 life. (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+"type": "Sorcery"
+},
 "Crop Rotation": {
 "cost": "{G}",
 "text": "As an additional cost to cast this spell, sacrifice a land.\nSearch your library for a land card, put that card onto the battlefield, then shuffle.",
@@ -849,6 +879,16 @@
 "text": "If a land is tapped for two or more mana, it produces {C} instead of any other type and amount.\nEach spell a player casts costs {1} more to cast for each other spell that player has cast this turn.",
 "type": "Artifact"
 },
+"Dance of the Dead": {
+"cost": "{1}{B}",
+"text": "Enchant creature card in a graveyard\nWhen this Aura enters, if it's on the battlefield, it loses \"enchant creature card in a graveyard\" and gains \"enchant creature put onto the battlefield with this Aura.\" Put enchanted creature card onto the battlefield tapped under your control and attach this Aura to it. When this Aura leaves the battlefield, that creature's controller sacrifices it.\nEnchanted creature gets +1/+1 and doesn't untap during its controller's untap step.\nAt the beginning of the upkeep of enchanted creature's controller, that player may pay {1}{B}. If the player does, untap that creature.",
+"type": "Enchantment \u2014 Aura"
+},
+"Dance with Calamity": {
+"cost": "{7}{R}",
+"text": "Shuffle your library. As many times as you choose, you may exile the top card of your library. If the total mana value of the cards exiled this way is 13 or less, you may cast any number of spells from among those cards without paying their mana costs.",
+"type": "Sorcery"
+},
 "Dark Depths": {
 "cost": "",
 "text": "Dark Depths enters with ten ice counters on it.\n{3}: Remove an ice counter from Dark Depths.\nWhen Dark Depths has no ice counters on it, sacrifice it. If you do, create Marit Lage, a legendary 20/20 black Avatar creature token with flying and indestructible.",
@@ -863,6 +903,11 @@
 "cost": "{B}",
 "text": "Add {B}{B}{B}.",
 "type": "Instant"
+},
+"Darklight Phoenix": {
+"cost": "{3}{B}",
+"text": "Flying, haste\nAt the beginning of combat on your turn, if two or more creatures died this turn, return this card from your graveyard to the battlefield.",
+"type": "Creature \u2014 Phoenix"
 },
 "Dauthi Voidwalker": {
 "cost": "{B}{B}",
@@ -913,6 +958,11 @@
 "cost": "{2}",
 "text": "Each spell costs {3} more to cast except during its controller's turn.",
 "type": "Artifact"
+},
+"Delighted Halfling": {
+"cost": "{G}",
+"text": "{T}: Add {C}.\n{T}: Add one mana of any color. Spend this mana only to cast a legendary spell, and that spell can't be countered.",
+"type": "Creature \u2014 Halfling Citizen"
 },
 "Delver of Secrets": {
 "cost": "{U}",
@@ -1149,6 +1199,11 @@
 "text": "Lifelink\nAt the beginning of your end step, if you gained life this turn, surveil 1. If you put a card with mana value less than or equal to the amount of life you gained this turn into your graveyard this way, put that card into your hand.",
 "type": "Creature \u2014 Kor Cleric"
 },
+"Enlightened Tutor": {
+"cost": "{W}",
+"text": "Search your library for an artifact or enchantment card, reveal it, then shuffle and put that card on top.",
+"type": "Instant"
+},
 "Ensnaring Bridge": {
 "cost": "{3}",
 "text": "Creatures with power greater than the number of cards in your hand can't attack.",
@@ -1187,6 +1242,11 @@
 "Eureka": {
 "cost": "{2}{G}{G}",
 "text": "Starting with you, each player may put a permanent card from their hand onto the battlefield. Repeat this process until no one puts a card onto the battlefield.",
+"type": "Sorcery"
+},
+"Exorcise": {
+"cost": "{1}{W}",
+"text": "Exile target artifact, enchantment, or creature with power 4 or greater.",
 "type": "Sorcery"
 },
 "Expedition Map": {
@@ -1248,6 +1308,11 @@
 "cost": "{1}{B}",
 "text": "As an additional cost to cast this spell, forage or pay {B}. (To forage, exile three cards from your graveyard or sacrifice a Food.)\nDestroy target creature or planeswalker.",
 "type": "Instant"
+},
+"Feed the Swarm": {
+"cost": "{1}{B}",
+"text": "Destroy target creature or enchantment an opponent controls. You lose life equal to that permanent's mana value.",
+"type": "Sorcery"
 },
 "Fell the Profane": {
 "cost": "{2}{B}{B}",
@@ -1329,6 +1394,11 @@
 "text": "You may sacrifice a nontoken white creature rather than pay this spell's mana cost.\nUntil end of turn, your life total can't change, and permanents you control gain hexproof and indestructible.",
 "type": "Instant"
 },
+"Flare of Malice": {
+"cost": "{2}{B}{B}",
+"text": "You may sacrifice a nontoken black creature rather than pay this spell's mana cost.\nEach opponent sacrifices a creature or planeswalker with the greatest mana value among creatures and planeswalkers they control.",
+"type": "Instant"
+},
 "Flickerwisp": {
 "cost": "{1}{W}{W}",
 "text": "Flying\nWhen this creature enters, exile another target permanent. Return that card to the battlefield under its owner's control at the beginning of the next end step.",
@@ -1394,6 +1464,11 @@
 "text": "This spell can't be countered.\nTrample, haste\nCreature spells you control can't be countered.\nCombat damage can't be prevented.",
 "type": "Creature \u2014 Beast"
 },
+"From the Ashes": {
+"cost": "{3}{R}",
+"text": "Destroy all nonbasic lands. For each land destroyed this way, its controller may search their library for a basic land card and put it onto the battlefield. Then each player who searched their library this way shuffles.",
+"type": "Sorcery"
+},
 "From the Catacombs": {
 "cost": "{3}{B}{B}",
 "text": "Put target creature card from a graveyard onto the battlefield under your control with a corpse counter on it. You take the initiative. If that creature would leave the battlefield, exile it instead of putting it anywhere else.\nEscape\u2014{3}{B}{B}, Exile five other cards from your graveyard. (You may cast this card from your graveyard for its escape cost.)",
@@ -1438,6 +1513,11 @@
 "cost": "{R}",
 "text": "Search your library for a card, put that card into your hand, discard a card at random, then shuffle.",
 "type": "Sorcery"
+},
+"Gandalf, Goblins' Bane": {
+"cost": "{2}{R} // {1}{R}",
+"text": "Whenever you cast a noncreature spell, Gandalf gets +1/+1 until end of turn and deals 1 damage to each opponent.\n//\nLook at the top two cards of your library and exile them face down. For as long as they remain exiled, you may play them if you control a Wizard.",
+"type": "Legendary Creature \u2014 Avatar Wizard // Sorcery \u2014 Adventure"
 },
 "Geier Reach Sanitarium": {
 "cost": "",
@@ -1714,6 +1794,11 @@
 "text": "Flash\nIf an opponent would draw a card except the first one they draw in each of their draw steps, instead you create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")",
 "type": "Creature \u2014 Merfolk Pirate"
 },
+"Humility": {
+"cost": "{2}{W}{W}",
+"text": "All creatures lose all abilities and have base power and toughness 1/1.",
+"type": "Enchantment"
+},
 "Hurkyl's Recall": {
 "cost": "{1}{U}",
 "text": "Return all artifacts target player owns to their hand.",
@@ -1753,6 +1838,16 @@
 "cost": "{G}",
 "text": "Exalted (Whenever a creature you control attacks alone, that creature gets +1/+1 until end of turn.)\n{T}: Add {B}, {R}, or {G}.",
 "type": "Creature \u2014 Goblin Shaman"
+},
+"Ill-Gotten Gains": {
+"cost": "{2}{B}{B}",
+"text": "Exile Ill-Gotten Gains. Each player discards their hand, then returns up to three cards from their graveyard to their hand.",
+"type": "Sorcery"
+},
+"Ill-Timed Explosion": {
+"cost": "{2}{U}{R}",
+"text": "Draw two cards. Then you may discard two cards. When you do, Ill-Timed Explosion deals X damage to each creature, where X is the greatest mana value among cards discarded this way.",
+"type": "Sorcery"
 },
 "Impulse": {
 "cost": "{1}{U}",
@@ -1914,6 +2009,11 @@
 "text": "",
 "type": ""
 },
+"King T'Challa": {
+"cost": "{1}{W}{U}",
+"text": "Flash\nWhenever a player draws their second card each turn, you draw a card.\n{4}{W}{U}: Transform King T'Challa. Activate only as a sorcery.\n//\nFlash\nDouble strike\nPrevent all damage that would be dealt to Black Panther.\nWhenever Black Panther deals combat damage to a player, draw a card.",
+"type": "Legendary Creature \u2014 Human Noble Hero // Legendary Creature \u2014 Human Warrior Hero"
+},
 "Kiora's Dismissal": {
 "cost": "{U}",
 "text": "Strive \u2014 This spell costs {U} more to cast for each target beyond the first.\nReturn any number of target enchantments to their owners' hands.",
@@ -2029,10 +2129,20 @@
 "text": "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.",
 "type": "Enchantment"
 },
+"Lich's Relic": {
+"cost": "{B}",
+"text": "When this Equipment enters, you may pay {2}. When you do, for each opponent, destroy up to one target creature or planeswalker that player controls.\nEquipped creature gets +2/+1.\nEquip {2}",
+"type": "Artifact \u2014 Equipment"
+},
 "Life from the Loam": {
 "cost": "{1}{G}",
 "text": "Return up to three target land cards from your graveyard to your hand.\nDredge 3 (If you would draw a card, you may mill three cards instead. If you do, return this card from your graveyard to your hand.)",
 "type": "Sorcery"
+},
+"Lightning Axe": {
+"cost": "{R}",
+"text": "As an additional cost to cast this spell, discard a card or pay {5}.\nLightning Axe deals 5 damage to target creature.",
+"type": "Instant"
 },
 "Lightning Bolt": {
 "cost": "{R}",
@@ -2319,6 +2429,11 @@
 "text": "Choose one. If you descended this turn, you may choose both instead. (You descended if a permanent card was put into your graveyard from anywhere.)\n\u2022 Destroy target creature or planeswalker.\n\u2022 Destroy target noncreature, nonland permanent with mana value 1 or less.",
 "type": "Sorcery"
 },
+"Molten Gatekeeper": {
+"cost": "{2}{R}",
+"text": "Whenever another creature you control enters, this creature deals 1 damage to each opponent.\nUnearth {R} ({R}: Return this card from your graveyard to the battlefield. It gains haste. Exile it at the beginning of the next end step or if it would leave the battlefield. Unearth only as a sorcery.)",
+"type": "Artifact Creature \u2014 Golem"
+},
 "Momo, Friendly Flier": {
 "cost": "{W}",
 "text": "Flying\nThe first non-Lemur creature spell with flying you cast during each of your turns costs {1} less to cast.\nWhenever another creature you control with flying enters, Momo gets +1/+1 until end of turn.",
@@ -2459,6 +2574,16 @@
 "text": "{0}: The next 1 damage that would be dealt to this creature this turn is dealt to target creature you control instead.",
 "type": "Creature \u2014 Kor Nomad Soldier"
 },
+"Not of This World": {
+"cost": "{7}",
+"text": "Counter target spell or ability that targets a permanent you control.\nThis spell costs {7} less to cast if it targets a spell or ability that targets a creature you control with power 7 or greater.",
+"type": "Kindred Instant \u2014 Eldrazi"
+},
+"Noxious Revival": {
+"cost": "{G/P}",
+"text": "({G/P} can be paid with either {G} or 2 life.)\nPut target card from a graveyard on top of its owner's library.",
+"type": "Instant"
+},
 "Null Rod": {
 "cost": "{2}",
 "text": "Activated abilities of artifacts can't be activated.",
@@ -2584,6 +2709,11 @@
 "text": "Return any number of target nonland, nontoken permanents you control to their owners' hands. Draw a card for each card returned to your hand this way.",
 "type": "Instant"
 },
+"Past in Flames": {
+"cost": "{3}{R}",
+"text": "Each instant and sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.\nFlashback {4}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+"type": "Sorcery"
+},
 "Patchwork Automaton": {
 "cost": "{2}",
 "text": "Ward {2} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {2}.)\nWhenever you cast an artifact spell, put a +1/+1 counter on this creature.",
@@ -2653,6 +2783,16 @@
 "cost": "{2}",
 "text": "As this creature enters, choose a nonland card name.\nActivated abilities of sources with the chosen name can't be activated.",
 "type": "Artifact Creature \u2014 Phyrexian Horror"
+},
+"Phyrexian Tower": {
+"cost": "",
+"text": "{T}: Add {C}.\n{T}, Sacrifice a creature: Add {B}{B}.",
+"type": "Legendary Land"
+},
+"Pick Your Poison": {
+"cost": "{G}",
+"text": "Choose one \u2014\n\u2022 Each opponent sacrifices an artifact of their choice.\n\u2022 Each opponent sacrifices an enchantment of their choice.\n\u2022 Each opponent sacrifices a creature with flying of their choice.",
+"type": "Sorcery"
 },
 "Pinnacle Emissary": {
 "cost": "{1}{U}{R}",
@@ -2819,6 +2959,11 @@
 "text": "You may exile a red card from your hand rather than pay this spell's mana cost.\nPyrokinesis deals 4 damage divided as you choose among any number of target creatures.",
 "type": "Instant"
 },
+"Pyrostatic Pillar": {
+"cost": "{1}{R}",
+"text": "Whenever a player casts a spell with mana value 3 or less, this enchantment deals 2 damage to that player.",
+"type": "Enchantment"
+},
 "Quantum Riddler": {
 "cost": "{3}{U}{U}",
 "text": "Flying\nWhen this creature enters, draw a card.\nAs long as you have one or fewer cards in hand, if you would draw one or more cards, you draw that many cards plus one instead.\nWarp {1}{U}",
@@ -2924,10 +3069,25 @@
 "text": "{3}: Untap this artifact.\n{2}, {T}: Create a 1/1 colorless Servo artifact creature token.\n{1}, {T}, Sacrifice a Servo: Create a 1/1 colorless Thopter artifact creature token with flying.\n{T}, Sacrifice a Thopter: Create a 4/4 colorless Construct artifact creature token.",
 "type": "Artifact"
 },
+"Reverent Silence": {
+"cost": "{3}{G}",
+"text": "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.\nDestroy all enchantments.",
+"type": "Sorcery"
+},
 "Riddlesmith": {
 "cost": "{1}{U}",
 "text": "Whenever you cast an artifact spell, you may draw a card. If you do, discard a card.",
 "type": "Creature \u2014 Human Artificer"
+},
+"Rift Bolt": {
+"cost": "{2}{R}",
+"text": "Rift Bolt deals 3 damage to any target.\nSuspend 1\u2014{R} (Rather than cast this card from your hand, you may pay {R} and exile it with a time counter on it. At the beginning of your upkeep, remove a time counter. When the last is removed, you may cast it without paying its mana cost.)",
+"type": "Sorcery"
+},
+"Riftstone Portal": {
+"cost": "",
+"text": "{T}: Add {C}.\nAs long as this card is in your graveyard, lands you control have \"{T}: Add {G} or {W}.\"",
+"type": "Land"
 },
 "Rip Apart": {
 "cost": "{R}{W}",
@@ -3059,6 +3219,16 @@
 "text": "When this enchantment enters, exile target nonland permanent an opponent controls with mana value 2 or less until this enchantment leaves the battlefield.",
 "type": "Enchantment"
 },
+"Sear": {
+"cost": "{1}{R}",
+"text": "Sear deals 4 damage to target creature or planeswalker.",
+"type": "Instant"
+},
+"Searing Blaze": {
+"cost": "{R}{R}",
+"text": "Searing Blaze deals 1 damage to target player or planeswalker and 1 damage to target creature that player or that planeswalker's controller controls.\nLandfall \u2014 If you had a land enter the battlefield under your control this turn, Searing Blaze deals 3 damage to that player or planeswalker and 3 damage to that creature instead.",
+"type": "Instant"
+},
 "Searing Blood": {
 "cost": "{R}{R}",
 "text": "Searing Blood deals 2 damage to target creature. When that creature dies this turn, Searing Blood deals 3 damage to the creature's controller.",
@@ -3183,6 +3353,11 @@
 "cost": "",
 "text": "This land enters tapped unless you control a Forest.\n{T}: Add {G}.\nDelirium \u2014 {2}{G}{G}: This land becomes a copy of target permanent card in your graveyard until end of turn. Activate only if there are four or more card types among cards in your graveyard.",
 "type": "Land"
+},
+"Shoot the Sheriff": {
+"cost": "{1}{B}",
+"text": "Destroy target non-outlaw creature. (Assassins, Mercenaries, Pirates, Rogues, and Warlocks are outlaws. Everyone else is fair game.)",
+"type": "Instant"
 },
 "Show and Tell": {
 "cost": "{2}{U}",
@@ -3419,10 +3594,20 @@
 "text": "Choose a card name. Reveal cards from the top of your library until you reveal a card with that name, then put that card into your hand. Exile all other cards revealed this way, and you lose 1 life for each of the exiled cards.",
 "type": "Instant"
 },
+"Springheart Nantuko": {
+"cost": "{1}{G}",
+"text": "Bestow {1}{G}\nEnchanted creature gets +1/+1.\nLandfall \u2014 Whenever a land you control enters, you may pay {1}{G} if this permanent is attached to a creature you control. If you do, create a token that's a copy of that creature. If you didn't create a token this way, create a 1/1 green Insect creature token.",
+"type": "Enchantment Creature \u2014 Insect Monk"
+},
 "Stadium Headliner": {
 "cost": "{R}",
 "text": "Mobilize 1 (Whenever this creature attacks, create a tapped and attacking 1/1 red Warrior creature token. Sacrifice it at the beginning of the next end step.)\n{1}{R}, Sacrifice this creature: It deals damage equal to the number of creatures you control to target creature.",
 "type": "Creature \u2014 Goblin Warrior"
+},
+"Staff of the Storyteller": {
+"cost": "{1}{W}",
+"text": "When this artifact enters, create a 1/1 white Spirit creature token with flying.\nWhenever you create one or more creature tokens, put a story counter on this artifact.\n{W}, {T}, Remove a story counter from this artifact: Draw a card.",
+"type": "Artifact"
 },
 "Starfield Shepherd": {
 "cost": "{3}{W}{W}",
@@ -3432,6 +3617,11 @@
 "Static Prison": {
 "cost": "{W}",
 "text": "When this enchantment enters, exile target nonland permanent an opponent controls until this enchantment leaves the battlefield. You get {E}{E} (two energy counters).\nAt the beginning of your first main phase, sacrifice this enchantment unless you pay {E}.",
+"type": "Enchantment"
+},
+"Steely Resolve": {
+"cost": "{1}{G}",
+"text": "As this enchantment enters, choose a creature type.\nCreatures of the chosen type have shroud. (They can't be the targets of spells or abilities.)",
 "type": "Enchantment"
 },
 "Stern Dismissal": {
@@ -3534,6 +3724,11 @@
 "text": "Choose a color. Sudden Demise deals X damage to each creature of the chosen color.",
 "type": "Sorcery"
 },
+"Sulfuric Vortex": {
+"cost": "{1}{R}{R}",
+"text": "At the beginning of each player's upkeep, this enchantment deals 2 damage to that player.\nIf a player would gain life, that player gains no life instead.",
+"type": "Enchantment"
+},
 "Summer Bloom": {
 "cost": "{1}{G}",
 "text": "You may play up to three additional lands this turn.",
@@ -3613,6 +3808,11 @@
 "cost": "{G}",
 "text": "Sacrifice a land: Target creature you control gains shroud until end of turn. (It can't be the target of spells or abilities.)",
 "type": "Creature \u2014 Human Wizard"
+},
+"Sylvan Scrying": {
+"cost": "{1}{G}",
+"text": "Search your library for a land card, reveal it, put it into your hand, then shuffle.",
+"type": "Sorcery"
 },
 "Taiga": {
 "cost": "",
@@ -3824,6 +4024,11 @@
 "text": "This land enters tapped.\n{T}: Add {G}.\n{T}, Sacrifice this land: Add {R}{W}.",
 "type": "Land"
 },
+"Tinybones Joins Up": {
+"cost": "{B}",
+"text": "When Tinybones Joins Up enters, any number of target players each discard a card.\nWhenever a legendary creature you control enters, any number of target players each mill a card and lose 1 life.",
+"type": "Legendary Enchantment"
+},
 "Tishana's Tidebinder": {
 "cost": "{2}{U}",
 "text": "Flash\nWhen this creature enters, counter up to one target activated or triggered ability. If an ability of an artifact, creature, or planeswalker is countered this way, that permanent loses all abilities for as long as this creature remains on the battlefield. (Mana abilities can't be targeted.)",
@@ -3914,6 +4119,11 @@
 "text": "Reach\nWhen this creature enters, it deals 2 damage to any target.\nChannel \u2014 {1}{R}, Discard this card: It deals 2 damage to any target.",
 "type": "Artifact Creature \u2014 Goblin Archer"
 },
+"Tyvar, Jubilant Brawler": {
+"cost": "{1}{B}{G}",
+"text": "You may activate abilities of creatures you control as though those creatures had haste.\n+1: Untap up to one target creature.\n\u22122: Mill three cards, then you may return a creature card with mana value 2 or less from your graveyard to the battlefield.",
+"type": "Legendary Planeswalker \u2014 Tyvar"
+},
 "Tyvar, the Pummeler": {
 "cost": "{1}{G}{G}",
 "text": "Tap another untapped creature you control: Tyvar gains indestructible until end of turn. Tap it.\n{3}{G}{G}: Creatures you control get +X/+X until end of turn, where X is the greatest power among creatures you control.",
@@ -3999,6 +4209,11 @@
 "text": "When this enchantment enters and whenever you cast a spell with mana value 5 or greater, draw a card.",
 "type": "Enchantment"
 },
+"Urborg, Tomb of Yawgmoth": {
+"cost": "",
+"text": "Each land is a Swamp in addition to its other land types.",
+"type": "Legendary Land"
+},
 "Uro, Titan of Nature's Wrath": {
 "cost": "{1}{G}{U}",
 "text": "When Uro enters, sacrifice it unless it escaped.\nWhenever Uro enters or attacks, you gain 3 life and draw a card, then you may put a land card from your hand onto the battlefield.\nEscape\u2014{G}{G}{U}{U}, Exile five other cards from your graveyard. (You may cast this card from your graveyard for its escape cost.)",
@@ -4044,6 +4259,11 @@
 "text": "Flying, lifelink\nWard\u2014Sacrifice three nonland permanents.\nIf a card you didn't control would be put into an opponent's graveyard from anywhere, exile it instead.\nDuring your turn, you may play cards exiled with Valgavoth. If you cast a spell this way, pay life equal to its mana value rather than pay its mana cost.",
 "type": "Legendary Creature \u2014 Elder Demon"
 },
+"Vampire Hexmage": {
+"cost": "{B}{B}",
+"text": "First strike\nSacrifice this creature: Remove all counters from target permanent.",
+"type": "Creature \u2014 Vampire Shaman"
+},
 "Vandalblast": {
 "cost": "{R}",
 "text": "Destroy target artifact you don't control.\nOverload {4}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")",
@@ -4063,6 +4283,11 @@
 "cost": "{G}",
 "text": "Draw a card if an opponent has cast a blue or black spell this turn. Spells you control can't be countered this turn. You and permanents you control gain hexproof from blue and from black until end of turn. (You and they can't be the targets of blue or black spells or abilities your opponents control.)",
 "type": "Instant"
+},
+"Vendilion Clique": {
+"cost": "{1}{U}{U}",
+"text": "Flash\nFlying\nWhen Vendilion Clique enters, look at target player's hand. You may choose a nonland card from it. If you do, that player reveals the chosen card, puts it on the bottom of their library, then draws a card.",
+"type": "Legendary Creature \u2014 Faerie Wizard"
 },
 "Vengevine": {
 "cost": "{2}{G}{G}",
@@ -4129,6 +4354,16 @@
 "text": "Whenever a player casts a spell, if no colored mana was spent to cast it, counter that spell.",
 "type": "Artifact"
 },
+"Void Rend": {
+"cost": "{W}{U}{B}",
+"text": "This spell can't be countered.\nDestroy target nonland permanent.",
+"type": "Instant"
+},
+"Volatile Stormdrake": {
+"cost": "{1}{U}",
+"text": "Flying, hexproof from activated and triggered abilities\nWhen this creature enters, exchange control of this creature and target creature an opponent controls. If you do, you get {E}{E}{E}{E}, then sacrifice that creature unless you pay an amount of {E} equal to its mana value.",
+"type": "Creature \u2014 Drake"
+},
 "Volcanic Island": {
 "cost": "",
 "text": "({T}: Add {U} or {R}.)",
@@ -4169,6 +4404,11 @@
 "text": "This creature enters with X +1/+1 counters on it.\n{4}: Put a +1/+1 counter on this creature.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.",
 "type": "Artifact Creature \u2014 Construct"
 },
+"Wan Shi Tong, Librarian": {
+"cost": "{X}{U}{U}",
+"text": "Flash\nFlying, vigilance\nWhen Wan Shi Tong enters, put X +1/+1 counters on him. Then draw half X cards, rounded down.\nWhenever an opponent searches their library, put a +1/+1 counter on Wan Shi Tong and draw a card.",
+"type": "Legendary Creature \u2014 Bird Spirit"
+},
 "Warping Wail": {
 "cost": "{1}{C}",
 "text": "({C} represents colorless mana.)\nChoose one \u2014\n\u2022 Exile target creature with power or toughness 1 or less.\n\u2022 Counter target sorcery spell.\n\u2022 Create a 1/1 colorless Eldrazi Scion creature token. It has \"Sacrifice this token: Add {C}.\"",
@@ -4203,6 +4443,11 @@
 "cost": "{2}{G}",
 "text": "When Way of the Paradox enters, empower Jace 5. (Put five loyalty counters on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[\u22121]: Surveil 1\" and \"[\u22123]: Draw a card.\")\nWhenever you activate a loyalty ability, you gain 1 life. You may play an additional land this turn.",
 "type": "Legendary Enchantment"
+},
+"Wear Down": {
+"cost": "{1}{G}",
+"text": "Gift a card (You may promise an opponent a gift as you cast this spell. If you do, they draw a card before its other effects.)\nDestroy target artifact or enchantment. If the gift was promised, instead destroy two target artifacts and/or enchantments.",
+"type": "Sorcery"
 },
 "Wear/Tear": {
 "cost": "",
@@ -4303,6 +4548,11 @@
 "cost": "{1}{R}",
 "text": "Exile the top two cards of your library. Until the end of your next turn, you may play those cards.",
 "type": "Sorcery"
+},
+"Wurmcoil Engine": {
+"cost": "{6}",
+"text": "Deathtouch, lifelink\nWhen this creature dies, create a 3/3 colorless Phyrexian Wurm artifact creature token with deathtouch and a 3/3 colorless Phyrexian Wurm artifact creature token with lifelink.",
+"type": "Artifact Creature \u2014 Phyrexian Wurm"
 },
 "Xander's Lounge": {
 "cost": "",

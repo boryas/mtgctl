@@ -14,4 +14,5 @@ rsync -az "bur.io:$data/mtgctl.db" "bur.io:$data/mtgctl.db-wal" "$here/.pooled/"
 rsync -az --delete "bur.io:$data/ldc/pages" "bur.io:$data/ldc/lists" "$here/.pooled/ldc/" 2>&1 | quiet
 python3 "$here/build_meta.py" "$DAYS"
 python3 "$here/build_ranges.py" "$here/.pooled/mtgctl.db"
-python3 "$here/sbmap.py" export "$here/sbmaps/tempo-ew-current.toml" "$here/sbmaps/tempo-ew-draft-b.toml" "$here/sbmaps/tempo-eureka.toml" --meta "$here/sbmaps/expected-meta.csv" -o "$here/sbmaps.json"
+python3 "$here/sbmap.py" export "$here/sbmaps/tempo-ew-final.toml" "$here/sbmaps/tempo-eureka.toml" --meta "$here/sbmaps/expected-meta.csv" -o "$here/sbmaps.json"
+python3 "$here/pull_sheet_pdf.py" "$here/sbmaps.json" "$here/pull-sheet.pdf" "$here/pull-sheet.html"

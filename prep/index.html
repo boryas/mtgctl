@@ -821,32 +821,60 @@ function sbGrid(map) {
   const bal = `<tr class="tot"><th>Balance</th><td></td>${decks.map((x) => { const b = balance(planOf(map, x.deck)); return `<td class="c ${b ? "bad" : ""}">${b ? (b > 0 ? "+" : "") + b : "✓"}</td>`; }).join("")}<td></td><td></td></tr>`;
   const mains = Object.entries(map.main).sort((a, b) => a[0].localeCompare(b[0])).map(([c, q]) => row(c, q, "out")).join("");
   const sides = Object.entries(map.side).sort((a, b) => a[0].localeCompare(b[0])).map(([c, q]) => row(c, q, "in")).join("");
-  return `<div class="row noprint"><button class="btn" data-act="print">Print this grid</button><span class="small muted">Rows are your 75; a cell is copies cut (−) or brought in (+). Decks = matchups that touch the card; Meta = their summed share. A grey row is never swapped.</span></div>
+  return `<div class="row noprint"><button class="btn" data-act="print">Save the grid as a file</button><span class="small muted">Rows are your 75; a cell is copies cut (−) or brought in (+). Decks = matchups that touch the card; Meta = their summed share. A grey row is never swapped.</span></div>
     <div class="tbl-wrap sheet"><table class="sbgrid"><thead>${head}</thead><tbody>${mains}${foot("out")}<tr class="sep"><th colspan="${decks.length + 4}">Sideboard</th></tr>${sides}${foot("in")}${bal}</tbody></table></div>`;
 }
 // The table format is "all 75 in, then pull 15": a plan's pull list is its main-deck cuts
 // plus every sideboard copy it does not bring in, so each card reads as what leaves the deck.
+// A card in both main and side (Murktide) is one line: copies pulled, whichever pile they sit in.
 function pullList(map, plan) {
-  const out = Object.entries(plan.out);
-  const stays = Object.entries(map.side).map(([c, n]) => [c, n - (plan.in[c] || 0)]).filter(([, n]) => n > 0);
-  return { out, stays, total: sumv(plan.out) + stays.reduce((a, [, n]) => a + n, 0) };
+  const n = { ...plan.out };
+  for (const [c, q] of Object.entries(map.side)) { const stay = q - (plan.in[c] || 0); if (stay > 0) n[c] = (n[c] || 0) + stay; }
+  const items = Object.entries(n).sort((a, b) => a[0].localeCompare(b[0]));
+  return { items, total: sumv(n) };
 }
 function sbPull(map) {
   const box = (x) => {
-    const plan = planOf(map, x.deck), { out, stays, total } = pullList(map, plan), issues = planIssues(map, x.deck), empty = planEmpty(plan);
+    const plan = planOf(map, x.deck), { items, total } = pullList(map, plan), issues = planIssues(map, x.deck), empty = planEmpty(plan);
     const title = x.meta && x.meta !== x.deck ? `${esc(x.meta)}<span class="muted"> · ${esc(x.deck)}</span>` : esc(x.deck) + (map.aliases[x.deck] && map.aliases[x.deck] !== x.deck ? `<span class="muted"> · ${esc(map.aliases[x.deck])}</span>` : "");
     return `<section class="pull ${total !== 15 || issues.length ? "off" : plan.rough ? "rough" : ""}">
       <h3>${plan.rough ? `<span class="rough-mark" title="Doesn't map cleanly">~</span>` : ""}${title}${x.share != null ? `<span class="num pull-share">${Math.round(x.share * 100)}%</span>` : ""}<span class="num pull-n">${total}</span></h3>
-      ${empty ? `<div class="pull-issue">No plan yet.</div>` : `<div class="pull-list">${[...out, ...stays].sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => `<div class="pl"><span class="num">${n}</span>${esc(c)}</div>`).join("")}</div>`}
+      ${empty ? `<div class="pull-issue">No plan yet.</div>` : `<div class="pull-list">${items.map(([c, n]) => `<div class="pl"><span class="num">${n}</span>${esc(c)}</div>`).join("")}</div>`}
       ${issues.length && !empty ? `<div class="pull-issue">${issues.map(esc).join("<br>")}</div>` : ""}
     </section>`;
   };
   const sideBox = `<section class="pull side"><h3>Sideboard<span class="num pull-n">${sumv(map.side)}</span></h3>
       <div class="pull-list">${Object.entries(map.side).sort((a, b) => a[0].localeCompare(b[0])).map(([c, n]) => `<div class="pl"><span class="num">${n}</span>${esc(c)}</div>`).join("")}</div></section>`;
-  return `<div class="row noprint"><button class="btn" data-act="print">Print this sheet</button>
-      <span class="small muted">Table procedure: all 75 go in, then pull the cards listed. Each box should total 15; a red box has no plan or does not balance.</span></div>
+  return `<div class="row noprint"><button class="btn" data-act="print">Save the sheet as a file</button>
+      <span class="small muted">Table procedure: all 75 go in, then pull the cards listed. Each box should total 15; a red box has no plan or does not balance. ${S.sbMsg ? esc(S.sbMsg) + " " : ""}<button class="chip" data-act="save-pdf">Save the PDF</button> <a href="pull-sheet.html" target="_blank" rel="noopener">static copy</a> from the last refresh.</span></div>
     <div class="sheet"><div class="sheet-head"><b>${esc(map.name)}</b></div>
       <div class="pull-grid">${sideBox}${map.decks.map(box).join("")}</div></div>`;
+}
+
+// window.print() and new tabs are no-ops inside the artifact frame, so the sheet is handed to
+// the viewer as a standalone document (the page's stylesheet applies, including its @media
+// print rules) that prints itself when opened.
+function sheetDocument() {
+  const sheet = document.querySelector(".sheet"); if (!sheet) return null;
+  const css = [...document.querySelectorAll("style")].map((s) => s.textContent).join("\n");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(curMap().name)}</title><style>${css}</style></head><body><div class="wrap"><main>${sheet.outerHTML}</main></div><script>setTimeout(() => window.print(), 400)<\/script></body></html>`;
+}
+async function printSheet() {
+  const doc = sheetDocument();
+  if (!doc) { window.print(); return; }
+  const downloads = await (window.claude?.use ? window.claude.use("downloads") : null);
+  if (!downloads) { S.sbMsg = "Saving is unavailable in this view: open the static copy (link below) and print it."; render(); return; }
+  try { await downloads.save({ filename: "pull-sheet.html", data: doc }); S.sbMsg = "Saved pull-sheet.html: open it in a browser tab, it prints itself (Ctrl+P if not)."; }
+  catch (e) { S.sbMsg = e?.code === "declined" ? "" : "Could not save the sheet (" + (e?.code || "error") + "): open the static copy (link below) and print it."; }
+  render();
+}
+
+async function savePdf() {
+  const downloads = await (window.claude?.use ? window.claude.use("downloads") : null);
+  if (!downloads) { S.sbMsg = "Saving is unavailable in this view."; render(); return; }
+  try { const blob = await (await fetch("pull-sheet.pdf")).blob(); await downloads.save({ filename: "pull-sheet.pdf", data: blob }); S.sbMsg = "Saved pull-sheet.pdf."; }
+  catch (e) { S.sbMsg = e?.code === "declined" ? "" : "Could not save the PDF (" + (e?.code || "error") + ")."; }
+  render();
 }
 
 /* ---------- drill: board a random matchup from memory, graded against the map ---------- */
@@ -1027,7 +1055,7 @@ document.addEventListener("click", (e) => {
     const map = curMap(), p = planOf(map, S.sbDeck), o = t.dataset.mstep === "in" ? p.in : p.out, c = t.dataset.card;
     o[c] = Math.max(0, (o[c] || 0) + +t.dataset.d); if (!o[c]) delete o[c]; saveMap(map); render(); return;
   }
-  if (t.dataset.act === "print") { window.print(); return; }
+  if (t.dataset.act === "print") { printSheet(); return; }
   if (t.dataset.mode) { if (S.quizMode !== t.dataset.mode) GS = freshGame(GS.deck); S.quizMode = t.dataset.mode; render(); return; }
   if (t.dataset.addGuess) { addGuess(t.dataset.addGuess); return; }
   if (t.dataset.delGuess) { GS.names[GS.stage] = (GS.names[GS.stage] || []).filter((n) => n !== t.dataset.delGuess); render(); return; }
@@ -1081,6 +1109,7 @@ document.addEventListener("click", (e) => {
     case "sb-save": saveSb(); break;
     case "sb-next": newScenario(); break;
     case "sb-edit-this": S.sbView = "edit"; lsSet("sbView", "edit"); S.sbDeck = S.sbScenario.deck; render(); window.scrollTo(0, 0); break;
+    case "save-pdf": savePdf(); break;
     case "sb-paste": S.sbPaste = !S.sbPaste; S.sbMsg = ""; render(); break;
     case "sb-apply-list": {
       const { main, side } = parseList($("#sb-list").value);
