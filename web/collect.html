@@ -1,23 +1,43 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl upload</title><link rel="stylesheet" href="style.css?v=46"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Upload MTGO logs · mtgctl</title><link rel="stylesheet" href="style.css?v=47"></head>
 <body>
-<h1>mtgctl · add my logs</h1>
-<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="reference.html">reference decklists</a><a href="windows/">windows uploader</a></nav>
-<div class="box">
-  <div class="box"><b>On Windows, skip this page.</b> Open PowerShell (Start menu, type <i>PowerShell</i>) and paste this line:
+<h1>mtgctl · upload your MTGO logs</h1>
+<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a></nav>
+<p class="lede">Your results here are built from the game logs the MTGO client keeps on your computer. Upload them either way below. There is no account to make: the server reads your MTGO username from the logs, and takes only the files it does not have yet.</p>
+<p id="known" class="muted lede">…</p>
+
+<div class="box step" id="windows">
+  <h2>On Windows: install the uploader once <span class="muted">(recommended)</span></h2>
+  <p>Your logs then upload by themselves every time you close MTGO, and you don't need this page again.</p>
+  <ol>
+    <li>Open PowerShell (Start menu, type <i>PowerShell</i>) and paste this line:
 <pre class="copy">irm https://bur.io/mtg/stats/windows/install.ps1 | iex</pre>
-<span class="muted">Or <a href="windows/install-mtgctl.cmd">download install-mtgctl.cmd</a>, double-click it and click <i>Run</i> when Windows asks; it is this and nothing more:
-<pre class="copy">@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://bur.io/mtg/stats/windows/install.ps1 | iex"
-pause</pre> Either way a <i>Play MTGO</i> shortcut lands on the desktop: start the client from it and your logs upload when you close it (and at logon, as a fallback). Nothing else to install. Everything it runs is four short scripts you can read first: <a href="windows/install.ps1">install.ps1</a>, <a href="windows/mtgctl-upload.ps1">mtgctl-upload.ps1</a>, <a href="windows/play-mtgo.ps1">play-mtgo.ps1</a>. <a href="windows/">Details and how to remove it.</a></span></div>
-<div id="known" class="muted">…</div>
-  <p style="margin:12px 0"><button id="pick" style="font-size:16px;padding:8px 16px">Add my logs</button>
-     <input type="file" id="dirinput" webkitdirectory multiple hidden>
-     <span class="muted">choose the MTGO client folder <code>…\AppData\Local\Apps\2.0</code>, or the same folder under your wine prefix. Keep archived session logs somewhere? Add that folder too, as a second pick.</span></p>
+      Or <a href="windows/install-mtgctl.cmd">download install-mtgctl.cmd</a> and double-click it; if Windows asks, choose <i>Run</i>. It runs the same line.</li>
+    <li>From now on, start MTGO from the new <b>Play MTGO</b> shortcut on your desktop.</li>
+  </ol>
+  <p class="muted">The first upload reads every match log you have and can take a few minutes; later ones take seconds. If you start MTGO some other way, your logs upload the next time you log on to Windows.</p>
+  <details><summary>What it installs, and how to remove it</summary>
+    <ul>
+      <li><a href="windows/install.ps1">install.ps1</a> downloads the two scripts below into <code>%LOCALAPPDATA%\mtgctl</code>, adds the desktop shortcut and a task that uploads at logon, and runs the first upload.</li>
+      <li><a href="windows/mtgctl-upload.ps1">mtgctl-upload.ps1</a> finds your logs and uploads what the server does not have yet; it notes what it did in <code>upload.log</code> in that folder.</li>
+      <li><a href="windows/play-mtgo.ps1">play-mtgo.ps1</a> starts MTGO and runs the upload when it closes.</li>
+      <li><a href="windows/install-mtgctl.cmd">install-mtgctl.cmd</a> is the PowerShell line above in a file you can double-click.</li>
+    </ul>
+    <p>To remove it, run this in PowerShell, then delete the <code>%LOCALAPPDATA%\mtgctl</code> folder and the desktop shortcut:</p>
+<pre class="copy">schtasks /Delete /TN "mtgctl upload at logon" /F</pre>
+  </details>
+</div>
+
+<div class="box step">
+  <h2>Any computer: upload from this page</h2>
+  <p>Choose your MTGO folder and the page uploads what is new. Come back and do it again whenever you want your results brought up to date.</p>
+  <p><button id="pick" class="big">Choose my MTGO folder…</button> <input type="file" id="dirinput" webkitdirectory multiple hidden></p>
+  <p class="muted">On Windows it is <code>C:\Users\<i>you</i>\AppData\Local\Apps\2.0</code>; on Linux or a Mac, the same folder inside your wine prefix. If you keep old session logs (<code>mtgo-*.log</code>) somewhere else, choose that folder too, afterwards.</p>
   <p><progress id="prog" value="0" max="1" hidden></progress> <span id="status"></span> <span id="phase" class="muted"></span></p>
   <div id="result"></div>
-  <p class="muted">Nothing to install and no account: your MTGO username is read from the logs. The page finds your match logs and the client's session log, uploads only what the server does not have yet, and updates your results. Session logs are reduced to the lines that name your registered list before upload.</p>
 </div>
+
+<p class="muted lede">What gets uploaded, either way: your match logs (<code>Match_GameLog_*.dat</code>) and, from the client's session log, the lines about your decklists, events and game states, plus one line an hour so they can be dated. Game states include your own hand, which is how the stats know your opening hands and draws. The rest of the session log stays on your computer.</p>
 <script src="common.js?v=46"></script>
 <script>
 const status = document.getElementById('status'), prog = document.getElementById('prog'), result = document.getElementById('result'), phase = document.getElementById('phase');
@@ -45,7 +65,7 @@ function fail(e) { stopClock(); prog.hidden = true; phase.textContent = ''; stat
 function when(ts) { if (!ts) return ''; const d = new Date(ts.replace(' ', 'T')); const days = Math.floor((Date.now() - d) / 864e5); return days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`; }
 async function showKnown() {
   const el = document.getElementById('known');
-  if (!getPlayer()) { el.textContent = 'First time here: add your logs and the page will tell you who you are.'; return; }
+  if (!getPlayer()) { el.textContent = 'Nothing uploaded from this browser yet. Once you upload, this line shows what the server has for you.'; return; }
   try {
     const s = await api('api/summary');
     el.innerHTML = s.matches ? `<b>${getPlayer()}</b>: ${s.matches} matches on file, latest ${when(s.latest_match)}; ${s.lists} registered lists, latest <b>${s.latest_list || '?'}</b>. <a href="index.html">see stats</a>` : `<b>${getPlayer()}</b>: no matches on file yet.`;
@@ -133,7 +153,7 @@ async function addLogs(files) {
   const lines = [];
   lines.push(newMatches > 0 ? `<b>${newMatches} new match${newMatches > 1 ? 'es' : ''}</b> added (latest ${when(after.latest_match)}).` : `No new matches — your latest is from ${when(after.latest_match)}.`);
   if (nSess) lines.push(`${nSess} session log${nSess > 1 ? 's' : ''} read; ${after.matches_with_list - before.matches_with_list} more match${after.matches_with_list - before.matches_with_list === 1 ? '' : 'es'} now know which list you played.`);
-  if (rep.in_progress) lines.push(`${rep.in_progress} match${rep.in_progress > 1 ? 'es' : ''} not finished yet (no result in the log) — add logs again when done.`);
+  if (rep.in_progress) lines.push(`${rep.in_progress} match${rep.in_progress > 1 ? 'es' : ''} not finished yet (no result in the log yet): upload again once they finish.`);
   if (after.latest_list) lines.push(`Latest list: <b>${after.latest_list}</b>.`);
   lines.push(`<a href="index.html">see stats</a> · <a href="lists.html">see lists</a>`);
   result.innerHTML = lines.map(l => `<div>${l}</div>`).join('');

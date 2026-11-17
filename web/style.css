@@ -151,3 +151,12 @@ td:hover a.mk, a.mk:hover { opacity: 1; }
 .marked { border-bottom: 1px dashed #666; }
 #markEd { position: absolute; z-index: 30; box-shadow: 0 2px 10px rgba(0,0,0,.2); }
 #markEd label { display: block; margin: .3em 0; }
+/* the upload page: two ways to upload, each a box with its own heading */
+.lede { max-width: 760px; }
+.step { max-width: 760px; margin: 12px 0; }
+.step h2 { font-size: 16px; margin: 0 0 6px; }
+.step ol { padding-left: 20px; }
+.step li { margin-bottom: 6px; }
+.step details { margin-top: 6px; }
+.step summary { cursor: pointer; }
+button.big { font-size: 16px; padding: 8px 16px; }
