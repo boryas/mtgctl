@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use mtgctl::mtgolog::pipeline::{self, PlayerDir, Reference};
 use mtgctl::mtgolog::dataset::{self, Dataset};
-use mtgctl::mtgolog::{clocks, ldc, meta, observed, picker, stats};
+use mtgctl::mtgolog::{ldc, picker, stats};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -696,70 +696,6 @@ struct ValueRow {
     games: i64,
 }
 
-/// The decks of the published lists of the last `days` days (default 28) and goldfish's metagame page.
-async fn meta_api(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<meta::Meta>, ApiError> {
-    let days: u32 = q.get("days").and_then(|d| d.parse().ok()).filter(|d| (1..=730).contains(d)).unwrap_or(28);
-    let r = tokio::task::spawn_blocking(move || meta::meta(&st.data, days)).await.map_err(|e| internal(e.to_string()))?.map_err(internal)?;
-    Ok(Json(r))
-}
-
-/// A clock document larger than this is a client bug, not a model.
-const MAX_CLOCKS_BYTES: usize = 512 * 1024;
-
-/// The player's clock document and its version; both null before the first save.
-async fn clocks_get(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<serde_json::Value>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
-    let stored = tokio::task::spawn_blocking(move || clocks::load(&mut shared_db(&st.data)?, &name).map_err(|e| e.to_string())).await.map_err(|e| internal(e.to_string()))?.map_err(internal)?;
-    Ok(Json(match stored {
-        Some(s) => serde_json::json!({ "doc": serde_json::from_str::<serde_json::Value>(&s.body).map_err(|e| internal(e.to_string()))?, "at": s.updated_at }),
-        None => serde_json::json!({ "doc": null, "at": null }),
-    }))
-}
-
-/// What `?deck=` did to the player in their games against it since `?since=` (YYYY-MM-DD; the
-/// current era's start by default): see `observed::Observed`.
-async fn observed_api(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<observed::Observed>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
-    let deck = q.get("deck").cloned().filter(|d| !d.is_empty()).ok_or_else(|| bad("deck required"))?;
-    let since = q.get("since").cloned();
-    let r = tokio::task::spawn_blocking(move || -> Result<observed::Observed, String> {
-        use diesel::prelude::*;
-        #[derive(diesel::QueryableByName)]
-        struct Since { #[diesel(sql_type = diesel::sql_types::Text)] n: String }
-        let conn = &mut pool(&st)?;
-        let since = match since {
-            Some(s) if chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").is_ok() => s,
-            _ => diesel::sql_query("SELECT start_date AS n FROM mtgo_eras WHERE start_date <= date('now') ORDER BY start_date DESC, id DESC LIMIT 1").get_result::<Since>(conn).optional().map_err(|e| e.to_string())?.map_or_else(|| "2000-01-01".to_string(), |r| r.n),
-        };
-        let cfg = player_dir(&st, &name).config(&name);
-        observed::observed(conn, &cfg, &name, &deck, &since)
-    })
-    .await
-    .map_err(|e| internal(e.to_string()))?
-    .map_err(internal)?;
-    Ok(Json(r))
-}
-
-/// Stores the body as the player's clock document; `?base=` names the version it was edited from
-/// (absent for a first save) and a stale one is refused with 409.
-async fn clocks_put(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, body: Bytes) -> Result<Json<serde_json::Value>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
-    if body.len() > MAX_CLOCKS_BYTES {
-        return Err(bad("document too large"));
-    }
-    let text = String::from_utf8(body.to_vec()).map_err(|_| bad("not UTF-8"))?;
-    if !serde_json::from_str::<serde_json::Value>(&text).map_err(|e| bad(e.to_string()))?.is_object() {
-        return Err(bad("expected a JSON object"));
-    }
-    let base = q.get("base").filter(|b| !b.is_empty()).cloned();
-    let at = tokio::task::spawn_blocking(move || clocks::save(&mut shared_db(&st.data)?, &name, &text, base.as_deref()).map_err(|e| e.to_string())).await.map_err(|e| internal(e.to_string()))?.map_err(internal)?;
-    match at {
-        Some(at) => Ok(Json(serde_json::json!({ "at": at }))),
-        None => Err(ApiError(StatusCode::CONFLICT, "changed elsewhere since this page loaded it".into())),
-    }
-}
-
-/// Distinct values of one view column under an optional WHERE, most matches first.
 #[derive(Deserialize)]
 struct ExperimentalReq {
     id: i32,
@@ -857,6 +793,7 @@ async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiEr
     Ok(Json(rows))
 }
 
+/// Distinct values of one view column under an optional WHERE, most matches first.
 async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
     let col = q.get("col").cloned().ok_or_else(|| bad("col required"))?;
     if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
@@ -1929,10 +1866,6 @@ async fn main() {
                     Ok((pages, lists)) => println!("{pages} event pages and {lists} lists downloaded"),
                     Err(e) => eprintln!("ldc: {e}"),
                 }
-                match meta::fetch_front(&cli.data) {
-                    Ok(n) => println!("mtggoldfish metagame page: {n} decks"),
-                    Err(e) => eprintln!("{e}"),
-                }
                 let eras = mtgctl::mtgolog::eras::eras_from_file(&timeline)?;
                 let refs = mtgctl::mtgolog::reference::load_references(&mut shared_db(&cli.data)?, &eras).map_err(|e| e.to_string())?;
                 let r = ldc::import(&cli.data, &timeline, &refs)?;
@@ -1999,9 +1932,6 @@ async fn main() {
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))
                 .route("/api/schema", get(schema))
-                .route("/api/meta", get(meta_api))
-                .route("/api/clocks", get(clocks_get).put(clocks_put))
-                .route("/api/observed", get(observed_api))
                 .route("/api/cards-seen", get(cards_seen))
                 .route("/api/card-counts", get(card_counts))
                 .route("/api/list/experimental", post(list_experimental))
