@@ -640,7 +640,7 @@ pub async fn callback(State(st): State<Shared>, headers: HeaderMap, Query(q): Qu
         Ok((session, next)) => redirect(&format!("{}{next}", c.prefix), &[format!("{SESSION_COOKIE}={session}; Path={}; Max-Age={}; HttpOnly; SameSite=Lax{}", c.prefix, SESSION_DAYS * 86400, c.secure()), clear_login]),
         Err(msg) => {
             eprintln!("login: {msg}");
-            let page = format!("<!doctype html><meta charset=\"utf-8\"><title>Login failed · mtgctl</title><link rel=\"stylesheet\" href=\"{p}style.css\"><h1>Login failed</h1><p>{}</p><p><a href=\"{p}collect.html\">back to the upload page</a></p>", html_escape(&msg), p = c.prefix);
+            let page = format!("<!doctype html><meta charset=\"utf-8\"><title>Login failed · mtgstats</title><link rel=\"stylesheet\" href=\"{p}style.css\"><h1>Login failed</h1><p>{}</p><p><a href=\"{p}collect.html\">back to the upload page</a></p>", html_escape(&msg), p = c.prefix);
             Response::builder().status(StatusCode::BAD_REQUEST).header(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8").header(SET_COOKIE, clear_login).body(Body::from(page)).unwrap()
         }
     }

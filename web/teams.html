@@ -1,8 +1,8 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Teams · mtgctl</title><link rel="stylesheet" href="style.css?v=48"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Teams · mtgstats</title><link rel="stylesheet" href="style.css?v=48"></head>
 <body>
-<h1>mtgctl · teams</h1>
-<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
+<h1>mtgstats · teams</h1>
+<nav><a href="index.html">stats</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
 <p class="lede">A team pools its members' games: everyone in it sees every member's results, the cards they played, their decks and the hands from their session logs. Without a team the pages show your own games only; with one, choose whose games they show with <i>games of</i> at the top of each page. Your list of registered decklists stays yours alone.</p>
 <div id="join"></div>
 <div id="teams"><span class="muted">…</span></div>
@@ -12,7 +12,7 @@
   <p><input id="tname" maxlength="40" placeholder="team name"> <button id="mk">start the team</button></p>
 </div>
 <div class="box step" id="mcp">
-  <h2>Ask Claude about your results</h2>
+  <h2>Ask Claude about your stats</h2>
   <p>Claude Code (and other MCP clients) can read the stats here with a key that only reads. The key sees the games you choose now: your own, or one team's.</p>
   <p><label>games of <select id="kteam"></select></label> <button id="mkKey">make an MCP key</button></p>
   <div id="keyout"></div>

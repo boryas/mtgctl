@@ -1,8 +1,8 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl replay</title><link rel="stylesheet" href="style.css?v=56"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Replay · mtgstats</title><link rel="stylesheet" href="style.css?v=56"></head>
 <body>
-<h1 class="rp-title">mtgctl · replay</h1>
-<nav class="rp-nav"><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
+<h1 class="rp-title">mtgstats · replay</h1>
+<nav class="rp-nav"><a href="index.html">stats</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
 <div id="head" class="muted">…</div>
 <div class="rp-controls">
   <button id="first" title="start (Home)">⏮</button><button id="prevTurn" title="previous turn (Shift+←)">«</button><button id="prev" title="back (←)">‹</button>
@@ -154,7 +154,7 @@ function wireZoom() {
 (async () => {
   wireZoom();
   const m = /game=(\d+)/.exec(location.hash), sm = /step=(\d+)/.exec(location.hash);
-  if (!m) { document.getElementById('head').textContent = 'open a game from the results page'; return; }
+  if (!m) { document.getElementById('head').textContent = 'open a game from the stats page'; return; }
   try {
     R = await api(`api/replay?id=${m[1]}`); const g = R.game;
     document.getElementById('head').innerHTML = `<b>Game ${g.game_number} vs ${g.opponent || '?'}</b> · ${g.start_ts.slice(0, 16)} · ${g.on_play ? 'on the play' : 'on the draw'} · mulligans ${g.my_mulligans}/${g.opp_mulligans} · ${g.turns} turns · ${g.winner === 'me' ? 'won' : 'lost'}${g.win_by ? ' by ' + g.win_by : ''}${R.note ? ` · <span class="err">${R.note}</span>` : ''}`;

@@ -1,9 +1,9 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Upload MTGO logs · mtgctl</title><link rel="stylesheet" href="style.css?v=47"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Upload MTGO logs · mtgstats</title><link rel="stylesheet" href="style.css?v=47"></head>
 <body>
-<h1>mtgctl · upload your MTGO logs</h1>
-<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
-<p class="lede">Your results here are built from the game logs the MTGO client keeps on your computer. Log in with Discord, then upload them either way below. The server reads your MTGO username from the logs, and your first upload links that name to your login. It takes only the files it does not have yet.</p>
+<h1>mtgstats · upload your MTGO logs</h1>
+<nav><a href="index.html">stats</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
+<p class="lede">Your stats here are built from the game logs the MTGO client keeps on your computer. Log in with Discord, then upload them either way below. The server reads your MTGO username from the logs, and your first upload links that name to your login. It takes only the files it does not have yet.</p>
 <p id="known" class="muted lede">…</p>
 
 <div class="box step" id="windows">
@@ -29,7 +29,7 @@
 
 <div class="box step">
   <h2>Any computer: upload from this page</h2>
-  <p>Choose your MTGO folder and the page uploads what is new. Come back and do it again whenever you want your results brought up to date.</p>
+  <p>Choose your MTGO folder and the page uploads what is new. Come back and do it again whenever you want your stats brought up to date.</p>
   <p><button id="pick" class="big">Choose my MTGO folder…</button> <span id="pickNote" class="muted"></span> <input type="file" id="dirinput" webkitdirectory multiple hidden></p>
   <p class="muted">On Windows it is <code>C:\Users\<i>you</i>\AppData\Local\Apps\2.0</code>; on Linux or a Mac, the same folder inside your wine prefix. If you keep old session logs (<code>mtgo-*.log</code>) somewhere else, choose that folder too, afterwards.</p>
   <p><progress id="prog" value="0" max="1" hidden></progress> <span id="status"></span> <span id="phase" class="muted"></span></p>
@@ -83,9 +83,9 @@ async function showInstall() {
   el.querySelector('#mkKey').onclick = async () => {
     let k; try { k = await api('api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'upload' }) }); } catch (e) { el.innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
     const line = `$env:MTGCTL_KEY='${k.key}'; irm ${new URL('windows/install.ps1', location.href).href} | iex`;
-    const cmd = `@echo off\r\nrem Installs the mtgctl uploader with your key: the same as pasting your install line into PowerShell.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "${line}"\r\necho.\r\npause\r\n`;
+    const cmd = `@echo off\r\nrem Installs the mtgstats uploader with your key: the same as pasting your install line into PowerShell.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "${line}"\r\necho.\r\npause\r\n`;
     const href = URL.createObjectURL(new Blob([cmd], { type: 'application/octet-stream' }));
-    el.innerHTML = `<pre class="copy">${esc(line)}</pre>Or <a download="install-mtgctl.cmd" href="${href}">download install-mtgctl.cmd</a> and double-click it; if Windows asks, choose <i>Run</i>. It runs the same line. This page shows the key only now.`;
+    el.innerHTML = `<pre class="copy">${esc(line)}</pre>Or <a download="install-mtgstats.cmd" href="${href}">download install-mtgstats.cmd</a> and double-click it; if Windows asks, choose <i>Run</i>. It runs the same line. This page shows the key only now.`;
     copyButtons(el); accountReq = null; showKeys();
   };
   showKeys();
@@ -126,7 +126,7 @@ async function* walkFsa(dir, depth = 0) {
     else if (isGame(name) || isSession(name)) yield await h.getFile();
   }
 }
-// The one action: identify, upload what is new, update results, report in match terms.
+// The one action: identify, upload what is new, update the stats, report in match terms.
 async function addLogs(files) {
   result.innerHTML = '';
   progress('reading the folder…', null, null);
@@ -177,7 +177,7 @@ async function addLogs(files) {
     sent += bytes; i = j;
   }
   progress(todo.length ? `uploaded ${todo.length} files (${fmtMB(totalBytes)})` : 'nothing new to upload', totalBytes, Math.max(totalBytes, 1));
-  startClock(todo.length ? 'updating your results…' : 'checking your results…');
+  startClock(todo.length ? 'updating your stats…' : 'checking your stats…');
   const rep = await api('api/sync', { method: 'POST' });
   stopClock();
   const after = await api('api/summary');

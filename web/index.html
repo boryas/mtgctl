@@ -1,8 +1,8 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=58"></head>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgstats</title><link rel="stylesheet" href="style.css?v=58"></head>
 <body>
-<h1>mtgctl · results</h1>
-<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
+<h1>mtgstats</h1>
+<nav><a href="index.html">stats</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
 <div class="layout">
 <aside class="panels">
   <fieldset class="box" id="pView">
@@ -703,7 +703,7 @@ function wireKeys(out) {
   out.querySelectorAll('[data-game]').forEach(s => { s.style.cursor = 'pointer'; s.onclick = () => showGame(+s.dataset.game); });
 }
 async function runView(seq) {
-  if (!(await account()).account) { setSummary(''); document.getElementById('out').innerHTML = `<a href="${loginHref()}">Log in with Discord</a> to see your results, or those of a team you are in.`; return; }
+  if (!(await account()).account) { setSummary(''); document.getElementById('out').innerHTML = `<a href="${loginHref()}">Log in with Discord</a> to see your stats, or those of a team you are in.`; return; }
   const v = view();
   if (v === 'rows') return showMatches(seq);
   if (v === 'series') return showSeries(seq);

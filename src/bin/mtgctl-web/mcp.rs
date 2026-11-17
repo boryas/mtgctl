@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
-const INSTRUCTIONS: &str = "mtgctl-web: MTGO Legacy results from the game logs players upload: a player's record, results by event, matchups, win rates by deck, archetype, era or month, what an opponent played, cards cast, mulligans, play/draw, decklists. Start with `describe`. \
+const INSTRUCTIONS: &str = "mtgstats: MTGO Legacy results from the game logs players upload: a player's record, results by event, matchups, win rates by deck, archetype, era or month, what an opponent played, cards cast, mulligans, play/draw, decklists. Start with `describe`. \
 The key this connection uses decides whose games every tool sees: the key owner's own, or those of every member of the team it was made for; `lists` and `list` show only the owner's lists. \
 One row per game; `player` names whose logs, `my_*` that player's side, `opp_*` the opponent; cards played are filterable. \
 Players are MTGO usernames; spelling and case vary, so find one with `values` on `player` (or `opponent`) with op `contains` before filtering on it. \
@@ -249,7 +249,7 @@ async fn handle(st: &Shared, headers: &HeaderMap, msg: &Value) -> Option<Value> 
             json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": false}, "prompts": {"listChanged": false}},
-                "serverInfo": {"name": "mtgctl-web", "version": env!("CARGO_PKG_VERSION")},
+                "serverInfo": {"name": "mtgstats", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": INSTRUCTIONS
             })
         }
