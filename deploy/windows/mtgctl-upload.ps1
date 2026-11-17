@@ -3,7 +3,7 @@
 # by name+size+mtime, session logs by hash, as a small extract), then sync.
 # Windows PowerShell 5.1 or later; nothing to install.
 param(
-    [string]$Server = 'https://bur.io/doomsday/stats/',
+    [string]$Server = 'https://bur.io/mtg/stats/',
     # MTGO client folder; the match logs live under Apps\2.0\...\Logs
     [string]$LogsRoot = (Join-Path $env:LOCALAPPDATA 'Apps\2.0'),
     # extra folders of archived session logs (mtgo-YYYYMMDD-HHMMSS.log)

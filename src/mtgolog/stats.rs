@@ -263,7 +263,7 @@ pub fn wilson(wins: i64, n: i64) -> (f64, f64) {
 /// Where `mtgo stats` reads from: a database, or the stats site, whose API runs this same `compute`.
 pub enum Source {
     Db(SqliteConnection),
-    /// the site's base URL, e.g. https://bur.io/doomsday/stats
+    /// the site's base URL, e.g. https://bur.io/mtg/stats
     Site(String),
 }
 

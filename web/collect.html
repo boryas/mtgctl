@@ -2,13 +2,13 @@
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl upload</title><link rel="stylesheet" href="style.css?v=46"></head>
 <body>
 <h1>mtgctl · add my logs</h1>
-<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="lists.html">lists</a><a href="reference.html">reference decklists</a><a href="elo.html">elo</a><a href="clocks.html">clocks</a><a href="windows/">windows uploader</a></nav>
+<nav><a href="index.html">results</a><a href="collect.html">add logs</a><a href="reference.html">reference decklists</a><a href="windows/">windows uploader</a></nav>
 <div class="box">
   <div class="box"><b>On Windows, skip this page.</b> Open PowerShell (Start menu, type <i>PowerShell</i>) and paste this line:
-<pre class="copy">irm https://bur.io/doomsday/stats/windows/install.ps1 | iex</pre>
+<pre class="copy">irm https://bur.io/mtg/stats/windows/install.ps1 | iex</pre>
 <span class="muted">Or <a href="windows/install-mtgctl.cmd">download install-mtgctl.cmd</a>, double-click it and click <i>Run</i> when Windows asks; it is this and nothing more:
 <pre class="copy">@echo off
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://bur.io/doomsday/stats/windows/install.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://bur.io/mtg/stats/windows/install.ps1 | iex"
 pause</pre> Either way a <i>Play MTGO</i> shortcut lands on the desktop: start the client from it and your logs upload when you close it (and at logon, as a fallback). Nothing else to install. Everything it runs is four short scripts you can read first: <a href="windows/install.ps1">install.ps1</a>, <a href="windows/mtgctl-upload.ps1">mtgctl-upload.ps1</a>, <a href="windows/play-mtgo.ps1">play-mtgo.ps1</a>. <a href="windows/">Details and how to remove it.</a></span></div>
 <div id="known" class="muted">…</div>
   <p style="margin:12px 0"><button id="pick" style="font-size:16px;padding:8px 16px">Add my logs</button>

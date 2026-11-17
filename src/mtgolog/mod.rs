@@ -60,7 +60,7 @@ pub struct MtgoConfig {
     /// Default scope (SQL over mtgo_game_view) applied to stats/picker unless --all.
     /// Default: "has_decklist = 1" — only matches with an exact registered list.
     pub default_scope: Option<String>,
-    /// The stats site `mtgo stats` reads from without --data; default https://bur.io/doomsday/stats.
+    /// The stats site `mtgo stats` reads from without --data; default https://bur.io/mtg/stats.
     pub site: Option<String>,
 }
 
@@ -104,7 +104,7 @@ impl MtgoConfig {
         }
     }
     pub fn site(&self) -> String {
-        self.site.clone().unwrap_or_else(|| "https://bur.io/doomsday/stats".to_string())
+        self.site.clone().unwrap_or_else(|| "https://bur.io/mtg/stats".to_string())
     }
 }
 

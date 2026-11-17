@@ -1,6 +1,6 @@
 # Starts the MTGO client, waits for it to exit, then uploads: the session log is complete at that point,
 # and the client overwrites it on the next launch.
-param([string]$Server = 'https://bur.io/doomsday/stats/')
+param([string]$Server = 'https://bur.io/mtg/stats/')
 $ErrorActionPreference = 'Continue'
 $shortcut = Get-ChildItem -Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs') -Recurse -Filter 'Magic The Gathering Online*.appref-ms' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($shortcut) { Start-Process $shortcut.FullName } else { Start-Process 'MTGO.exe' }

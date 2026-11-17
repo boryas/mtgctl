@@ -2,7 +2,7 @@
 
 Open PowerShell (Start menu, type "PowerShell") and paste:
 
-    irm https://bur.io/doomsday/stats/windows/install.ps1 | iex
+    irm https://bur.io/mtg/stats/windows/install.ps1 | iex
 
 Or download [install-mtgctl.cmd](install-mtgctl.cmd), double-click it and click *Run* when
 Windows asks; it runs the same line.

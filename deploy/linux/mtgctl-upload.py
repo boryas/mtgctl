@@ -47,7 +47,7 @@ def session_extract(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--server', default='https://bur.io/doomsday/stats/')
+    ap.add_argument('--server', default='https://bur.io/mtg/stats/')
     ap.add_argument('--logs', action='append', default=[], help='MTGO client folder (Apps/2.0) or a folder of archived session logs; repeatable')
     ap.add_argument('--state', default=os.path.expanduser('~/.local/share/mtgctl'))
     ap.add_argument('--quiet', action='store_true')

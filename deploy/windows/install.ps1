@@ -1,12 +1,12 @@
 # Installs the mtgctl uploader for the current user. Run from PowerShell with one line:
-#   irm https://bur.io/doomsday/stats/windows/install.ps1 | iex
+#   irm https://bur.io/mtg/stats/windows/install.ps1 | iex
 # Downloads the uploader and the launcher next to the state folder, puts a "Play MTGO" shortcut on
 # the desktop that uploads when the client exits, registers an upload at logon (catches a session
 # played without the shortcut, as long as the client has not been started again since), and runs
 # the first upload. Set MTGCTL_TIMER=1 before running to also upload every 30 minutes.
 $ErrorActionPreference = 'Stop'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
-$Server = if ($env:MTGCTL_SERVER) { $env:MTGCTL_SERVER } else { 'https://bur.io/doomsday/stats/' }
+$Server = if ($env:MTGCTL_SERVER) { $env:MTGCTL_SERVER } else { 'https://bur.io/mtg/stats/' }
 $dir = Join-Path $env:LOCALAPPDATA 'mtgctl'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 foreach ($f in 'mtgctl-upload.ps1', 'play-mtgo.ps1') {
