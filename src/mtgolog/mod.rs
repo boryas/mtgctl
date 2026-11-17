@@ -56,8 +56,6 @@ pub struct MtgoConfig {
     /// Default scope (SQL over mtgo_game_view) applied to stats/picker unless --all.
     /// Default: "has_decklist = 1" — only matches with an exact registered list.
     pub default_scope: Option<String>,
-    /// The stats site `mtgo stats` reads from without --data; default https://bur.io/mtg/stats.
-    pub site: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -98,9 +96,6 @@ impl MtgoConfig {
             Some(w) if !w.trim().is_empty() => (Some(format!("({scope}) AND ({w})")), desc),
             _ => (Some(scope), desc),
         }
-    }
-    pub fn site(&self) -> String {
-        self.site.clone().unwrap_or_else(|| "https://bur.io/mtg/stats".to_string())
     }
 }
 
@@ -167,9 +162,9 @@ enum MtgoCommand {
         /// Whose matches (default: [mtgo] username); '*' for every player.
         #[arg(long)]
         player: Option<String>,
-        /// Read the pooled database that `mtgctl-web --data <DIR> rebuild` made instead of the stats site.
+        /// The pooled database that `mtgctl-web --data <DIR> rebuild` made (the site takes no SQL).
         #[arg(long, value_name = "DIR")]
-        data: Option<PathBuf>,
+        data: PathBuf,
     },
     /// Show the distinct registered lists (id, name, archetype, usage).
     Lists,
@@ -183,7 +178,7 @@ enum MtgoCommand {
     Columns {
         /// As for `mtgo stats --data`.
         #[arg(long, value_name = "DIR")]
-        data: Option<PathBuf>,
+        data: PathBuf,
     },
 }
 
@@ -195,7 +190,7 @@ pub fn run(args: MtgoArgs) {
             scan::run_scan(&cfg, Path::new(&root), matches, unparsed, dump.as_deref(), last, include_replays);
         }
         MtgoCommand::Stats { by, per, where_sql, min, sort, limit, full, hist, interactive, all, player, data } => {
-            let mut src = match stats::Source::open(data.as_deref(), cfg.site()) {
+            let mut src = match stats::Source::open(&data) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("{e}");
@@ -210,7 +205,7 @@ pub fn run(args: MtgoArgs) {
                 (None, w) => w,
             };
             let mut q = stats::StatsQuery { by, split: vec![], game: None, per, where_sql, min_games: min, sort, limit, full, hist };
-            println!("{} · {scope_desc} · {}", player.as_deref().unwrap_or("every player"), data.as_ref().map_or_else(|| cfg.site(), |d| d.display().to_string()));
+            println!("{} · {scope_desc} · {}", player.as_deref().unwrap_or("every player"), data.display());
             if interactive {
                 match picker::pick(&mut src, &cfg, q, player.as_deref()) {
                     Ok(Some(picked)) => q = picked,
@@ -239,7 +234,7 @@ pub fn run(args: MtgoArgs) {
             }
         }
         MtgoCommand::Columns { data } => {
-            let mut src = match stats::Source::open(data.as_deref(), cfg.site()) {
+            let mut src = match stats::Source::open(&data) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("{e}");

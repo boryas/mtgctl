@@ -120,7 +120,7 @@ pub fn ensure_view(conn: &mut SqliteConnection) -> QueryResult<()> {
     Ok(())
 }
 
-#[derive(QueryableByName, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(QueryableByName, Debug, serde::Serialize)]
 pub struct Row {
     #[diesel(sql_type = Nullable<Text>)]
     pub key: Option<String>,
@@ -260,73 +260,23 @@ pub fn wilson(wins: i64, n: i64) -> (f64, f64) {
     ((centre - half) / denom, (centre + half) / denom)
 }
 
-/// Where `mtgo stats` reads from: a database, or the stats site, whose API runs this same `compute`.
-pub enum Source {
-    Db(SqliteConnection),
-    /// the site's base URL, e.g. https://bur.io/mtg/stats
-    Site(String),
-}
+/// What `mtgo stats` reads: the pooled database `mtgctl-web --data <dir> rebuild` made.
+pub struct Source(SqliteConnection);
 
 impl Source {
-    /// `data`: a directory holding the pooled database `mtgctl-web --data <dir> rebuild` made; None: the site.
-    pub fn open(data: Option<&std::path::Path>, site: String) -> Result<Source, String> {
-        Ok(match data {
-            Some(d) => Source::Db(MTGO.open(d)?),
-            None => Source::Site(site),
-        })
+    pub fn open(data: &std::path::Path) -> Result<Source, String> {
+        Ok(Source(MTGO.open(data)?))
     }
     pub fn stats(&mut self, q: &StatsQuery) -> Result<StatsResult, String> {
-        match self {
-            Source::Db(conn) => compute(conn, &MTGO, q),
-            Source::Site(base) => site_get(
-                base,
-                "api/stats",
-                &[("by", q.by.join(",")), ("where", q.where_sql.clone().unwrap_or_default()), ("min", q.min_games.to_string()), ("limit", q.limit.to_string()), ("sort", q.sort.clone()), ("full", q.full.to_string()), ("hist", q.hist.join(","))],
-            ),
-        }
+        compute(&mut self.0, &MTGO, q)
     }
     pub fn columns(&mut self) -> Result<Vec<String>, String> {
-        match self {
-            Source::Db(conn) => super::picker::view_columns(conn, &MTGO).map_err(|e| e.to_string()),
-            Source::Site(base) => site_get(base, "api/columns", &[]),
-        }
+        super::picker::view_columns(&mut self.0, &MTGO).map_err(|e| e.to_string())
     }
     /// Distinct values of `col` under the ANDed `terms`: (value, matches, games), most matches first.
     pub fn values(&mut self, col: &str, terms: &[String]) -> Result<Vec<(Option<String>, i64, i64)>, String> {
-        match self {
-            Source::Db(conn) => super::picker::column_values(conn, &MTGO, col, terms).map_err(|e| e.to_string()),
-            Source::Site(base) => {
-                #[derive(serde::Deserialize)]
-                struct V {
-                    value: Option<String>,
-                    matches: i64,
-                    games: i64,
-                }
-                let vs: Vec<V> = site_get(base, "api/values", &[("col", col.to_string()), ("where", terms.join(" AND "))])?;
-                Ok(vs.into_iter().map(|v| (v.value, v.matches, v.games)).collect())
-            }
-        }
+        super::picker::column_values(&mut self.0, &MTGO, col, terms).map_err(|e| e.to_string())
     }
-}
-
-/// GET `<base>/<path>?params` with curl (as the Scryfall fetch does); a non-200 reply's `error` is the Err.
-fn site_get<T: serde::de::DeserializeOwned>(base: &str, path: &str, params: &[(&str, String)]) -> Result<T, String> {
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args(["-sS", "-G", "--max-time", "60", "-w", "\n%{http_code}"]).arg(format!("{}/{path}", base.trim_end_matches('/')));
-    for (k, v) in params {
-        cmd.arg("--data-urlencode").arg(format!("{k}={v}"));
-    }
-    let out = cmd.output().map_err(|e| format!("curl: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("{path}: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (body, code) = text.rsplit_once('\n').unwrap_or((&text, ""));
-    if code != "200" {
-        let msg = serde_json::from_str::<serde_json::Value>(body).ok().and_then(|v| v["error"].as_str().map(String::from)).unwrap_or_else(|| body.to_string());
-        return Err(format!("{path}: {code} {msg}"));
-    }
-    serde_json::from_str(body).map_err(|e| format!("{path}: {e}"))
 }
 
 pub fn run_stats(src: &mut Source, q: &StatsQuery) -> Result<(), String> {
@@ -356,7 +306,7 @@ fn run_per(src: &mut Source, q: &StatsQuery, per: &str) -> Result<(), String> {
 
 /// The computed table behind `mtgo stats` (and the web API): groups after --min/--limit,
 /// the rolled-up remainder, the grand total, and per-group histograms keyed by group key.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize)]
 pub struct StatsResult {
     pub by: Vec<String>,
     pub rows: Vec<Row>,
