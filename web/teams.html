@@ -94,7 +94,7 @@ function showMcp(teams) {
     const team = $('kteam').value;
     let k;
     try { k = await api('api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(team ? { kind: 'read', team: +team } : { kind: 'read' }) }); } catch (e) { $('keyout').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
-    $('keyout').innerHTML = `<pre class="copy">claude mcp add --transport http stats ${new URL('mcp', location.href).href} --header "Authorization: Bearer ${k.key}"</pre><p class="muted">Run it in a terminal. If you added this server before without a key, run <code>claude mcp remove stats</code> first. The key only reads, and this page shows it only now.</p>`;
+    $('keyout').innerHTML = `<pre class="copy">claude mcp add --transport http mtgstats ${new URL('mcp', location.href).href} --header "Authorization: Bearer ${k.key}"</pre><p class="muted">Run it in a terminal. If you set this server up before, remove that entry (<code>claude mcp remove stats</code>, or whatever you named it). The key only reads, and this page shows it only now.</p>`;
     copyButtons($('keyout'));
     accountReq = null; showReadKeys();
   };

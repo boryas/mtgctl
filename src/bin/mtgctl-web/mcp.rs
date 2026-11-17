@@ -1,5 +1,6 @@
 //! The stats API as MCP tools (JSON-RPC 2.0 over streamable HTTP, POST /mcp), for agents the
-//! players run: `claude mcp add --transport http stats https://bur.io/mtg/stats/mcp`.
+//! players run: `claude mcp add --transport http mtgstats https://bur.io/mtg/stats/mcp --header
+//! "Authorization: Bearer <read key>"` (the line the teams page makes).
 //! Stateless: no session id, no server-initiated stream (GET is 405). Filters arrive as the
 //! page's entries and go to the page's handlers as they are.
 
