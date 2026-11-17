@@ -16,6 +16,11 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 $logFile = Join-Path $StateDir 'upload.log'
 function Log($msg) { $line = "{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg; Add-Content -Path $logFile -Value $line; if (-not $Quiet) { Write-Host $line } }
+# a refused request (no key, a revoked key, someone else's name) says why in upload.log
+trap { Log "failed: $($_.Exception.Message) $($_.ErrorDetails.Message)"; exit 1 }
+# the uploader key install.ps1 saved (MTGCTL_KEY); without one only the server's keyless names may upload
+$keyFile = Join-Path $StateDir 'key'
+$key = if (Test-Path $keyFile) { (Get-Content $keyFile -Raw).Trim() } else { $null }
 $stateFile = Join-Path $StateDir 'state.json'
 $state = if (Test-Path $stateFile) { Get-Content $stateFile -Raw | ConvertFrom-Json } else { [pscustomobject]@{ player = $null; last_change = $null } }
 if (-not ($state.PSObject.Properties.Name -contains 'last_change')) { $state | Add-Member -NotePropertyName last_change -NotePropertyValue $null }
@@ -38,12 +43,14 @@ function Send-Multipart([string]$url, [string]$player, [object[]]$parts) {
     $w.Write("--$boundary--`r`n"); $w.Flush()
     $headers = @{}
     if ($player) { $headers['X-Player'] = $player }
+    if ($key) { $headers['Authorization'] = "Bearer $key" }
     $r = Invoke-WebRequest -Uri $url -Method Post -Headers $headers -ContentType "multipart/form-data; boundary=$boundary" -Body $ms.ToArray() -UseBasicParsing
     $r.Content | ConvertFrom-Json
 }
 function Api([string]$path, [string]$method = 'Get') {
     $headers = @{}
     if ($state.player) { $headers['X-Player'] = $state.player }
+    if ($key) { $headers['Authorization'] = "Bearer $key" }
     (Invoke-WebRequest -Uri ($Server + $path) -Method $method -Headers $headers -UseBasicParsing).Content | ConvertFrom-Json
 }
 # Same reduction the site applies to a raw session log: the lines that name decks, games and events, plus one line per hour.

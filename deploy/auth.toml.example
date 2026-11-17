@@ -1,0 +1,9 @@
+# The Discord application behind the logins. On bur.io this is ~/mtgctl-web/auth.toml, made by
+# hand (umask 077); it holds the client secret, so it is never in git or sent anywhere else.
+client_id = "1572284445522923540"
+client_secret = "from the application's OAuth2 page"
+# registered on the application exactly as written; the site's pages live where auth/ does
+redirect_uri = "https://bur.io/mtg/stats/auth/callback"
+# MTGO names whose uploaders were installed before logins and may upload without a key;
+# remove a name once that player has reinstalled with their own install line
+keyless = ["boryas", "HJ_Kaiser", "Jaytron"]

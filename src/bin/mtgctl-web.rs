@@ -1,8 +1,8 @@
 //! HTTP front-end over the mtgolog pipeline: players upload their MTGO log files, the server
 //! pools every player's matches in one database and answers the same stats queries as `mtgctl mtgo stats`.
-//! Identity (v0): the MTGO username the game logs themselves name as "me" — detected by
-//! `/api/detect`, sent as the `X-Player` header, and re-checked against the stored logs on every
-//! sync. No secrets; a real login (Discord) is the planned replacement.
+//! A request names the MTGO username it is about (`X-Player`, detected by `/api/detect` from the
+//! logs and re-checked against the stored logs on every sync); who may upload, sync or mark as that
+//! name is decided by the login or uploader key (see auth.rs).
 //! Layout: `<data>/players/<name>/{logs,sessions}` (the uploads), `<data>/mtgctl.db` (derived from
 //! them, see pipeline::connect), `<data>/shared.db` (reference decklists).
 
@@ -26,6 +26,8 @@ use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
+#[path = "mtgctl-web/auth.rs"]
+mod auth;
 #[path = "mtgctl-web/mcp.rs"]
 mod mcp;
 
@@ -97,6 +99,12 @@ enum Cmd {
     },
     /// Delete a player: their rows of the pooled database and their uploads.
     PlayerRemove { player: String },
+    /// List the accounts, their MTGO names and uploader keys.
+    Accounts,
+    /// Link an MTGO name to an account (by id, Discord id or Discord name): its uploads become the account's.
+    Bind { account: String, name: String },
+    /// Unlink an MTGO name from its account.
+    Unbind { name: String },
     /// Assign a player's registered lists to decks via the nearest reference decklist and print the decisions.
     Assign { player: String },
     /// Stamp a player's matches' format and place their registered lists and matches on the reference decks again (after references or card facts changed); a sync does the same for its player.
@@ -125,6 +133,9 @@ enum Cmd {
         /// Repo root holding definitions/mtgo/legacy_timeline.toml.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// The Discord application and keyless names (deploy/auth.toml.example); holds the client secret.
+        #[arg(long, default_value = "auth.toml")]
+        auth: PathBuf,
     },
 }
 
@@ -134,6 +145,7 @@ struct AppState {
     reference: Reference,
     /// one pipeline run at a time: SQLite has one writer
     sync_lock: Mutex<()>,
+    auth: auth::Config,
 }
 
 /// Uploads per player are capped so a stray or hostile client cannot fill the volume.
@@ -210,15 +222,10 @@ async fn no_sql_params(req: axum::extract::Request, next: axum::middleware::Next
 
 /// The Windows scripts are meant to be read in the browser before they are run: serve them as text.
 async fn plain_text_scripts(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
-    let (ps1, cmd) = (req.uri().path().ends_with(".ps1"), req.uri().path().ends_with(".cmd"));
+    let ps1 = req.uri().path().ends_with(".ps1");
     let mut res = next.run(req).await;
-    if res.status().is_success() {
-        if ps1 {
-            res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain; charset=utf-8"));
-        } else if cmd {
-            // the double-click installer: always a download (its text is shown on the collector page)
-            res.headers_mut().insert(axum::http::header::CONTENT_DISPOSITION, axum::http::HeaderValue::from_static("attachment; filename=\"install-mtgctl.cmd\""));
-        }
+    if ps1 && res.status().is_success() {
+        res.headers_mut().insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain; charset=utf-8"));
     }
     res
 }
@@ -310,12 +317,6 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-async fn me(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<serde_json::Value>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
-    let known = player_dir(&st, &name).logs().exists();
-    Ok(Json(serde_json::json!({ "name": name, "known": known })))
-}
-
 /// Browser-side failures, written to the server log verbatim (bounded), for debugging what a page saw.
 async fn client_log(body: Bytes) -> StatusCode {
     let text = String::from_utf8_lossy(&body[..body.len().min(4000)]).replace('\n', " ");
@@ -363,7 +364,7 @@ async fn detect(mut mp: Multipart) -> Result<Json<serde_json::Value>, ApiError> 
 }
 
 async fn manifest(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<StoredFile>>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+    let (name, _) = auth::player_access(&st, &headers, &q, false).await?;
     let dir = player_dir(&st, &name);
     Ok(Json(tokio::task::spawn_blocking(move || stored_files(&dir)).await.map_err(|e| internal(e.to_string()))?))
 }
@@ -382,16 +383,19 @@ struct UploadResult {
 /// The timestamp is the session's end, taken from an archive-style name when there is one (a copy's
 /// mtime is the copy time, not the session's) and from the upload's mtime for a live `mtgo.log`.
 async fn upload(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, mut mp: Multipart) -> Result<Json<UploadResult>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+    let (name, access) = auth::player_access(&st, &headers, &q, true).await?;
     let dir = player_dir(&st, &name);
-    dir.ensure().map_err(|e| internal(e.to_string()))?;
     let mut used: u64 = stored_files(&dir).iter().map(|f| f.size).sum();
     let mut res = UploadResult { stored: vec![], skipped: vec![] };
     let (mut kind, mut fname, mut mtime, mut sha): (Option<String>, Option<String>, Option<u64>, Option<String>) = (None, None, None, None);
     // the client's UTC offset in minutes, JavaScript's getTimezoneOffset sign (UTC minus local; 420 for UTC-7)
     let mut tz: Option<i64> = None;
-    let existing_session_hashes: std::collections::HashSet<String> = stored_files(&dir).into_iter().filter(|f| f.kind == "session").map(|f| f.sha256).collect();
-    let mut session_hashes = existing_session_hashes;
+    let mut session_hashes: HashSet<String> = stored_files(&dir).into_iter().filter(|f| f.kind == "session").map(|f| f.sha256).collect();
+    // a claim stores nothing until auth::claim has checked the whole upload
+    let mut held: Option<(Vec<Part>, u64)> = matches!(access, auth::Access::Claim(_)).then(|| (vec![], 0));
+    if held.is_none() {
+        dir.ensure().map_err(|e| internal(e.to_string()))?;
+    }
     while let Some(field) = mp.next_field().await.map_err(|e| bad(e.to_string()))? {
         match field.name().unwrap_or("") {
             "kind" => kind = Some(field.text().await.map_err(|e| bad(e.to_string()))?),
@@ -401,29 +405,61 @@ async fn upload(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Ha
             "tz" => tz = field.text().await.map_err(|e| bad(e.to_string()))?.trim().parse().ok(),
             "file" => {
                 let bytes: Bytes = field.bytes().await.map_err(|e| bad(e.to_string()))?;
-                let k = kind.take().ok_or_else(|| bad("kind before file"))?;
-                let n = fname.take().ok_or_else(|| bad("name before file"))?;
-                let mt = mtime.take().unwrap_or(0);
-                let s = sha.take();
-                if used + bytes.len() as u64 > MAX_PLAYER_BYTES {
-                    return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, format!("{name} is over the {} MB storage cap", MAX_PLAYER_BYTES >> 20)));
-                }
-                match store_file(&dir, &k, &n, mt, tz, s.as_deref(), &bytes, &mut session_hashes) {
-                    Ok(Some(stored)) => {
-                        used += bytes.len() as u64;
-                        res.stored.push(stored)
+                let part = Part { kind: kind.take().ok_or_else(|| bad("kind before file"))?, name: fname.take().ok_or_else(|| bad("name before file"))?, mtime: mtime.take().unwrap_or(0), tz, sha: sha.take(), bytes };
+                match &mut held {
+                    Some((parts, size)) => {
+                        *size += part.bytes.len() as u64;
+                        if *size > MAX_CLAIM_BYTES {
+                            return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, format!("the first upload as {name} is limited to {} MB", MAX_CLAIM_BYTES >> 20)));
+                        }
+                        parts.push(part);
                     }
-                    Ok(None) => res.skipped.push(n),
-                    Err(e) => return Err(bad(format!("{n}: {e}"))),
+                    None => put(&dir, &name, part, &mut used, &mut session_hashes, &mut res)?,
                 }
             }
             other => return Err(bad(format!("unexpected field {other}"))),
         }
     }
+    if let (auth::Access::Claim(account), Some((parts, _))) = (access, held) {
+        let logs: Vec<&[u8]> = parts.iter().filter(|p| p.kind == "game").map(|p| &p.bytes[..]).collect();
+        auth::claim(&st.data, account, &name, &logs).map_err(|e| ApiError(StatusCode::FORBIDDEN, e))?;
+        dir.ensure().map_err(|e| internal(e.to_string()))?;
+        for part in parts {
+            put(&dir, &name, part, &mut used, &mut session_hashes, &mut res)?;
+        }
+    }
     Ok(Json(res))
 }
 
-fn store_file(dir: &PlayerDir, kind: &str, name: &str, mtime_ms: u64, tz_min: Option<i64>, raw_sha: Option<&str>, bytes: &[u8], session_hashes: &mut std::collections::HashSet<String>) -> Result<Option<String>, String> {
+/// A claiming upload is held in memory whole (see upload); the uploaders send at most 48 MB at once.
+const MAX_CLAIM_BYTES: u64 = 64 * 1024 * 1024;
+
+/// One uploaded file with the fields sent before it.
+struct Part {
+    kind: String,
+    name: String,
+    mtime: u64,
+    tz: Option<i64>,
+    sha: Option<String>,
+    bytes: Bytes,
+}
+
+fn put(dir: &PlayerDir, player: &str, p: Part, used: &mut u64, session_hashes: &mut HashSet<String>, res: &mut UploadResult) -> Result<(), ApiError> {
+    if *used + p.bytes.len() as u64 > MAX_PLAYER_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, format!("{player} is over the {} MB storage cap", MAX_PLAYER_BYTES >> 20)));
+    }
+    match store_file(dir, &p.kind, &p.name, p.mtime, p.tz, p.sha.as_deref(), &p.bytes, session_hashes) {
+        Ok(Some(stored)) => {
+            *used += p.bytes.len() as u64;
+            res.stored.push(stored)
+        }
+        Ok(None) => res.skipped.push(p.name),
+        Err(e) => return Err(bad(format!("{}: {e}", p.name))),
+    }
+    Ok(())
+}
+
+fn store_file(dir: &PlayerDir, kind: &str, name: &str, mtime_ms: u64, tz_min: Option<i64>, raw_sha: Option<&str>, bytes: &[u8], session_hashes: &mut HashSet<String>) -> Result<Option<String>, String> {
     let base = Path::new(name).file_name().and_then(|n| n.to_str()).ok_or("bad name")?;
     let target = match kind {
         "game" => {
@@ -646,7 +682,10 @@ async fn run_sync(st: Shared, name: String) -> Result<mtgctl::mtgolog::pipeline:
 }
 
 async fn sync(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<mtgctl::mtgolog::pipeline::SyncReport>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+    let (name, access) = auth::player_access(&st, &headers, &q, true).await?;
+    if let auth::Access::Claim(_) = access {
+        return Err(bad(format!("nothing uploaded as {name} yet")));
+    }
     Ok(Json(run_sync(st, name).await?))
 }
 
@@ -735,21 +774,22 @@ struct ExperimentalReq {
     on: bool,
 }
 
-/// Tag one of the player's registered lists as an experimental brew, or clear the tag.
-async fn list_experimental(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(req): Json<ExperimentalReq>) -> Result<Json<serde_json::Value>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
-    tokio::task::spawn_blocking(move || {
+/// Tag one of the viewer's registered lists as an experimental brew, or clear the tag.
+async fn list_experimental(State(st): State<Shared>, headers: HeaderMap, Json(req): Json<ExperimentalReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    let names = own_names(&st, &headers).await?;
+    tokio::task::spawn_blocking(move || -> Result<(), ApiError> {
         use diesel::prelude::*;
-        let conn = &mut pool(&st)?;
+        let conn = &mut pool(&st).map_err(internal)?;
         #[derive(diesel::QueryableByName)]
-        struct H { #[diesel(sql_type = diesel::sql_types::Text)] hash: String }
-        let h: Option<H> = diesel::sql_query(format!("SELECT hash FROM mtgo_lists WHERE id = {} AND me = '{}'", req.id, name.replace('\'', "''"))).get_result(conn).optional().map_err(|e| e.to_string())?;
-        let h = h.ok_or_else(|| format!("no list {}", req.id))?;
-        mtgctl::mtgolog::marks::record(conn, &st.data, &mtgctl::mtgolog::marks::Mark { at: mtgctl::mtgolog::marks::now(), by: name.clone(), me: name, guid: None, hash: Some(h.hash), field: "experimental".into(), value: Some(if req.on { "1" } else { "0" }.into()), extra: None })
+        struct H { #[diesel(sql_type = diesel::sql_types::Text)] me: String, #[diesel(sql_type = diesel::sql_types::Text)] hash: String }
+        let h: H = diesel::sql_query(format!("SELECT me, hash FROM mtgo_lists WHERE id = {}", req.id)).get_result(conn).map_err(|_| bad(format!("no list {}", req.id)))?;
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(&h.me)) {
+            return Err(ApiError(StatusCode::FORBIDDEN, "you can tag only your own lists".into()));
+        }
+        mtgctl::mtgolog::marks::record(conn, &st.data, &mtgctl::mtgolog::marks::Mark { at: mtgctl::mtgolog::marks::now(), by: h.me.clone(), me: h.me, guid: None, hash: Some(h.hash), field: "experimental".into(), value: Some(if req.on { "1" } else { "0" }.into()), extra: None }).map_err(bad)
     })
     .await
-    .map_err(|e| internal(e.to_string()))?
-    .map_err(bad)?;
+    .map_err(|e| internal(e.to_string()))??;
     Ok(Json(serde_json::json!({ "id": req.id, "experimental": req.on })))
 }
 
@@ -762,15 +802,25 @@ struct MarkReq {
     value: Option<String>,
 }
 
-/// A hand mark on a match (marks.rs); the marker is the X-Player name when one is sent.
-async fn mark_api(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>, Json(req): Json<MarkReq>) -> Result<Json<serde_json::Value>, ApiError> {
-    let by = auth(&st, &headers, &q).map(|n| n).unwrap_or_else(|_| "?".into());
+/// The MTGO names of the viewer's account; a request without a login (or key) is refused.
+async fn own_names(st: &Shared, headers: &HeaderMap) -> Result<Vec<String>, ApiError> {
+    let v = auth::viewer(st, headers, true).await?;
+    Ok(v.account.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "log in first (the link at the top of the page)".into()))?.names)
+}
+
+/// A hand mark on one of the viewer's own matches (marks.rs).
+async fn mark_api(State(st): State<Shared>, headers: HeaderMap, Json(req): Json<MarkReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    let names = own_names(&st, &headers).await?;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         use diesel::prelude::*;
         let conn = &mut pool(&st)?;
         #[derive(diesel::QueryableByName)]
         struct K { #[diesel(sql_type = diesel::sql_types::Text)] me: String, #[diesel(sql_type = diesel::sql_types::Text)] guid: String }
         let k: K = diesel::sql_query(format!("SELECT me, guid FROM mtgo_matches WHERE id = {}", req.match_id)).get_result(conn).map_err(|_| format!("no match {}", req.match_id))?;
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(&k.me)) {
+            return Err("you can mark only your own matches".into());
+        }
+        let by = k.me.clone();
         let mut value = req.value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
         let mut extra = None;
         match (req.field.as_str(), &value) {
@@ -1017,7 +1067,7 @@ struct Summary {
 
 /// What the server already knows for a player, in the terms the upload page speaks.
 async fn summary(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Summary>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+    let (name, _) = auth::player_access(&st, &headers, &q, false).await?;
     let r = tokio::task::spawn_blocking(move || -> Result<Summary, String> {
         use diesel::prelude::*;
         let conn = &mut pool(&st)?;
@@ -1930,6 +1980,17 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Cmd::Accounts | Cmd::Bind { .. } | Cmd::Unbind { .. } => {
+            let r = auth::ensure(&cli.data).and_then(|_| match &cli.command {
+                Cmd::Bind { account, name } => auth::cli_bind(&cli.data, account, name),
+                Cmd::Unbind { name } => auth::cli_unbind(&cli.data, name),
+                _ => auth::cli_accounts(&cli.data),
+            });
+            if let Err(e) = r {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
         Cmd::PlayerRemove { player } => {
             let conn = &mut pipeline::connect(&cli.data).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             match mtgctl::mtgolog::db::ensure_schema(conn).and_then(|_| mtgctl::mtgolog::db::remove_player(conn, &player)) {
@@ -1948,8 +2009,10 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Cmd::Serve { listen, web, repo } => {
+        Cmd::Serve { listen, web, repo, auth } => {
+            let auth = auth::Config::load(&auth).unwrap_or_else(|e| { eprintln!("{e}"); std::process::exit(1) });
             std::fs::create_dir_all(cli.data.join("players")).expect("data dir");
+            auth::ensure(&cli.data).expect("accounts database");
             // once here, so that requests only read
             let conn = &mut pipeline::connect(&cli.data).expect("database");
             mtgctl::mtgolog::db::ensure_schema(conn).expect("schema");
@@ -1963,9 +2026,14 @@ async fn main() {
                 Ok(s) => eprintln!("eras: {} matches placed in {} eras{}", s.placed, s.eras, s.from.map(|d| format!(", the timeline changed from {d} on")).unwrap_or_default()),
                 Err(e) => eprintln!("eras: {e}"),
             }
-            let state = Arc::new(AppState { data: cli.data.clone(), reference, sync_lock: Mutex::new(()) });
+            let state = Arc::new(AppState { data: cli.data.clone(), reference, sync_lock: Mutex::new(()), auth });
             let app = Router::new()
-                .route("/api/me", get(me))
+                .route("/auth/login", get(auth::login))
+                .route("/auth/callback", get(auth::callback))
+                .route("/auth/logout", post(auth::logout))
+                .route("/api/account", get(auth::account_api))
+                .route("/api/keys", post(auth::key_new))
+                .route("/api/keys/revoke", post(auth::key_revoke))
                 .route("/api/players", get(players))
                 .route("/api/reference", get(reference_api))
                 .route("/api/client-log", post(client_log))

@@ -2,14 +2,16 @@
 """Uploads new MTGO logs to the mtgctl stats site and refreshes the results: the Linux twin of
 deploy/windows/mtgctl-upload.ps1. Identify the player from the match logs, send what the server
 lacks (match logs by name+size+mtime, session logs by hash as a small gzipped extract), then sync.
-Standard library only."""
-import argparse, gzip, hashlib, io, json, os, re, sys, time, urllib.request, uuid
+The uploader key (made on the upload page) is read from MTGCTL_KEY or <state>/key; without one only
+the names the server lists as keyless may upload. Standard library only."""
+import argparse, gzip, hashlib, io, json, os, re, sys, time, urllib.error, urllib.request, uuid
 from datetime import datetime, timezone
 
 GAME = re.compile(r'^Match_GameLog_.*\.dat$')
 SESSION = re.compile(r'^(mtgo\.log|mtgo-\d{8}-\d{6}\.log)$')
 KEEP = ('Deck Used in Game ID:', 'Game Play Status Update for Game ID:', 'CreateAndFlipToDuelScene', 'Deck Used to Join Event ID:')
 MAX_BATCH = 48 << 20
+KEY = None
 
 def log(msg, path, quiet):
     line = f"{datetime.now():%Y-%m-%d %H:%M:%S} {msg}"
@@ -31,8 +33,12 @@ def multipart(parts):
 def api(server, path, player=None, method='GET', body=None, ctype=None):
     req = urllib.request.Request(server + path, data=body, method=method)
     if player: req.add_header('X-Player', player)
+    if KEY: req.add_header('Authorization', 'Bearer ' + KEY)
     if ctype: req.add_header('Content-Type', ctype.decode() if isinstance(ctype, bytes) else ctype)
-    with urllib.request.urlopen(req, timeout=900) as r: return json.loads(r.read().decode() or 'null')
+    try:
+        with urllib.request.urlopen(req, timeout=900) as r: return json.loads(r.read().decode() or 'null')
+    except urllib.error.HTTPError as e:
+        raise SystemExit(f"{path}: {e.code} {e.read().decode(errors='replace')[:300]}")
 
 def session_extract(path):
     """Same reduction the site applies: the lines naming decks, games and events, plus one line per hour."""
@@ -57,6 +63,9 @@ def main():
     logfile = os.path.join(a.state, 'upload.log'); L = lambda m: log(m, logfile, a.quiet)
     statefile = os.path.join(a.state, 'state.json')
     state = json.load(open(statefile)) if os.path.exists(statefile) else {'player': None, 'last_change': None}
+    global KEY
+    keyfile = os.path.join(a.state, 'key')
+    KEY = os.environ.get('MTGCTL_KEY') or (open(keyfile).read().strip() if os.path.exists(keyfile) else None)
 
     games, sessions = {}, []
     for root in a.logs:

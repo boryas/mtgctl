@@ -1,5 +1,6 @@
-# Installs the mtgctl uploader for the current user. Run from PowerShell with one line:
-#   irm https://bur.io/mtg/stats/windows/install.ps1 | iex
+# Installs the mtgctl uploader for the current user. Run from PowerShell with the install line the
+# upload page makes after a login, which sets the uploader key first:
+#   $env:MTGCTL_KEY='mk_...'; irm https://bur.io/mtg/stats/windows/install.ps1 | iex
 # Downloads the uploader and the launcher next to the state folder, puts a "Play MTGO" shortcut on
 # the desktop that uploads when the client exits, registers an upload at logon (catches a session
 # played without the shortcut, as long as the client has not been started again since), and runs
@@ -9,6 +10,8 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::S
 $Server = if ($env:MTGCTL_SERVER) { $env:MTGCTL_SERVER } else { 'https://bur.io/mtg/stats/' }
 $dir = Join-Path $env:LOCALAPPDATA 'mtgctl'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+# without a new key, a reinstall keeps the one saved before
+if ($env:MTGCTL_KEY) { Set-Content -Path (Join-Path $dir 'key') -Value $env:MTGCTL_KEY -NoNewline }
 foreach ($f in 'mtgctl-upload.ps1', 'play-mtgo.ps1') {
     Invoke-WebRequest -Uri ($Server.TrimEnd('/') + "/windows/$f") -OutFile (Join-Path $dir $f) -UseBasicParsing
 }

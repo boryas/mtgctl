@@ -87,13 +87,31 @@ function diffText(diff) { return diff.map(([n, sb, a, b]) => `${sb ? 'SB ' : ''}
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function statsLink(col, val) { return `index.html#${encodeURIComponent(col)}=${encodeURIComponent(val)}`; }
 
-// Every <pre class="copy"> gets a copy button; the block's text goes to the clipboard as is.
-document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('pre.copy').forEach(pre => {
+// Every <pre class="copy"> under `root` gets a copy button; the block's text goes to the clipboard as is.
+function copyButtons(root) {
+  root.querySelectorAll('pre.copy').forEach(pre => {
     const wrap = document.createElement('div'); wrap.className = 'copywrap'; pre.parentNode.insertBefore(wrap, pre); wrap.appendChild(pre);
     const b = document.createElement('button'); b.type = 'button'; b.textContent = 'copy'; wrap.appendChild(b);
     b.onclick = async () => { try { await navigator.clipboard.writeText(pre.textContent.trim() + '\n'); b.textContent = 'copied'; } catch (e) { b.textContent = 'select it'; } setTimeout(() => b.textContent = 'copy', 1500); };
   });
+}
+document.addEventListener('DOMContentLoaded', () => copyButtons(document));
+
+// The login (auth.rs): {account: {name, names} | null, keys}, fetched once per page.
+let accountReq = null;
+const account = () => accountReq || (accountReq = api('api/account').catch(() => ({ account: null })));
+const thisPage = () => location.pathname.split('/').pop() || 'index.html';
+const loginHref = () => `auth/login?next=${encodeURIComponent(thisPage())}`;
+// The end of every page's nav: who is logged in, or the way to log in.
+document.addEventListener('DOMContentLoaded', async () => {
+  const nav = document.querySelector('nav'); if (!nav) return;
+  const el = document.createElement('span'); el.className = 'login';
+  const { account: a } = await account();
+  if (a) {
+    el.innerHTML = `${esc(a.name)} · <a href="#">log out</a>`;
+    el.querySelector('a').onclick = async e => { e.preventDefault(); await fetch('auth/logout', { method: 'POST' }); location.reload(); };
+  } else el.innerHTML = `<a href="${loginHref()}">log in with Discord</a>`;
+  nav.appendChild(el);
 });
 
 // The hand-mark editor (marks.rs): a popover under `anchor` for one field of `row` (a match or

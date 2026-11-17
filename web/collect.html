@@ -3,26 +3,25 @@
 <body>
 <h1>mtgctl · upload your MTGO logs</h1>
 <nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a></nav>
-<p class="lede">Your results here are built from the game logs the MTGO client keeps on your computer. Upload them either way below. There is no account to make: the server reads your MTGO username from the logs, and takes only the files it does not have yet.</p>
+<p class="lede">Your results here are built from the game logs the MTGO client keeps on your computer. Log in with Discord, then upload them either way below. The server reads your MTGO username from the logs, and your first upload links that name to your login. It takes only the files it does not have yet.</p>
 <p id="known" class="muted lede">…</p>
 
 <div class="box step" id="windows">
   <h2>On Windows: install the uploader once <span class="muted">(recommended)</span></h2>
   <p>Your logs then upload by themselves every time you close MTGO, and you don't need this page again.</p>
   <ol>
-    <li>Open PowerShell (Start menu, type <i>PowerShell</i>) and paste this line:
-<pre class="copy">irm https://bur.io/mtg/stats/windows/install.ps1 | iex</pre>
-      Or <a href="windows/install-mtgctl.cmd">download install-mtgctl.cmd</a> and double-click it; if Windows asks, choose <i>Run</i>. It runs the same line.</li>
+    <li>Open PowerShell (Start menu, type <i>PowerShell</i>) and paste your install line:
+      <div id="install">…</div></li>
     <li>From now on, start MTGO from the new <b>Play MTGO</b> shortcut on your desktop.</li>
   </ol>
   <p class="muted">The first upload reads every match log you have and can take a few minutes; later ones take seconds. If you start MTGO some other way, your logs upload the next time you log on to Windows.</p>
   <details><summary>What it installs, and how to remove it</summary>
     <ul>
-      <li><a href="windows/install.ps1">install.ps1</a> downloads the two scripts below into <code>%LOCALAPPDATA%\mtgctl</code>, adds the desktop shortcut and a task that uploads at logon, and runs the first upload.</li>
+      <li><a href="windows/install.ps1">install.ps1</a> saves your uploader key and downloads the two scripts below into <code>%LOCALAPPDATA%\mtgctl</code>, adds the desktop shortcut and a task that uploads at logon, and runs the first upload.</li>
       <li><a href="windows/mtgctl-upload.ps1">mtgctl-upload.ps1</a> finds your logs and uploads what the server does not have yet; it notes what it did in <code>upload.log</code> in that folder.</li>
       <li><a href="windows/play-mtgo.ps1">play-mtgo.ps1</a> starts MTGO and runs the upload when it closes.</li>
-      <li><a href="windows/install-mtgctl.cmd">install-mtgctl.cmd</a> is the PowerShell line above in a file you can double-click.</li>
     </ul>
+    <div id="keys"></div>
     <p>To remove it, run this in PowerShell, then delete the <code>%LOCALAPPDATA%\mtgctl</code> folder and the desktop shortcut:</p>
 <pre class="copy">schtasks /Delete /TN "mtgctl upload at logon" /F</pre>
   </details>
@@ -31,7 +30,7 @@
 <div class="box step">
   <h2>Any computer: upload from this page</h2>
   <p>Choose your MTGO folder and the page uploads what is new. Come back and do it again whenever you want your results brought up to date.</p>
-  <p><button id="pick" class="big">Choose my MTGO folder…</button> <input type="file" id="dirinput" webkitdirectory multiple hidden></p>
+  <p><button id="pick" class="big">Choose my MTGO folder…</button> <span id="pickNote" class="muted"></span> <input type="file" id="dirinput" webkitdirectory multiple hidden></p>
   <p class="muted">On Windows it is <code>C:\Users\<i>you</i>\AppData\Local\Apps\2.0</code>; on Linux or a Mac, the same folder inside your wine prefix. If you keep old session logs (<code>mtgo-*.log</code>) somewhere else, choose that folder too, afterwards.</p>
   <p><progress id="prog" value="0" max="1" hidden></progress> <span id="status"></span> <span id="phase" class="muted"></span></p>
   <div id="result"></div>
@@ -63,13 +62,47 @@ document.getElementById('dirinput').onchange = e => addLogs((async function* () 
 window.addEventListener('error', e => fail(e));
 function fail(e) { stopClock(); prog.hidden = true; phase.textContent = ''; status.innerHTML = `<span class="err">${e.message || e}</span>`; }
 function when(ts) { if (!ts) return ''; const d = new Date(ts.replace(' ', 'T')); const days = Math.floor((Date.now() - d) / 864e5); return days === 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`; }
+// What the server has for the logged-in player; the MTGO name is this browser's last upload when it is one of the account's.
 async function showKnown() {
   const el = document.getElementById('known');
-  if (!getPlayer()) { el.textContent = 'Nothing uploaded from this browser yet. Once you upload, this line shows what the server has for you.'; return; }
+  const { account: a } = await account();
+  if (!a) { el.innerHTML = `<a href="${loginHref()}">Log in with Discord</a> to upload. The site learns only your Discord name and id.`; return; }
+  if (!a.names.length) { el.textContent = `Logged in as ${a.name}. Your first upload links your MTGO name to this login.`; return; }
+  if (!a.names.includes(getPlayer())) setPlayer(a.names[0]);
+  const others = a.names.length > 1 ? ` (your MTGO names: ${a.names.map(esc).join(', ')})` : '';
   try {
     const s = await api('api/summary');
-    el.innerHTML = s.matches ? `<b>${getPlayer()}</b>: ${s.matches} matches on file, latest ${when(s.latest_match)}; ${s.lists} registered lists, latest <b>${s.latest_list || '?'}</b>. <a href="index.html">see stats</a>` : `<b>${getPlayer()}</b>: no matches on file yet.`;
-  } catch (e) { el.innerHTML = `<span class="err">${e.message}</span>`; }
+    el.innerHTML = (s.matches ? `<b>${esc(getPlayer())}</b>: ${s.matches} matches on file, latest ${when(s.latest_match)}; ${s.lists} registered lists, latest <b>${esc(s.latest_list || '?')}</b>. <a href="index.html">see stats</a>` : `<b>${esc(getPlayer())}</b>: no matches on file yet.`) + others;
+  } catch (e) { el.innerHTML = `<span class="err">${esc(e.message)}</span>`; }
+}
+// The Windows install line: a new uploader key, then the line (and a .cmd running it) that saves it on that computer.
+async function showInstall() {
+  const el = document.getElementById('install'), { account: a } = await account();
+  if (!a) { el.innerHTML = `<a href="${loginHref()}">Log in with Discord</a> first: your install line carries a key that uploads as you.`; return; }
+  el.innerHTML = '<button id="mkKey">Make my install line</button> Each computer gets its own line. It holds a key that uploads as you, so keep it to yourself.';
+  el.querySelector('#mkKey').onclick = async () => {
+    let k; try { k = await api('api/keys', { method: 'POST' }); } catch (e) { el.innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+    const line = `$env:MTGCTL_KEY='${k.key}'; irm ${new URL('windows/install.ps1', location.href).href} | iex`;
+    const cmd = `@echo off\r\nrem Installs the mtgctl uploader with your key: the same as pasting your install line into PowerShell.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "${line}"\r\necho.\r\npause\r\n`;
+    const href = URL.createObjectURL(new Blob([cmd], { type: 'application/octet-stream' }));
+    el.innerHTML = `<pre class="copy">${esc(line)}</pre>Or <a download="install-mtgctl.cmd" href="${href}">download install-mtgctl.cmd</a> and double-click it; if Windows asks, choose <i>Run</i>. It runs the same line. This page shows the key only now.`;
+    copyButtons(el); accountReq = null; showKeys();
+  };
+  showKeys();
+}
+async function showKeys() {
+  const el = document.getElementById('keys'), { keys } = await account();
+  if (!keys || !keys.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<p>Your uploader keys; revoking one stops the computer that has it from uploading:</p><ul>${keys.map(k => `<li>made ${esc(k.created)} UTC, ${k.last_used ? `last used ${esc(k.last_used)} UTC` : 'not used yet'} <button data-k="${k.id}">revoke</button></li>`).join('')}</ul>`;
+  el.querySelectorAll('button[data-k]').forEach(b => b.onclick = async () => {
+    try { await api('api/keys/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: +b.dataset.k }) }); } catch (e) { alert(e.message); return; }
+    accountReq = null; showKeys();
+  });
+}
+async function gateUpload() {
+  const { account: a } = await account();
+  document.getElementById('pick').disabled = !a;
+  document.getElementById('pickNote').innerHTML = a ? '' : `<a href="${loginHref()}">log in with Discord</a> first`;
 }
 async function sha256(buf) { const h = await crypto.subtle.digest('SHA-256', buf); return [...new Uint8Array(h)].map(b => b.toString(16).padStart(2, '0')).join(''); }
 // Same reduction the server applies to a raw session log (decklist::session_extract).
@@ -157,8 +190,9 @@ async function addLogs(files) {
   if (after.latest_list) lines.push(`Latest list: <b>${after.latest_list}</b>.`);
   lines.push(`<a href="index.html">see stats</a> · <a href="lists.html">see lists</a>`);
   result.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+  accountReq = null;
   await showKnown();
 }
-showKnown();
+showKnown(); showInstall(); gateUpload();
 </script>
 </body></html>

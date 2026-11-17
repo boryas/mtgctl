@@ -1,8 +1,8 @@
 //! Hand marks: the one input not derived from the logs. A match mark names its opponent deck,
 //! my deck or format, adds a note, or excludes the match from the stats; a list mark is the
 //! experimental tag. Every change is appended to `<data>/marks.jsonl` and applied to the pooled
-//! database, and `apply` replays the file, which is why a rebuild keeps them. Nothing checks who
-//! marks what (user, 2026-11-13: the players know each other; identity comes later).
+//! database, and `apply` replays the file, which is why a rebuild keeps them. The server lets a
+//! logged-in player mark only their own matches and lists (mtgctl-web `mark_api`).
 
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;

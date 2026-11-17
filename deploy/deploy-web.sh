@@ -5,7 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 docker run --rm -v "$PWD":/src -w /src -v mtgctl-cargo-cache:/usr/local/cargo/registry -e CARGO_TARGET_DIR=/src/target-bullseye rust:1.88-bullseye cargo build --release --bin mtgctl-web
 H=bur.io
-ssh "$H" 'mkdir -p ~/mtgctl-web/{bin,web,definitions/mtgo,deploy,data} ~/.config/systemd/user'
+# the server will not start without its Discord settings (deploy/auth.toml.example); stop before changing anything
+ssh "$H" 'test -f ~/mtgctl-web/auth.toml || { echo "bur.io: ~/mtgctl-web/auth.toml is missing; create it first (deploy/auth.toml.example)" >&2; exit 1; }; mkdir -p ~/mtgctl-web/{bin,web,definitions/mtgo,deploy,data} ~/.config/systemd/user'
 rsync -az target-bullseye/release/mtgctl-web "$H":mtgctl-web/bin/mtgctl-web.new
 rsync -az --delete web/ "$H":mtgctl-web/web/
 rsync -az deploy/windows/ "$H":mtgctl-web/web/windows/
