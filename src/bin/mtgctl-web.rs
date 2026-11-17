@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use mtgctl::mtgolog::pipeline::{self, PlayerDir, Reference};
 use mtgctl::mtgolog::dataset::{self, Dataset};
-use mtgctl::mtgolog::{ldc, picker, stats};
+use mtgctl::mtgolog::{filter, ldc, picker, stats};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -198,6 +198,16 @@ fn timeline_eras() -> Vec<(String, String)> {
     mtgctl::mtgolog::eras::eras_from_file(Path::new("definitions/mtgo/legacy_timeline.toml")).unwrap_or_else(|e| { eprintln!("timeline: {e}"); std::process::exit(1) })
 }
 
+/// Clients from before filters were entries send SQL as `where` or `split`: refuse them rather
+/// than answer as if nothing were filtered.
+async fn no_sql_params(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let q: HashMap<String, String> = Query::try_from_uri(req.uri()).map(|Query(q)| q).unwrap_or_default();
+    if q.contains_key("where") || q.contains_key("split") {
+        return bad("this server takes filters as JSON entries (`filters`, `groups`), not SQL (`where`, `split`): reload the page or update the client").into_response();
+    }
+    next.run(req).await
+}
+
 /// The Windows scripts are meant to be read in the browser before they are run: serve them as text.
 async fn plain_text_scripts(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
     let (ps1, cmd) = (req.uri().path().ends_with(".ps1"), req.uri().path().ends_with(".cmd"));
@@ -222,6 +232,27 @@ fn shared_db(data: &Path) -> Result<diesel::SqliteConnection, String> {
 
 fn pool(state: &AppState) -> Result<diesel::SqliteConnection, String> {
     pipeline::connect(&state.data)
+}
+
+/// A connection for the queries built from request filters: `query_only`, so a fault in that SQL
+/// can read but never write.
+fn reader(ds: &Dataset, data: &Path) -> Result<diesel::SqliteConnection, String> {
+    use diesel::RunQueryDsl;
+    let mut conn = ds.connect(data)?;
+    diesel::sql_query("PRAGMA query_only = 1").execute(&mut conn).map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+/// The WHERE and split conditions of a request's `filters` and `groups`, each a JSON array of
+/// filter entries; see filter::query_sql.
+fn query_sql(ds: &Dataset, filters: &str, except: Option<usize>, groups: &str, by: &[String]) -> Result<(Option<String>, Vec<String>), ApiError> {
+    let parse = |k: &str, s: &str| -> Result<Vec<filter::Entry>, ApiError> {
+        if s.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        serde_json::from_str(s).map_err(|e| bad(format!("{k}: {e}")))
+    };
+    filter::query_sql(ds, &parse("filters", filters)?, except, &parse("groups", groups)?, by).map_err(bad)
 }
 
 fn player_dir(state: &AppState, name: &str) -> PlayerDir {
@@ -623,8 +654,12 @@ async fn sync(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<Hash
 struct StatsParams {
     #[serde(default)]
     by: String,
-    #[serde(default, rename = "where")]
-    where_sql: Option<String>,
+    /// JSON filter entries; see query_sql
+    #[serde(default)]
+    filters: String,
+    /// JSON group entries: a card sentence among them is a yes/no split after the `by` columns
+    #[serde(default)]
+    groups: String,
     #[serde(default = "one")]
     min: i64,
     #[serde(default = "sixty")]
@@ -635,9 +670,6 @@ struct StatsParams {
     full: bool,
     #[serde(default)]
     hist: String,
-    /// a JSON array of SQL conditions, see StatsQuery::split
-    #[serde(default)]
-    split: String,
     #[serde(default)]
     game: Option<bool>,
     #[serde(default)]
@@ -665,10 +697,11 @@ fn dataset(key: Option<&str>) -> Result<&'static Dataset, ApiError> {
 
 async fn stats_api(State(st): State<Shared>, Query(p): Query<StatsParams>) -> Result<Json<stats::StatsResult>, ApiError> {
     let ds = dataset(p.ds.as_deref())?;
-    let split: Vec<String> = if p.split.is_empty() { vec![] } else { serde_json::from_str(&p.split).map_err(|e| bad(format!("split: {e}")))? };
-    let query = stats::StatsQuery { by: split_cols(&p.by), split, game: p.game, per: None, where_sql: p.where_sql.filter(|w| !w.trim().is_empty()), min_games: p.min, sort: p.sort, limit: p.limit, full: p.full, hist: split_cols(&p.hist) };
+    let by = split_cols(&p.by);
+    let (where_sql, split) = query_sql(ds, &p.filters, None, &p.groups, &by)?;
+    let query = stats::StatsQuery { by, split, game: p.game, per: None, where_sql, min_games: p.min, sort: p.sort, limit: p.limit, full: p.full, hist: split_cols(&p.hist) };
     let r = tokio::task::spawn_blocking(move || {
-        let conn = &mut ds.connect(&st.data)?;
+        let conn = &mut reader(ds, &st.data)?;
         stats::compute(conn, ds, &query)
     })
     .await
@@ -793,16 +826,22 @@ async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiEr
     Ok(Json(rows))
 }
 
-/// Distinct values of one view column under an optional WHERE, most matches first.
+/// Distinct values of one view column under `filters` but the one at `except` (the filter being
+/// edited), most matches first.
 async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
     let col = q.get("col").cloned().ok_or_else(|| bad("col required"))?;
     if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(bad("bad column"));
     }
     let ds = dataset(q.get("ds").map(String::as_str))?;
-    let wher: Vec<String> = q.get("where").filter(|w| !w.trim().is_empty()).cloned().into_iter().collect();
+    let except = match q.get("except").filter(|x| !x.is_empty()) {
+        Some(x) => Some(x.parse::<usize>().map_err(|_| bad("except: not an index"))?),
+        None => None,
+    };
+    let arg = |k: &str| q.get(k).map_or("", String::as_str);
+    let wher: Vec<String> = query_sql(ds, arg("filters"), except, arg("groups"), &[])?.0.into_iter().collect();
     let rows = tokio::task::spawn_blocking(move || {
-        let conn = &mut ds.connect(&st.data)?;
+        let conn = &mut reader(ds, &st.data)?;
         picker::column_values(conn, ds, &col, &wher).map_err(|e| e.to_string())
     })
     .await
@@ -1066,8 +1105,12 @@ struct MatchRow {
 
 #[derive(Deserialize)]
 struct MatchesParams {
-    #[serde(default, rename = "where")]
-    where_sql: Option<String>,
+    /// JSON filter entries; see query_sql
+    #[serde(default)]
+    filters: String,
+    /// JSON group entries: only what they need applies
+    #[serde(default)]
+    groups: String,
     #[serde(default = "two_hundred")]
     limit: usize,
 }
@@ -1075,14 +1118,15 @@ fn two_hundred() -> usize {
     200
 }
 
-/// The matches a WHERE over mtgo_game_view selects (a match is included if any of its games
+/// The matches the filters select over mtgo_game_view (a match is included if any of its games
 /// passes), newest first, with a compact per-game summary.
 async fn matches_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> Result<Json<Vec<MatchRow>>, ApiError> {
-    let wher = p.where_sql.filter(|w| !w.trim().is_empty()).map(|w| format!("WHERE {w}")).unwrap_or_default();
+    let ds = dataset(None)?;
+    let wher = query_sql(ds, &p.filters, None, &p.groups, &[])?.0.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let limit = p.limit.min(2000);
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<MatchRow>, String> {
         use diesel::prelude::*;
-        let conn = &mut pool(&st)?;
+        let conn = &mut reader(ds, &st.data)?;
         diesel::sql_query(format!(
             "SELECT v.match_id, v.player, v.format, v.format_source, v.legacy, v.note, v.excluded, v.opp_deck_source, v.date, v.match_start AS start, v.opponent, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
@@ -1525,13 +1569,14 @@ struct GameRow {
     minutes: Option<i64>,
 }
 
-/// One row per game the WHERE selects, newest first.
+/// One row per game the filters select, newest first.
 async fn games_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> Result<Json<Vec<GameRow>>, ApiError> {
-    let wher = p.where_sql.filter(|w| !w.trim().is_empty()).map(|w| format!("WHERE {w}")).unwrap_or_default();
+    let ds = dataset(None)?;
+    let wher = query_sql(ds, &p.filters, None, &p.groups, &[])?.0.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let limit = p.limit.min(5000);
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<GameRow>, String> {
         use diesel::prelude::*;
-        let conn = &mut pool(&st)?;
+        let conn = &mut reader(ds, &st.data)?;
         diesel::sql_query(format!(
             "SELECT game_id, match_id, player, format, format_source, legacy, note, excluded, opp_deck_source, my_deck_source, date, game_start AS start, opponent, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_archetype_surprise, opp_misfit, opp_seen, opp_colors, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
              FROM mtgo_game_view {wher} ORDER BY game_start DESC, game_id DESC LIMIT {limit}"
@@ -1547,8 +1592,12 @@ async fn games_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> 
 
 #[derive(Deserialize)]
 struct CardCountParams {
-    #[serde(default, rename = "where")]
-    where_sql: Option<String>,
+    /// JSON filter entries; see query_sql
+    #[serde(default)]
+    filters: String,
+    /// JSON group entries: only what they need applies
+    #[serde(default)]
+    groups: String,
     /// comma-separated filter::VERBS names and `deck`; none = all
     #[serde(default)]
     verbs: Option<String>,
@@ -1620,7 +1669,8 @@ struct SelCount {
 /// facts are known, so a missing count means none happened.
 async fn card_counts(State(st): State<Shared>, Query(p): Query<CardCountParams>) -> Result<Json<CardCounts>, ApiError> {
     use mtgctl::mtgolog::filter::{sq, VERBS};
-    let wher = p.where_sql.filter(|w| !w.trim().is_empty()).map(|w| format!("WHERE {w}")).unwrap_or_default();
+    let ds = dataset(None)?;
+    let wher = query_sql(ds, &p.filters, None, &p.groups, &[])?.0.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let verbs: Vec<String> = p.verbs.iter().flat_map(|v| v.split(',')).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect();
     if let Some(v) = verbs.iter().find(|v| v.as_str() != "deck" && !VERBS.iter().any(|(k, _, _)| k == v)) {
         return Err(bad(format!("unknown verb {v:?}")));
@@ -1635,7 +1685,7 @@ async fn card_counts(State(st): State<Shared>, Query(p): Query<CardCountParams>)
     };
     let r = tokio::task::spawn_blocking(move || -> Result<CardCounts, String> {
         use diesel::prelude::*;
-        let conn = &mut pool(&st)?;
+        let conn = &mut reader(ds, &st.data)?;
         let sel: SelCount = diesel::sql_query(format!("SELECT COUNT(*) AS games, COALESCE(SUM(my_hand_known), 0) AS hand FROM mtgo_game_view {wher}")).get_result(conn).map_err(|e| format!("query failed: {e}"))?;
         let hand_verbs = VERBS.iter().filter(|(_, _, n)| *n == Some("hand")).map(|(v, _, _)| sq(v)).collect::<Vec<_>>().join(", ");
         let event_verbs: Vec<&String> = verbs.iter().filter(|v| v.as_str() != "deck").collect();
@@ -1942,6 +1992,7 @@ async fn main() {
                 .route("/mcp", post(mcp::mcp).get(mcp::mcp_get))
                 .fallback_service(ServeDir::new(&web))
                 .layer(axum::middleware::from_fn(plain_text_scripts))
+                .layer(axum::middleware::from_fn(no_sql_params))
                 // pages and scripts change together on every deploy; never serve a stale script against a new page
                 .layer(SetResponseHeaderLayer::overriding(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache")))
                 .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))

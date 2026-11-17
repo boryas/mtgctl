@@ -61,15 +61,14 @@
 // The dataset's column catalog and features come from api/schema (src/mtgolog/dataset.rs): the
 // columns a person can filter or group on, their labels, level, kind and value labels.
 let DS = 'mtgo', SCHEMA = null;
-let LABEL = {}, GAME_COLS = [], NUMERIC = new Set(), VALUE_LABEL = {}, KIND_OF = {};
+let LABEL = {}, GAME_COLS = [], VALUE_LABEL = {}, KIND_OF = {};
 const feature = k => !!(SCHEMA && SCHEMA.dataset.features[k]);
 function applySchema(s) {
-  SCHEMA = s; LABEL = {}; GAME_COLS = []; NUMERIC = new Set(); VALUE_LABEL = {}; KIND_OF = {};
+  SCHEMA = s; LABEL = {}; GAME_COLS = []; VALUE_LABEL = {}; KIND_OF = {};
   for (const c of s.dataset.columns) {
     if (!s.present.includes(c.name)) continue;
     LABEL[c.name] = c.label; KIND_OF[c.name] = c.kind;
     if (c.level === 'game') GAME_COLS.push(c.name);
-    if (c.kind === 'num') NUMERIC.add(c.name);
     if (c.values.length) VALUE_LABEL[c.name] = Object.fromEntries(c.values);
   }
   PEEKABLE = feature('lists') ? { my_list: 'my_list', my_deck: 'my_deck', opp_deck: 'my_deck' } : {};
@@ -128,9 +127,6 @@ function rowCols(game) {
 // The query: every filter holds (AND); within one, the values are alternatives (OR). A filter
 // with no field or no values yet is inactive. Entries: {field, op, not, values}; see FIELDS.
 let filters = [];
-const sq = v => `'${String(v).replace(/'/g, "''")}'`;
-const like = v => `${sq('%' + v.replace(/[\\%_]/g, m => '\\' + m) + '%')} ESCAPE '\\'`;
-const lit = (col, v) => NUMERIC.has(col) && /^-?\d+(\.\d+)?$/.test(v) ? v : sq(v);
 const valText = (col, v) => v === null ? '∅' : (VALUE_LABEL[col] || {})[v] || v;
 // What a card sentence can say happened, by mtgo_card_events.verb (see model::Verb): `active`
 // verbs read "I cast X", `passive` ones "my X was milled"; `other` names what `other` holds.
@@ -170,25 +166,6 @@ const CARD_FIELDS = {
   opp_list_has: { label: "opponent's inferred decklist", kind: 'deck', side: 'opp' },
 };
 const newCardEntry = (field, kind) => kind === 'play' ? { field, verb: 'cast', values: [], other: [], when: 'any', scope: 'game', n: 1, not: false } : { field, values: [], board: 'any', n: 1, not: false };
-// The games (scope 'game') or matches (scope 'match') in which the sentence happened at least n times.
-function playSql(f, not) {
-  const d = CARD_FIELDS[f.field], unit = f.scope === 'match' ? 'match_id' : 'game_id';
-  const conds = [`c.side = '${d.side}'`, `c.verb = ${sq(f.verb)}`, `c.card IN (${f.values.map(sq).join(', ')})`];
-  if (VERBS[f.verb].other && f.other && f.other.length) conds.push(`c.other IN (${f.other.map(sq).join(', ')})`);
-  if (f.when === 'before') conds.push('(g.my_dd_seq IS NULL OR c.seq < g.my_dd_seq)');
-  if (f.when === 'after') conds.push('c.seq > g.my_dd_seq');
-  const n = +f.n > 1 ? ` GROUP BY c.${unit} HAVING COUNT(*) >= ${+f.n}` : '';
-  return `${unit} ${not ? 'NOT IN' : 'IN'} (SELECT c.${unit} FROM mtgo_card_events c JOIN mtgo_games g ON g.id = c.game_id WHERE ${conds.join(' AND ')}${n})`;
-}
-// The list holds at least n copies of any of the cards (main and side summed for 'any').
-function deckSql(f, not) {
-  const d = CARD_FIELDS[f.field];
-  const [table, key] = d.side === 'me' ? ['mtgo_list_cards', 'list_id = my_list_id'] : ['shared.reference_cards', 'reference_id = opp_reference_id'];
-  const board = f.board === 'main' ? ' AND lc.sideboard = 0' : f.board === 'side' ? ' AND lc.sideboard = 1' : '';
-  const one = v => `(SELECT COALESCE(SUM(lc.qty), 0) FROM ${table} lc WHERE lc.${key} AND lc.name = ${sq(v)}${board}) >= ${Math.max(1, +f.n || 1)}`;
-  const t = `(${f.values.map(one).join(' OR ')})`;
-  return not ? `NOT ${t}` : t;
-}
 function cardText(f) {
   const d = CARD_FIELDS[f.field], me = d.side === 'me', cards = f.values.join(' or ') || '…';
   if (d.kind === 'deck') {
@@ -203,14 +180,14 @@ function cardText(f) {
   t += f.scope === 'match' ? ', in any game of the match' : ', in that game';
   return f.not ? `not: ${t}` : t;
 }
-// A filter or group entry in use applies what it needs to mean what it says, and nothing is left
-// behind when it goes: these are recomputed on every query, never added to the filter list.
+// What a filter or group entry in use needs to mean what it says: the server adds it to every
+// query (filter.rs REQUIRE, the same keys); the page only says so.
 const REQUIRE = {
-  my_list: { sql: 'my_list_id IS NOT NULL', text: 'my list is known' },
-  opp_list: { sql: 'opp_reference_id IS NOT NULL', text: "the opponent's deck is inferred" },
-  dd_deck: { sql: "my_archetype = 'Doomsday'", text: 'my archetype is Doomsday' },
-  hand: { sql: 'my_hand_known = 1', text: 'my hands, draws and sideboarding are known (a session log)' },
-  pile: { sql: 'my_pile_known = 1', text: 'my Doomsday pile is known' },
+  my_list: 'my list is known',
+  opp_list: "the opponent's deck is inferred",
+  dd_deck: 'my archetype is Doomsday',
+  hand: 'my hands, draws and sideboarding are known (a session log)',
+  pile: 'my Doomsday pile is known',
 };
 function needs(f) {
   const d = CARD_FIELDS[f.field];
@@ -249,31 +226,6 @@ function buildFields() {
 }
 const kindOf = f => f.field && FIELDS[f.field] ? FIELDS[f.field].kind : null;
 const active = f => kindOf(f) && f.values.some(v => v === null || String(v).trim() !== '');
-function filterSql(f) {
-  const c = f.field, vs = f.values.filter(v => v === null || String(v).trim() !== '');
-  const neg = t => f.not ? `NOT ${t}` : t;
-  switch (kindOf(f)) {
-    case 'col': case 'num': {
-      if (f.op === 'contains') { const t = `(${vs.map(v => `${c} LIKE ${like(v)}`).join(' OR ')})`; return f.not ? `(${c} IS NULL OR NOT ${t})` : t; }
-      if (f.op !== 'is') return neg(`(${c} ${f.op === '≥' ? '>=' : '<='} ${lit(c, vs[0])})`);
-      const nn = vs.filter(v => v !== null).map(v => lit(c, v)), hasNull = vs.includes(null);
-      const inList = nn.length === 1 ? `${c} = ${nn[0]}` : `${c} IN (${nn.join(', ')})`;
-      // NOT IN alone drops the NULL rows, so ∅ is kept or excluded explicitly
-      if (f.not) return [nn.length ? `(${c} NOT IN (${nn.join(', ')})${hasNull ? '' : ` OR ${c} IS NULL`})` : null, hasNull ? `${c} IS NOT NULL` : null].filter(Boolean).join(' AND ');
-      return nn.length && hasNull ? `(${inList} OR ${c} IS NULL)` : nn.length ? inList : `${c} IS NULL`;
-    }
-    case 'play': return playSql(f, f.not);
-    case 'deck': return deckSql(f, f.not);
-    case 'colors': {
-      const cs = vs[0];
-      if (f.op === 'exact') return neg(`(${c} = ${sq(cs)})`);
-      const ts = [...cs].map(x => `${c} LIKE '%${x}%'`);
-      return neg(f.op === 'all' ? `(${ts.join(' AND ')})` : `(${ts.map(t => 'NOT ' + t).join(' AND ')})`);
-    }
-    case 'date': return [f.values[0] ? `date >= ${sq(f.values[0])}` : null, f.values[1] ? `date <= ${sq(f.values[1])}` : null].filter(Boolean).join(' AND ');
-  }
-  return null;
-}
 function filterText(f) {
   const k = kindOf(f);
   if (!k) return 'choose a field…';
@@ -291,9 +243,10 @@ function filterText(f) {
     case 'stat': { const s = STATS[f.field.slice(5)]; return `${s.label} ${f.op} ${s.rate || s.bar ? (100 * vs[0]).toFixed(0) + '%' : vs[0]}`; }
   }
 }
-function whereSql(except) {
-  return [...filters.filter((f, i) => i !== except && active(f) && kindOf(f) !== 'stat').map(filterSql), ...requirements().map(r => REQUIRE[r.k].sql)].filter(Boolean).join(' AND ');
-}
+// What the server builds the SQL from (filter::query_sql): the filters in use but the statistic
+// ones (applied here, after grouping), and every group in use.
+const queryFilters = () => filters.filter(f => active(f) && kindOf(f) !== 'stat');
+const queryParams = () => ({ filters: JSON.stringify(queryFilters()), groups: JSON.stringify(groups.filter(groupActive)) });
 const OPS = { '≥': (a, b) => a >= b, '≤': (a, b) => a <= b, '>': (a, b) => a > b, '<': (a, b) => a < b };
 function parseOutVal(stat, text) { const t = String(text).trim(); const pct = t.endsWith('%'); const n = parseFloat(t); if (isNaN(n)) return null; return STATS[stat].rate || STATS[stat].bar ? (pct || n > 1 ? n / 100 : n) : n; }
 // A group passes when every statistic filter holds for it; `rr` is the stats row with `n` set.
@@ -417,7 +370,7 @@ function parseDay(t, end) {
 }
 function renderRequired() {
   const el = document.getElementById('freq'); if (!el) return;
-  el.innerHTML = requirements().map(r => `<div class="muted">also: only where ${REQUIRE[r.k].text} <span title="${r.by.join('\n').replace(/"/g, '&quot;')}">(needed by ${r.by.length === 1 ? r.by[0] : r.by.length + ' entries'})</span></div>`).join('');
+  el.innerHTML = requirements().map(r => `<div class="muted">also: only where ${REQUIRE[r.k]} <span title="${r.by.join('\n').replace(/"/g, '&quot;')}">(needed by ${r.by.length === 1 ? r.by[0] : r.by.length + ' entries'})</span></div>`).join('');
 }
 function editor(f, mode, textEl) {
   const box = document.createElement('div'); box.className = 'fedit';
@@ -526,7 +479,8 @@ async function pickValues(f, i, el, touch) {
   const col = f.field;
   el.innerHTML = '…';
   let vals;
-  try { vals = await api(`api/values?ds=${DS}&col=${encodeURIComponent(col)}&where=${encodeURIComponent(whereSql(i))}`); }
+  const except = queryFilters().indexOf(filters[i]);
+  try { vals = await api('api/values?' + new URLSearchParams({ ds: DS, col, ...queryParams(), except: except < 0 ? '' : String(except) })); }
   catch (e) { el.innerHTML = `<span class="err">${e.message}</span>`; return; }
   for (const v of f.values) if (!vals.some(x => x.value === v)) vals.unshift({ value: v, matches: 0, games: 0 });
   el.innerHTML = '';
@@ -562,10 +516,9 @@ const chosenStats = () => [...document.querySelectorAll('input[name=stat]:checke
 const gameQuery = () => [...groupBy(), ...filters.filter(active).map(f => f.field)].some(c => GAME_COLS.includes(c))
   || [...filters.filter(active), ...groups.filter(groupActive)].some(f => kindOf(f) === 'play' && f.scope === 'game');
 const groupBy = () => groups.filter(g => groupActive(g) && isColumn(g)).map(g => g.field);
-const groupSplits = () => groups.filter(g => groupActive(g) && CARD_FIELDS[g.field]).map(g => ({ label: groupText(g), sql: kindOf(g) === 'play' ? playSql(g, false) : deckSql(g, false) }));
-// the server's key order: the columns, then the splits
-const groupLabels = () => [...groupBy().map(c => LABEL[c] || c), ...groupSplits().map(x => x.label)];
-const statsParams = extra => new URLSearchParams(Object.assign({ ds: DS, where: whereSql(), split: JSON.stringify(groupSplits().map(x => x.sql)), game: String(gameQuery()) }, extra));
+// the server's key order: the columns, then the card groups' yes/no splits
+const groupLabels = () => [...groupBy().map(c => LABEL[c] || c), ...groups.filter(g => groupActive(g) && CARD_FIELDS[g.field]).map(groupText)];
+const statsParams = extra => new URLSearchParams(Object.assign({ ds: DS, ...queryParams(), game: String(gameQuery()) }, extra));
 
 async function init() {
   document.querySelectorAll('input[name=view]').forEach(r => r.onchange = syncViewOpts);
@@ -811,7 +764,7 @@ async function showTable(seq) {
       tableSort = tableSort && tableSort.col === col ? { col, dir: -tableSort.dir } : { col, dir: numeric ? -1 : 1 };
       schedule();
     });
-    setSummary(`${r.game_mode ? 'per-game view: ' : ''}${r.all_matches} matches / ${r.all_games} games in ${r.all_groups} groups${hiddenN ? `, ${hiddenN} hidden by the filters on groups` : ''}; where: ${whereSql() || '(none)'}`);
+    setSummary(`${r.game_mode ? 'per-game view: ' : ''}${r.all_matches} matches / ${r.all_games} games in ${r.all_groups} groups${hiddenN ? `, ${hiddenN} hidden by the filters on groups` : ''}`);
   } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
 }
 // Time series: the same group-by and output statistics as the table; the bucket is prepended to
@@ -860,7 +813,7 @@ async function showSeries(seq) {
       html += `<h3 class="charttitle">${st.label}${win > 1 ? ` <span class="muted">(smoothed over ${win} ${bucket === 'date' ? 'days' : bucket + 's'}, ${trailing ? 'trailing' : 'centred'})</span>` : ''}</h3>` + chart(xs, series, st);
     }
     out.innerHTML = html + `<div class="muted">${names.length} of ${size.size} groups shown (largest by ${r.game_mode ? 'games' : 'matches'}${qualified.length < size.size ? `, ${size.size - qualified.length} hidden by the filters on groups` : ''}); hover a point for the value and sample size</div>`;
-    setSummary(`per ${bucket}${groupLabels().length ? ' by ' + groupLabels().join(', ') : ''}; ${r.all_matches} matches / ${r.all_games} games; where: ${whereSql() || '(none)'}`);
+    setSummary(`per ${bucket}${groupLabels().length ? ' by ' + groupLabels().join(', ') : ''}; ${r.all_matches} matches / ${r.all_games} games`);
   } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
 }
 // Matchup matrix: the first group-by field gives the rows, the second the columns; a cell is the
@@ -911,7 +864,7 @@ async function showMatrix(seq) {
       const v = s => s === '∅' ? null : s;
       addValueFilter(rc, v(td.dataset.a), false); addValueFilter(cc, v(td.dataset.b), false);
     };
-    setSummary(`${game ? 'game' : 'match'} win rate of each row against each column; ${rows.length} × ${cols.length} of ${rowN.size} × ${colN.size}; ${r.all_matches} matches; where: ${whereSql() || '(none)'}`);
+    setSummary(`${game ? 'game' : 'match'} win rate of each row against each column; ${rows.length} × ${cols.length} of ${rowN.size} × ${colN.size}; ${r.all_matches} matches`);
   } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
 }
 const PALETTE = ['#2a6fdb', '#d9534f', '#3a9d5d', '#e8a33d', '#8e5ec9', '#1fa2b3', '#b5651d', '#777'];
@@ -986,7 +939,7 @@ async function showMatches(seq) {
   try {
     const limit = +document.getElementById('rowlimit').value || 500;
     if (gameQuery()) {
-      const rows = await cachedRows('api/games?' + new URLSearchParams({ where: whereSql(), limit: String(limit) }));
+      const rows = await cachedRows('api/games?' + new URLSearchParams({ ...queryParams(), limit: String(limit) }));
       if (stale(seq)) return;
       const { defs, set } = rowCols(true);
       const cell = {
@@ -997,10 +950,10 @@ async function showMatches(seq) {
         turns: g => g.turns, min: g => g.minutes ?? '', result: g => resultSigil(g.winner === 'me' ? 'W' : g.winner === 'opp' ? 'L' : '?', ''), how: g => g.win_by || '' };
       const cols = Object.keys(defs).filter(c => set.has(c));
       rowTable(out, rows, cols, Object.assign({}, defs, { mulls: 'mulls (me/opp)' }), cell, GAME_ROW_FIELD);
-      setSummary(`per-game rows: ${rows.length} games${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
+      setSummary(`per-game rows: ${rows.length} games${rows.length === limit ? ` (showing the newest ${limit})` : ''}`);
       return;
     }
-    const rows = await cachedRows('api/matches?' + new URLSearchParams({ where: whereSql(), limit: String(limit) }));
+    const rows = await cachedRows('api/matches?' + new URLSearchParams({ ...queryParams(), limit: String(limit) }));
     if (stale(seq)) return;
     const game = g => { const [id, n, pd, m, t, w, by] = g.split(':'); return `<span class="g ${w === 'me' ? 'gw' : 'gl'}" data-game="${id}" title="game ${n}: ${pd}, ${m} mulligan${m === '1' ? '' : 's'}, ${t} turns, ${w === 'me' ? 'won' : 'lost'}${by ? ' by ' + by : ''} — click for the log">${w === 'me' ? 'W' : 'L'}<small>${pd === 'play' ? 'p' : 'd'}${m !== '0' ? 'm' + m : ''}·${t}</small></span>${replayLink(id)}`; };
     const { defs, set } = rowCols(false);
@@ -1013,7 +966,7 @@ async function showMatches(seq) {
       event: r => r.event_name || '', result: r => resultSigil(r.match_result, ` ${r.my_game_wins}–${r.opp_game_wins}`), games: r => (r.games || '').split('|').filter(Boolean).map(game).join(' ') };
     const cols = Object.keys(defs).filter(c => set.has(c));
     rowTable(out, rows, cols, Object.assign({}, defs, { games: 'games (W/L, play/draw, mulls, turns)' }), cell, ROW_FIELD);
-    setSummary(`${rows.length} matches${rows.length === limit ? ` (showing the newest ${limit})` : ''}; where: ${whereSql() || '(none)'}`);
+    setSummary(`${rows.length} matches${rows.length === limit ? ` (showing the newest ${limit})` : ''}`);
   } catch (e) { out.innerHTML = `<span class="err">${e.message}</span>`; }
 }
 init().catch(e => { document.getElementById('summary').innerHTML = `<span class="err">${e.message}</span>`; });

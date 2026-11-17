@@ -1,6 +1,5 @@
-//! A filter as the stats page states it, turned into a SQL condition over a dataset's view.
-//! The page builds the same SQL in the browser (index.html `filterSql`); this is the server's
-//! copy for callers that must not send SQL, such as the MCP tools.
+//! A filter as the stats page and the MCP state it, turned into a SQL condition over a dataset's
+//! view. Callers send entries, never SQL: this is the only place the conditions are built.
 
 use super::dataset::{Dataset, Kind};
 use serde::Deserialize;
@@ -26,8 +25,9 @@ pub struct Entry {
     pub when: Option<String>,
     #[serde(default)]
     pub scope: Option<String>,
+    /// at least n times (copies); the page's number box can hold a fraction
     #[serde(default)]
-    pub n: Option<i64>,
+    pub n: Option<f64>,
     #[serde(default)]
     pub board: Option<String>,
 }
@@ -65,6 +65,13 @@ const REQUIRE: &[(&str, &str)] = &[
     ("hand", "my_hand_known = 1"),
     ("pile", "my_pile_known = 1"),
 ];
+
+/// A filter or group on one of these columns means my Doomsday games (REQUIRE `dd_deck`).
+const DD_COLS: &[&str] = &["my_dd_resolved", "my_dd_turn", "my_pile_known"];
+
+fn col_needs(ds: &Dataset, col: &str) -> Option<&'static str> {
+    (ds.features.cards && DD_COLS.contains(&col)).then_some("dd_deck")
+}
 
 pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -111,22 +118,19 @@ fn entry_sql(ds: &Dataset, f: &Entry) -> Result<(Option<String>, Vec<&'static st
     let neg = |t: String| if f.not { format!("NOT {t}") } else { t };
     let c = f.field.as_str();
     let op = f.op.as_deref().unwrap_or("is");
-    let n = f.n.unwrap_or(1).max(1);
+    let n = f.n.unwrap_or(1.0).max(1.0).ceil() as i64;
     match field_of(ds, c)? {
         Field::Col(kind) => {
             if vs.is_empty() {
                 return Ok((None, vec![]));
             }
-            let mut needs = vec![];
-            if ds.features.cards && ["my_dd_resolved", "my_dd_turn", "my_pile_known"].contains(&c) {
-                needs.push("dd_deck");
-            }
+            let needs: Vec<&'static str> = col_needs(ds, c).into_iter().collect();
             let lit = |v: &str| if matches!(kind, Kind::Num) && v.parse::<f64>().is_ok() { v.to_string() } else { sq(v) };
             let sql = match kind {
                 Kind::Date => {
-                    let from = vs.first().cloned().flatten().map(|d| format!("date >= {}", sq(&d)));
-                    let to = vs.get(1).cloned().flatten().map(|d| format!("date <= {}", sq(&d)));
-                    let parts: Vec<String> = from.into_iter().chain(to).collect();
+                    // values are [from, to] by position, either one empty
+                    let at = |i: usize| f.values.get(i).and_then(text).filter(|d| !d.trim().is_empty());
+                    let parts: Vec<String> = [(0, ">="), (1, "<=")].into_iter().filter_map(|(i, o)| at(i).map(|d| format!("date {o} {}", sq(&d)))).collect();
                     if parts.is_empty() {
                         return Ok((None, needs));
                     }
@@ -227,29 +231,35 @@ fn entry_sql(ds: &Dataset, f: &Entry) -> Result<(Option<String>, Vec<&'static st
     }
 }
 
-/// The WHERE of a filter list (ANDed) with what the filters and the grouping columns require.
-/// `None` when nothing filters.
-pub fn where_sql(ds: &Dataset, filters: &[Entry], by: &[String]) -> Result<Option<String>, String> {
+/// The WHERE (ANDed) of `filters` but the one at `except`, and the yes/no split condition of each
+/// card sentence in `groups` (column groups are the caller's `by`). Every filter (`except` too),
+/// group and `by` column adds what it needs (REQUIRE) to the WHERE, so both sides of a split hold
+/// only games where the sentence can be known.
+pub fn query_sql(ds: &Dataset, filters: &[Entry], except: Option<usize>, groups: &[Entry], by: &[String]) -> Result<(Option<String>, Vec<String>), String> {
     let mut parts = vec![];
     let mut needs: Vec<&'static str> = vec![];
-    for f in filters {
+    for (i, f) in filters.iter().enumerate() {
         let (sql, req) = entry_sql(ds, f)?;
-        parts.extend(sql);
+        if except != Some(i) {
+            parts.extend(sql);
+        }
         needs.extend(req);
     }
-    if ds.features.cards {
-        for b in by {
-            if ["my_dd_resolved", "my_dd_turn", "my_pile_known"].contains(&b.as_str()) {
-                needs.push("dd_deck");
-            }
+    let mut splits = vec![];
+    for g in groups {
+        if let Field::Col(_) = field_of(ds, &g.field)? {
+            needs.extend(col_needs(ds, &g.field));
+        } else {
+            let (sql, req) = entry_sql(ds, &Entry { not: false, ..g.clone() })?;
+            splits.push(sql.unwrap_or_else(|| "1".into()));
+            needs.extend(req);
         }
     }
+    needs.extend(by.iter().filter_map(|b| col_needs(ds, b)));
     needs.sort();
     needs.dedup();
-    for k in needs {
-        parts.push(REQUIRE.iter().find(|(r, _)| *r == k).map(|(_, s)| s.to_string()).unwrap());
-    }
-    Ok(if parts.is_empty() { None } else { Some(parts.join(" AND ")) })
+    parts.extend(needs.iter().map(|k| REQUIRE.iter().find(|(r, _)| r == k).map(|(_, s)| s.to_string()).unwrap()));
+    Ok((if parts.is_empty() { None } else { Some(parts.join(" AND ")) }, splits))
 }
 
 #[cfg(test)]
@@ -261,9 +271,13 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    fn where_sql(filters: &[Entry], by: &[String]) -> Result<Option<String>, String> {
+        query_sql(&MTGO, filters, None, &[], by).map(|(w, _)| w)
+    }
+
     #[test]
     fn column_filters() {
-        let w = |j: &str| where_sql(&MTGO, &[e(j)], &[]).unwrap().unwrap();
+        let w = |j: &str| where_sql(&[e(j)], &[]).unwrap().unwrap();
         assert_eq!(w(r#"{"field":"opp_deck","values":["Lands"]}"#), "opp_deck = 'Lands'");
         assert_eq!(w(r#"{"field":"opp_deck","values":["Lands","Tron"]}"#), "opp_deck IN ('Lands', 'Tron')");
         assert_eq!(w(r#"{"field":"opp_archetype","not":true,"values":[null]}"#), "opp_archetype IS NOT NULL");
@@ -271,20 +285,32 @@ mod tests {
         assert_eq!(w(r#"{"field":"turns","op":">=","values":[5]}"#), "(turns >= 5)");
         assert_eq!(w(r#"{"field":"opp_colors","op":"all","values":["UB"]}"#), "(opp_colors LIKE '%U%' AND opp_colors LIKE '%B%')");
         assert_eq!(w(r#"{"field":"date","values":["2026-09-01",""]}"#), "date >= '2026-09-01'");
+        assert_eq!(w(r#"{"field":"date","values":["","2026-10-01"]}"#), "date <= '2026-10-01'");
         assert_eq!(w(r#"{"field":"event_name","op":"contains","values":["Challenge"]}"#), "(event_name LIKE '%Challenge%' ESCAPE '\\')");
     }
 
     #[test]
     fn card_filters_and_requirements() {
-        let w = where_sql(&MTGO, &[e(r#"{"field":"my_play","verb":"cast","values":["Doomsday"],"when":"before","scope":"match"}"#)], &[]).unwrap().unwrap();
+        let w = where_sql(&[e(r#"{"field":"my_play","verb":"cast","values":["Doomsday"],"when":"before","scope":"match"}"#)], &[]).unwrap().unwrap();
         assert!(w.starts_with("match_id IN (SELECT c.match_id FROM mtgo_card_events c"));
         assert!(w.ends_with(" AND my_archetype = 'Doomsday'"));
-        let w = where_sql(&MTGO, &[e(r#"{"field":"opp_list_has","values":["Wasteland"],"board":"main","n":4}"#)], &[]).unwrap().unwrap();
+        let w = where_sql(&[e(r#"{"field":"opp_list_has","values":["Wasteland"],"board":"main","n":4}"#)], &[]).unwrap().unwrap();
         assert_eq!(w, "((SELECT COALESCE(SUM(lc.qty), 0) FROM shared.reference_cards lc WHERE lc.reference_id = opp_reference_id AND lc.name = 'Wasteland' AND lc.sideboard = 0) >= 4) AND opp_reference_id IS NOT NULL");
-        let w = where_sql(&MTGO, &[e(r#"{"field":"my_play","verb":"drawn","values":["Force of Will"],"n":2}"#)], &[]).unwrap().unwrap();
+        let w = where_sql(&[e(r#"{"field":"my_play","verb":"drawn","values":["Force of Will"],"n":2}"#)], &[]).unwrap().unwrap();
         assert!(w.contains("c.verb = 'drawn'") && w.contains("HAVING COUNT(*) >= 2") && w.ends_with(" AND my_hand_known = 1"));
-        assert!(where_sql(&MTGO, &[e(r#"{"field":"my_play","verb":"pile","values":["Thassa's Oracle"]}"#)], &[]).unwrap().unwrap().ends_with(" AND my_pile_known = 1"));
-        assert!(where_sql(&MTGO, &[e(r#"{"field":"nope","values":["x"]}"#)], &[]).is_err());
-        assert_eq!(where_sql(&MTGO, &[], &["my_dd_turn".into()]).unwrap().unwrap(), "my_archetype = 'Doomsday'");
+        assert!(where_sql(&[e(r#"{"field":"my_play","verb":"pile","values":["Thassa's Oracle"]}"#)], &[]).unwrap().unwrap().ends_with(" AND my_pile_known = 1"));
+        assert!(where_sql(&[e(r#"{"field":"nope","values":["x"]}"#)], &[]).is_err());
+        assert_eq!(where_sql(&[], &["my_dd_turn".into()]).unwrap().unwrap(), "my_archetype = 'Doomsday'");
+    }
+
+    #[test]
+    fn except_and_groups_keep_their_needs() {
+        let fs = [e(r#"{"field":"my_dd_turn","op":">=","values":[3]}"#), e(r#"{"field":"opp_deck","values":["Lands"]}"#)];
+        assert_eq!(query_sql(&MTGO, &fs, Some(0), &[], &[]).unwrap().0.unwrap(), "opp_deck = 'Lands' AND my_archetype = 'Doomsday'");
+        let gs = [e(r#"{"field":"my_deck"}"#), e(r#"{"field":"my_play","verb":"drawn","values":["Force of Will"],"not":true}"#)];
+        let (w, splits) = query_sql(&MTGO, &[], None, &gs, &["my_deck".into()]).unwrap();
+        assert_eq!(w.unwrap(), "my_hand_known = 1");
+        assert_eq!(splits.len(), 1);
+        assert!(splits[0].starts_with("game_id IN (SELECT") && !splits[0].contains("my_hand_known"));
     }
 }

@@ -1,10 +1,10 @@
 //! The stats API as MCP tools (JSON-RPC 2.0 over streamable HTTP, POST /mcp), for agents the
 //! players run: `claude mcp add --transport http stats https://bur.io/mtg/stats/mcp`.
 //! Stateless: no session id, no server-initiated stream (GET is 405). Filters arrive as the
-//! page's entries and become SQL here (`filter::where_sql`), never as SQL from the caller.
+//! page's entries and go to the page's handlers as they are.
 
 use super::*;
-use mtgctl::mtgolog::filter::{self, Entry};
+use mtgctl::mtgolog::filter;
 use serde_json::{json, Value};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
@@ -141,11 +141,8 @@ fn prompt_text(name: &str, args: &Value) -> Option<String> {
 fn arg_str(a: &Value, k: &str) -> Option<String> {
     a.get(k).and_then(|v| v.as_str()).map(str::to_string).filter(|s| !s.is_empty())
 }
-fn arg_filters(a: &Value, k: &str) -> Result<Vec<Entry>, String> {
-    match a.get(k) {
-        None | Some(Value::Null) => Ok(vec![]),
-        Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("{k}: {e}")),
-    }
+fn arg_json(a: &Value, k: &str) -> String {
+    a.get(k).filter(|v| !v.is_null()).map(Value::to_string).unwrap_or_default()
 }
 fn arg_strings(a: &Value, k: &str) -> Vec<String> {
     a.get(k).and_then(|v| v.as_array()).map(|xs| xs.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
@@ -159,7 +156,6 @@ fn q(pairs: &[(&str, String)]) -> Query<HashMap<String, String>> {
 async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
     let api = |e: ApiError| e.1;
     let ds = dataset(None).map_err(api)?;
-    let wher = |by: &[String]| filter::where_sql(ds, &arg_filters(a, "filters")?, by);
     match name {
         "describe" => {
             let s = schema(State(st.clone()), q(&[])).await.map_err(api)?.0;
@@ -174,31 +170,26 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
         }
         "values" => {
             let col = arg_str(a, "column").ok_or("column required")?;
-            let mut params = vec![("col", col)];
-            if let Some(w) = wher(&[])? {
-                params.push(("where", w));
-            }
+            let params = [("col", col), ("filters", arg_json(a, "filters"))];
             Ok(serde_json::to_value(values(State(st.clone()), q(&params)).await.map_err(api)?.0).unwrap())
         }
         "stats" => {
-            let by = arg_strings(a, "by");
-            let split: Vec<String> = arg_filters(a, "split")?.iter().map(|f| filter::where_sql(ds, std::slice::from_ref(f), &[]).map(|w| w.unwrap_or_else(|| "1".into()))).collect::<Result<_, _>>()?;
             let p = StatsParams {
-                by: by.join(","),
-                where_sql: wher(&by)?,
+                by: arg_strings(a, "by").join(","),
+                filters: arg_json(a, "filters"),
+                groups: arg_json(a, "split"),
                 min: a.get("min_games").and_then(Value::as_i64).unwrap_or(1),
                 limit: a.get("limit").and_then(Value::as_u64).unwrap_or(60) as usize,
                 sort: arg_str(a, "sort").unwrap_or_else(|| "games".into()),
                 full: false,
                 hist: arg_strings(a, "hist").join(","),
-                split: serde_json::to_string(&split).unwrap(),
                 game: a.get("game").and_then(Value::as_bool),
                 ds: None,
             };
             Ok(serde_json::to_value(stats_api(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap())
         }
         "matches" | "games" => {
-            let p = MatchesParams { where_sql: wher(&[])?, limit: a.get("limit").and_then(Value::as_u64).unwrap_or(if name == "matches" { 200 } else { 500 }) as usize };
+            let p = MatchesParams { filters: arg_json(a, "filters"), groups: String::new(), limit: a.get("limit").and_then(Value::as_u64).unwrap_or(if name == "matches" { 200 } else { 500 }) as usize };
             Ok(if name == "matches" {
                 serde_json::to_value(matches_api(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap()
             } else {
@@ -211,7 +202,8 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
         }
         "cards" => {
             let p = CardCountParams {
-                where_sql: wher(&[])?,
+                filters: arg_json(a, "filters"),
+                groups: String::new(),
                 verbs: Some(arg_strings(a, "verbs").join(",")),
                 cards: Some(serde_json::to_string(&arg_strings(a, "cards")).unwrap()),
                 side: arg_str(a, "side"),
