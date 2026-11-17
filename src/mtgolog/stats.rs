@@ -342,8 +342,8 @@ pub fn compute(conn: &mut SqliteConnection, ds: &Dataset, q: &StatsQuery) -> Res
     let wher = where_sql.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let select_body = format!(
         "COUNT(*) AS games,
-            SUM(won IS NOT NULL) AS decided,
-            SUM(COALESCE(won,0)) AS wins,
+            COALESCE(SUM(won IS NOT NULL), 0) AS decided,
+            COALESCE(SUM(won), 0) AS wins,
             COUNT(DISTINCT match_id) AS matches,
             COUNT(DISTINCT CASE WHEN match_result='W' THEN match_id END) AS match_wins,
             COUNT(DISTINCT CASE WHEN match_result IN ('W','L') THEN match_id END) AS match_decided,
