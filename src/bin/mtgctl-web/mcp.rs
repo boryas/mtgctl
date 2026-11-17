@@ -9,13 +9,16 @@ use serde_json::{json, Value};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
-const INSTRUCTIONS: &str = "mtgctl-web: MTGO Legacy results from the game logs team members upload: a player's record, results by event, matchups, win rates by deck, archetype, era or month, what an opponent played, cards cast, mulligans, play/draw, decklists. Start with `describe`. \
+const INSTRUCTIONS: &str = "mtgctl-web: MTGO Legacy results from the game logs players upload: a player's record, results by event, matchups, win rates by deck, archetype, era or month, what an opponent played, cards cast, mulligans, play/draw, decklists. Start with `describe`. \
+The key this connection uses decides whose games every tool sees: the key owner's own, or those of every member of the team it was made for; `lists` and `list` show only the owner's lists. \
 One row per game; `player` names whose logs, `my_*` that player's side, `opp_*` the opponent; cards played are filterable. \
 Players are MTGO usernames; spelling and case vary, so find one with `values` on `player` (or `opponent`) with op `contains` before filtering on it. \
 A filter is {field, op, not, values}: op `is` (default; values ORed, null = unknown), `contains`, `>=`, `<=`; colours take op `all` | `exact` | `none` with one WUBRG string; `date` takes [from, to]. \
 Card sentences: {field: my_play | opp_play, verb, values: [card names], other?: [targets], when?: any | before | after (my Doomsday resolved), scope?: game | match, n?: at least n times} and {field: my_list_has | opp_list_has, values: [cards], board?: any | main | side, n?: copies}. \
 Card verbs with `needs` (opening_hand, mulliganed, bottomed, drawn, in_hand, boarded_in, boarded_out: `hand`; pile: `pile`) are the player's own hidden cards, read from their client session log, and hold only in games where `my_hand_known` (`my_pile_known`) = 1; a filter on one adds that condition. \
 Grouping by a game-level column or filtering on one turns a query per game. `stats` returns counts, match and game wins, and averages per group; `matches` and `games` return the rows; `cards` counts card events over a selection (e.g. Forces drawn, cards seen, copies in my deck after sideboarding); `game` returns one game's full event log and, where the session log was uploaded, my hidden cards and my hand after every change.";
+
+const NO_KEY: &str = "this server answers only with a key: make one on https://bur.io/mtg/stats/teams.html (log in with Discord) and add it to the MCP setup with --header \"Authorization: Bearer <key>\"";
 
 fn filter_schema() -> Value {
     json!({
@@ -96,13 +99,13 @@ fn tools() -> Value {
         },
         {
             "name": "lists",
-            "description": "A player's registered decklists with the reference deck each is nearest to.",
-            "inputSchema": {"type": "object", "properties": {"player": {"type": "string", "description": "MTGO username as the logs spell it"}}, "required": ["player"]}
+            "description": "Your registered decklists with the reference deck each is nearest to (lists are personal: a teammate's are not shown).",
+            "inputSchema": {"type": "object", "properties": {"player": {"type": "string", "description": "one of your MTGO usernames; default your first"}}}
         },
         {
             "name": "list",
-            "description": "One registered list's cards and its delta against its reference deck.",
-            "inputSchema": {"type": "object", "properties": {"player": {"type": "string"}, "id": {"type": "integer"}}, "required": ["player", "id"]}
+            "description": "One of your registered lists: its cards and its delta against its reference deck.",
+            "inputSchema": {"type": "object", "properties": {"player": {"type": "string"}, "id": {"type": "integer"}}, "required": ["id"]}
         }
     ])
 }
@@ -153,9 +156,13 @@ fn q(pairs: &[(&str, String)]) -> Query<HashMap<String, String>> {
 }
 
 /// A tool's result as JSON, or the message of the error the caller sees.
-async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
+async fn call(st: &Shared, headers: &HeaderMap, name: &str, a: &Value) -> Result<Value, String> {
     let api = |e: ApiError| e.1;
     let ds = dataset(None).map_err(api)?;
+    if name != "describe" && auth::viewer(st, headers, false).await.map_err(api)?.account.is_none() {
+        return Err(NO_KEY.into());
+    }
+    let h = || headers.clone();
     match name {
         "describe" => {
             let s = schema(State(st.clone()), q(&[])).await.map_err(api)?.0;
@@ -171,7 +178,7 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
         "values" => {
             let col = arg_str(a, "column").ok_or("column required")?;
             let params = [("col", col), ("filters", arg_json(a, "filters"))];
-            Ok(serde_json::to_value(values(State(st.clone()), q(&params)).await.map_err(api)?.0).unwrap())
+            Ok(serde_json::to_value(values(State(st.clone()), h(), q(&params)).await.map_err(api)?.0).unwrap())
         }
         "stats" => {
             let p = StatsParams {
@@ -186,19 +193,19 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
                 game: a.get("game").and_then(Value::as_bool),
                 ds: None,
             };
-            Ok(serde_json::to_value(stats_api(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap())
+            Ok(serde_json::to_value(stats_api(State(st.clone()), h(), Query(p)).await.map_err(api)?.0).unwrap())
         }
         "matches" | "games" => {
             let p = MatchesParams { filters: arg_json(a, "filters"), groups: String::new(), limit: a.get("limit").and_then(Value::as_u64).unwrap_or(if name == "matches" { 200 } else { 500 }) as usize };
             Ok(if name == "matches" {
-                serde_json::to_value(matches_api(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap()
+                serde_json::to_value(matches_api(State(st.clone()), h(), Query(p)).await.map_err(api)?.0).unwrap()
             } else {
-                serde_json::to_value(games_api(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap()
+                serde_json::to_value(games_api(State(st.clone()), h(), Query(p)).await.map_err(api)?.0).unwrap()
             })
         }
         "game" => {
             let id = a.get("id").and_then(Value::as_i64).ok_or("id required")?;
-            Ok(serde_json::to_value(game_detail(State(st.clone()), q(&[("id", id.to_string()), ("hands", "1".into())])).await.map_err(api)?.0).unwrap())
+            Ok(serde_json::to_value(game_detail(State(st.clone()), h(), q(&[("id", id.to_string()), ("hands", "1".into())])).await.map_err(api)?.0).unwrap())
         }
         "cards" => {
             let p = CardCountParams {
@@ -210,16 +217,15 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
                 by_game: a.get("by_game").and_then(Value::as_bool).unwrap_or(false),
                 limit: a.get("limit").and_then(Value::as_u64).unwrap_or(500) as usize,
             };
-            Ok(serde_json::to_value(card_counts(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap())
+            Ok(serde_json::to_value(card_counts(State(st.clone()), h(), Query(p)).await.map_err(api)?.0).unwrap())
         }
         "lists" | "list" => {
-            let player = arg_str(a, "player").ok_or("player required")?;
-            let mut params = vec![("player", player)];
+            let mut params: Vec<(&str, String)> = arg_str(a, "player").map(|p| ("player", p)).into_iter().collect();
             if name == "list" {
                 params.push(("id", a.get("id").and_then(Value::as_i64).ok_or("id required")?.to_string()));
-                Ok(serde_json::to_value(list_detail(State(st.clone()), HeaderMap::new(), q(&params)).await.map_err(api)?.0).unwrap())
+                Ok(serde_json::to_value(list_detail(State(st.clone()), h(), q(&params)).await.map_err(api)?.0).unwrap())
             } else {
-                Ok(serde_json::to_value(lists(State(st.clone()), HeaderMap::new(), q(&params)).await.map_err(api)?.0).unwrap())
+                Ok(serde_json::to_value(lists(State(st.clone()), h(), q(&params)).await.map_err(api)?.0).unwrap())
             }
         }
         _ => Err(format!("unknown tool {name}")),
@@ -231,7 +237,7 @@ fn rpc_error(id: Value, code: i64, msg: impl Into<String>) -> Value {
 }
 
 /// One request's response; `None` for a notification.
-async fn handle(st: &Shared, msg: &Value) -> Option<Value> {
+async fn handle(st: &Shared, headers: &HeaderMap, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned().filter(|i| !i.is_null())?;
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -260,7 +266,7 @@ async fn handle(st: &Shared, msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call(st, name, &args).await {
+            match call(st, headers, name, &args).await {
                 Ok(v) => json!({"content": [{"type": "text", "text": serde_json::to_string(&v).unwrap()}], "structuredContent": if v.is_object() { v } else { json!({"rows": v}) }}),
                 Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
             }
@@ -270,7 +276,7 @@ async fn handle(st: &Shared, msg: &Value) -> Option<Value> {
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-pub async fn mcp(State(st): State<Shared>, body: Bytes) -> Response {
+pub async fn mcp(State(st): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(rpc_error(Value::Null, -32700, format!("parse error: {e}")))).into_response(),
@@ -279,11 +285,11 @@ pub async fn mcp(State(st): State<Shared>, body: Bytes) -> Response {
         Value::Array(batch) => {
             let mut out = vec![];
             for m in batch {
-                out.extend(handle(&st, m).await);
+                out.extend(handle(&st, &headers, m).await);
             }
             if out.is_empty() { None } else { Some(Value::Array(out)) }
         }
-        m => handle(&st, m).await,
+        m => handle(&st, &headers, m).await,
     };
     match out {
         Some(v) => Json(v).into_response(),

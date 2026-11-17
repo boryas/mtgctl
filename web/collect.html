@@ -2,7 +2,7 @@
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Upload MTGO logs · mtgctl</title><link rel="stylesheet" href="style.css?v=47"></head>
 <body>
 <h1>mtgctl · upload your MTGO logs</h1>
-<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a></nav>
+<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
 <p class="lede">Your results here are built from the game logs the MTGO client keeps on your computer. Log in with Discord, then upload them either way below. The server reads your MTGO username from the logs, and your first upload links that name to your login. It takes only the files it does not have yet.</p>
 <p id="known" class="muted lede">…</p>
 
@@ -81,7 +81,7 @@ async function showInstall() {
   if (!a) { el.innerHTML = `<a href="${loginHref()}">Log in with Discord</a> first: your install line carries a key that uploads as you.`; return; }
   el.innerHTML = '<button id="mkKey">Make my install line</button> Each computer gets its own line. It holds a key that uploads as you, so keep it to yourself.';
   el.querySelector('#mkKey').onclick = async () => {
-    let k; try { k = await api('api/keys', { method: 'POST' }); } catch (e) { el.innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
+    let k; try { k = await api('api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'upload' }) }); } catch (e) { el.innerHTML = `<span class="err">${esc(e.message)}</span>`; return; }
     const line = `$env:MTGCTL_KEY='${k.key}'; irm ${new URL('windows/install.ps1', location.href).href} | iex`;
     const cmd = `@echo off\r\nrem Installs the mtgctl uploader with your key: the same as pasting your install line into PowerShell.\r\npowershell -NoProfile -ExecutionPolicy Bypass -Command "${line}"\r\necho.\r\npause\r\n`;
     const href = URL.createObjectURL(new Blob([cmd], { type: 'application/octet-stream' }));
@@ -91,8 +91,8 @@ async function showInstall() {
   showKeys();
 }
 async function showKeys() {
-  const el = document.getElementById('keys'), { keys } = await account();
-  if (!keys || !keys.length) { el.innerHTML = ''; return; }
+  const el = document.getElementById('keys'), keys = ((await account()).keys || []).filter(k => k.kind === 'upload');
+  if (!keys.length) { el.innerHTML = ''; return; }
   el.innerHTML = `<p>Your uploader keys; revoking one stops the computer that has it from uploading:</p><ul>${keys.map(k => `<li>made ${esc(k.created)} UTC, ${k.last_used ? `last used ${esc(k.last_used)} UTC` : 'not used yet'} <button data-k="${k.id}">revoke</button></li>`).join('')}</ul>`;
   el.querySelectorAll('button[data-k]').forEach(b => b.onclick = async () => {
     try { await api('api/keys/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: +b.dataset.k }) }); } catch (e) { alert(e.message); return; }

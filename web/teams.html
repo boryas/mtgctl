@@ -1,0 +1,120 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Teams · mtgctl</title><link rel="stylesheet" href="style.css?v=48"></head>
+<body>
+<h1>mtgctl · teams</h1>
+<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
+<p class="lede">A team pools its members' games: everyone in it sees every member's results, the cards they played, their decks and the hands from their session logs. Without a team the pages show your own games only; with one, choose whose games they show with <i>games of</i> at the top of each page. Your list of registered decklists stays yours alone.</p>
+<div id="join"></div>
+<div id="teams"><span class="muted">…</span></div>
+<div class="box step" id="create">
+  <h2>Start a team</h2>
+  <p>You can then make an invite link and send it to the players you want in it.</p>
+  <p><input id="tname" maxlength="40" placeholder="team name"> <button id="mk">start the team</button></p>
+</div>
+<div class="box step" id="mcp">
+  <h2>Ask Claude about your results</h2>
+  <p>Claude Code (and other MCP clients) can read the stats here with a key that only reads. The key sees the games you choose now: your own, or one team's.</p>
+  <p><label>games of <select id="kteam"></select></label> <button id="mkKey">make an MCP key</button></p>
+  <div id="keyout"></div>
+  <div id="rkeys"></div>
+</div>
+<script src="common.js?v=48"></script>
+<script>
+const $ = id => document.getElementById(id);
+const post = (action, body) => api('api/teams/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+// An invite link is teams.html#join=<token>: the fragment never reaches the server's logs, and the
+// token waits in sessionStorage while a logged-out visitor goes through the Discord login.
+const JOIN_KEY = 'mtgctl.join';
+// also on hashchange: a link opened in a tab already on this page does not reload it
+function takeInvite() {
+  const invited = /^#join=([0-9a-f]{64})$/.exec(location.hash);
+  if (!invited) return false;
+  try { sessionStorage.setItem(JOIN_KEY, invited[1]); } catch (e) {}
+  history.replaceState(null, '', location.pathname);
+  return true;
+}
+takeInvite();
+window.addEventListener('hashchange', () => { if (takeInvite()) render(); });
+const joinToken = () => { try { return sessionStorage.getItem(JOIN_KEY); } catch (e) { return null; } };
+const forgetJoin = () => { try { sessionStorage.removeItem(JOIN_KEY); } catch (e) {} };
+const teamLabel = t => t ? 'team ' + t : 'just me';
+
+async function render() {
+  accountReq = null;
+  const r = await account(), a = r.account;
+  if (!a) {
+    $('teams').innerHTML = `<p><a href="${loginHref()}">Log in with Discord</a> ${joinToken() ? 'to join the team you were invited to.' : 'to see your teams.'}</p>`;
+    $('create').hidden = $('mcp').hidden = true;
+    return;
+  }
+  showJoin(); showTeams(r.teams || [], a); showMcp(r.teams || []);
+}
+
+async function showJoin() {
+  const token = joinToken(), el = $('join');
+  if (!token) { el.innerHTML = ''; return; }
+  let p;
+  try { p = await post('peek', { token }); } catch (e) { forgetJoin(); el.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  if (p.member) { forgetJoin(); el.innerHTML = `<p>You are already in team <b>${esc(p.name)}</b>.</p>`; return; }
+  el.innerHTML = `<div class="box step"><h2>Join team ${esc(p.name)}?</h2><p>${esc(p.owner)} invited you. Joining shares all your games with every member of the team: results, cards played, decks, and the hands from your session logs. You can leave at any time, which hides your games from them at once.</p><p><button id="jYes">join ${esc(p.name)}</button> <button id="jNo">no thanks</button></p></div>`;
+  $('jYes').onclick = async () => {
+    try { const j = await post('join', { token }); forgetJoin(); setTeam(String(j.team)); location.reload(); } catch (e) { alert(e.message); }
+  };
+  $('jNo').onclick = () => { forgetJoin(); el.innerHTML = ''; };
+}
+
+function showTeams(teams, a) {
+  const el = $('teams');
+  el.innerHTML = teams.length ? '' : '<p class="muted">You are in no team: the pages show your own games only.</p>';
+  for (const t of teams) {
+    const box = document.createElement('div'); box.className = 'box step';
+    const members = t.members.map(m => `<li>${esc(m.name)} <span class="muted">${esc(m.names || 'no MTGO name yet')}${m.id === t.owner_id ? ' · owner' : ''}</span>${t.owner && m.id !== a.id ? ` <button data-rm="${m.id}" data-who="${esc(m.name)}">remove</button>` : ''}</li>`).join('');
+    const invites = t.invites.length ? `<p class="muted">Open invite links; anyone who has one can join until you revoke it:</p><ul>${t.invites.map(i => `<li>made ${esc(i.created)} UTC <button data-un="${i.id}">revoke</button></li>`).join('')}</ul>` : '';
+    box.innerHTML = `<h2>${esc(t.name)}</h2><ul>${members}</ul>`
+      + (t.owner ? `<p><button data-inv>make an invite link</button></p><div class="inv"></div>${invites}<p><button data-del>delete the team</button></p>` : '<p><button data-leave>leave the team</button></p>');
+    const act = (action, body, ask) => async () => { if (ask && !confirm(ask)) return; try { await post(action, Object.assign({ team: t.id }, body)); render(); } catch (e) { alert(e.message); } };
+    box.querySelectorAll('[data-rm]').forEach(b => b.onclick = act('remove', { id: +b.dataset.rm }, `Remove ${b.dataset.who} from ${t.name}? You stop seeing each other's games through this team.`));
+    box.querySelectorAll('[data-un]').forEach(b => b.onclick = act('uninvite', { id: +b.dataset.un }));
+    const del = box.querySelector('[data-del]'); if (del) del.onclick = act('delete', {}, `Delete team ${t.name}? Its members stop seeing each other's games, and its MCP keys stop working.`);
+    const leave = box.querySelector('[data-leave]'); if (leave) leave.onclick = act('leave', {}, `Leave ${t.name}? Its members stop seeing your games at once.`);
+    const inv = box.querySelector('[data-inv]');
+    if (inv) inv.onclick = async () => {
+      let r; try { r = await post('invite', { team: t.id }); } catch (e) { alert(e.message); return; }
+      const out = box.querySelector('.inv');
+      out.innerHTML = `<pre class="copy">${new URL('teams.html#join=' + r.token, location.href).href}</pre><p class="muted">Send it to the players you want in ${esc(t.name)}. This page shows the link only now; revoke it below once they have joined.</p>`;
+      copyButtons(out);
+    };
+    el.appendChild(box);
+  }
+}
+
+function showMcp(teams) {
+  $('kteam').innerHTML = [['', 'just me'], ...teams.map(t => [String(t.id), 'team ' + t.name])].map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('');
+  $('mkKey').onclick = async () => {
+    const team = $('kteam').value;
+    let k;
+    try { k = await api('api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(team ? { kind: 'read', team: +team } : { kind: 'read' }) }); } catch (e) { $('keyout').innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    $('keyout').innerHTML = `<pre class="copy">claude mcp add --transport http stats ${new URL('mcp', location.href).href} --header "Authorization: Bearer ${k.key}"</pre><p class="muted">Run it in a terminal. If you added this server before without a key, run <code>claude mcp remove stats</code> first. The key only reads, and this page shows it only now.</p>`;
+    copyButtons($('keyout'));
+    accountReq = null; showReadKeys();
+  };
+  showReadKeys();
+}
+
+async function showReadKeys() {
+  const el = $('rkeys'), keys = ((await account()).keys || []).filter(k => k.kind === 'read');
+  if (!keys.length) { el.innerHTML = ''; return; }
+  el.innerHTML = `<p>Your MCP keys:</p><ul>${keys.map(k => `<li>${esc(teamLabel(k.team))}, made ${esc(k.created)} UTC, ${k.last_used ? `last used ${esc(k.last_used)} UTC` : 'not used yet'} <button data-k="${k.id}">revoke</button></li>`).join('')}</ul>`;
+  el.querySelectorAll('button[data-k]').forEach(b => b.onclick = async () => {
+    try { await api('api/keys/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: +b.dataset.k }) }); } catch (e) { alert(e.message); return; }
+    accountReq = null; showReadKeys();
+  });
+}
+
+$('mk').onclick = async () => {
+  const name = $('tname').value.trim(); if (!name) return;
+  try { await post('create', { name }); $('tname').value = ''; render(); } catch (e) { alert(e.message); }
+};
+render();
+</script>
+</body></html>

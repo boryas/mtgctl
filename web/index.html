@@ -2,7 +2,7 @@
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mtgctl stats</title><link rel="stylesheet" href="style.css?v=58"></head>
 <body>
 <h1>mtgctl · results</h1>
-<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a></nav>
+<nav><a href="index.html">results</a><a href="collect.html">upload logs</a><a href="reference.html">reference decklists</a><a href="teams.html">teams</a></nav>
 <div class="layout">
 <aside class="panels">
   <fieldset class="box" id="pView">
@@ -540,8 +540,9 @@ async function setupDataset(ds, fromLink) {
   document.getElementById('dsSel').innerHTML = s.datasets.map(([k, t]) => `<option value="${k}" ${k === ds ? 'selected' : ''}>${t}</option>`).join('');
   document.getElementById('dsSel').hidden = s.datasets.length < 2;
   document.getElementById('dsAbout').textContent = s.dataset.about;
-  // the player is the one this browser uploaded as (a default filter), else the first with data
-  if (feature('players') && !getPlayer()) { try { const ps = await api('api/players'); if (ps.length) setPlayer(ps[0]); } catch (e) {} }
+  // the player filter starts on your own name; a team view shows every member once it is removed
+  const { account: me } = await account();
+  if (me && me.names.length && !me.names.includes(getPlayer())) setPlayer(me.names[0]);
   const sl = ([k, s]) => `<label><input type="checkbox" name="stat" value="${k}" ${DEFAULT_STATS.includes(k) ? 'checked' : ''}> ${s.label}</label><br>`;
   document.getElementById('sMatch').innerHTML = Object.entries(STATS).filter(offered).filter(([, s]) => s.level === 'match').map(sl).join('');
   document.getElementById('sGame').innerHTML = Object.entries(STATS).filter(offered).filter(([, s]) => s.level !== 'match').map(sl).join('');
@@ -702,6 +703,7 @@ function wireKeys(out) {
   out.querySelectorAll('[data-game]').forEach(s => { s.style.cursor = 'pointer'; s.onclick = () => showGame(+s.dataset.game); });
 }
 async function runView(seq) {
+  if (!(await account()).account) { setSummary(''); document.getElementById('out').innerHTML = `<a href="${loginHref()}">Log in with Discord</a> to see your results, or those of a team you are in.`; return; }
   const v = view();
   if (v === 'rows') return showMatches(seq);
   if (v === 'series') return showSeries(seq);

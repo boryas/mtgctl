@@ -241,11 +241,14 @@ fn pool(state: &AppState) -> Result<diesel::SqliteConnection, String> {
     pipeline::connect(&state.data)
 }
 
-/// A connection for the queries built from request filters: `query_only`, so a fault in that SQL
-/// can read but never write.
-fn reader(ds: &Dataset, data: &Path) -> Result<diesel::SqliteConnection, String> {
+/// A read connection that sees only the games of `names` (auth::scope): a TEMP view over the
+/// dataset's view shadows it for every unqualified query on the connection. `query_only` then
+/// keeps a fault in the SQL built from request filters from writing.
+fn reader(ds: &Dataset, data: &Path, names: &[String]) -> Result<diesel::SqliteConnection, String> {
     use diesel::RunQueryDsl;
     let mut conn = ds.connect(data)?;
+    let who = if names.is_empty() { "0".to_string() } else { format!("player IN ({})", names.iter().map(|n| sq(n)).collect::<Vec<_>>().join(", ")) };
+    diesel::sql_query(format!("CREATE TEMP VIEW {v} AS SELECT * FROM main.{v} WHERE {who}", v = ds.view)).execute(&mut conn).map_err(|e| e.to_string())?;
     diesel::sql_query("PRAGMA query_only = 1").execute(&mut conn).map_err(|e| e.to_string())?;
     Ok(conn)
 }
@@ -341,11 +344,11 @@ async fn reference_api(State(st): State<Shared>, Query(q): Query<HashMap<String,
     Ok(Json(v))
 }
 
-/// Every player with data on this server.
-async fn players(State(st): State<Shared>) -> Json<Vec<String>> {
-    let mut out: Vec<String> = std::fs::read_dir(st.data.join("players")).map(|rd| rd.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).collect()).unwrap_or_default();
+/// The players with uploads whose games the viewer sees (auth::scope).
+async fn players(State(st): State<Shared>, headers: HeaderMap) -> Result<Json<Vec<String>>, ApiError> {
+    let mut out: Vec<String> = auth::scope(&st, &headers).await?.into_iter().filter(|n| player_dir(&st, n).logs().exists()).collect();
     out.sort();
-    Json(out)
+    Ok(Json(out))
 }
 
 /// `file` parts holding a few game logs → the username they name as "me".
@@ -734,13 +737,14 @@ fn dataset(key: Option<&str>) -> Result<&'static Dataset, ApiError> {
     dataset::by_key(key).ok_or_else(|| bad(format!("no dataset {key}")))
 }
 
-async fn stats_api(State(st): State<Shared>, Query(p): Query<StatsParams>) -> Result<Json<stats::StatsResult>, ApiError> {
+async fn stats_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<StatsParams>) -> Result<Json<stats::StatsResult>, ApiError> {
     let ds = dataset(p.ds.as_deref())?;
+    let names = auth::scope(&st, &headers).await?;
     let by = split_cols(&p.by);
     let (where_sql, split) = query_sql(ds, &p.filters, None, &p.groups, &by)?;
     let query = stats::StatsQuery { by, split, game: p.game, per: None, where_sql, min_games: p.min, sort: p.sort, limit: p.limit, full: p.full, hist: split_cols(&p.hist) };
     let r = tokio::task::spawn_blocking(move || {
-        let conn = &mut reader(ds, &st.data)?;
+        let conn = &mut reader(ds, &st.data, &names)?;
         stats::compute(conn, ds, &query)
     })
     .await
@@ -805,6 +809,9 @@ struct MarkReq {
 /// The MTGO names of the viewer's account; a request without a login (or key) is refused.
 async fn own_names(st: &Shared, headers: &HeaderMap) -> Result<Vec<String>, ApiError> {
     let v = auth::viewer(st, headers, true).await?;
+    if !v.can_write() {
+        return Err(ApiError(StatusCode::FORBIDDEN, "a read key only reads".into()));
+    }
     Ok(v.account.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "log in first (the link at the top of the page)".into()))?.names)
 }
 
@@ -857,17 +864,18 @@ async fn decks_api(State(st): State<Shared>) -> Result<Json<serde_json::Value>, 
     Ok(Json(v))
 }
 
-/// Every card the game logs name or a registered list holds, for the card filters' suggestions.
-async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiError> {
+/// Every card the viewer's game logs name or registered lists hold, for the card filters' suggestions.
+async fn cards_seen(State(st): State<Shared>, headers: HeaderMap) -> Result<Json<Vec<String>>, ApiError> {
+    let names = auth::scope(&st, &headers).await?;
     let rows = tokio::task::spawn_blocking(move || {
         use diesel::prelude::*;
-        let conn = &mut pool(&st)?;
+        let conn = &mut reader(&dataset::MTGO, &st.data, &names)?;
         #[derive(diesel::QueryableByName)]
         struct R {
             #[diesel(sql_type = diesel::sql_types::Text)]
             name: String,
         }
-        let rows: Vec<R> = diesel::sql_query("SELECT card AS name FROM mtgo_card_events UNION SELECT name FROM mtgo_list_cards ORDER BY name").load(conn).map_err(|e| e.to_string())?;
+        let rows: Vec<R> = diesel::sql_query("SELECT card AS name FROM mtgo_card_events WHERE game_id IN (SELECT game_id FROM mtgo_game_view) UNION SELECT name FROM mtgo_list_cards WHERE list_id IN (SELECT my_list_id FROM mtgo_game_view) ORDER BY name").load(conn).map_err(|e| e.to_string())?;
         Ok::<_, String>(rows.into_iter().map(|r| r.name).collect::<Vec<_>>())
     })
     .await
@@ -878,7 +886,7 @@ async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiEr
 
 /// Distinct values of one view column under `filters` but the one at `except` (the filter being
 /// edited), most matches first.
-async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
+async fn values(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
     let col = q.get("col").cloned().ok_or_else(|| bad("col required"))?;
     if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return Err(bad("bad column"));
@@ -890,8 +898,9 @@ async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String
     };
     let arg = |k: &str| q.get(k).map_or("", String::as_str);
     let wher: Vec<String> = query_sql(ds, arg("filters"), except, arg("groups"), &[])?.0.into_iter().collect();
+    let names = auth::scope(&st, &headers).await?;
     let rows = tokio::task::spawn_blocking(move || {
-        let conn = &mut reader(ds, &st.data)?;
+        let conn = &mut reader(ds, &st.data, &names)?;
         picker::column_values(conn, ds, &col, &wher).map_err(|e| e.to_string())
     })
     .await
@@ -956,7 +965,7 @@ struct ListRow {
 }
 
 async fn lists(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ListRow>>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+    let name = auth::own_name(&st, &headers, &q).await?;
     let rows = tokio::task::spawn_blocking(move || {
         use diesel::prelude::*;
         let conn = &mut pool(&st)?;
@@ -1010,7 +1019,7 @@ struct ListDetail {
 
 /// One registered list with its cards and the card-level delta against its assigned reference.
 async fn list_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<ListDetail>, ApiError> {
-    let name = auth(&st, &headers, &q)?;
+    let name = auth::own_name(&st, &headers, &q).await?;
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
     let r = tokio::task::spawn_blocking(move || -> Result<ListDetail, String> {
         use diesel::prelude::*;
@@ -1170,13 +1179,14 @@ fn two_hundred() -> usize {
 
 /// The matches the filters select over mtgo_game_view (a match is included if any of its games
 /// passes), newest first, with a compact per-game summary.
-async fn matches_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> Result<Json<Vec<MatchRow>>, ApiError> {
+async fn matches_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<MatchesParams>) -> Result<Json<Vec<MatchRow>>, ApiError> {
     let ds = dataset(None)?;
+    let names = auth::scope(&st, &headers).await?;
     let wher = query_sql(ds, &p.filters, None, &p.groups, &[])?.0.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let limit = p.limit.min(2000);
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<MatchRow>, String> {
         use diesel::prelude::*;
-        let conn = &mut reader(ds, &st.data)?;
+        let conn = &mut reader(ds, &st.data, &names)?;
         diesel::sql_query(format!(
             "SELECT v.match_id, v.player, v.format, v.format_source, v.legacy, v.note, v.excluded, v.opp_deck_source, v.date, v.match_start AS start, v.opponent, v.my_list, v.my_deck, v.my_archetype, v.my_deck_source, v.opp_deck, v.opp_archetype, v.opp_deck_candidates, v.opp_candidate_posteriors, v.opp_posterior, v.opp_surprise, v.opp_archetype_surprise, v.opp_misfit, v.opp_seen, v.opp_colors, v.event_name, v.match_result, v.my_game_wins, v.opp_game_wins,
                     (SELECT GROUP_CONCAT(g.id || ':' || g.game_number || ':' || CASE g.on_play WHEN 1 THEN 'play' ELSE 'draw' END || ':' || g.my_mulligans || ':' || g.turns || ':' || COALESCE(g.winner, '?') || ':' || COALESCE(g.win_by, ''), '|')
@@ -1321,6 +1331,18 @@ fn deck_sql(sel: &str) -> String {
     )
 }
 
+/// A read connection for game `id`, which must be one of `names`' games: these handlers read the
+/// game's tables by id, past the scoped view.
+fn visible_game(st: &AppState, names: &[String], id: i32) -> Result<diesel::SqliteConnection, String> {
+    use diesel::prelude::*;
+    let mut conn = reader(&dataset::MTGO, &st.data, names)?;
+    let n = diesel::sql_query(format!("SELECT COUNT(*) AS n FROM mtgo_game_view WHERE game_id = {id}")).get_result::<mtgctl::mtgolog::db::CountRow>(&mut conn).map_err(|e| e.to_string())?.n;
+    if n == 0 {
+        return Err(format!("no game {id}"));
+    }
+    Ok(conn)
+}
+
 /// MTGO's card markup `@[Name@:catalog,instance:@]`.
 static CARD_REF: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"@\[([^@]*)@:([0-9]*),?([0-9]*):@\]").unwrap());
 
@@ -1331,12 +1353,13 @@ fn plain_text(s: &str) -> String {
 
 /// One game: its facts, the cards each side played (with first turn), the event log, and my
 /// session-log facts (`hands=1` adds my hand after each change, read from the stored session log).
-async fn game_detail(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<GameDetail>, ApiError> {
+async fn game_detail(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<GameDetail>, ApiError> {
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
     let hands = q.get("hands").is_some_and(|v| v == "1");
+    let names = auth::scope(&st, &headers).await?;
     let r = tokio::task::spawn_blocking(move || -> Result<GameDetail, String> {
         use diesel::prelude::*;
-        let conn = &mut pool(&st)?;
+        let conn = &mut visible_game(&st, &names, id)?;
         let game: GameMeta = diesel::sql_query(format!("SELECT g.id, g.match_id, g.game_number, g.on_play, g.turns, g.winner, g.win_by, g.my_mulligans, g.opp_mulligans, m.opponent, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| format!("no game {id}: {e}"))?;
         let cards: Vec<PlayedCard> = diesel::sql_query(format!("SELECT side, card AS name, COUNT(*) AS plays, MIN(turn) AS first_turn FROM mtgo_card_events WHERE game_id = {id} AND verb IN ('cast', 'land') GROUP BY side, card ORDER BY side, first_turn, name")).load(conn).map_err(|e| e.to_string())?;
         let mut events: Vec<EventRow> = diesel::sql_query(format!("SELECT seq, ts, turn, side, kind, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
@@ -1485,12 +1508,13 @@ fn game_states(st: &AppState, conn: &mut diesel::SqliteConnection, id: i32, star
 
 /// One game's event log plus its state snapshots from the player's stored session logs (see
 /// `mtgolog::snapshot`), card names resolved; sideboards are left out.
-async fn replay_api(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Replay>, ApiError> {
+async fn replay_api(State(st): State<Shared>, headers: HeaderMap, Query(q): Query<HashMap<String, String>>) -> Result<Json<Replay>, ApiError> {
     let id: i32 = q.get("id").and_then(|s| s.parse().ok()).ok_or_else(|| bad("id required"))?;
+    let names = auth::scope(&st, &headers).await?;
     let r = tokio::task::spawn_blocking(move || -> Result<Replay, String> {
         use diesel::prelude::*;
         use mtgctl::mtgolog::snapshot;
-        let conn = &mut pool(&st)?;
+        let conn = &mut visible_game(&st, &names, id)?;
         let game: GameMeta = diesel::sql_query(format!("SELECT g.id, g.match_id, g.game_number, g.on_play, g.turns, g.winner, g.win_by, g.my_mulligans, g.opp_mulligans, m.opponent, g.start_ts FROM mtgo_games g JOIN mtgo_matches m ON m.id = g.match_id WHERE g.id = {id}")).get_result(conn).map_err(|e| format!("no game {id}: {e}"))?;
         let rows: Vec<ReplayEventRow> = diesel::sql_query(format!("SELECT seq, ts, turn, side, kind, text FROM mtgo_events WHERE game_id = {id} ORDER BY seq")).load(conn).map_err(|e| e.to_string())?;
         // (time, object id, name) for every card the log mentions: snapshots share the log's object
@@ -1620,13 +1644,14 @@ struct GameRow {
 }
 
 /// One row per game the filters select, newest first.
-async fn games_api(State(st): State<Shared>, Query(p): Query<MatchesParams>) -> Result<Json<Vec<GameRow>>, ApiError> {
+async fn games_api(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<MatchesParams>) -> Result<Json<Vec<GameRow>>, ApiError> {
     let ds = dataset(None)?;
+    let names = auth::scope(&st, &headers).await?;
     let wher = query_sql(ds, &p.filters, None, &p.groups, &[])?.0.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let limit = p.limit.min(5000);
     let rows = tokio::task::spawn_blocking(move || -> Result<Vec<GameRow>, String> {
         use diesel::prelude::*;
-        let conn = &mut reader(ds, &st.data)?;
+        let conn = &mut reader(ds, &st.data, &names)?;
         diesel::sql_query(format!(
             "SELECT game_id, match_id, player, format, format_source, legacy, note, excluded, opp_deck_source, my_deck_source, date, game_start AS start, opponent, opp_deck, opp_archetype, opp_deck_candidates, opp_candidate_posteriors, opp_posterior, opp_surprise, opp_archetype_surprise, opp_misfit, opp_seen, opp_colors, my_list, my_deck, event_name, game_number, on_play, my_mulligans, opp_mulligans, turns, winner, win_by, minutes
              FROM mtgo_game_view {wher} ORDER BY game_start DESC, game_id DESC LIMIT {limit}"
@@ -1717,9 +1742,10 @@ struct SelCount {
 /// Card events counted over the selected games, per (side, verb, card) or per game; `deck` is my
 /// main deck after sideboarding (see deck_sql). Session-log verbs count only the games whose
 /// facts are known, so a missing count means none happened.
-async fn card_counts(State(st): State<Shared>, Query(p): Query<CardCountParams>) -> Result<Json<CardCounts>, ApiError> {
+async fn card_counts(State(st): State<Shared>, headers: HeaderMap, Query(p): Query<CardCountParams>) -> Result<Json<CardCounts>, ApiError> {
     use mtgctl::mtgolog::filter::{sq, VERBS};
     let ds = dataset(None)?;
+    let names = auth::scope(&st, &headers).await?;
     let wher = query_sql(ds, &p.filters, None, &p.groups, &[])?.0.map(|w| format!("WHERE {w}")).unwrap_or_default();
     let verbs: Vec<String> = p.verbs.iter().flat_map(|v| v.split(',')).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect();
     if let Some(v) = verbs.iter().find(|v| v.as_str() != "deck" && !VERBS.iter().any(|(k, _, _)| k == v)) {
@@ -1735,7 +1761,7 @@ async fn card_counts(State(st): State<Shared>, Query(p): Query<CardCountParams>)
     };
     let r = tokio::task::spawn_blocking(move || -> Result<CardCounts, String> {
         use diesel::prelude::*;
-        let conn = &mut reader(ds, &st.data)?;
+        let conn = &mut reader(ds, &st.data, &names)?;
         let sel: SelCount = diesel::sql_query(format!("SELECT COUNT(*) AS games, COALESCE(SUM(my_hand_known), 0) AS hand FROM mtgo_game_view {wher}")).get_result(conn).map_err(|e| format!("query failed: {e}"))?;
         let hand_verbs = VERBS.iter().filter(|(_, _, n)| *n == Some("hand")).map(|(v, _, _)| sq(v)).collect::<Vec<_>>().join(", ");
         let event_verbs: Vec<&String> = verbs.iter().filter(|v| v.as_str() != "deck").collect();
@@ -2034,6 +2060,7 @@ async fn main() {
                 .route("/api/account", get(auth::account_api))
                 .route("/api/keys", post(auth::key_new))
                 .route("/api/keys/revoke", post(auth::key_revoke))
+                .route("/api/teams/{action}", post(auth::team_action))
                 .route("/api/players", get(players))
                 .route("/api/reference", get(reference_api))
                 .route("/api/client-log", post(client_log))

@@ -2,6 +2,10 @@
 const PLAYER_KEY = 'mtgctl.player';
 function getPlayer() { try { return localStorage.getItem(PLAYER_KEY) || ''; } catch (e) { return ''; } }
 function setPlayer(p) { try { localStorage.setItem(PLAYER_KEY, p); } catch (e) {} }
+// Whose games the pages show (auth.rs scope): one of the account's teams, sent as X-Team; none: your own.
+const TEAM_KEY = 'mtgctl.team';
+function getTeam() { try { return localStorage.getItem(TEAM_KEY) || ''; } catch (e) { return ''; } }
+function setTeam(t) { try { t ? localStorage.setItem(TEAM_KEY, t) : localStorage.removeItem(TEAM_KEY); } catch (e) {} }
 // Failures are reported to the server (journal) so "works for me" bugs can be read from the droplet.
 function report(what) {
   try { navigator.sendBeacon('api/client-log', JSON.stringify(Object.assign({ page: location.href, ua: navigator.userAgent, player: getPlayer() }, what))); } catch (e) {}
@@ -9,7 +13,7 @@ function report(what) {
 window.addEventListener('error', e => report({ error: e.message, at: `${e.filename}:${e.lineno}` }));
 window.addEventListener('unhandledrejection', e => report({ error: String(e.reason && e.reason.message || e.reason) }));
 async function api(path, opts = {}) {
-  const headers = Object.assign({}, getPlayer() ? { 'X-Player': getPlayer() } : {}, opts.headers || {});
+  const headers = Object.assign({}, getPlayer() ? { 'X-Player': getPlayer() } : {}, getTeam() ? { 'X-Team': getTeam() } : {}, opts.headers || {});
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   const text = await r.text();
   let body; try { body = JSON.parse(text); } catch (e) { body = { error: text }; }
@@ -22,15 +26,14 @@ function wilson(w, n) {
   const c = (p + z * z / (2 * n)) / d, h = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d;
   return [100 * (c - h), 100 * (c + h)];
 }
-// Player bar: a dropdown of everyone with data here, plus the one detected from your own uploads.
+// Player bar (lists page): which of the account's own MTGO names to show; '' when there is none.
 async function playerBar(el, onChange) {
-  let known = [];
-  try { known = await api('api/players'); } catch (e) {}
+  const { account: a } = await account();
+  if (!a) { el.innerHTML = `<a href="${loginHref()}">Log in with Discord</a> to see your lists.`; return ''; }
+  if (!a.names.length) { el.innerHTML = 'No MTGO name is linked to your login yet: <a href="collect.html">upload your logs</a> first.'; return ''; }
   let cur = getPlayer();
-  if (cur && !known.includes(cur)) known.push(cur);
-  // nothing chosen yet (no upload from this browser): show the first player with data rather than a dead page
-  if (!cur && known.length) { cur = known[0]; setPlayer(cur); }
-  el.innerHTML = `<label>player <select id="playerSel">${known.map(p => `<option ${p === cur ? 'selected' : ''}>${p}</option>`).join('')}</select></label> <span id="who" class="muted">${cur ? '' : 'nobody has uploaded logs yet'}</span>`;
+  if (!a.names.includes(cur)) { cur = a.names[0]; setPlayer(cur); }
+  el.innerHTML = `<label>player <select id="playerSel">${a.names.map(p => `<option ${p === cur ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>`;
   el.querySelector('#playerSel').onchange = e => { setPlayer(e.target.value); if (onChange) onChange(e.target.value); else location.reload(); };
   return cur;
 }
@@ -97,18 +100,22 @@ function copyButtons(root) {
 }
 document.addEventListener('DOMContentLoaded', () => copyButtons(document));
 
-// The login (auth.rs): {account: {name, names} | null, keys}, fetched once per page.
+// The login (auth.rs): {account: {name, names} | null, keys, teams}, fetched once per page.
 let accountReq = null;
 const account = () => accountReq || (accountReq = api('api/account').catch(() => ({ account: null })));
 const thisPage = () => location.pathname.split('/').pop() || 'index.html';
 const loginHref = () => `auth/login?next=${encodeURIComponent(thisPage())}`;
-// The end of every page's nav: who is logged in, or the way to log in.
+// The end of every page's nav: whose games the pages show, who is logged in, or the way to log in.
 document.addEventListener('DOMContentLoaded', async () => {
   const nav = document.querySelector('nav'); if (!nav) return;
   const el = document.createElement('span'); el.className = 'login';
-  const { account: a } = await account();
+  const { account: a, teams = [] } = await account();
+  // a team left or deleted since this browser chose it
+  if (getTeam() && !teams.some(t => String(t.id) === getTeam())) { setTeam(''); if (a) location.reload(); }
   if (a) {
-    el.innerHTML = `${esc(a.name)} · <a href="#">log out</a>`;
+    const pick = teams.length ? `<label>games of <select>${[['', 'just me'], ...teams.map(t => [String(t.id), 'team ' + t.name])].map(([v, l]) => `<option value="${v}" ${v === getTeam() ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label> · ` : '';
+    el.innerHTML = `${pick}${esc(a.name)} · <a href="#">log out</a>`;
+    const sel = el.querySelector('select'); if (sel) sel.onchange = () => { setTeam(sel.value); location.reload(); };
     el.querySelector('a').onclick = async e => { e.preventDefault(); await fetch('auth/logout', { method: 'POST' }); location.reload(); };
   } else el.innerHTML = `<a href="${loginHref()}">log in with Discord</a>`;
   nav.appendChild(el);

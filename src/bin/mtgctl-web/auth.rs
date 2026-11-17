@@ -1,8 +1,10 @@
-//! Logins and uploader keys. A Discord login (OAuth2 authorization-code flow, scope `identify`)
-//! makes an account and a session cookie; a key made on the upload page stands in for the cookie
-//! in the uploaders. `<data>/accounts.db` holds the accounts, the MTGO names bound to them,
-//! sessions and keys; a session or key is stored only as its SHA-256. The client secret comes from
-//! the `--auth` file on the server, never from git.
+//! Logins, keys and teams. A Discord login (OAuth2 authorization-code flow, scope `identify`)
+//! makes an account and a session cookie; a key stands in for the cookie in the uploaders (an
+//! upload key) and in MCP clients (a read key). A team pools its members' games: a read sees the
+//! viewer's own games or those of one team it is in (`scope`). `<data>/accounts.db` holds the
+//! accounts, the MTGO names bound to them, sessions, keys and teams; a session, key or invite is
+//! stored only as its SHA-256. The client secret comes from the `--auth` file on the server, never
+//! from git.
 
 use super::*;
 use axum::body::Body;
@@ -83,12 +85,33 @@ const DDL: &[&str] = &[
         account_id INTEGER NOT NULL REFERENCES accounts(id),
         expires TEXT NOT NULL
     )",
-    "CREATE TABLE IF NOT EXISTS upload_keys (
+    "CREATE TABLE IF NOT EXISTS access_keys (
         id INTEGER PRIMARY KEY,
         token_hash TEXT NOT NULL UNIQUE,
         account_id INTEGER NOT NULL REFERENCES accounts(id),
+        kind TEXT NOT NULL,              -- upload (also syncs and marks) | read (reads only)
+        team_id INTEGER REFERENCES teams(id),   -- a read key's scope; NULL: the account's own games
         created TEXT NOT NULL,
         last_used TEXT,
+        revoked TEXT
+    )",
+    "CREATE TABLE IF NOT EXISTS teams (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        owner_id INTEGER NOT NULL REFERENCES accounts(id),   -- makes invites, removes members, deletes the team
+        created TEXT NOT NULL
+    )",
+    "CREATE TABLE IF NOT EXISTS team_members (
+        team_id INTEGER NOT NULL REFERENCES teams(id),
+        account_id INTEGER NOT NULL REFERENCES accounts(id),
+        joined TEXT NOT NULL,
+        PRIMARY KEY (team_id, account_id)
+    )",
+    "CREATE TABLE IF NOT EXISTS team_invites (
+        id INTEGER PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE, -- the link is reusable until revoked
+        team_id INTEGER NOT NULL REFERENCES teams(id),
+        created TEXT NOT NULL,
         revoked TEXT
     )",
 ];
@@ -102,7 +125,26 @@ pub fn ensure(data: &Path) -> Result<(), String> {
     for d in DDL {
         diesel::sql_query(*d).execute(conn).map_err(|e| e.to_string())?;
     }
+    // the first build's keys were all upload keys
+    let old: Option<NameRow> = diesel::sql_query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'upload_keys'").get_result(conn).optional().map_err(|e| e.to_string())?;
+    if old.is_some() {
+        conn.immediate_transaction(|c| {
+            diesel::sql_query("INSERT INTO access_keys(id, token_hash, account_id, kind, team_id, created, last_used, revoked) SELECT id, token_hash, account_id, 'upload', NULL, created, last_used, revoked FROM upload_keys").execute(c)?;
+            diesel::sql_query("DROP TABLE upload_keys").execute(c)
+        })
+        .map_err(|e| e.to_string())?;
+    }
     Ok(())
+}
+
+fn db(e: diesel::result::Error) -> ApiError {
+    internal(e.to_string())
+}
+
+/// `f` on an accounts.db connection, off the async workers.
+async fn with_db<T: Send + 'static>(st: &Shared, f: impl FnOnce(&mut SqliteConnection) -> Result<T, ApiError> + Send + 'static) -> Result<T, ApiError> {
+    let data = st.data.clone();
+    tokio::task::spawn_blocking(move || f(&mut conn(&data).map_err(internal)?)).await.map_err(|e| internal(e.to_string()))?
 }
 
 fn conn(data: &Path) -> Result<SqliteConnection, String> {
@@ -163,6 +205,25 @@ pub struct Viewer {
     pub account: Option<Account>,
     /// the account came from a session cookie, not a key
     pub session: bool,
+    /// the key's kind and team, when a key was sent
+    pub key: Option<(String, Option<i64>)>,
+}
+
+impl Viewer {
+    /// A read key only reads.
+    pub fn can_write(&self) -> bool {
+        !matches!(&self.key, Some((kind, _)) if kind == "read")
+    }
+}
+
+#[derive(diesel::QueryableByName)]
+struct KeyHit {
+    #[diesel(sql_type = BigInt)]
+    id: i64,
+    #[diesel(sql_type = Text)]
+    kind: String,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    team_id: Option<i64>,
 }
 
 fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -182,7 +243,7 @@ pub async fn viewer(st: &Shared, headers: &HeaderMap, write: bool) -> Result<Vie
     };
     let session = cookie(headers, SESSION_COOKIE).filter(|s| is_token(s, ""));
     if key.is_none() && session.is_none() {
-        return Ok(Viewer { account: None, session: false });
+        return Ok(Viewer { account: None, session: false, key: None });
     }
     if key.is_none() && write && headers.get(axum::http::header::ORIGIN).and_then(|o| o.to_str().ok()) != Some(st.auth.origin.as_str()) {
         return Err(ApiError(StatusCode::FORBIDDEN, "a change must come from this site's own pages".into()));
@@ -191,16 +252,16 @@ pub async fn viewer(st: &Shared, headers: &HeaderMap, write: bool) -> Result<Vie
     tokio::task::spawn_blocking(move || -> Result<Viewer, ApiError> {
         let conn = &mut conn(&data).map_err(internal)?;
         if let Some(k) = key {
-            let r: Option<Id> = diesel::sql_query(format!("SELECT account_id AS id FROM upload_keys WHERE token_hash = '{}' AND revoked IS NULL", hash(&k))).get_result(conn).optional().map_err(|e| internal(e.to_string()))?;
-            let id = r.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "unknown or revoked uploader key: make a new install line on the upload page".into()))?.id;
-            diesel::sql_query(format!("UPDATE upload_keys SET last_used = '{}' WHERE token_hash = '{}'", now(), hash(&k))).execute(conn).map_err(|e| internal(e.to_string()))?;
-            return Ok(Viewer { account: account(conn, id).map_err(internal)?, session: false });
+            let r: Option<KeyHit> = diesel::sql_query(format!("SELECT account_id AS id, kind, team_id FROM access_keys WHERE token_hash = '{}' AND revoked IS NULL", hash(&k))).get_result(conn).optional().map_err(db)?;
+            let r = r.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "unknown or revoked key: make a new one (upload keys on the upload page, MCP keys on the teams page)".into()))?;
+            diesel::sql_query(format!("UPDATE access_keys SET last_used = '{}' WHERE token_hash = '{}'", now(), hash(&k))).execute(conn).map_err(db)?;
+            return Ok(Viewer { account: account(conn, r.id).map_err(internal)?, session: false, key: Some((r.kind, r.team_id)) });
         }
         let s = session.unwrap();
         let r: Option<Id> = diesel::sql_query(format!("SELECT account_id AS id FROM sessions WHERE token_hash = '{}' AND expires > '{}'", hash(&s), now())).get_result(conn).optional().map_err(|e| internal(e.to_string()))?;
         Ok(match r {
-            Some(r) => Viewer { account: account(conn, r.id).map_err(internal)?, session: true },
-            None => Viewer { account: None, session: false },
+            Some(r) => Viewer { account: account(conn, r.id).map_err(internal)?, session: true, key: None },
+            None => Viewer { account: None, session: false, key: None },
         })
     })
     .await
@@ -225,6 +286,9 @@ pub enum Access {
 pub async fn player_access(st: &Shared, headers: &HeaderMap, q: &HashMap<String, String>, write: bool) -> Result<(String, Access), ApiError> {
     let name = auth(st, headers, q)?;
     let v = viewer(st, headers, write).await?;
+    if write && !v.can_write() {
+        return Err(ApiError(StatusCode::FORBIDDEN, "a read key cannot upload: use an upload key".into()));
+    }
     let (st2, n) = (st.clone(), name.clone());
     let owner = tokio::task::spawn_blocking(move || owner(&mut conn(&st2.data)?, &n)).await.map_err(|e| internal(e.to_string()))?.map_err(internal)?;
     let me = v.account.as_ref().map(|a| a.id);
@@ -237,6 +301,41 @@ pub async fn player_access(st: &Shared, headers: &HeaderMap, q: &HashMap<String,
         (None, Some(_)) => return Err(ApiError(StatusCode::FORBIDDEN, format!("{name} has uploads from before logins: ask the admin to link it to your account"))),
     };
     Ok((name, access))
+}
+
+/// The MTGO names whose games a read sees: the viewer's own, or every member's of the team it
+/// reads through (a read key's team, else `X-Team`). Without a login, none.
+pub async fn scope(st: &Shared, headers: &HeaderMap) -> Result<Vec<String>, ApiError> {
+    let v = viewer(st, headers, false).await?;
+    let Some(a) = v.account else { return Ok(vec![]) };
+    let team = match v.key {
+        Some((_, team)) => team,
+        None => match headers.get("x-team").and_then(|h| h.to_str().ok()).filter(|t| !t.is_empty()) {
+            Some(t) => Some(t.parse::<i64>().map_err(|_| bad("X-Team is a team id"))?),
+            None => None,
+        },
+    };
+    let Some(t) = team else { return Ok(a.names) };
+    with_db(st, move |conn| {
+        let member: Option<Id> = diesel::sql_query(format!("SELECT team_id AS id FROM team_members WHERE team_id = {t} AND account_id = {}", a.id)).get_result(conn).optional().map_err(db)?;
+        if member.is_none() {
+            return Err(ApiError(StatusCode::FORBIDDEN, format!("you are not in team {t}: choose another view at the top of the page")));
+        }
+        let names: Vec<NameRow> = diesel::sql_query(format!("SELECT n.name FROM account_names n JOIN team_members m ON m.account_id = n.account_id WHERE m.team_id = {t} ORDER BY n.name")).load(conn).map_err(db)?;
+        Ok(names.into_iter().map(|n| n.name).collect())
+    })
+    .await
+}
+
+/// The viewer's own MTGO name a request asks for (`X-Player`, else the first): lists belong to one name.
+pub async fn own_name(st: &Shared, headers: &HeaderMap, q: &HashMap<String, String>) -> Result<String, ApiError> {
+    let v = viewer(st, headers, false).await?;
+    let a = v.account.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "log in first".into()))?;
+    let asked = headers.get("x-player").and_then(|h| h.to_str().ok()).map(str::to_string).or_else(|| q.get("player").cloned()).filter(|p| !p.is_empty());
+    match asked {
+        Some(p) => a.names.into_iter().find(|n| n.eq_ignore_ascii_case(&p)).ok_or_else(|| ApiError(StatusCode::FORBIDDEN, format!("{p} is not one of your MTGO names"))),
+        None => a.names.into_iter().next().ok_or_else(|| bad("no MTGO name is linked to your login yet: upload your logs first")),
+    }
 }
 
 /// Binds `name` to `account` when the game logs of the upload name it as the one player in all of
@@ -265,12 +364,16 @@ pub fn claim(data: &Path, account: i64, name: &str, logs: &[&[u8]]) -> Result<()
     Ok(())
 }
 
-/// The account to show on the pages, and its uploader keys when the request has a session.
+/// The account to show on the pages; with a session also its keys and teams.
 pub async fn account_api(State(st): State<Shared>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
     let v = viewer(&st, &headers, false).await?;
     let Some(a) = v.account else { return Ok(Json(serde_json::json!({ "account": null }))) };
-    let keys = if v.session { list_keys(&st, a.id).await? } else { vec![] };
-    Ok(Json(serde_json::json!({ "account": a, "keys": keys })))
+    if !v.session {
+        return Ok(Json(serde_json::json!({ "account": a, "keys": [], "teams": [] })));
+    }
+    let id = a.id;
+    let (keys, teams) = with_db(&st, move |conn| Ok((keys(conn, id)?, teams(conn, id)?))).await?;
+    Ok(Json(serde_json::json!({ "account": a, "keys": keys, "teams": teams })))
 }
 
 #[derive(diesel::QueryableByName, Serialize)]
@@ -278,20 +381,62 @@ pub struct KeyRow {
     #[diesel(sql_type = BigInt)]
     id: i64,
     #[diesel(sql_type = Text)]
+    kind: String,
+    #[diesel(sql_type = Nullable<BigInt>)]
+    team_id: Option<i64>,
+    #[diesel(sql_type = Nullable<Text>)]
+    team: Option<String>,
+    #[diesel(sql_type = Text)]
     created: String,
     #[diesel(sql_type = Nullable<Text>)]
     last_used: Option<String>,
 }
 
-async fn list_keys(st: &Shared, account: i64) -> Result<Vec<KeyRow>, ApiError> {
-    let data = st.data.clone();
-    tokio::task::spawn_blocking(move || diesel::sql_query(format!("SELECT id, created, last_used FROM upload_keys WHERE account_id = {account} AND revoked IS NULL ORDER BY id")).load(&mut conn(&data)?).map_err(|e| e.to_string()))
-        .await
-        .map_err(|e| internal(e.to_string()))?
-        .map_err(internal)
+fn keys(conn: &mut SqliteConnection, account: i64) -> Result<Vec<KeyRow>, ApiError> {
+    diesel::sql_query(format!("SELECT k.id, k.kind, k.team_id, t.name AS team, k.created, k.last_used FROM access_keys k LEFT JOIN teams t ON t.id = k.team_id WHERE k.account_id = {account} AND k.revoked IS NULL ORDER BY k.id")).load(conn).map_err(db)
 }
 
-/// Keys are made and revoked only with a session: a key cannot make more keys.
+#[derive(diesel::QueryableByName, Serialize)]
+struct Member {
+    #[diesel(sql_type = BigInt)]
+    id: i64,
+    #[diesel(sql_type = Text)]
+    name: String,
+    #[diesel(sql_type = Nullable<Text>)]
+    names: Option<String>,
+}
+
+#[derive(diesel::QueryableByName, Serialize)]
+struct Invite {
+    #[diesel(sql_type = BigInt)]
+    id: i64,
+    #[diesel(sql_type = Text)]
+    created: String,
+}
+
+/// The teams `account` is in, with their members, and the open invites of those it owns.
+fn teams(conn: &mut SqliteConnection, account: i64) -> Result<Vec<serde_json::Value>, ApiError> {
+    #[derive(diesel::QueryableByName)]
+    struct T {
+        #[diesel(sql_type = BigInt)]
+        id: i64,
+        #[diesel(sql_type = Text)]
+        name: String,
+        #[diesel(sql_type = BigInt)]
+        owner_id: i64,
+    }
+    let ts: Vec<T> = diesel::sql_query(format!("SELECT t.id, t.name, t.owner_id FROM teams t JOIN team_members m ON m.team_id = t.id WHERE m.account_id = {account} ORDER BY t.name")).load(conn).map_err(db)?;
+    let mut out = vec![];
+    for t in ts {
+        let members: Vec<Member> = diesel::sql_query(format!("SELECT a.id, a.name, (SELECT GROUP_CONCAT(n.name, ', ') FROM account_names n WHERE n.account_id = a.id) AS names FROM team_members m JOIN accounts a ON a.id = m.account_id WHERE m.team_id = {} ORDER BY a.name", t.id)).load(conn).map_err(db)?;
+        let owner = t.owner_id == account;
+        let invites: Vec<Invite> = if owner { diesel::sql_query(format!("SELECT id, created FROM team_invites WHERE team_id = {} AND revoked IS NULL ORDER BY id", t.id)).load(conn).map_err(db)? } else { vec![] };
+        out.push(serde_json::json!({ "id": t.id, "name": t.name, "owner": owner, "owner_id": t.owner_id, "members": members, "invites": invites }));
+    }
+    Ok(out)
+}
+
+/// Keys and teams change only with a session: a key cannot make keys or change a team.
 async fn session_account(st: &Shared, headers: &HeaderMap) -> Result<Account, ApiError> {
     let v = viewer(st, headers, true).await?;
     match v.account {
@@ -300,19 +445,44 @@ async fn session_account(st: &Shared, headers: &HeaderMap) -> Result<Account, Ap
     }
 }
 
-/// A new uploader key, shown this once.
-pub async fn key_new(State(st): State<Shared>, headers: HeaderMap) -> Result<Json<serde_json::Value>, ApiError> {
+fn is_member(conn: &mut SqliteConnection, team: i64, account: i64) -> Result<bool, ApiError> {
+    let r: Option<Id> = diesel::sql_query(format!("SELECT team_id AS id FROM team_members WHERE team_id = {team} AND account_id = {account}")).get_result(conn).optional().map_err(db)?;
+    Ok(r.is_some())
+}
+
+#[derive(Deserialize, Default)]
+pub struct KeyReq {
+    /// upload (default) | read
+    #[serde(default)]
+    kind: Option<String>,
+    /// a read key's team; none: the account's own games
+    #[serde(default)]
+    team: Option<i64>,
+}
+
+/// A new key, shown this once. The body is optional: no body makes an upload key.
+pub async fn key_new(State(st): State<Shared>, headers: HeaderMap, body: Bytes) -> Result<Json<serde_json::Value>, ApiError> {
     let a = session_account(&st, &headers).await?;
+    let req: KeyReq = if body.is_empty() { KeyReq::default() } else { serde_json::from_slice(&body).map_err(|e| bad(e.to_string()))? };
+    let kind = req.kind.unwrap_or_else(|| "upload".into());
+    if kind != "upload" && kind != "read" {
+        return Err(bad("kind is upload or read"));
+    }
+    if kind == "upload" && req.team.is_some() {
+        return Err(bad("an upload key has no team"));
+    }
     let key = token("mk_");
-    let (data, h) = (st.data.clone(), hash(&key));
-    let id = tokio::task::spawn_blocking(move || -> Result<i64, String> {
-        let conn = &mut conn(&data)?;
-        diesel::sql_query(format!("INSERT INTO upload_keys(token_hash, account_id, created) VALUES ('{h}', {}, '{}')", a.id, now())).execute(conn).map_err(|e| e.to_string())?;
-        Ok(diesel::sql_query("SELECT last_insert_rowid() AS id").get_result::<Id>(conn).map_err(|e| e.to_string())?.id)
+    let h = hash(&key);
+    let id = with_db(&st, move |conn| {
+        if let Some(t) = req.team {
+            if !is_member(conn, t, a.id)? {
+                return Err(ApiError(StatusCode::FORBIDDEN, format!("you are not in team {t}")));
+            }
+        }
+        diesel::sql_query(format!("INSERT INTO access_keys(token_hash, account_id, kind, team_id, created) VALUES ('{h}', {}, '{kind}', {}, '{}')", a.id, req.team.map_or("NULL".into(), |t| t.to_string()), now())).execute(conn).map_err(db)?;
+        Ok(diesel::sql_query("SELECT last_insert_rowid() AS id").get_result::<Id>(conn).map_err(db)?.id)
     })
-    .await
-    .map_err(|e| internal(e.to_string()))?
-    .map_err(internal)?;
+    .await?;
     Ok(Json(serde_json::json!({ "id": id, "key": key })))
 }
 
@@ -323,15 +493,113 @@ pub struct RevokeReq {
 
 pub async fn key_revoke(State(st): State<Shared>, headers: HeaderMap, Json(req): Json<RevokeReq>) -> Result<Json<serde_json::Value>, ApiError> {
     let a = session_account(&st, &headers).await?;
-    let data = st.data.clone();
-    let n = tokio::task::spawn_blocking(move || diesel::sql_query(format!("UPDATE upload_keys SET revoked = '{}' WHERE id = {} AND account_id = {} AND revoked IS NULL", now(), req.id, a.id)).execute(&mut conn(&data)?).map_err(|e| e.to_string()))
-        .await
-        .map_err(|e| internal(e.to_string()))?
-        .map_err(internal)?;
+    let n = with_db(&st, move |conn| diesel::sql_query(format!("UPDATE access_keys SET revoked = '{}' WHERE id = {} AND account_id = {} AND revoked IS NULL", now(), req.id, a.id)).execute(conn).map_err(db)).await?;
     if n == 0 {
         return Err(bad(format!("no key {}", req.id)));
     }
     Ok(Json(serde_json::json!({ "revoked": req.id })))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct TeamReq {
+    team: i64,
+    name: String,
+    token: String,
+    /// an invite (uninvite) or a member account (remove)
+    id: i64,
+}
+
+/// `api/teams/<action>`: create {name}; invite, leave, delete {team}; uninvite {team, id};
+/// remove {team, id}; peek, join {token}. The owner alone invites, removes and deletes, and cannot
+/// leave (deleting the team instead).
+pub async fn team_action(State(st): State<Shared>, headers: HeaderMap, axum::extract::Path(action): axum::extract::Path<String>, Json(r): Json<TeamReq>) -> Result<Json<serde_json::Value>, ApiError> {
+    let a = session_account(&st, &headers).await?;
+    let me = a.id;
+    with_db(&st, move |conn| {
+        let t = r.team;
+        let owner: Option<i64> = diesel::sql_query(format!("SELECT owner_id AS id FROM teams WHERE id = {t}")).get_result::<Id>(conn).optional().map_err(db)?.map(|o| o.id);
+        let need_owner = |owner: Option<i64>| if owner == Some(me) { Ok(()) } else { Err(ApiError(StatusCode::FORBIDDEN, "only the team's owner can do that".into())) };
+        let invite = |conn: &mut SqliteConnection, token: &str| -> Result<(i64, String, String), ApiError> {
+            #[derive(diesel::QueryableByName)]
+            struct I {
+                #[diesel(sql_type = BigInt)]
+                id: i64,
+                #[diesel(sql_type = Text)]
+                name: String,
+                #[diesel(sql_type = Text)]
+                owner: String,
+            }
+            let i: Option<I> = if is_token(token, "") { diesel::sql_query(format!("SELECT t.id, t.name, a.name AS owner FROM team_invites i JOIN teams t ON t.id = i.team_id JOIN accounts a ON a.id = t.owner_id WHERE i.token_hash = '{}' AND i.revoked IS NULL", hash(token))).get_result(conn).optional().map_err(db)? } else { None };
+            let i = i.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "this invite link is not valid (any more): ask for a new one".into()))?;
+            Ok((i.id, i.name, i.owner))
+        };
+        let n = now();
+        match action.as_str() {
+            "create" => {
+                let name = r.name.trim();
+                if name.is_empty() || name.chars().count() > 40 {
+                    return Err(bad("a team name has 1 to 40 characters"));
+                }
+                conn.immediate_transaction(|c| {
+                    diesel::sql_query(format!("INSERT INTO teams(name, owner_id, created) VALUES ({}, {me}, '{n}')", sq(name))).execute(c)?;
+                    let id = diesel::sql_query("SELECT last_insert_rowid() AS id").get_result::<Id>(c)?.id;
+                    diesel::sql_query(format!("INSERT INTO team_members(team_id, account_id, joined) VALUES ({id}, {me}, '{n}')")).execute(c)?;
+                    Ok(serde_json::json!({ "team": id }))
+                })
+                .map_err(db)
+            }
+            "invite" => {
+                need_owner(owner)?;
+                let token = token("");
+                diesel::sql_query(format!("INSERT INTO team_invites(token_hash, team_id, created) VALUES ('{}', {t}, '{n}')", hash(&token))).execute(conn).map_err(db)?;
+                Ok(serde_json::json!({ "token": token }))
+            }
+            "uninvite" => {
+                need_owner(owner)?;
+                diesel::sql_query(format!("UPDATE team_invites SET revoked = '{n}' WHERE id = {} AND team_id = {t}", r.id)).execute(conn).map_err(db)?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            "peek" => {
+                let (id, name, owner) = invite(conn, &r.token)?;
+                Ok(serde_json::json!({ "team": id, "name": name, "owner": owner, "member": is_member(conn, id, me)? }))
+            }
+            "join" => {
+                let (id, name, _) = invite(conn, &r.token)?;
+                diesel::sql_query(format!("INSERT OR IGNORE INTO team_members(team_id, account_id, joined) VALUES ({id}, {me}, '{n}')")).execute(conn).map_err(db)?;
+                Ok(serde_json::json!({ "team": id, "name": name }))
+            }
+            "leave" => {
+                if owner == Some(me) {
+                    return Err(bad("the owner cannot leave: delete the team instead"));
+                }
+                diesel::sql_query(format!("DELETE FROM team_members WHERE team_id = {t} AND account_id = {me}")).execute(conn).map_err(db)?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            "remove" => {
+                need_owner(owner)?;
+                if r.id == me {
+                    return Err(bad("the owner cannot remove themselves: delete the team instead"));
+                }
+                diesel::sql_query(format!("DELETE FROM team_members WHERE team_id = {t} AND account_id = {}", r.id)).execute(conn).map_err(db)?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            "delete" => {
+                need_owner(owner)?;
+                conn.immediate_transaction(|c| {
+                    diesel::sql_query(format!("UPDATE access_keys SET revoked = COALESCE(revoked, '{n}'), team_id = NULL WHERE team_id = {t}")).execute(c)?;
+                    diesel::sql_query(format!("DELETE FROM team_invites WHERE team_id = {t}")).execute(c)?;
+                    diesel::sql_query(format!("DELETE FROM team_members WHERE team_id = {t}")).execute(c)?;
+                    diesel::sql_query(format!("DELETE FROM teams WHERE id = {t}")).execute(c)
+                })
+                .map_err(db)?;
+                Ok(serde_json::json!({ "ok": true }))
+            }
+            other => Err(ApiError(StatusCode::NOT_FOUND, format!("no team action {other}"))),
+        }
+    })
+    .await
+    .map(Json)
 }
 
 fn pct(s: &str) -> String {
@@ -470,7 +738,7 @@ pub fn cli_accounts(data: &Path) -> Result<(), String> {
     let rows: Vec<R> = diesel::sql_query(
         "SELECT a.id, a.discord_id, a.name, a.last_login,
                 (SELECT GROUP_CONCAT(n.name || ' (' || n.how || ')', ', ') FROM account_names n WHERE n.account_id = a.id) AS names,
-                (SELECT COUNT(*) FROM upload_keys k WHERE k.account_id = a.id AND k.revoked IS NULL) AS keys
+                (SELECT COUNT(*) FROM access_keys k WHERE k.account_id = a.id AND k.revoked IS NULL) AS keys
          FROM accounts a ORDER BY a.id",
     )
     .load(&mut conn(data)?)
