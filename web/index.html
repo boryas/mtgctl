@@ -585,6 +585,7 @@ async function setupDataset(ds, fromLink) {
   DS = ds; try { localStorage.setItem('mtgctl.ds', ds); } catch (e) {}
   applySchema(s);
   document.getElementById('dsSel').innerHTML = s.datasets.map(([k, t]) => `<option value="${k}" ${k === ds ? 'selected' : ''}>${t}</option>`).join('');
+  document.getElementById('dsSel').hidden = s.datasets.length < 2;
   document.getElementById('dsAbout').textContent = s.dataset.about;
   // the player is the one this browser uploaded as (a default filter), else the first with data
   if (feature('players') && !getPlayer()) { try { const ps = await api('api/players'); if (ps.length) setPlayer(ps[0]); } catch (e) {} }

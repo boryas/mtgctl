@@ -95,10 +95,13 @@ impl Dataset {
     }
 }
 
+/// Every dataset whose tables and view the server keeps in place.
 pub const ALL: &[&Dataset] = &[&MTGO, &super::ldc::DATASET];
+/// The datasets the pages and the MCP answer from; LDC is read only to name lists and decks.
+pub const SERVED: &[&Dataset] = &[&MTGO];
 
 pub fn by_key(key: &str) -> Option<&'static Dataset> {
-    ALL.iter().copied().find(|d| d.key == key)
+    SERVED.iter().copied().find(|d| d.key == key)
 }
 
 const fn col(name: &'static str, label: &'static str, level: Level, kind: Kind) -> Column {

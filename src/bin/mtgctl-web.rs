@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use mtgctl::mtgolog::pipeline::{self, PlayerDir, Reference};
 use mtgctl::mtgolog::dataset::{self, Dataset};
-use mtgctl::mtgolog::{clocks, elo, ldc, meta, observed, picker, stats};
+use mtgctl::mtgolog::{clocks, ldc, meta, observed, picker, stats};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -857,20 +857,6 @@ async fn cards_seen(State(st): State<Shared>) -> Result<Json<Vec<String>>, ApiEr
     Ok(Json(rows))
 }
 
-/// Player-deck Elo over the LDC's Challenge matches (`event_type` overrides); see elo::compute.
-async fn elo_api(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<elo::EloResult>, ApiError> {
-    let ds = dataset(Some("ldc"))?;
-    let event_type = q.get("event_type").filter(|e| !e.is_empty()).cloned().unwrap_or_else(|| "Challenge".into());
-    let r = tokio::task::spawn_blocking(move || {
-        let conn = &mut ds.connect(&st.data)?;
-        elo::compute(conn, &event_type)
-    })
-    .await
-    .map_err(|e| internal(e.to_string()))?
-    .map_err(internal)?;
-    Ok(Json(r))
-}
-
 async fn values(State(st): State<Shared>, Query(q): Query<HashMap<String, String>>) -> Result<Json<Vec<ValueRow>>, ApiError> {
     let col = q.get("col").cloned().ok_or_else(|| bad("col required"))?;
     if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
@@ -907,7 +893,7 @@ async fn schema(State(st): State<Shared>, Query(q): Query<HashMap<String, String
     .await
     .map_err(|e| internal(e.to_string()))?
     .map_err(internal)?;
-    let datasets = dataset::ALL.iter().map(|d| (d.key, d.title)).collect();
+    let datasets = dataset::SERVED.iter().map(|d| (d.key, d.title)).collect();
     Ok(Json(Schema { datasets, dataset: ds, present, defaults: ds.defaults() }))
 }
 
@@ -2013,7 +1999,6 @@ async fn main() {
                 .route("/api/columns", get(columns))
                 .route("/api/values", get(values))
                 .route("/api/schema", get(schema))
-                .route("/api/elo", get(elo_api))
                 .route("/api/meta", get(meta_api))
                 .route("/api/clocks", get(clocks_get).put(clocks_put))
                 .route("/api/observed", get(observed_api))

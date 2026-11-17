@@ -8,7 +8,6 @@ pub mod clocks;
 pub mod dataset;
 pub mod db;
 pub mod decklist;
-pub mod elo;
 pub mod eras;
 pub mod event;
 pub mod filter;

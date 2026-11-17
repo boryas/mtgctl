@@ -9,12 +9,11 @@ use serde_json::{json, Value};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 
-const INSTRUCTIONS: &str = "mtgctl-web: MTGO Legacy results, updated as players upload logs and the Legacy Data Collection publishes: a player's record, Challenge results, matchups, win rates by deck, archetype, era or month, what an opponent played, cards cast, mulligans, play/draw, decklists. Start with `describe`. \
-Datasets: `mtgo` = uploaded game logs of every team member (one row per game; `player` names whose logs, `my_*` that player's side, `opp_*` the opponent; cards played are filterable). \
-`ldc` = the Legacy Data Collection: every player's matches in MTGO Challenges and qualifiers, one row per game per side (A = `my_*`, B = `opp_*`), scores only; `my_deck` is the LDC's deck name, `my_ref_deck` the finer reference deck when the list was published. \
+const INSTRUCTIONS: &str = "mtgctl-web: MTGO Legacy results from the game logs team members upload: a player's record, results by event, matchups, win rates by deck, archetype, era or month, what an opponent played, cards cast, mulligans, play/draw, decklists. Start with `describe`. \
+One row per game; `player` names whose logs, `my_*` that player's side, `opp_*` the opponent; cards played are filterable. \
 Players are MTGO usernames; spelling and case vary, so find one with `values` on `player` (or `opponent`) with op `contains` before filtering on it. \
 A filter is {field, op, not, values}: op `is` (default; values ORed, null = unknown), `contains`, `>=`, `<=`; colours take op `all` | `exact` | `none` with one WUBRG string; `date` takes [from, to]. \
-On `mtgo`, card sentences: {field: my_play | opp_play, verb, values: [card names], other?: [targets], when?: any | before | after (my Doomsday resolved), scope?: game | match, n?: at least n times} and {field: my_list_has | opp_list_has, values: [cards], board?: any | main | side, n?: copies}. \
+Card sentences: {field: my_play | opp_play, verb, values: [card names], other?: [targets], when?: any | before | after (my Doomsday resolved), scope?: game | match, n?: at least n times} and {field: my_list_has | opp_list_has, values: [cards], board?: any | main | side, n?: copies}. \
 Card verbs with `needs` (opening_hand, mulliganed, bottomed, drawn, in_hand, boarded_in, boarded_out: `hand`; pile: `pile`) are the player's own hidden cards, read from their client session log, and hold only in games where `my_hand_known` (`my_pile_known`) = 1; a filter on one adds that condition. \
 Grouping by a game-level column or filtering on one turns a query per game. `stats` returns counts, match and game wins, and averages per group; `matches` and `games` return the rows; `cards` counts card events over a selection (e.g. Forces drawn, cards seen, copies in my deck after sideboarding); `game` returns one game's full event log and, where the session log was uploaded, my hidden cards and my hand after every change.";
 
@@ -42,24 +41,22 @@ fn filter_schema() -> Value {
 }
 
 fn tools() -> Value {
-    let ds = json!({"type": "string", "description": "dataset key: mtgo (default) or ldc"});
     let limit = |d: usize| json!({"type": "integer", "default": d});
     json!([
         {
             "name": "describe",
-            "description": "Start here for any MTGO Legacy results question: the datasets, or one dataset's column catalog, default filters and notes.",
-            "inputSchema": {"type": "object", "properties": {"ds": ds}}
+            "description": "Start here for any MTGO Legacy results question: the column catalog, default filters, notes and card verbs.",
+            "inputSchema": {"type": "object", "properties": {}}
         },
         {
             "name": "values",
             "description": "Distinct values of one column with their match and game counts, most matches first (at most 500), under optional filters. Use it to find a player's or deck's exact spelling (op contains) before filtering on it.",
-            "inputSchema": {"type": "object", "properties": {"ds": ds, "column": {"type": "string"}, "filters": filter_schema()}, "required": ["column"]}
+            "inputSchema": {"type": "object", "properties": {"column": {"type": "string"}, "filters": filter_schema()}, "required": ["column"]}
         },
         {
             "name": "stats",
-            "description": "Win rates and counts for any question about Legacy results, matchups or a player's record. Results grouped by columns: per group its matches, match wins and decided matches, games, game wins and decided games, first date, and averages (turns, minutes, mulligans) where the dataset has them. `split` filters each add a yes/no grouping. `hist` columns add a value histogram per group. Sort: games (default; chronological for list/era/month/date groups), time, wr, key.",
+            "description": "Win rates and counts for any question about Legacy results, matchups or a player's record. Results grouped by columns: per group its matches, match wins and decided matches, games, game wins and decided games, first date, and averages (turns, minutes, mulligans). `split` filters each add a yes/no grouping. `hist` columns add a value histogram per group. Sort: games (default; chronological for list/era/month/date groups), time, wr, key.",
             "inputSchema": {"type": "object", "properties": {
-                "ds": ds,
                 "by": {"type": "array", "items": {"type": "string"}, "description": "columns to group by"},
                 "filters": filter_schema(),
                 "split": filter_schema(),
@@ -72,17 +69,17 @@ fn tools() -> Value {
         },
         {
             "name": "matches",
-            "description": "mtgo only: the matches the filters select (a match passes if any of its games does), newest first, with the decks, the inference behind the opponent's deck, and a compact per-game summary 'id:game:play|draw:mulligans:turns:winner:how'.",
+            "description": "The matches the filters select (a match passes if any of its games does), newest first, with the decks, the inference behind the opponent's deck, and a compact per-game summary 'id:game:play|draw:mulligans:turns:winner:how'.",
             "inputSchema": {"type": "object", "properties": {"filters": filter_schema(), "limit": limit(200)}}
         },
         {
             "name": "games",
-            "description": "mtgo only: one row per game the filters select, newest first.",
+            "description": "One row per game the filters select, newest first.",
             "inputSchema": {"type": "object", "properties": {"filters": filter_schema(), "limit": limit(500)}}
         },
         {
             "name": "cards",
-            "description": "mtgo only: card events counted over the games the filters select. `rows`: per side, verb and card, the count `n` and the games with at least one; `totals`: the same per side and verb over every card (e.g. opening_hand + drawn = cards I saw; `drawn` counts every draw, so a card Brainstorm put back and drew again counts twice). Verbs are `describe`'s card_verbs plus `deck`: copies in my main deck for that game after sideboarding (its total is the deck size). My hidden verbs and `deck` count only the `games_hand_known` games, `pile` only games with my pile known. `by_game` gives one row per game instead, for per-game expectations (e.g. hypergeometric: cards seen × copies in deck / deck size).",
+            "description": "Card events counted over the games the filters select. `rows`: per side, verb and card, the count `n` and the games with at least one; `totals`: the same per side and verb over every card (e.g. opening_hand + drawn = cards I saw; `drawn` counts every draw, so a card Brainstorm put back and drew again counts twice). Verbs are `describe`'s card_verbs plus `deck`: copies in my main deck for that game after sideboarding (its total is the deck size). My hidden verbs and `deck` count only the `games_hand_known` games, `pile` only games with my pile known. `by_game` gives one row per game instead, for per-game expectations (e.g. hypergeometric: cards seen × copies in deck / deck size).",
             "inputSchema": {"type": "object", "properties": {
                 "filters": filter_schema(),
                 "verbs": {"type": "array", "items": {"type": "string"}, "description": "verbs to count; none = all"},
@@ -94,17 +91,17 @@ fn tools() -> Value {
         },
         {
             "name": "game",
-            "description": "mtgo only: one game's cards played per side and its full event log. Where the player's session log was uploaded (`hand_known`): `my_cards`, their hidden card events by log `seq` (opening hand, mulligans, bottomed, draws, boarding, Doomsday pile); `my_deck`, their main deck after sideboarding; `my_hand`, their hand after every change, each at the `seq` and turn of the last log line at or before it (so the hand when the opponent cast a spell is the last entry with seq <= that cast's seq).",
+            "description": "One game's cards played per side and its full event log. Where the player's session log was uploaded (`hand_known`): `my_cards`, their hidden card events by log `seq` (opening hand, mulligans, bottomed, draws, boarding, Doomsday pile); `my_deck`, their main deck after sideboarding; `my_hand`, their hand after every change, each at the `seq` and turn of the last log line at or before it (so the hand when the opponent cast a spell is the last entry with seq <= that cast's seq).",
             "inputSchema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]}
         },
         {
             "name": "lists",
-            "description": "mtgo only: a player's registered decklists with the reference deck each is nearest to.",
+            "description": "A player's registered decklists with the reference deck each is nearest to.",
             "inputSchema": {"type": "object", "properties": {"player": {"type": "string", "description": "MTGO username as the logs spell it"}}, "required": ["player"]}
         },
         {
             "name": "list",
-            "description": "mtgo only: one registered list's cards and its delta against its reference deck.",
+            "description": "One registered list's cards and its delta against its reference deck.",
             "inputSchema": {"type": "object", "properties": {"player": {"type": "string"}, "id": {"type": "integer"}}, "required": ["player", "id"]}
         }
     ])
@@ -115,17 +112,17 @@ fn prompts() -> Value {
     json!([
         {
             "name": "record",
-            "description": "A player's Legacy results: overall, by event type, by deck and by opponent archetype, on both datasets",
+            "description": "A player's results: overall, by event type, by deck and by opponent archetype",
             "arguments": [{"name": "player", "description": "MTGO username", "required": true}]
         },
         {
             "name": "compare",
-            "description": "Two players' Challenge results side by side: record, decks, matchups, trend",
+            "description": "Two players' results side by side: record, decks, matchups, trend",
             "arguments": [{"name": "a", "description": "MTGO username", "required": true}, {"name": "b", "description": "MTGO username", "required": true}]
         },
         {
             "name": "matchup",
-            "description": "How a deck fares against an opponent deck or archetype, across eras and on both datasets",
+            "description": "How a deck fares against an opponent deck or archetype, across eras",
             "arguments": [{"name": "deck", "required": true}, {"name": "opponent", "description": "opponent deck or archetype", "required": true}]
         }
     ])
@@ -134,9 +131,9 @@ fn prompts() -> Value {
 fn prompt_text(name: &str, args: &Value) -> Option<String> {
     let g = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("?").to_string();
     Some(match name {
-        "record" => format!("Using the mtgctl-web stats tools, summarise {}'s MTGO Legacy results. Find the exact spelling with `values` on `player` first. Give the overall record, by event type, by deck, by opponent archetype, and the trend by month, on the ldc dataset and (if they have uploaded logs) the mtgo dataset. State sample sizes.", g("player")),
-        "compare" => format!("Using the mtgctl-web stats tools, compare {} and {} on the ldc dataset: Challenge record, decks played, matchups by opponent archetype and deck, and trend by era and month. Find each spelling with `values` on `player` first. Note where the samples are too small to separate them.", g("a"), g("b")),
-        "matchup" => format!("Using the mtgctl-web stats tools, report how {} does against {}: match and game win rates on the ldc dataset (filter `my_deck` or `my_ref_deck`, group by `opp_deck`) and on the mtgo dataset (`my_deck`, `opp_deck`/`opp_archetype`), by era, with sample sizes.", g("deck"), g("opponent")),
+        "record" => format!("Using the mtgctl-web stats tools, summarise {}'s MTGO Legacy results. Find the exact spelling with `values` on `player` first. Give the overall record, by event type, by deck, by opponent archetype, and the trend by month. State sample sizes.", g("player")),
+        "compare" => format!("Using the mtgctl-web stats tools, compare {} and {}: record by event type, decks played, matchups by opponent archetype and deck, and trend by era and month. Find each spelling with `values` on `player` first. Note where the samples are too small to separate them.", g("a"), g("b")),
+        "matchup" => format!("Using the mtgctl-web stats tools, report how {} does against {}: match and game win rates (filter `my_deck` or `my_ref_deck`, group by `opp_deck` or `opp_archetype`), by era, with sample sizes.", g("deck"), g("opponent")),
         _ => return None,
     })
 }
@@ -161,16 +158,11 @@ fn q(pairs: &[(&str, String)]) -> Query<HashMap<String, String>> {
 /// A tool's result as JSON, or the message of the error the caller sees.
 async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
     let api = |e: ApiError| e.1;
-    let ds_key = arg_str(a, "ds");
-    let ds = dataset(ds_key.as_deref()).map_err(api)?;
+    let ds = dataset(None).map_err(api)?;
     let wher = |by: &[String]| filter::where_sql(ds, &arg_filters(a, "filters")?, by);
-    let mtgo_only = || if ds.features.rows { Ok(()) } else { Err(format!("{} is only for the mtgo dataset", name)) };
     match name {
         "describe" => {
-            if ds_key.is_none() && a.get("ds").is_none() {
-                return Ok(json!(dataset::ALL.iter().map(|d| json!({"key": d.key, "title": d.title, "about": d.about})).collect::<Vec<_>>()));
-            }
-            let s = schema(State(st.clone()), q(&[("ds", ds.key.into())])).await.map_err(api)?.0;
+            let s = schema(State(st.clone()), q(&[])).await.map_err(api)?.0;
             let mut v = serde_json::to_value(&s.dataset).unwrap();
             v["present_columns"] = json!(s.present);
             v["defaults"] = s.defaults;
@@ -182,7 +174,7 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
         }
         "values" => {
             let col = arg_str(a, "column").ok_or("column required")?;
-            let mut params = vec![("ds", ds.key.to_string()), ("col", col)];
+            let mut params = vec![("col", col)];
             if let Some(w) = wher(&[])? {
                 params.push(("where", w));
             }
@@ -201,12 +193,11 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
                 hist: arg_strings(a, "hist").join(","),
                 split: serde_json::to_string(&split).unwrap(),
                 game: a.get("game").and_then(Value::as_bool),
-                ds: Some(ds.key.into()),
+                ds: None,
             };
             Ok(serde_json::to_value(stats_api(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap())
         }
         "matches" | "games" => {
-            mtgo_only()?;
             let p = MatchesParams { where_sql: wher(&[])?, limit: a.get("limit").and_then(Value::as_u64).unwrap_or(if name == "matches" { 200 } else { 500 }) as usize };
             Ok(if name == "matches" {
                 serde_json::to_value(matches_api(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap()
@@ -215,12 +206,10 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
             })
         }
         "game" => {
-            mtgo_only()?;
             let id = a.get("id").and_then(Value::as_i64).ok_or("id required")?;
             Ok(serde_json::to_value(game_detail(State(st.clone()), q(&[("id", id.to_string()), ("hands", "1".into())])).await.map_err(api)?.0).unwrap())
         }
         "cards" => {
-            mtgo_only()?;
             let p = CardCountParams {
                 where_sql: wher(&[])?,
                 verbs: Some(arg_strings(a, "verbs").join(",")),
@@ -232,7 +221,6 @@ async fn call(st: &Shared, name: &str, a: &Value) -> Result<Value, String> {
             Ok(serde_json::to_value(card_counts(State(st.clone()), Query(p)).await.map_err(api)?.0).unwrap())
         }
         "lists" | "list" => {
-            mtgo_only()?;
             let player = arg_str(a, "player").ok_or("player required")?;
             let mut params = vec![("player", player)];
             if name == "list" {
